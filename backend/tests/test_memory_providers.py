@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -191,7 +191,34 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     adapter = FakeMemoryProviderAdapter()
     register_memory_provider_adapter(adapter)
     try:
-        with patch.object(settings, "workspace_dir", str(workspace)):
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.api.memory.summarize_memory_reconciliation_state",
+                AsyncMock(
+                    return_value={
+                        "state": "conflict_reconciled",
+                        "active_count": 4,
+                        "superseded_count": 1,
+                        "archived_count": 0,
+                        "contradiction_edge_count": 1,
+                        "recent_conflicts": [
+                            {
+                                "summary": "Atlas launch delayed",
+                                "reason": "contradiction",
+                                "superseded_by_memory_id": "newer-memory",
+                            }
+                        ],
+                        "recent_archivals": [],
+                        "policy": {
+                            "authoritative_memory": "guardian",
+                            "reconciliation_policy": "canonical_first",
+                            "forgetting_policy": "selective_decay_then_archive",
+                        },
+                    }
+                ),
+            ),
+        ):
             payload = await list_memory_providers()
     finally:
         clear_memory_provider_adapters()
@@ -214,6 +241,9 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     assert provider["governance"]["conflict_policy"] == "guardian_wins"
     assert provider["quality_controls"]["writeback_minimum_confidence"] == 0.55
     assert payload["canonical_memory_contract"]["reconciliation_policy"] == "canonical_first"
+    assert payload["canonical_memory_reconciliation"]["state"] == "conflict_reconciled"
+    assert payload["canonical_memory_reconciliation"]["policy"]["authoritative_memory"] == "guardian"
+    assert payload["canonical_memory_reconciliation"]["recent_conflicts"][0]["summary"] == "Atlas launch delayed"
     assert payload["provenance_taxonomy"][0]["name"] == "guardian_canonical"
     assert payload["adapter_model_rules"][0].startswith("Every provider capability is modeled")
     assert payload["quality_controls"]["project_scoped_buckets"] == [
@@ -234,7 +264,28 @@ async def test_memory_provider_inventory_surfaces_capability_governance_states(t
     adapter = FakeMemoryProviderAdapter(capabilities=("retrieval", "user_model", "consolidation"))
     register_memory_provider_adapter(adapter)
     try:
-        with patch.object(settings, "workspace_dir", str(workspace)):
+        with (
+            patch.object(settings, "workspace_dir", str(workspace)),
+            patch(
+                "src.api.memory.summarize_memory_reconciliation_state",
+                AsyncMock(
+                    return_value={
+                        "state": "steady",
+                        "active_count": 3,
+                        "superseded_count": 0,
+                        "archived_count": 0,
+                        "contradiction_edge_count": 0,
+                        "recent_conflicts": [],
+                        "recent_archivals": [],
+                        "policy": {
+                            "authoritative_memory": "guardian",
+                            "reconciliation_policy": "canonical_first",
+                            "forgetting_policy": "selective_decay_then_archive",
+                        },
+                    }
+                ),
+            ),
+        ):
             payload = await list_memory_providers()
     finally:
         clear_memory_provider_adapters()
@@ -741,6 +792,25 @@ async def test_plan_memory_retrieval_tolerates_provider_health_failures(tmp_path
                     buckets={"project": ("Canonical recall",)},
                     degraded=False,
                     hits=(),
+                ),
+            ),
+            patch(
+                "src.api.memory.summarize_memory_reconciliation_state",
+                AsyncMock(
+                    return_value={
+                        "state": "steady",
+                        "active_count": 1,
+                        "superseded_count": 0,
+                        "archived_count": 0,
+                        "contradiction_edge_count": 0,
+                        "recent_conflicts": [],
+                        "recent_archivals": [],
+                        "policy": {
+                            "authoritative_memory": "guardian",
+                            "reconciliation_policy": "canonical_first",
+                            "forgetting_policy": "selective_decay_then_archive",
+                        },
+                    }
                 ),
             ),
         ):

@@ -595,6 +595,131 @@ async def test_build_guardian_state_degrades_on_stale_execution_pressure(async_d
 
 
 @pytest.mark.asyncio
+async def test_build_guardian_state_surfaces_memory_reconciliation_diagnostics(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "What changed in memory policy?")
+    await sm.add_message("current", "assistant", "Let me inspect the current reconciliation posture.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Review guardian memory posture",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas follow-through notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="low",
+        user_state="available",
+    )
+
+    retrieval = MemoryRetrievalPlanResult(
+        semantic_context="- [project] Atlas launch",
+        episodic_context="",
+        memory_buckets={"project": ("Atlas launch",)},
+        degraded=False,
+        lane="hybrid",
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch(
+            "src.memory.retrieval_planner.plan_memory_retrieval",
+            AsyncMock(return_value=retrieval),
+        ),
+        patch(
+            "src.memory.decay.summarize_memory_reconciliation_state",
+            AsyncMock(
+                return_value={
+                    "state": "conflict_and_forgetting_active",
+                    "active_count": 6,
+                    "superseded_count": 2,
+                    "archived_count": 1,
+                    "contradiction_edge_count": 2,
+                    "recent_conflicts": [
+                        {
+                            "summary": "Atlas launch delayed",
+                            "reason": "contradiction",
+                            "superseded_by_memory_id": "atlas-current",
+                        }
+                    ],
+                    "recent_archivals": [
+                        {
+                            "summary": "Weekly recap preference",
+                            "reason": "stale_decay_archive",
+                        }
+                    ],
+                    "policy": {
+                        "authoritative_memory": "guardian",
+                        "reconciliation_policy": "canonical_first",
+                        "forgetting_policy": "selective_decay_then_archive",
+                    },
+                }
+            ),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(
+                return_value=MagicMock(
+                    effective_signal=GuardianLearningSignal.neutral("advisory"),
+                    dominant_scope="global",
+                    decisions=tuple(),
+                )
+            ),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=ProceduralMemoryGuidance(intervention_type="advisory")),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="What changed in memory policy?",
+        )
+
+    assert any(
+        "state=conflict_and_forgetting_active, active=6, superseded=2, archived=1, contradictions=2"
+        in item
+        for item in state.memory_reconciliation_diagnostics
+    )
+    assert any(
+        "policy=authoritative=guardian, reconciliation=canonical_first, forgetting=selective_decay_then_archive"
+        in item
+        for item in state.memory_reconciliation_diagnostics
+    )
+    assert any(
+        "recent_conflict=summary=Atlas launch delayed, reason=contradiction, superseded_by=atlas-current"
+        in item
+        for item in state.memory_reconciliation_diagnostics
+    )
+    assert any(
+        "recent_archival=summary=Weekly recap preference, reason=stale_decay_archive"
+        in item
+        for item in state.memory_reconciliation_diagnostics
+    )
+    prompt = state.to_prompt_block()
+    assert "Memory reconciliation diagnostics:" in prompt
+    assert "state=conflict_and_forgetting_active" in prompt
+
+
+@pytest.mark.asyncio
 async def test_build_guardian_state_prioritizes_live_project_cross_thread_continuity(async_db):
     sm = SessionManager()
     await sm.get_or_create("current")

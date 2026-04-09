@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from src.memory.decay import summarize_memory_reconciliation_state
 from src.memory.providers import list_memory_provider_inventory
 
 router = APIRouter()
@@ -7,4 +8,6 @@ router = APIRouter()
 
 @router.get("/memory/providers")
 async def list_memory_providers():
-    return list_memory_provider_inventory()
+    payload = list_memory_provider_inventory()
+    payload["canonical_memory_reconciliation"] = await summarize_memory_reconciliation_state()
+    return payload

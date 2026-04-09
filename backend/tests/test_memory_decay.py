@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.db.models import MemoryEdgeType, MemoryKind
-from src.memory.decay import apply_memory_decay_policies
+from src.memory.decay import apply_memory_decay_policies, summarize_memory_reconciliation_state
 from src.memory.repository import memory_repository
 from src.memory.snapshots import render_bounded_guardian_snapshot
 
@@ -273,6 +273,112 @@ async def test_apply_memory_decay_detects_concise_active_paused_state_reversal(a
     assert result.superseded_count == 1
     assert [memory.id for memory in active_projects] == [newer.memory_id]
     assert [memory.id for memory in superseded_projects] == [older.memory_id]
+
+
+@pytest.mark.asyncio
+async def test_memory_reconciliation_summary_reports_conflicts_and_archivals(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type="project",
+    )
+    superseded = await memory_repository.create_memory(
+        content="Atlas launch is delayed.",
+        kind=MemoryKind.project,
+        summary="Atlas launch delayed",
+        importance=0.7,
+        confidence=0.6,
+        project_entity_id=atlas.id,
+        status="superseded",
+        metadata={
+            "superseded_reason": "contradiction",
+            "superseded_by_memory_id": "atlas-current",
+        },
+    )
+    current = await memory_repository.create_memory(
+        content="Atlas launch is on track.",
+        kind=MemoryKind.project,
+        summary="Atlas launch on track",
+        importance=0.9,
+        confidence=0.9,
+        project_entity_id=atlas.id,
+    )
+    await memory_repository.create_memory(
+        content="User prefers redundant weekly recap messages.",
+        kind=MemoryKind.communication_preference,
+        summary="Weekly recap preference",
+        importance=0.2,
+        confidence=0.2,
+        reinforcement=0.1,
+        status="archived",
+        metadata={"archived_reason": "stale_decay_archive"},
+    )
+    await memory_repository.create_edge(
+        from_memory_id=current.memory_id,
+        to_memory_id=superseded.memory_id,
+        edge_type=MemoryEdgeType.contradicts,
+    )
+
+    summary = await summarize_memory_reconciliation_state(limit=3)
+
+    assert summary["state"] == "conflict_and_forgetting_active"
+    assert summary["superseded_count"] == 1
+    assert summary["archived_count"] == 1
+    assert summary["contradiction_edge_count"] == 1
+    assert summary["policy"]["authoritative_memory"] == "guardian"
+    assert summary["policy"]["reconciliation_policy"] == "canonical_first"
+    assert summary["recent_conflicts"][0]["summary"] == "Atlas launch delayed"
+    assert summary["recent_conflicts"][0]["superseded_by_memory_id"] == "atlas-current"
+    assert summary["recent_archivals"][0]["summary"] == "Weekly recap preference"
+
+
+@pytest.mark.asyncio
+async def test_memory_reconciliation_summary_counts_are_not_capped_by_preview_limit(async_db):
+    atlas = await memory_repository.get_or_create_entity(
+        canonical_name="Atlas launch",
+        entity_type="project",
+    )
+    for index in range(3):
+        superseded = await memory_repository.create_memory(
+            content=f"Atlas launch status variant {index}",
+            kind=MemoryKind.project,
+            summary=f"Atlas variant {index}",
+            importance=0.99 if index == 0 else 0.2,
+            project_entity_id=atlas.id,
+            status="superseded",
+            metadata={
+                "superseded_reason": "contradiction",
+                "superseded_by_memory_id": f"atlas-current-{index}",
+            },
+        )
+        current = await memory_repository.create_memory(
+            content=f"Atlas launch current status {index}",
+            kind=MemoryKind.project,
+            summary=f"Atlas current {index}",
+            project_entity_id=atlas.id,
+        )
+        await memory_repository.create_edge(
+            from_memory_id=current.memory_id,
+            to_memory_id=superseded.memory_id,
+            edge_type=MemoryEdgeType.contradicts,
+        )
+        await memory_repository.create_memory(
+            content=f"Archived preference {index}",
+            kind=MemoryKind.communication_preference,
+            summary=f"Archived preference {index}",
+            importance=0.99 if index == 0 else 0.2,
+            status="archived",
+            metadata={"archived_reason": "stale_decay_archive"},
+        )
+
+    summary = await summarize_memory_reconciliation_state(limit=1)
+
+    assert summary["superseded_count"] == 3
+    assert summary["archived_count"] == 3
+    assert summary["contradiction_edge_count"] == 3
+    assert len(summary["recent_conflicts"]) == 1
+    assert len(summary["recent_archivals"]) == 1
+    assert summary["recent_conflicts"][0]["summary"] == "Atlas variant 2"
+    assert summary["recent_archivals"][0]["summary"] == "Archived preference 2"
 
 
 @pytest.mark.asyncio

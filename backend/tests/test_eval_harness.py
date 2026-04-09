@@ -245,6 +245,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "bounded_memory_snapshot_behavior" in captured.out
     assert "memory_supersession_filter_behavior" in captured.out
     assert "memory_decay_contradiction_cleanup_behavior" in captured.out
+    assert "memory_reconciliation_policy_behavior" in captured.out
     assert "procedural_memory_adaptation_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "process_recovery_boundary_behavior" in captured.out
@@ -368,6 +369,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "bounded_memory_snapshot_behavior",
                 "memory_supersession_filter_behavior",
                 "memory_decay_contradiction_cleanup_behavior",
+                "memory_reconciliation_policy_behavior",
                 "procedural_memory_adaptation_behavior",
                 "scheduled_local_runtime_profile",
                 "process_recovery_boundary_behavior",
@@ -1349,6 +1351,17 @@ def test_runtime_eval_scenarios_expose_expected_details():
         details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_keeps_current"]
         is True
     )
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_state_conflict_and_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_policy_authoritative_guardian"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_policy_selective_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_superseded_count"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_archived_count"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_conflict_summary_visible"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reconciliation_diagnostics_visible"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_conflict_and_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_policy_contract"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_conflict"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_archival"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["baseline_snapshot_has_no_procedural_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["same_session_snapshot_refreshes"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
@@ -1558,6 +1571,7 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
         run_runtime_evals(
             [
                 "memory_decay_contradiction_cleanup_behavior",
+                "memory_reconciliation_policy_behavior",
                 "procedural_memory_adaptation_behavior",
                 "memory_provider_stale_evidence_behavior",
                 "memory_provider_writeback_behavior",
@@ -1582,6 +1596,11 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
         details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_keeps_current"]
         is True
     )
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_state_conflict_and_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_policy_authoritative_guardian"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_policy_contract"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_conflict"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_archival"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["baseline_snapshot_has_no_procedural_rule"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["same_session_snapshot_refreshes"] is True
     assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True

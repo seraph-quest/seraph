@@ -4503,6 +4503,167 @@ async def _eval_memory_decay_contradiction_cleanup_behavior() -> dict[str, Any]:
         }
 
 
+async def _eval_memory_reconciliation_policy_behavior() -> dict[str, Any]:
+    from src.api.memory import list_memory_providers
+    from src.db.models import MemoryEdgeType
+    from src.memory.procedural_guidance import ProceduralMemoryGuidance
+    from src.memory.retrieval_planner import MemoryRetrievalPlanResult
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+        "src.memory.decay.get_session",
+    ):
+        await session_manager.get_or_create("memory-reconciliation-current")
+        await session_manager.add_message(
+            "memory-reconciliation-current",
+            "user",
+            "How is memory conflict being handled?",
+        )
+        await session_manager.add_message(
+            "memory-reconciliation-current",
+            "assistant",
+            "Let me inspect the current reconciliation posture.",
+        )
+
+        atlas = await memory_repository.get_or_create_entity(
+            canonical_name="Atlas launch",
+            entity_type="project",
+            aliases=["Atlas"],
+        )
+        superseded = await memory_repository.create_memory(
+            content="Atlas launch is delayed.",
+            kind="project",
+            summary="Atlas launch delayed",
+            importance=0.74,
+            confidence=0.62,
+            project_entity_id=atlas.id,
+            status="superseded",
+            metadata={
+                "superseded_reason": "contradiction",
+                "superseded_by_memory_id": "atlas-current",
+            },
+        )
+        current = await memory_repository.create_memory(
+            content="Atlas launch is on track.",
+            kind="project",
+            summary="Atlas launch on track",
+            importance=0.92,
+            confidence=0.91,
+            project_entity_id=atlas.id,
+        )
+        await memory_repository.create_memory(
+            content="User prefers redundant weekly recap messages.",
+            kind="communication_preference",
+            summary="Weekly recap preference",
+            importance=0.2,
+            confidence=0.2,
+            reinforcement=0.1,
+            status="archived",
+            metadata={"archived_reason": "stale_decay_archive"},
+        )
+        await memory_repository.create_edge(
+            from_memory_id=current.memory_id,
+            to_memory_id=superseded.memory_id,
+            edge_type=MemoryEdgeType.contradicts,
+        )
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_project="Atlas",
+            active_window="VS Code",
+            screen_context="Reviewing Atlas release notes",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
+        )
+        retrieval = MemoryRetrievalPlanResult(
+            semantic_context="- [project] Atlas launch on track",
+            episodic_context="",
+            memory_buckets={"project": ("Atlas launch on track",)},
+            degraded=False,
+            lane="hybrid",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.plan_memory_retrieval",
+                AsyncMock(return_value=retrieval),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(
+                    return_value=MagicMock(
+                        effective_signal=GuardianLearningSignal.neutral("advisory"),
+                        dominant_scope="global",
+                        decisions=tuple(),
+                    )
+                ),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+                AsyncMock(return_value=""),
+            ),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(return_value=ProceduralMemoryGuidance(intervention_type="advisory")),
+            ),
+        ):
+            state = await build_guardian_state(
+                session_id="memory-reconciliation-current",
+                user_message="How is memory conflict being handled?",
+            )
+            inventory = await list_memory_providers()
+
+    summary = inventory["canonical_memory_reconciliation"]
+    return {
+        "inventory_state_conflict_and_forgetting": summary["state"] == "conflict_and_forgetting_active",
+        "inventory_policy_authoritative_guardian": (
+            summary["policy"]["authoritative_memory"] == "guardian"
+        ),
+        "inventory_policy_selective_forgetting": (
+            summary["policy"]["forgetting_policy"] == "selective_decay_then_archive"
+        ),
+        "inventory_superseded_count": summary["superseded_count"] == 1,
+        "inventory_archived_count": summary["archived_count"] == 1,
+        "inventory_conflict_summary_visible": (
+            summary["recent_conflicts"][0]["summary"] == "Atlas launch delayed"
+        ),
+        "state_reconciliation_diagnostics_visible": bool(state.memory_reconciliation_diagnostics),
+        "state_reports_conflict_and_forgetting": any(
+            "state=conflict_and_forgetting_active" in item
+            for item in state.memory_reconciliation_diagnostics
+        ),
+        "state_reports_policy_contract": any(
+            "policy=authoritative=guardian, reconciliation=canonical_first, forgetting=selective_decay_then_archive"
+            in item
+            for item in state.memory_reconciliation_diagnostics
+        ),
+        "state_reports_recent_conflict": any(
+            "recent_conflict=summary=Atlas launch delayed, reason=contradiction"
+            in item
+            for item in state.memory_reconciliation_diagnostics
+        ),
+        "state_reports_recent_archival": any(
+            "recent_archival=summary=Weekly recap preference, reason=stale_decay_archive"
+            in item
+            for item in state.memory_reconciliation_diagnostics
+        ),
+    }
+
+
 async def _eval_procedural_memory_adaptation_behavior() -> dict[str, Any]:
     from src.db.models import MemoryKind
     from src.guardian.feedback import guardian_feedback_repository
@@ -9144,6 +9305,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Decay maintenance supersedes contradictory memory and keeps stale vector hits out of hybrid and guardian retrieval.",
         runner=_eval_memory_decay_contradiction_cleanup_behavior,
+    ),
+    EvalScenario(
+        name="memory_reconciliation_policy_behavior",
+        category="behavior",
+        description="Canonical memory reconciliation exposes conflict, forgetting, and policy diagnostics through the memory API and guardian state.",
+        runner=_eval_memory_reconciliation_policy_behavior,
     ),
     EvalScenario(
         name="procedural_memory_adaptation_behavior",

@@ -5,10 +5,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlmodel import col, select
 
 from src.db.engine import get_session
 from src.db.models import Memory, MemoryEdge, MemoryEdgeType, MemoryKind, MemoryStatus
+from src.memory.repository import memory_repository
 
 _STOPWORDS = {
     "a",
@@ -102,6 +104,151 @@ class DecayMaintenanceResult:
     superseded_count: int = 0
     decayed_count: int = 0
     archived_count: int = 0
+
+
+def memory_reconciliation_policy_payload() -> dict[str, object]:
+    return {
+        "authoritative_memory": "guardian",
+        "reconciliation_policy": "canonical_first",
+        "conflict_resolution": "supersede_lower_priority_contradictions",
+        "forgetting_policy": "selective_decay_then_archive",
+        "stale_windows_days": {
+            kind.value if hasattr(kind, "value") else str(kind): days
+            for kind, days in _STALE_WINDOWS_DAYS.items()
+        },
+        "archive_thresholds": {
+            "decay_step": 4,
+            "max_confidence": 0.35,
+            "max_reinforcement": 0.2,
+        },
+        "rules": [
+            "Canonical guardian memory remains authoritative when contradictory memories compete.",
+            "Lower-priority contradictory memories are superseded instead of silently coexisting as current truth.",
+            "Stale memories decay progressively and archive only after confidence or reinforcement falls below the terminal threshold.",
+        ],
+    }
+
+
+async def summarize_memory_reconciliation_state(*, limit: int = 5) -> dict[str, object]:
+    try:
+        async with get_session() as db:
+            superseded_memories = (
+                await db.execute(
+                    select(Memory)
+                    .where(Memory.status == MemoryStatus.superseded)
+                    .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+                    .limit(limit)
+                )
+            ).scalars().all()
+            archived_memories = (
+                await db.execute(
+                    select(Memory)
+                    .where(Memory.status == MemoryStatus.archived)
+                    .order_by(col(Memory.updated_at).desc(), col(Memory.created_at).desc())
+                    .limit(limit)
+                )
+            ).scalars().all()
+            for memory in (*superseded_memories, *archived_memories):
+                db.expunge(memory)
+            active_count = int(
+                (
+                    await db.execute(
+                        select(func.count()).select_from(Memory).where(
+                            Memory.status == MemoryStatus.active
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            superseded_count = int(
+                (
+                    await db.execute(
+                        select(func.count()).select_from(Memory).where(
+                            Memory.status == MemoryStatus.superseded
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            archived_count = int(
+                (
+                    await db.execute(
+                        select(func.count()).select_from(Memory).where(
+                            Memory.status == MemoryStatus.archived
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            contradiction_edge_count = int(
+                (
+                    await db.execute(
+                        select(func.count()).select_from(MemoryEdge).where(
+                            MemoryEdge.edge_type == MemoryEdgeType.contradicts
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+    except Exception:
+        return {
+            "state": "unavailable",
+            "active_count": 0,
+            "superseded_count": 0,
+            "archived_count": 0,
+            "contradiction_edge_count": 0,
+            "recent_conflicts": [],
+            "recent_archivals": [],
+            "policy": memory_reconciliation_policy_payload(),
+            "error": "memory_repository_unavailable",
+        }
+
+    recent_conflicts: list[dict[str, object]] = []
+    for memory in superseded_memories[:limit]:
+        metadata = json.loads(memory.metadata_json or "{}")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        recent_conflicts.append(
+            {
+                "summary": (memory.summary or memory.content or "").strip(),
+                "kind": memory.kind.value,
+                "reason": str(metadata.get("superseded_reason") or "superseded"),
+                "superseded_by_memory_id": metadata.get("superseded_by_memory_id"),
+            }
+        )
+
+    recent_archivals: list[dict[str, object]] = []
+    for memory in archived_memories[:limit]:
+        metadata = json.loads(memory.metadata_json or "{}")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        recent_archivals.append(
+            {
+                "summary": (memory.summary or memory.content or "").strip(),
+                "kind": memory.kind.value,
+                "reason": str(metadata.get("archived_reason") or "archived"),
+            }
+        )
+
+    if recent_conflicts and recent_archivals:
+        state = "conflict_and_forgetting_active"
+    elif recent_conflicts:
+        state = "conflict_reconciled"
+    elif recent_archivals:
+        state = "selective_forgetting_active"
+    else:
+        state = "steady"
+
+    return {
+        "state": state,
+        "active_count": active_count,
+        "superseded_count": superseded_count,
+        "archived_count": archived_count,
+        "contradiction_edge_count": contradiction_edge_count,
+        "recent_conflicts": recent_conflicts,
+        "recent_archivals": recent_archivals,
+        "policy": memory_reconciliation_policy_payload(),
+    }
 
 
 def _now() -> datetime:

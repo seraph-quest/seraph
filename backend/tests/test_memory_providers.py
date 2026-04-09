@@ -205,6 +205,9 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     assert provider["memory_contract"]["authoritative_memory"] == "guardian"
     assert provider["memory_contract"]["provider_retrieval_provenance"] == "external_advisory"
     assert provider["memory_contract"]["provider_writeback_provenance"] == "provider_mirror"
+    assert provider["adapter_model"]["adapter_kind"] == "provider_neutral_memory_adapter"
+    assert provider["adapter_model"]["capability_contracts"]["retrieval"]["sync_policy"] == "read_augment_only"
+    assert provider["adapter_model"]["capability_contracts"]["retrieval"]["state"] == "ready"
     assert "Canonical guardian memory remains authoritative" in provider["notes"][0]
     assert provider["capability_states"]["retrieval"] == "ready"
     assert provider["governance"]["authoritative_memory"] == "guardian"
@@ -212,6 +215,7 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     assert provider["quality_controls"]["writeback_minimum_confidence"] == 0.55
     assert payload["canonical_memory_contract"]["reconciliation_policy"] == "canonical_first"
     assert payload["provenance_taxonomy"][0]["name"] == "guardian_canonical"
+    assert payload["adapter_model_rules"][0].startswith("Every provider capability is modeled")
     assert payload["quality_controls"]["project_scoped_buckets"] == [
         "collaborator",
         "commitment",
@@ -322,6 +326,7 @@ async def test_plan_memory_retrieval_merges_provider_hits_without_overriding_can
     assert retrieval.provider_diagnostics[0]["canonical_authority"] == "guardian"
     assert retrieval.provider_diagnostics[0]["provenance"] == "external_advisory"
     assert retrieval.provider_diagnostics[0]["sync_policy"] == "read_augment_only"
+    assert retrieval.provider_diagnostics[0]["capability_contracts_used"]["retrieval"]["operation_mode"] == "augment_recall"
     assert retrieval.provider_diagnostics[0]["runtime_state"] == "ready"
 
 
@@ -372,6 +377,7 @@ async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project
     assert retrieval.provider_diagnostics[0]["capabilities_used"] == ["user_model"]
     assert retrieval.provider_diagnostics[0]["bucket_counts"]["timeline"] == 1
     assert retrieval.provider_diagnostics[0]["provenance"] == "external_advisory"
+    assert retrieval.provider_diagnostics[0]["capability_contracts_used"]["user_model"]["sync_policy"] == "advisory_model_overlay"
 
 
 @pytest.mark.asyncio
@@ -728,6 +734,7 @@ async def test_memory_provider_writeback_runs_after_canonical_memory_is_persiste
     assert result.diagnostics[0]["canonical_authority"] == "guardian"
     assert result.diagnostics[0]["provenance"] == "provider_mirror"
     assert result.diagnostics[0]["sync_policy"] == "post_canonical_guarded_writeback"
+    assert result.diagnostics[0]["capability_contracts_used"]["consolidation"]["requires_canonical_persistence"] is True
     assert result.diagnostics[0]["runtime_state"] == "ready"
     assert result.diagnostics[0]["stored_count"] == 2
     assert result.diagnostics[0]["capabilities_used"] == ["consolidation"]

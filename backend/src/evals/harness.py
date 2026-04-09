@@ -3881,6 +3881,8 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
             else True,
             "provider_contract_authoritative_guardian": provider["memory_contract"]["authoritative_memory"] == "guardian",
             "provider_contract_advisory_provenance": provider["memory_contract"]["provider_model_provenance"] == "external_advisory",
+            "provider_adapter_model_user_sync_policy": provider["adapter_model"]["capability_contracts"]["user_model"]["sync_policy"]
+            == "advisory_model_overlay",
             "world_model_has_provider_collaborator": "Alice owns Atlas launch communications." in state.world_model.collaborators,
             "world_model_has_provider_obligation": "Atlas launch investor note goes out on Friday." in state.world_model.recurring_obligations,
             "memory_context_has_provider_project": "Atlas launch remains the live project anchor." in state.memory_context,
@@ -4201,6 +4203,8 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
         return {
             "provider_consolidation_ready": provider["capability_states"]["consolidation"] == "ready",
             "provider_writeback_contract_is_guarded": provider["memory_contract"]["provider_writeback_provenance"] == "provider_mirror",
+            "provider_adapter_model_writeback_requires_canonical": provider["adapter_model"]["capability_contracts"]["consolidation"]["requires_canonical_persistence"]
+            is True,
             "provider_writeback_called": bool(adapter.writeback_calls),
             "provider_writeback_kinds": adapter.writeback_calls[0]["kinds"] if adapter.writeback_calls else [],
             "audit_has_provider_writeback": consolidation_event["provider_writeback_count"] == 2,
@@ -4212,6 +4216,10 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
             == 1,
             "provider_writeback_sync_policy_guarded": consolidation_event["provider_writeback_diagnostics"][0]["sync_policy"]
             == "post_canonical_guarded_writeback",
+            "provider_writeback_runtime_contract_visible": consolidation_event["provider_writeback_diagnostics"][0][
+                "capability_contracts_used"
+            ]["consolidation"]["requires_canonical_persistence"]
+            is True,
         }
 
 

@@ -939,10 +939,26 @@ async def get_activity_ledger(
                     routing_metadata,
                     "planning_winner_model",
                 ),
+                "planning_winner_profile": _request_metadata_value(
+                    routing_metadata,
+                    "planning_winner_profile",
+                ),
+                "planning_winner_source": _request_metadata_value(
+                    routing_metadata,
+                    "planning_winner_source",
+                ),
                 "planning_winner_selected": routing_metadata.get("planning_winner_selected"),
                 "best_alternate_model": _request_metadata_value(
                     routing_metadata,
                     "best_alternate_model",
+                ),
+                "best_alternate_profile": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_profile",
+                ),
+                "best_alternate_source": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_source",
                 ),
                 "best_alternate_route_score": _request_metadata_value(
                     routing_metadata,

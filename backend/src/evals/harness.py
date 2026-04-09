@@ -31,6 +31,7 @@ from starlette.testclient import TestClient
 
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
+from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.session import SessionManager, session_manager
 from src.agent.context_window import _summarize_middle, _summary_cache
 from src.agent.factory import create_agent, create_orchestrator, get_model
@@ -89,6 +90,13 @@ from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
 from src.tools.delegate_task_tool import delegate_task
 from src.tools.filesystem_tool import read_file, write_file
+from src.tools.process_tools import (
+    list_processes,
+    process_runtime_manager,
+    read_process_output,
+    start_process,
+    stop_process,
+)
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
 from src.utils.background import drain_tracked_tasks
@@ -2944,6 +2952,70 @@ def _eval_shell_tool_timeout_contract() -> dict[str, Any]:
 
     assert "timed out" in result.lower()
     return {"result": result}
+
+
+async def _eval_process_recovery_boundary_behavior() -> dict[str, Any]:
+    process_runtime_manager.reset_for_tests()
+    script_path: str | None = None
+    process_id: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix="_process_scope_eval.py",
+            dir=settings.workspace_dir,
+            encoding="utf-8",
+            delete=False,
+        ) as handle:
+            handle.write("import time\nprint('scoped-ready', flush=True)\ntime.sleep(30)\n")
+            script_path = handle.name
+
+        owner_tokens = set_runtime_context("owner-session", "high_risk")
+        try:
+            started = start_process(command="python3", args_json=json.dumps([os.path.basename(script_path)]))
+            process_id = started.split("process=")[1].split(",")[0]
+            owner_payloads = process_runtime_manager.list_processes()
+        finally:
+            reset_runtime_context(owner_tokens)
+
+        other_tokens = set_runtime_context("other-session", "high_risk")
+        try:
+            other_list = list_processes()
+            other_read = read_process_output(process_id=process_id)
+            other_stop = stop_process(process_id=process_id)
+        finally:
+            reset_runtime_context(other_tokens)
+
+        owner_tokens = set_runtime_context("owner-session", "high_risk")
+        try:
+            owner_list = ""
+            owner_output = ""
+            for _ in range(20):
+                owner_list = list_processes()
+                owner_output = read_process_output(process_id=process_id)
+                if process_id in owner_list and "scoped-ready" in owner_output:
+                    break
+                await asyncio.sleep(0.05)
+            owner_stop = stop_process(process_id=process_id)
+        finally:
+            reset_runtime_context(owner_tokens)
+
+        owner_payload = next(payload for payload in owner_payloads if payload["process_id"] == process_id)
+        return {
+            "process_id": process_id,
+            "session_scoped": owner_payload["session_scoped"],
+            "output_path_within_workspace": owner_payload["output_path"].startswith(str(settings.workspace_dir)),
+            "owner_list_includes_process": process_id in owner_list,
+            "owner_output_visible": "scoped-ready" in owner_output,
+            "owner_stop_succeeds": f"Stopped process '{process_id}'" in owner_stop,
+            "other_list_hidden": process_id not in other_list,
+            "other_read_hidden": other_read == f"Error: Process '{process_id}' was not found.",
+            "other_stop_hidden": other_stop == f"Error: Process '{process_id}' was not found.",
+        }
+    finally:
+        process_runtime_manager.reset_for_tests()
+        if script_path:
+            with suppress(FileNotFoundError):
+                os.unlink(script_path)
 
 
 async def _eval_shell_tool_runtime_audit() -> dict[str, Any]:
@@ -8904,6 +8976,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="tool",
         description="Shell tool returns a clear timeout contract when sandbox execution stalls.",
         runner=_eval_shell_tool_timeout_contract,
+    ),
+    EvalScenario(
+        name="process_recovery_boundary_behavior",
+        category="tool",
+        description="Managed process recovery stays scoped to the session that started the process instead of exposing cross-session recovery handles.",
+        runner=_eval_process_recovery_boundary_behavior,
     ),
     EvalScenario(
         name="shell_tool_runtime_audit",

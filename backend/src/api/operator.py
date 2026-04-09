@@ -256,6 +256,219 @@ def _usage_summary(
     }
 
 
+def _workflow_terminal_status(status: str) -> bool:
+    return status in {"completed", "succeeded", "failed", "cancelled"}
+
+
+def _workflow_step_focus(run: dict[str, Any]) -> dict[str, Any] | None:
+    step_records = run.get("step_records")
+    if not isinstance(step_records, list):
+        return None
+    records = [entry for entry in step_records if isinstance(entry, dict)]
+    if not records:
+        return None
+
+    def _record_index(record: dict[str, Any]) -> int:
+        value = record.get("index")
+        return int(value) if isinstance(value, int | float) else -1
+
+    records = sorted(records, key=_record_index)
+    active_statuses = {"running", "pending", "awaiting_approval"}
+    failure_statuses = {"failed", "degraded"}
+
+    active = next((record for record in reversed(records) if str(record.get("status") or "") in active_statuses), None)
+    if active is not None:
+        return {
+            "kind": "active",
+            "step_id": active.get("id"),
+            "tool": active.get("tool"),
+            "status": active.get("status"),
+            "summary": active.get("result_summary"),
+            "error_summary": active.get("error_summary"),
+            "recovery_hint": active.get("recovery_hint"),
+            "recovery_action_count": len(active.get("recovery_actions") or []) if isinstance(active.get("recovery_actions"), list) else 0,
+            "is_recoverable": bool(active.get("is_recoverable")),
+        }
+
+    failure = next((record for record in reversed(records) if str(record.get("status") or "") in failure_statuses), None)
+    if failure is not None:
+        return {
+            "kind": "failure",
+            "step_id": failure.get("id"),
+            "tool": failure.get("tool"),
+            "status": failure.get("status"),
+            "summary": failure.get("result_summary"),
+            "error_summary": failure.get("error_summary"),
+            "recovery_hint": failure.get("recovery_hint"),
+            "recovery_action_count": len(failure.get("recovery_actions") or []) if isinstance(failure.get("recovery_actions"), list) else 0,
+            "is_recoverable": bool(failure.get("is_recoverable")),
+        }
+
+    latest = records[-1]
+    return {
+        "kind": "latest",
+        "step_id": latest.get("id"),
+        "tool": latest.get("tool"),
+        "status": latest.get("status"),
+        "summary": latest.get("result_summary"),
+        "error_summary": latest.get("error_summary"),
+        "recovery_hint": latest.get("recovery_hint"),
+        "recovery_action_count": len(latest.get("recovery_actions") or []) if isinstance(latest.get("recovery_actions"), list) else 0,
+        "is_recoverable": bool(latest.get("is_recoverable")),
+    }
+
+
+def _workflow_orchestration_priority(run: dict[str, Any]) -> tuple[int, datetime]:
+    status = str(run.get("status") or "")
+    availability = str(run.get("availability") or "")
+    pending_approval_count = int(run.get("pending_approval_count") or 0)
+    step_focus = _workflow_step_focus(run)
+    step_kind = str(step_focus.get("kind") or "") if isinstance(step_focus, dict) else ""
+
+    priority = 50
+    if pending_approval_count > 0:
+        priority = 100
+    elif availability == "blocked":
+        priority = 98
+    elif status == "awaiting_approval":
+        priority = 96
+    elif status == "running":
+        priority = 94
+    elif status in {"failed", "degraded"}:
+        priority = 92
+    elif step_kind == "active":
+        priority = 90
+    elif step_kind == "failure":
+        priority = 88
+    elif run.get("retry_from_step_draft"):
+        priority = 86
+    elif step_focus and int(step_focus.get("recovery_action_count") or 0) > 0:
+        priority = 84
+    elif not _workflow_terminal_status(status):
+        priority = 80
+
+    return priority, _parse_iso(str(run.get("updated_at") or run.get("started_at") or ""))
+
+
+def _workflow_orchestration_entries(
+    workflow_runs: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    sorted_runs = sorted(
+        workflow_runs,
+        key=lambda run: _workflow_orchestration_priority(run),
+        reverse=True,
+    )
+    entries: list[dict[str, Any]] = []
+    for run in sorted_runs[:limit]:
+        step_focus = _workflow_step_focus(run)
+        checkpoint_candidates = run.get("checkpoint_candidates")
+        output_path = None
+        if isinstance(run.get("artifact_paths"), list) and run["artifact_paths"]:
+            output_path = run["artifact_paths"][-1]
+        entries.append({
+            "id": run.get("id"),
+            "tool_name": run.get("tool_name"),
+            "run_identity": run.get("run_identity"),
+            "root_run_identity": run.get("root_run_identity"),
+            "parent_run_identity": run.get("parent_run_identity"),
+            "workflow_name": run.get("workflow_name"),
+            "summary": run.get("summary"),
+            "status": run.get("status"),
+            "availability": run.get("availability"),
+            "session_id": run.get("session_id"),
+            "started_at": run.get("started_at"),
+            "updated_at": run.get("updated_at"),
+            "thread_id": run.get("thread_id"),
+            "thread_label": run.get("thread_label"),
+            "continue_message": workflow_surface_continue_message(run),
+            "thread_continue_message": workflow_surface_continue_message(run),
+            "output_path": output_path,
+            "artifact_paths": run.get("artifact_paths") if isinstance(run.get("artifact_paths"), list) else [],
+            "step_records": run.get("step_records") if isinstance(run.get("step_records"), list) else [],
+            "pending_approval_count": int(run.get("pending_approval_count") or 0),
+            "pending_approval_ids": run.get("pending_approval_ids") if isinstance(run.get("pending_approval_ids"), list) else [],
+            "checkpoint_candidate_count": len(checkpoint_candidates) if isinstance(checkpoint_candidates, list) else 0,
+            "checkpoint_candidates": checkpoint_candidates if isinstance(checkpoint_candidates, list) else [],
+            "retry_from_step_available": bool(run.get("retry_from_step_draft")),
+            "retry_from_step_draft": run.get("retry_from_step_draft"),
+            "replay_allowed": run.get("replay_allowed", True),
+            "replay_block_reason": run.get("replay_block_reason"),
+            "replay_recommended_actions": (
+                run.get("replay_recommended_actions")
+                if isinstance(run.get("replay_recommended_actions"), list)
+                else []
+            ),
+            "step_focus": step_focus,
+        })
+    return entries
+
+
+def _workflow_orchestration_sessions(
+    workflow_runs: list[dict[str, Any]],
+    *,
+    session_titles: dict[str, str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for run in workflow_runs:
+        thread_id = run.get("thread_id") if isinstance(run.get("thread_id"), str) else None
+        key = thread_id or "__ambient__"
+        grouped.setdefault(key, []).append(run)
+
+    entries: list[dict[str, Any]] = []
+    for key, runs in grouped.items():
+        runs_sorted = sorted(runs, key=lambda run: _workflow_orchestration_priority(run), reverse=True)
+        lead = runs_sorted[0]
+        active_workflows = sum(1 for run in runs if not _workflow_terminal_status(str(run.get("status") or "")))
+        blocked_workflows = sum(1 for run in runs if str(run.get("availability") or "") == "blocked")
+        awaiting_approval_workflows = sum(1 for run in runs if str(run.get("status") or "") == "awaiting_approval")
+        recoverable_workflows = sum(
+            1
+            for run in runs
+            if bool(run.get("retry_from_step_draft"))
+            or (
+                isinstance(_workflow_step_focus(run), dict)
+                and int((_workflow_step_focus(run) or {}).get("recovery_action_count") or 0) > 0
+            )
+        )
+        latest_updated_at = max(
+            _parse_iso(str(run.get("updated_at") or run.get("started_at") or "")) for run in runs
+        ).isoformat()
+        thread_id = lead.get("thread_id") if isinstance(lead.get("thread_id"), str) else None
+        entries.append({
+            "thread_id": thread_id,
+            "thread_label": (
+                lead.get("thread_label")
+                or (session_titles.get(thread_id) if thread_id else None)
+                or ("Ambient workflows" if key == "__ambient__" else None)
+            ),
+            "workflow_count": len(runs),
+            "active_workflows": active_workflows,
+            "blocked_workflows": blocked_workflows,
+            "awaiting_approval_workflows": awaiting_approval_workflows,
+            "recoverable_workflows": recoverable_workflows,
+            "latest_updated_at": latest_updated_at,
+            "lead_run_identity": lead.get("run_identity"),
+            "lead_workflow_name": lead.get("workflow_name"),
+            "lead_status": lead.get("status"),
+            "lead_summary": lead.get("summary"),
+            "continue_message": workflow_surface_continue_message(lead),
+            "lead_step_focus": _workflow_step_focus(lead),
+        })
+    return sorted(
+        entries,
+        key=lambda entry: (
+            int(entry["blocked_workflows"]),
+            int(entry["awaiting_approval_workflows"]),
+            int(entry["active_workflows"]),
+            _parse_iso(str(entry["latest_updated_at"])),
+        ),
+        reverse=True,
+    )[:limit]
+
+
 def _review_receipts(audit_events: list[dict[str, Any]], session_titles: dict[str, str]) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for event in audit_events:
@@ -462,6 +675,61 @@ async def get_operator_control_plane(
             ),
             "review_receipts": _review_receipts(audit_events, session_titles),
         },
+    }
+
+
+@router.get("/operator/workflow-orchestration")
+async def get_operator_workflow_orchestration(
+    limit_sessions: int = Query(default=6, ge=1, le=12),
+    limit_workflows: int = Query(default=8, ge=1, le=20),
+):
+    session_titles = {
+        str(session["id"]): str(session.get("title") or "Untitled session")
+        for session in await session_manager.list_sessions()
+        if isinstance(session, dict) and session.get("id")
+    }
+    workflow_runs = await _list_workflow_runs(limit=max(limit_workflows * 6, 60), session_id=None)
+    active_workflows = sum(
+        1 for run in workflow_runs if not _workflow_terminal_status(str(run.get("status") or ""))
+    )
+    blocked_workflows = sum(
+        1 for run in workflow_runs if str(run.get("availability") or "") == "blocked"
+    )
+    awaiting_approval_workflows = sum(
+        1 for run in workflow_runs if str(run.get("status") or "") == "awaiting_approval"
+    )
+    recoverable_workflows = sum(
+        1
+        for run in workflow_runs
+        if bool(run.get("retry_from_step_draft"))
+        or (
+            isinstance(_workflow_step_focus(run), dict)
+            and int((_workflow_step_focus(run) or {}).get("recovery_action_count") or 0) > 0
+        )
+    )
+    session_ids = {
+        str(run.get("thread_id"))
+        for run in workflow_runs
+        if isinstance(run.get("thread_id"), str)
+    }
+    return {
+        "summary": {
+            "tracked_sessions": len(session_ids),
+            "workflow_count": len(workflow_runs),
+            "active_workflows": active_workflows,
+            "blocked_workflows": blocked_workflows,
+            "awaiting_approval_workflows": awaiting_approval_workflows,
+            "recoverable_workflows": recoverable_workflows,
+        },
+        "sessions": _workflow_orchestration_sessions(
+            workflow_runs,
+            session_titles=session_titles,
+            limit=limit_sessions,
+        ),
+        "workflows": _workflow_orchestration_entries(
+            workflow_runs,
+            limit=limit_workflows,
+        ),
     }
 
 

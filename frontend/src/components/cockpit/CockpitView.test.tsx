@@ -1085,6 +1085,97 @@ describe("CockpitView", () => {
           ],
         }));
       }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 2,
+            workflow_count: 4,
+            active_workflows: 1,
+            blocked_workflows: 1,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 1,
+          },
+          sessions: [
+            {
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              workflow_count: 3,
+              active_workflows: 1,
+              blocked_workflows: 1,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 1,
+              latest_updated_at: "2026-03-18T12:06:00Z",
+              lead_run_identity: "root-1",
+              lead_workflow_name: "web-brief-to-file",
+              lead_status: "degraded",
+              lead_summary: "workflow_web_brief_to_file failed at write_file",
+              continue_message: "Continue Atlas workflow",
+              lead_step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+            {
+              thread_id: null,
+              thread_label: null,
+              workflow_count: 1,
+              active_workflows: 0,
+              blocked_workflows: 0,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 0,
+              latest_updated_at: "2026-03-18T12:01:00Z",
+              lead_run_identity: null,
+              lead_workflow_name: "cleanup",
+              lead_status: "running",
+              lead_summary: "Ambient cleanup scan",
+              continue_message: null,
+              lead_step_focus: {
+                kind: "active",
+                step_id: "scan",
+                tool: "read_file",
+                status: "running",
+                summary: "Scanning workspace files",
+                recovery_action_count: 0,
+                is_recoverable: false,
+              },
+            },
+          ],
+          workflows: [
+            {
+              run_identity: "root-1",
+              workflow_name: "web-brief-to-file",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              status: "degraded",
+              availability: "attention",
+              updated_at: "2026-03-18T12:04:00Z",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continue_message: "Continue Atlas workflow",
+              output_path: "notes/brief.md",
+              pending_approval_count: 0,
+              checkpoint_candidate_count: 1,
+              retry_from_step_available: true,
+              replay_block_reason: null,
+              step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+          ],
+        }));
+      }
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
@@ -1115,6 +1206,29 @@ describe("CockpitView", () => {
       expect(within(supervision).getByText("completed · workflow_summarize_file saved final note")).toBeInTheDocument();
       expect(within(supervision).getByText(/history 1 outputs/i)).toBeInTheDocument();
     });
+
+    const orchestration = await screen.findByLabelText("Workflow orchestration");
+    await waitFor(() => {
+      expect(within(orchestration).getByText("4 workflows · 2 sessions")).toBeInTheDocument();
+      expect(within(orchestration).getByText("Atlas thread")).toBeInTheDocument();
+      expect(within(orchestration).getByText("web-brief-to-file · degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
+      expect(within(orchestration).getByText("Ambient workflows")).toBeInTheDocument();
+      expect(within(orchestration).getByText("cleanup · running · Ambient cleanup scan")).toBeInTheDocument();
+    });
+
+    const orchestrationRow = within(orchestration).getByText("Atlas thread").closest(".cockpit-operator-row--entry");
+    expect(orchestrationRow).not.toBeNull();
+    expect(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Continue workflow orchestration for Atlas thread" })).toBeInTheDocument();
+    expect(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    fireEvent.click(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Continue workflow orchestration for Atlas thread" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas workflow")).toBeInTheDocument());
+    fireEvent.click(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
 
     const approvalRow = within(triage).getByText("approval: shell_execute").closest(".cockpit-operator-row--entry");
     expect(approvalRow).not.toBeNull();
@@ -1287,6 +1401,247 @@ describe("CockpitView", () => {
       expect(screen.getByDisplayValue(/Plan guarded follow-through for native notification channel/i)).toBeInTheDocument(),
     );
   }, 30000);
+
+  it("keeps workflow-orchestration controls when the lead run only exists in the orchestration payload", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "healthy",
+            primary_surface: "workspace",
+            recommended_focus: "workflow orchestration",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 0,
+            attention_presence_surface_count: 0,
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: {
+            workspace_mode: "single_operator_guarded_workspace",
+            review_posture: "guarded",
+            approval_mode: "high_risk",
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            delegation_enabled: false,
+            roles: [],
+          },
+          usage: {
+            window_hours: 24,
+            llm_call_count: 0,
+            llm_cost_usd: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            user_triggered_llm_calls: 0,
+            autonomous_llm_calls: 0,
+            failure_count: 0,
+            pending_approvals: 0,
+            active_workflows: 1,
+            blocked_workflows: 0,
+          },
+          runtime_posture: {
+            runtime: {
+              version: "2026.3.19",
+              build_id: "SERAPH_PRIME_v2026.3.19",
+              provider: "openrouter",
+              model: "openrouter/openai/gpt-4.1-mini",
+              model_label: "gpt-4.1-mini",
+            },
+            extensions: {
+              total: 0,
+              ready: 0,
+              degraded: 0,
+              governed: 0,
+              issue_count: 0,
+              degraded_connector_count: 0,
+            },
+            continuity: {
+              continuity_health: "healthy",
+              primary_surface: "workspace",
+              recommended_focus: "workflow orchestration",
+              actionable_thread_count: 1,
+              degraded_route_count: 0,
+              degraded_source_adapter_count: 0,
+              attention_presence_surface_count: 0,
+            },
+          },
+          handoff: {
+            pending_approvals: [],
+            blocked_workflows: [],
+            follow_ups: [],
+            review_receipts: [],
+          },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 1,
+            workflow_count: 1,
+            active_workflows: 1,
+            blocked_workflows: 0,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 1,
+          },
+          sessions: [
+            {
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              workflow_count: 1,
+              active_workflows: 1,
+              blocked_workflows: 0,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 1,
+              latest_updated_at: "2026-03-18T12:06:00Z",
+              lead_run_identity: "root-1",
+              lead_workflow_name: "web-brief-to-file",
+              lead_status: "degraded",
+              lead_summary: "workflow_web_brief_to_file failed at write_file",
+              continue_message: "Continue Atlas workflow",
+              lead_step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+          ],
+          workflows: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              parent_run_identity: null,
+              workflow_name: "web-brief-to-file",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              status: "degraded",
+              availability: "ready",
+              session_id: "session-2",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continue_message: "Continue Atlas workflow",
+              thread_continue_message: "Continue Atlas workflow",
+              output_path: "notes/brief.md",
+              artifact_paths: ["notes/brief.md"],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  error_summary: "write_file blocked by approval",
+                  recovery_hint: "Approve the pending write step and continue the workflow.",
+                  recovery_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+                  is_recoverable: true,
+                },
+              ],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 1,
+              checkpoint_candidates: [{ step_id: "collect", label: "collect" }],
+              retry_from_step_available: true,
+              retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+              replay_allowed: true,
+              replay_block_reason: null,
+              replay_recommended_actions: [],
+              step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const orchestration = await screen.findByLabelText("Workflow orchestration");
+    const row = (await within(orchestration).findByText("Atlas thread")).closest(".cockpit-operator-row--entry");
+    expect(row).not.toBeNull();
+    expect(
+      within(row as HTMLElement).getAllByRole("button", { name: "Inspect workflow orchestration for Atlas thread" }),
+    ).toHaveLength(2);
+    expect(within(row as HTMLElement).getByRole("button", { name: "Use latest output for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Retry step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft next step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use latest output for workflow orchestration Atlas thread" }));
+    await waitFor(() => expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument());
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+  });
 
   it("surfaces evidence shortcuts and keyboard-first triage control", async () => {
     useChatStore.setState({
@@ -8971,7 +9326,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 11 }, () => {
+    const deferredResponses = Array.from({ length: 15 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -8996,7 +9351,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(14));
+    await waitFor(() => expect(cockpitFetchCount).toBe(15));
     view.unmount();
 
     await act(async () => {

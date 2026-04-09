@@ -449,8 +449,10 @@ _IMPORTED_REACH_FAMILY_DEFS: tuple[tuple[str, str], ...] = (
 )
 
 _PRESENCE_CONTRIBUTION_TYPES = {
+    "browser_providers",
     "channel_adapters",
     "messaging_connectors",
+    "node_adapters",
     "observer_definitions",
 }
 
@@ -671,6 +673,8 @@ def _presence_surface_kind(contribution_type: str) -> str:
 def _presence_surface_label(contribution: dict[str, Any]) -> str:
     contribution_type = str(contribution.get("type") or "")
     name = str(contribution.get("name") or "").strip()
+    if contribution_type == "browser_providers":
+        return name or "browser provider"
     if contribution_type == "channel_adapters":
         transport = str(contribution.get("transport") or "channel").replace("_", " ")
         return name or f"{transport} channel"
@@ -698,6 +702,8 @@ def _presence_surface_detail(contribution: dict[str, Any], *, package_label: str
     if contribution_type == "observer_definitions":
         source_type = str(contribution.get("source_type") or "observer").replace("_", " ")
         return f"{package_label} adds {label} for {source_type} observation ({status})."
+    if contribution_type == "browser_providers":
+        return f"{package_label} exposes {label} for packaged browser reach ({status})."
     if contribution_type == "node_adapters":
         return f"{package_label} adds {label} for companion execution or device reach ({status})."
     return f"{package_label} exposes {label} ({status})."
@@ -718,8 +724,12 @@ def _presence_surface_repair_hint(contribution: dict[str, Any]) -> str | None:
         return "Re-enable this packaged contribution in extension lifecycle state."
     if contribution_type == "channel_adapters":
         return "Inspect channel routing and extension diagnostics in the operator surface."
+    if contribution_type == "browser_providers":
+        return "Inspect browser provider diagnostics and remote-browser prerequisites in the operator surface."
     if contribution_type == "observer_definitions":
         return "Inspect observer package state and manifest diagnostics in the operator surface."
+    if contribution_type == "node_adapters":
+        return "Inspect node-adapter diagnostics and daemon prerequisites in the operator surface."
     return "Inspect extension diagnostics and runtime prerequisites in the operator surface."
 
 
@@ -764,9 +774,15 @@ def _browser_provider_surface_repair_hint(item: Any) -> str | None:
 def _browser_provider_follow_up_prompt(item: Any) -> str | None:
     if not bool(getattr(item, "selected", False)):
         return None
-    if str(getattr(item, "runtime_state", "") or "") != "ready":
+    runtime_state = str(getattr(item, "runtime_state", "") or "")
+    if runtime_state not in {"ready", "staged_local_fallback"}:
         return None
     name = str(getattr(item, "name", "") or "browser provider")
+    if runtime_state == "staged_local_fallback":
+        return (
+            f"Plan guarded browser-assisted follow-through via {name}. Remote browser reach still falls back "
+            "to the local runtime, so confirm the target page, authentication boundary, and fallback expectations before acting."
+        )
     return (
         f"Plan guarded browser-assisted follow-through via {name}. Confirm the target page, "
         "authentication boundary, and fallback expectations before acting."
@@ -823,7 +839,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         if str(item.get("id") or "").strip()
     }
 
-    surfaces: list[dict[str, Any]] = []
+    surfaces_by_id: dict[str, dict[str, Any]] = {}
     for extension in extensions:
         contributions = extension.get("contributions")
         if not isinstance(contributions, list):
@@ -841,6 +857,13 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             ready = _presence_surface_ready(contribution)
             attention = _presence_surface_attention(contribution)
             follow_up_prompt = _presence_surface_follow_up_prompt(contribution)
+            if contribution_type in {"browser_providers", "node_adapters"} and status not in {
+                "planned",
+                "overridden",
+                "invalid",
+                "invalid_config",
+            }:
+                continue
             if not (
                 active
                 or attention
@@ -848,11 +871,12 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
                 or status in {"planned", "overridden", "disabled"}
             ):
                 continue
-            surfaces.append({
-                "id": (
-                    f"{contribution_type}:{package_id or package_label}:"
-                    f"{str(contribution.get('reference') or contribution.get('name') or contribution.get('transport') or contribution.get('source_type') or '')}"
-                ),
+            surface_id = (
+                f"{contribution_type}:{package_id or package_label}:"
+                f"{str(contribution.get('reference') or contribution.get('name') or contribution.get('transport') or contribution.get('source_type') or '')}"
+            )
+            surfaces_by_id[surface_id] = {
+                "id": surface_id,
                 "kind": _presence_surface_kind(contribution_type),
                 "label": _presence_surface_label(contribution),
                 "package_label": package_label,
@@ -879,13 +903,21 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
                     if contribution_type == "observer_definitions"
                     else None
                 ),
-                "provider_kind": None,
+                "provider_kind": (
+                    str(contribution.get("provider_kind") or "").strip() or None
+                    if contribution_type == "browser_providers"
+                    else None
+                ),
                 "execution_mode": None,
-                "adapter_kind": None,
+                "adapter_kind": (
+                    str(contribution.get("adapter_kind") or "").strip() or None
+                    if contribution_type == "node_adapters"
+                    else None
+                ),
                 "selected": False,
-                "requires_network": False,
-                "requires_daemon": False,
-            })
+                "requires_network": bool(contribution.get("requires_network", False)),
+                "requires_daemon": bool(contribution.get("requires_daemon", False)),
+            }
 
     state_payload = load_extension_state_payload()
     state_by_id = state_payload.get("extensions") if isinstance(state_payload, dict) else None
@@ -912,8 +944,9 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         package_label = package_label_by_id.get(package_id, package_id or "Extension package")
         if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
             continue
-        surfaces.append({
-            "id": f"browser_providers:{package_id}:{item.reference}",
+        surface_id = f"browser_providers:{package_id}:{item.reference}"
+        surfaces_by_id[surface_id] = {
+            "id": surface_id,
             "kind": "browser_provider",
             "label": str(getattr(item, "name", "") or "browser provider"),
             "package_label": package_label,
@@ -938,7 +971,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "selected": bool(getattr(item, "selected", False)),
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
-        })
+        }
 
     node_inventory = list_node_adapter_inventory(
         snapshot.list_contributions("node_adapters"),
@@ -954,8 +987,9 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         package_label = package_label_by_id.get(package_id, package_id or "Extension package")
         if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
             continue
-        surfaces.append({
-            "id": f"node_adapters:{package_id}:{item.reference}",
+        surface_id = f"node_adapters:{package_id}:{item.reference}"
+        surfaces_by_id[surface_id] = {
+            "id": surface_id,
             "kind": "node_adapter",
             "label": str(getattr(item, "name", "") or "node adapter"),
             "package_label": package_label,
@@ -980,10 +1014,10 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "selected": False,
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
-        })
+        }
 
     surfaces = sorted(
-        surfaces,
+        surfaces_by_id.values(),
         key=lambda item: (
             0 if bool(item.get("attention")) else 1 if not bool(item.get("ready")) else 2,
             str(item.get("kind") or ""),

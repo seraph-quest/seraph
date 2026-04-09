@@ -149,9 +149,9 @@
   - `cd docs && npm run build -- --out-dir /tmp/seraph-docs-build-az`
   - `git diff --check`
 - review follow-up captured during validation:
-  - the first inventory-backed observer pass imported `default_manifest_roots_for_workspace` and `settings` from the wrong modules, so the new reach path failed under the targeted observer contract tests instead of staying live on the same extension-runtime truth as the rest of the continuity payload
-  - the first inventory-backed observer pass also referenced `package_label_by_id` before constructing it locally, so browser-provider and node-adapter surfaces could crash outright instead of surfacing packaged reach state
-  - subagent review was requested for this PR-sized slice, but the review agents timed out; this branch record therefore only claims the direct local findings above and does not claim an external no-findings result
+  - verified subagent review found that removing browser providers and node adapters from the generic presence path made planned, overridden, and invalid packaged reach disappear whenever inventory rows were absent or sanitized, so observer continuity now preserves those generic fallback attention surfaces and lets richer inventory rows overwrite them only when they exist
+  - verified subagent review also found that the first browser-provider follow-up proof asserted an impossible packaged `ready` state, so the continuity contract now treats selected `staged_local_fallback` providers as the truthful guarded follow-up path and pins that fallback-aware behavior in tests and the eval harness
+  - the first inventory-backed observer pass also imported `default_manifest_roots_for_workspace` and `settings` from the wrong modules and referenced `package_label_by_id` before constructing it locally, so those direct validation bugs were fixed on the same branch before the review follow-up landed
 
 ## Batch AZ Branch Review Log
 

@@ -745,6 +745,9 @@ async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_fam
                             "selected_source": "primary",
                             "max_budget_class": "medium",
                             "budget_steering_mode": "prefer_lower_budget",
+                            "selected_preference_score": 3.5,
+                            "selected_capability_gap_count": 0,
+                            "selected_live_feedback_penalty": 2.5,
                             "selected_route_score": 9.5,
                             "selected_failure_risk_score": 2.5,
                             "selected_production_readiness": "guarded",
@@ -753,7 +756,18 @@ async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_fam
                                 "feedback_state": "recovering",
                                 "recent_failure_count": 1,
                             },
+                            "selection_policy_mode": "highest_ranked_attemptable",
+                            "planning_winner_model": "claude-sonnet-4",
+                            "planning_winner_profile": "balanced",
+                            "planning_winner_source": "primary",
+                            "planning_winner_selected": True,
+                            "best_alternate_model": "openai/gpt-4.1-mini",
+                            "best_alternate_profile": "balanced",
+                            "best_alternate_source": "fallback_chain",
+                            "best_alternate_route_score": 5.0,
+                            "selected_vs_best_alternate_margin": 4.5,
                             "route_explanation": "selected claude-sonnet-4; readiness=guarded; failure_risk=2.5; rejected=1",
+                            "route_comparison_summary": "selected claude-sonnet-4 over openai/gpt-4.1-mini by planning_score margin 4.5",
                             "rejected_target_summaries": [
                                 {
                                     "model_id": "openai/gpt-4.1-mini",
@@ -865,11 +879,27 @@ async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_fam
     assert by_request["agent-ws:session-1:chat"]["capability_family"] == "conversation"
     assert by_request["agent-ws:session-1:chat"]["max_budget_class"] == "medium"
     assert by_request["agent-ws:session-1:chat"]["budget_steering_mode"] == "prefer_lower_budget"
+    assert by_request["agent-ws:session-1:chat"]["selected_preference_score"] == 3.5
+    assert by_request["agent-ws:session-1:chat"]["selected_capability_gap_count"] == 0
+    assert by_request["agent-ws:session-1:chat"]["selected_live_feedback_penalty"] == 2.5
     assert by_request["agent-ws:session-1:chat"]["selected_route_score"] == 9.5
     assert by_request["agent-ws:session-1:chat"]["selected_failure_risk_score"] == 2.5
     assert by_request["agent-ws:session-1:chat"]["selected_production_readiness"] == "guarded"
     assert by_request["agent-ws:session-1:chat"]["selected_live_feedback"]["feedback_state"] == "recovering"
+    assert by_request["agent-ws:session-1:chat"]["selection_policy_mode"] == "highest_ranked_attemptable"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_model"] == "claude-sonnet-4"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_profile"] == "balanced"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_source"] == "primary"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_selected"] is True
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_model"] == "openai/gpt-4.1-mini"
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_profile"] == "balanced"
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_source"] == "fallback_chain"
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_route_score"] == 5.0
+    assert by_request["agent-ws:session-1:chat"]["selected_vs_best_alternate_margin"] == 4.5
     assert by_request["agent-ws:session-1:chat"]["route_explanation"].startswith("selected claude-sonnet-4")
+    assert by_request["agent-ws:session-1:chat"]["route_comparison_summary"].startswith(
+        "selected claude-sonnet-4 over openai/gpt-4.1-mini"
+    )
     assert by_request["agent-ws:session-1:chat"]["rejected_target_summaries"][0]["model_id"] == "openai/gpt-4.1-mini"
     assert by_request["agent-ws:session-1:browser"]["capability_family"] == "browser"
     assert by_request["agent-ws:session-1:browser"]["selected_source"] == "browser_provider"

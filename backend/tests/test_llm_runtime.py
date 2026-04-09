@@ -11,6 +11,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    _build_routing_decision_details,
     _feedback_snapshot,
     _fallback_targets,
     _mark_target_failed,
@@ -1701,8 +1702,252 @@ def test_completion_with_fallback_logs_routing_decision(async_db):
     assert details["candidate_targets"][2]["policy_score"] == 0.0
     assert details["selected_failure_risk_score"] == 0.0
     assert details["selected_production_readiness"] == "ready"
+    assert details["selection_policy_mode"] == "retain_primary_until_reroute"
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_selected"] is False
+    assert details["best_alternate_model"] == "openai/gpt-4o-mini"
+    assert details["selected_vs_best_alternate_margin"] < 0.0
     assert details["route_explanation"].startswith("selected openrouter/anthropic/claude-sonnet-4")
+    assert details["route_comparison_summary"].startswith(
+        "retained primary openrouter/anthropic/claude-sonnet-4 even though openai/gpt-4o-mini"
+    )
     assert len(details["rejected_target_summaries"]) == 2
+
+
+def test_build_routing_decision_details_disambiguates_same_model_routes():
+    with (
+        patch.object(settings, "runtime_policy_intents", ""),
+        patch.object(settings, "runtime_policy_requirements", ""),
+        patch.object(settings, "runtime_policy_scores", ""),
+        patch.object(settings, "runtime_max_cost_tier", "high"),
+        patch.object(settings, "runtime_max_latency_tier", "slow"),
+        patch.object(settings, "runtime_task_class", "analysis"),
+        patch.object(settings, "runtime_max_budget_class", "high"),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+    ):
+        details = _build_routing_decision_details(
+            runtime_path="session_title_generation",
+            runtime_profile="default",
+            primary_model="openai/gpt-4o-mini",
+            primary_api_base="https://api.primary.example/v1",
+            primary_api_key="primary-key",
+            primary_profile="default",
+            ordered_targets=[
+                {
+                    "model_id": "openai/gpt-4o-mini",
+                    "api_base": "https://api.primary.example/v1",
+                    "api_key": "primary-key",
+                    "profile": "default",
+                    "source": "primary",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4o-mini",
+                        api_base="https://api.primary.example/v1",
+                        api_key="primary-key",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 0.0,
+                        "policy_score": 0.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 0.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": -1.0,
+                    },
+                },
+                {
+                    "model_id": "openai/gpt-4o-mini",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key": "",
+                    "profile": "local",
+                    "source": "runtime_profile",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4o-mini",
+                        api_base="http://localhost:11434/v1",
+                        api_key="",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 1.0,
+                        "policy_score": 0.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 1.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": 1.0,
+                    },
+                },
+            ],
+            rerouted=False,
+            rerouted_due_to_policy=False,
+        )
+
+    assert details["selection_policy_mode"] == "retain_primary_until_reroute"
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_profile"] == "local"
+    assert details["planning_winner_source"] == "runtime_profile"
+    assert details["planning_winner_selected"] is False
+    assert details["best_alternate_model"] == "openai/gpt-4o-mini"
+    assert details["best_alternate_profile"] == "local"
+    assert details["best_alternate_source"] == "runtime_profile"
+    assert "openai/gpt-4o-mini (local/runtime_profile)" in details["route_comparison_summary"]
+    assert "openai/gpt-4o-mini (default/primary)" in details["route_comparison_summary"]
+
+
+def test_build_routing_decision_details_marks_legacy_order_when_planning_winner_differs():
+    with (
+        patch.object(settings, "runtime_policy_intents", ""),
+        patch.object(settings, "runtime_policy_requirements", ""),
+        patch.object(settings, "runtime_policy_scores", ""),
+        patch.object(settings, "runtime_max_cost_tier", "high"),
+        patch.object(settings, "runtime_max_latency_tier", "slow"),
+        patch.object(settings, "runtime_task_class", "analysis"),
+        patch.object(settings, "runtime_max_budget_class", "high"),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+    ):
+        details = _build_routing_decision_details(
+            runtime_path="chat_agent",
+            runtime_profile="default",
+            primary_model="openrouter/anthropic/claude-sonnet-4",
+            primary_api_base="https://openrouter.ai/api/v1",
+            primary_api_key="primary-key",
+            primary_profile="default",
+            ordered_targets=[
+                {
+                    "model_id": "openai/gpt-4.1-nano",
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key": "fallback-key",
+                    "profile": "default",
+                    "source": "fallback_chain",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4.1-nano",
+                        api_base="https://api.openai.com/v1",
+                        api_key="fallback-key",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 0.0,
+                        "policy_score": 1.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 1.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": 1.0,
+                    },
+                },
+                {
+                    "model_id": "openai/gpt-4o-mini",
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key": "standby-key",
+                    "profile": "default",
+                    "source": "fallback_chain",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4o-mini",
+                        api_base="https://api.openai.com/v1",
+                        api_key="standby-key",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 0.0,
+                        "policy_score": 3.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 3.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": 3.0,
+                    },
+                },
+            ],
+            rerouted=True,
+            rerouted_due_to_policy=False,
+        )
+
+    assert details["selection_policy_mode"] == "legacy_ordered_attemptable"
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_selected"] is False
+    assert details["route_comparison_summary"].startswith(
+        "selected openai/gpt-4.1-nano by legacy ordering even though openai/gpt-4o-mini"
+    )
 
 
 def test_completion_with_fallback_logs_weighted_policy_scores(async_db):
@@ -1878,6 +2123,10 @@ def test_completion_with_fallback_prefers_lower_budget_compliant_route_on_score_
         "openai/gpt-4.1-nano",
         "openai/gpt-4o-mini",
     ]
+    assert details["planning_winner_model"] == "openai/gpt-4.1-nano"
+    assert details["planning_winner_selected"] is True
+    assert details["best_alternate_model"] == "openai/gpt-4o-mini"
+    assert details["selected_vs_best_alternate_margin"] == 1.0
     assert details["simulated_routes"][0]["entry_model"] == "openai/gpt-4.1-nano"
     assert details["simulated_routes"][0]["selected"] is True
     assert details["simulated_routes"][1]["entry_model"] == "openai/gpt-4o-mini"
@@ -1941,6 +2190,9 @@ def test_completion_with_fallback_keeps_intent_match_ahead_of_budget_steering(as
         "openai/gpt-4o-mini",
         "openai/gpt-4.1-nano",
     ]
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_selected"] is True
+    assert details["best_alternate_model"] == "openai/gpt-4.1-nano"
     assert details["simulated_routes"][0]["entry_model"] == "openai/gpt-4o-mini"
     assert details["simulated_routes"][0]["selected"] is True
     assert details["simulated_routes"][1]["entry_model"] == "openai/gpt-4.1-nano"

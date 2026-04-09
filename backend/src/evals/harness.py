@@ -2439,9 +2439,17 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
         "completion_attempt_order": completion_decision["details"]["attempt_order"],
         "completion_budget_steering_mode": completion_decision["details"]["budget_steering_mode"],
         "completion_selected_route_score": completion_decision["details"]["selected_route_score"],
+        "completion_selection_policy_mode": completion_decision["details"]["selection_policy_mode"],
+        "completion_planning_winner_model": completion_decision["details"]["planning_winner_model"],
+        "completion_planning_winner_selected": completion_decision["details"]["planning_winner_selected"],
+        "completion_best_alternate_model": completion_decision["details"]["best_alternate_model"],
+        "completion_selected_vs_best_alternate_margin": completion_decision["details"][
+            "selected_vs_best_alternate_margin"
+        ],
         "completion_selected_failure_risk_score": completion_decision["details"]["selected_failure_risk_score"],
         "completion_selected_production_readiness": completion_decision["details"]["selected_production_readiness"],
         "completion_route_explanation": completion_decision["details"]["route_explanation"],
+        "completion_route_comparison_summary": completion_decision["details"]["route_comparison_summary"],
         "completion_simulated_route_count": len(completion_decision["details"]["simulated_routes"]),
         "completion_first_route_entry": completion_decision["details"]["simulated_routes"][0]["entry_model"],
         "completion_rejected_summary_count": len(completion_decision["details"]["rejected_target_summaries"]),
@@ -2452,10 +2460,18 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
         "agent_selected_model": rerouted_agent_decision["details"]["selected_model"],
         "agent_attempt_order": rerouted_agent_decision["details"]["attempt_order"],
         "agent_budget_steering_mode": rerouted_agent_decision["details"]["budget_steering_mode"],
+        "agent_selection_policy_mode": rerouted_agent_decision["details"]["selection_policy_mode"],
+        "agent_planning_winner_model": rerouted_agent_decision["details"]["planning_winner_model"],
+        "agent_planning_winner_selected": rerouted_agent_decision["details"]["planning_winner_selected"],
+        "agent_best_alternate_model": rerouted_agent_decision["details"]["best_alternate_model"],
+        "agent_selected_vs_best_alternate_margin": rerouted_agent_decision["details"][
+            "selected_vs_best_alternate_margin"
+        ],
         "agent_primary_decision": primary_candidate["decision"],
         "agent_primary_reason_codes": primary_candidate["reason_codes"],
         "agent_primary_feedback_state": primary_candidate["feedback_state"],
         "agent_primary_failure_risk_score": primary_candidate["failure_risk_score"],
+        "agent_route_comparison_summary": rerouted_agent_decision["details"]["route_comparison_summary"],
     }
 
 
@@ -4712,8 +4728,90 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
 
 
 async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
-    from src.guardian.learning_evidence import GuardianLearningAxisEvidence, neutral_axis_evidence, ordered_learning_axes
+    from src.guardian.feedback import (
+        GuardianLearningScopeDecision,
+        GuardianLearningSignal,
+        ScopedGuardianLearningResolution,
+    )
+    from src.guardian.learning_evidence import (
+        GuardianLearningAxisEvidence,
+        learning_field_for_axis,
+        learning_evidence_weight,
+        neutral_axis_evidence,
+        ordered_learning_axes,
+    )
     from src.memory.procedural_guidance import ProceduralMemoryGuidance
+
+    live_axis_evidence: list[GuardianLearningAxisEvidence] = []
+    live_scope_decisions: list[GuardianLearningScopeDecision] = []
+    for axis in ordered_learning_axes():
+        field_name = learning_field_for_axis(axis)
+        if axis == "timing":
+            evidence = GuardianLearningAxisEvidence(
+                axis=axis,
+                field_name=field_name,
+                source="live_signal",
+                bias="avoid_busy_windows",
+                support_count=4,
+                weighted_support=4.0,
+                recency_score=0.96,
+                confidence_score=0.93,
+                quality_score=0.91,
+                metadata_complete=True,
+            )
+            live_scope_decisions.append(
+                GuardianLearningScopeDecision(
+                    axis=axis,
+                    field_name=field_name,
+                    selected_scope="thread_project",
+                    selected_bias=evidence.bias,
+                    selected_weight=learning_evidence_weight(evidence),
+                    reason="strongest_scope",
+                )
+            )
+        else:
+            evidence = neutral_axis_evidence(axis, source="live_signal")
+            live_scope_decisions.append(
+                GuardianLearningScopeDecision(
+                    axis=axis,
+                    field_name=field_name,
+                    selected_scope="global",
+                    selected_bias="neutral",
+                    selected_weight=0.0,
+                    reason="no_supported_bias",
+                )
+            )
+        live_axis_evidence.append(evidence)
+
+    live_learning_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=2,
+        acknowledged_count=0,
+        failed_count=1,
+        bias="neutral",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="avoid_busy_windows",
+        blocked_state_bias="neutral",
+        suppression_bias="neutral",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=2,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+        multi_day_positive_days=0,
+        multi_day_negative_days=3,
+        scheduled_positive_days=0,
+        scheduled_negative_days=2,
+        axis_evidence=tuple(live_axis_evidence),
+    )
+    scoped_live_learning = ScopedGuardianLearningResolution(
+        effective_signal=live_learning_signal,
+        dominant_scope="thread_project",
+        decisions=tuple(live_scope_decisions),
+    )
 
     async with _patched_async_db(
         "src.agent.session.get_session",
@@ -4787,8 +4885,17 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
                 return_value=["Atlas", "Hermes migration"],
             ),
             patch(
-                "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
-                return_value="",
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(return_value=scoped_live_learning),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+                AsyncMock(
+                    return_value=(
+                        "- advisory, failed, feedback=not helpful, reason=project_conflict: "
+                        "Atlas timing advice landed in a busy window"
+                    )
+                ),
             ),
             patch(
                 "src.memory.procedural_guidance.load_procedural_memory_guidance",
@@ -4878,8 +4985,8 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
             for item in state.world_model.stale_signal_arbitration
         ),
         "includes_conservative_ambiguity_guardrail": any(
-            "Competing project anchors plus negative intervention trend require conservative judgment"
-            in item
+            "competing project anchors" in item.lower()
+            and "conservative judgment" in item.lower()
             for item in state.world_model.judgment_risks
         ),
         "has_learning_conflict_diagnostic": any(

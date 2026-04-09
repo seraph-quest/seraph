@@ -1027,46 +1027,30 @@ def _order_targets_by_policy(
 
     def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], float, float, int]:
         index, target = item
-        assessment = target["policy_assessment"]
         live_feedback = target["live_feedback"]
-        capabilities = set(
-            provider_capabilities(
-                str(target["model_id"]),
-                profile=target.get("profile"),
-            )
+        healthy = _is_target_healthy(
+            model_id=str(target["model_id"]),
+            api_base=target.get("api_base"),
+            api_key=target.get("api_key"),
         )
-        local_score = score_weights.get("local_first", 1.0) if prefer_local and target.get("profile") == "local" else 0.0
-        capability_priority = tuple(
-            0 if capability in capabilities else 1
-            for capability in desired_capabilities
+        priority = _candidate_priority_components(
+            target=target,
+            policy_intents=intents,
+            score_weights=score_weights,
+            prefer_local=prefer_local,
+            desired_capabilities=desired_capabilities,
+            any_compliant=any_compliant,
+            healthy=healthy,
+            live_feedback=live_feedback,
         )
-        capability_score = 0.0
-        if score_weights:
-            capability_score = sum(
-                score_weights.get(capability, 0.0)
-                for capability in desired_capabilities
-                if capability in capabilities
-            )
-        compliance_penalty = 0
-        safeguard_penalty = 0
-        if any_compliant and not assessment["policy_compliant"]:
-            compliance_penalty = 1
-            safeguard_penalty = len(assessment["missing_required_intents"])
-            if not assessment["within_cost_guardrail"]:
-                safeguard_penalty += 1
-            if not assessment["within_latency_guardrail"]:
-                safeguard_penalty += 1
-            if not assessment["matched_task_class"]:
-                safeguard_penalty += 1
-            if not assessment["within_budget_guardrail"]:
-                safeguard_penalty += 1
+        target["priority_components"] = priority
         return (
-            compliance_penalty,
-            safeguard_penalty,
-            -local_score - capability_score,
-            capability_priority,
-            float(live_feedback.get("failure_risk_score", 0.0)),
-            -float(target.get("budget_preference_score", 0.0)),
+            int(priority["compliance_penalty"] > 0.0),
+            int(priority["guardrail_penalty"]),
+            -float(priority["local_preference_score"] + priority["policy_score"]),
+            tuple(int(value) for value in priority["capability_priority"]),
+            float(priority["live_feedback_penalty"]),
+            -float(priority["budget_preference_score"]),
             index,
         )
 
@@ -1109,6 +1093,124 @@ def _policy_score(
         policy_intents=policy_intents,
     )
     return sum(policy_scores.get(intent, 0.0) for intent in matched)
+
+
+def _capability_priority(
+    *,
+    model_id: str,
+    profile: str | None,
+    desired_capabilities: list[str],
+) -> tuple[int, ...]:
+    capabilities = set(provider_capabilities(model_id, profile=profile))
+    return tuple(
+        0 if capability in capabilities else 1
+        for capability in desired_capabilities
+    )
+
+
+def _capability_gap_penalty(capability_priority: tuple[int, ...]) -> float:
+    total = 0.0
+    size = len(capability_priority)
+    for index, missing in enumerate(capability_priority):
+        if missing:
+            total += float(size - index)
+    return total
+
+
+def _candidate_priority_components(
+    *,
+    target: dict[str, Any],
+    policy_intents: list[str],
+    score_weights: dict[str, float],
+    prefer_local: bool,
+    desired_capabilities: list[str],
+    any_compliant: bool,
+    healthy: bool,
+    live_feedback: dict[str, Any],
+) -> dict[str, Any]:
+    assessment = target["policy_assessment"]
+    local_preference_score = (
+        score_weights.get("local_first", 1.0)
+        if prefer_local and target.get("profile") == "local"
+        else 0.0
+    )
+    capability_priority = _capability_priority(
+        model_id=str(target["model_id"]),
+        profile=target.get("profile"),
+        desired_capabilities=desired_capabilities,
+    )
+    capability_gap_count = sum(capability_priority)
+    capability_gap_penalty = _capability_gap_penalty(capability_priority)
+    policy_score = _policy_score(
+        model_id=str(target["model_id"]),
+        profile=target.get("profile"),
+        policy_intents=policy_intents,
+        policy_scores=score_weights,
+    )
+    budget_preference_score = float(target.get("budget_preference_score", 0.0))
+    live_feedback_penalty = float(live_feedback.get("failure_risk_score", 0.0))
+    health_penalty = 10.0 if not healthy else 0.0
+    guardrail_penalty = 0.0
+    compliance_penalty = 0.0
+    if any_compliant and not assessment["policy_compliant"]:
+        guardrail_penalty = float(len(assessment["missing_required_intents"]))
+        if not assessment["within_cost_guardrail"]:
+            guardrail_penalty += 1.0
+        if not assessment["within_latency_guardrail"]:
+            guardrail_penalty += 1.0
+        if not assessment["matched_task_class"]:
+            guardrail_penalty += 1.0
+        if not assessment["within_budget_guardrail"]:
+            guardrail_penalty += 1.0
+        compliance_penalty = 100.0
+    preference_score = local_preference_score + policy_score + budget_preference_score
+    planning_score = (
+        preference_score
+        - capability_gap_penalty
+        - live_feedback_penalty
+        - health_penalty
+        - guardrail_penalty
+        - compliance_penalty
+    )
+    return {
+        "local_preference_score": local_preference_score,
+        "policy_score": policy_score,
+        "capability_priority": capability_priority,
+        "capability_gap_count": capability_gap_count,
+        "capability_gap_penalty": capability_gap_penalty,
+        "budget_preference_score": budget_preference_score,
+        "preference_score": preference_score,
+        "live_feedback_penalty": live_feedback_penalty,
+        "health_penalty": health_penalty,
+        "guardrail_penalty": guardrail_penalty,
+        "compliance_penalty": compliance_penalty,
+        "planning_score": round(planning_score, 3),
+    }
+
+
+def _candidate_planning_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(candidate.get("planning_score", 0.0)),
+        -float(candidate.get("capability_gap_count", 0.0)),
+        float(candidate.get("preference_score", 0.0)),
+        -float(candidate.get("live_feedback_penalty", 0.0)),
+    )
+
+
+def _candidate_route_label(candidate: dict[str, Any], *, disambiguate: bool = False) -> str:
+    label = str(candidate["model_id"])
+    if not disambiguate:
+        return label
+    qualifiers: list[str] = []
+    profile = str(candidate.get("profile") or "").strip()
+    source = str(candidate.get("source") or "").strip()
+    if profile:
+        qualifiers.append(profile)
+    if source:
+        qualifiers.append(source)
+    if qualifiers:
+        label += f" ({'/'.join(qualifiers)})"
+    return label
 
 
 def _candidate_reason_codes(
@@ -1235,6 +1337,8 @@ def _build_routing_decision_details(
         policy_intents=policy_intents,
         max_budget_class=max_budget_class,
     )
+    prefer_local = "local_first" in policy_intents
+    desired_capabilities = [intent for intent in policy_intents if intent != "local_first"]
     primary_unhealthy = not _is_target_healthy(
         model_id=primary_model,
         api_base=primary_api_base,
@@ -1282,25 +1386,29 @@ def _build_routing_decision_details(
         else:
             decision = "deferred"
 
+        priority = target.get("priority_components")
+        if not isinstance(priority, dict):
+            priority = _candidate_priority_components(
+                target=target,
+                policy_intents=policy_intents,
+                score_weights=policy_scores,
+                prefer_local=prefer_local,
+                desired_capabilities=desired_capabilities,
+                any_compliant=compliant_targets_present,
+                healthy=healthy,
+                live_feedback=live_feedback,
+            )
         budget_headroom = target.get("budget_headroom")
-        budget_preference_score = float(target.get("budget_preference_score", 0.0))
-        policy_score = _policy_score(
-            model_id=str(target["model_id"]),
-            profile=target.get("profile"),
-            policy_intents=policy_intents,
-            policy_scores=policy_scores,
+        attemptable_route = (
+            assessment["policy_compliant"] or not compliant_targets_present
         )
-        simulation_score = policy_score + budget_preference_score
-        if compliant_targets_present and not assessment["policy_compliant"]:
-            simulation_score -= 100.0 + len(assessment["missing_required_intents"])
-        if not healthy:
-            simulation_score -= 10.0
 
         candidate_targets.append(
             {
                 "model_id": str(target["model_id"]),
                 "profile": target.get("profile"),
                 "source": target["source"],
+                "route_key": target_key,
                 "healthy": healthy,
                 "decision": decision,
                 "matched_policy_intents": _matched_policy_intents(
@@ -1322,15 +1430,24 @@ def _build_routing_decision_details(
                 "max_budget_class": assessment["max_budget_class"],
                 "within_budget_guardrail": assessment["within_budget_guardrail"],
                 "policy_compliant": assessment["policy_compliant"],
-                "policy_score": policy_score,
+                "policy_score": priority["policy_score"],
                 "budget_steering_mode": budget_steering_mode,
                 "budget_headroom": budget_headroom,
-                "budget_preference_score": budget_preference_score,
-                "simulation_score": simulation_score,
+                "budget_preference_score": priority["budget_preference_score"],
+                "local_preference_score": priority["local_preference_score"],
+                "preference_score": priority["preference_score"],
+                "capability_gap_count": priority["capability_gap_count"],
+                "capability_gap_penalty": priority["capability_gap_penalty"],
+                "live_feedback_penalty": priority["live_feedback_penalty"],
+                "health_penalty": priority["health_penalty"],
+                "guardrail_penalty": priority["guardrail_penalty"],
+                "compliance_penalty": priority["compliance_penalty"],
+                "planning_score": priority["planning_score"],
                 "failure_risk_score": live_feedback["failure_risk_score"],
                 "feedback_state": live_feedback["feedback_state"],
                 "production_readiness": live_feedback["production_readiness"],
                 "live_feedback": live_feedback,
+                "attemptable_route": attemptable_route,
                 "reason_codes": _candidate_reason_codes(
                     source=target["source"],
                     decision=decision,
@@ -1354,12 +1471,7 @@ def _build_routing_decision_details(
     simulated_routes: list[dict[str, Any]] = []
     for route_rank, candidate in enumerate(candidate_targets, start=1):
         attempt_order: list[str] = []
-        if any(
-            attemptable["model_id"] == candidate["model_id"]
-            and attemptable.get("profile") == candidate.get("profile")
-            and attemptable["source"] == candidate["source"]
-            for attemptable in attemptable_candidate_targets
-        ):
+        if candidate["attemptable_route"]:
             attempt_order = [candidate["model_id"]] + [
                 other["model_id"]
                 for other in attemptable_candidate_targets
@@ -1381,7 +1493,7 @@ def _build_routing_decision_details(
                 "budget_steering_mode": candidate["budget_steering_mode"],
                 "budget_headroom": candidate["budget_headroom"],
                 "budget_preference_score": candidate["budget_preference_score"],
-                "route_score": candidate["simulation_score"],
+                "route_score": candidate["planning_score"],
                 "attempt_order": attempt_order,
                 "selected": candidate["decision"] == "selected",
                 "reason_codes": candidate["reason_codes"],
@@ -1396,6 +1508,71 @@ def _build_routing_decision_details(
     selected_candidate = next(
         target for target in candidate_targets if target["decision"] == "selected"
     )
+    planning_candidates = [
+        target for target in candidate_targets if target["attemptable_route"]
+    ] or candidate_targets
+    ambiguous_model_ids = {
+        model_id
+        for model_id in {target["model_id"] for target in candidate_targets}
+        if sum(1 for target in candidate_targets if target["model_id"] == model_id) > 1
+    }
+    planning_winner = max(planning_candidates, key=_candidate_planning_sort_key)
+    alternate_candidates = [
+        target
+        for target in planning_candidates
+        if target["route_key"] != selected_candidate["route_key"]
+    ]
+    best_alternate = max(alternate_candidates, key=_candidate_planning_sort_key) if alternate_candidates else None
+    selection_policy_mode = "highest_ranked_attemptable"
+    if (
+        selected_candidate["source"] == "primary"
+        and not rerouted
+        and not primary_unhealthy
+        and not rerouted_due_to_policy
+    ):
+        selection_policy_mode = "retain_primary_until_reroute"
+    elif planning_winner["route_key"] != selected_candidate["route_key"]:
+        selection_policy_mode = "legacy_ordered_attemptable"
+    selected_vs_best_alternate_margin = None
+    selected_label = _candidate_route_label(
+        selected_candidate,
+        disambiguate=selected_candidate["model_id"] in ambiguous_model_ids,
+    )
+    planning_winner_label = _candidate_route_label(
+        planning_winner,
+        disambiguate=planning_winner["model_id"] in ambiguous_model_ids,
+    )
+    route_comparison_summary = f"selected {selected_label}; no alternate route remained"
+    if best_alternate is not None:
+        best_alternate_label = _candidate_route_label(
+            best_alternate,
+            disambiguate=best_alternate["model_id"] in ambiguous_model_ids,
+        )
+        selected_vs_best_alternate_margin = round(
+            float(selected_candidate["planning_score"]) - float(best_alternate["planning_score"]),
+            3,
+        )
+        if (
+            selection_policy_mode == "retain_primary_until_reroute"
+            and planning_winner["route_key"] != selected_candidate["route_key"]
+        ):
+            route_comparison_summary = (
+                f"retained primary {selected_label} even though "
+                f"{planning_winner_label} had higher planning_score "
+                f"({planning_winner['planning_score']} vs {selected_candidate['planning_score']}) "
+                "because no reroute trigger was active"
+            )
+        elif planning_winner["route_key"] != selected_candidate["route_key"]:
+            route_comparison_summary = (
+                f"selected {selected_label} by legacy ordering even though "
+                f"{planning_winner_label} had higher planning_score "
+                f"({planning_winner['planning_score']} vs {selected_candidate['planning_score']})"
+            )
+        else:
+            route_comparison_summary = (
+                f"selected {selected_label} over {best_alternate_label} "
+                f"by planning_score margin {selected_vs_best_alternate_margin}"
+            )
     reroute_cause = "none"
     if rerouted_due_to_policy:
         reroute_cause = "policy_guardrails"
@@ -1450,10 +1627,24 @@ def _build_routing_decision_details(
         "selected_policy_score": selected_candidate["policy_score"],
         "selected_budget_headroom": selected_candidate["budget_headroom"],
         "selected_budget_preference_score": selected_candidate["budget_preference_score"],
-        "selected_route_score": selected_candidate["simulation_score"],
+        "selected_route_score": selected_candidate["planning_score"],
         "selected_failure_risk_score": selected_candidate["failure_risk_score"],
         "selected_production_readiness": selected_candidate["production_readiness"],
         "selected_live_feedback": selected_candidate["live_feedback"],
+        "selected_preference_score": selected_candidate["preference_score"],
+        "selected_capability_gap_count": selected_candidate["capability_gap_count"],
+        "selected_live_feedback_penalty": selected_candidate["live_feedback_penalty"],
+        "selection_policy_mode": selection_policy_mode,
+        "planning_winner_model": planning_winner["model_id"],
+        "planning_winner_profile": planning_winner.get("profile"),
+        "planning_winner_source": planning_winner["source"],
+        "planning_winner_selected": planning_winner["route_key"] == selected_candidate["route_key"],
+        "best_alternate_model": best_alternate["model_id"] if best_alternate else None,
+        "best_alternate_profile": best_alternate.get("profile") if best_alternate else None,
+        "best_alternate_source": best_alternate["source"] if best_alternate else None,
+        "best_alternate_route_score": best_alternate["planning_score"] if best_alternate else None,
+        "selected_vs_best_alternate_margin": selected_vs_best_alternate_margin,
+        "route_comparison_summary": route_comparison_summary,
         "attempt_order": attempt_order,
         "reroute_cause": reroute_cause,
         "rerouted_from_unhealthy_primary": rerouted and primary_unhealthy,

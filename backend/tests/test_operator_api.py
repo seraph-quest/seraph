@@ -809,6 +809,9 @@ async def test_operator_timeline_projects_routing_metadata(client):
                             "budget_steering_mode": "prefer_lower_budget",
                             "selected_budget_headroom": 1,
                             "selected_budget_preference_score": 2.0,
+                            "selected_preference_score": 10.5,
+                            "selected_capability_gap_count": 0,
+                            "selected_live_feedback_penalty": 3.5,
                             "selected_route_score": 10.5,
                             "selected_failure_risk_score": 3.5,
                             "selected_production_readiness": "guarded",
@@ -816,12 +819,23 @@ async def test_operator_timeline_projects_routing_metadata(client):
                                 "feedback_state": "recovering",
                                 "recent_failure_count": 1,
                             },
+                            "selection_policy_mode": "highest_ranked_attemptable",
+                            "planning_winner_model": "openrouter/gpt-4o-mini",
+                            "planning_winner_profile": "balanced",
+                            "planning_winner_source": "primary",
+                            "planning_winner_selected": True,
+                            "best_alternate_model": "gpt-4.1-mini",
+                            "best_alternate_profile": "balanced",
+                            "best_alternate_source": "fallback",
+                            "best_alternate_route_score": 7.0,
+                            "selected_vs_best_alternate_margin": 3.5,
                             "attempt_order": ["gpt-4o-mini", "gpt-4.1-mini"],
                             "reroute_cause": "primary_timeout",
                             "rerouted_from_unhealthy_primary": False,
                             "rerouted_from_policy_guardrails": True,
                             "guardrail_compliant_targets_present": True,
                             "route_explanation": "selected openrouter/gpt-4o-mini; readiness=guarded; failure_risk=3.5; rejected=2",
+                            "route_comparison_summary": "selected openrouter/gpt-4o-mini over gpt-4.1-mini by planning_score margin 3.5",
                             "rejected_target_count": 2,
                             "rejected_target_summaries": [
                                 {
@@ -870,11 +884,27 @@ async def test_operator_timeline_projects_routing_metadata(client):
     assert routing_item["metadata"]["reroute_cause"] == "primary_timeout"
     assert routing_item["metadata"]["budget_steering_mode"] == "prefer_lower_budget"
     assert routing_item["metadata"]["selected_budget_preference_score"] == 2.0
+    assert routing_item["metadata"]["selected_preference_score"] == 10.5
+    assert routing_item["metadata"]["selected_capability_gap_count"] == 0
+    assert routing_item["metadata"]["selected_live_feedback_penalty"] == 3.5
     assert routing_item["metadata"]["selected_route_score"] == 10.5
     assert routing_item["metadata"]["selected_failure_risk_score"] == 3.5
     assert routing_item["metadata"]["selected_production_readiness"] == "guarded"
     assert routing_item["metadata"]["selected_live_feedback"]["feedback_state"] == "recovering"
+    assert routing_item["metadata"]["selection_policy_mode"] == "highest_ranked_attemptable"
+    assert routing_item["metadata"]["planning_winner_model"] == "openrouter/gpt-4o-mini"
+    assert routing_item["metadata"]["planning_winner_profile"] == "balanced"
+    assert routing_item["metadata"]["planning_winner_source"] == "primary"
+    assert routing_item["metadata"]["planning_winner_selected"] is True
+    assert routing_item["metadata"]["best_alternate_model"] == "gpt-4.1-mini"
+    assert routing_item["metadata"]["best_alternate_profile"] == "balanced"
+    assert routing_item["metadata"]["best_alternate_source"] == "fallback"
+    assert routing_item["metadata"]["best_alternate_route_score"] == 7.0
+    assert routing_item["metadata"]["selected_vs_best_alternate_margin"] == 3.5
     assert routing_item["metadata"]["route_explanation"].startswith("selected openrouter/gpt-4o-mini")
+    assert routing_item["metadata"]["route_comparison_summary"].startswith(
+        "selected openrouter/gpt-4o-mini over gpt-4.1-mini"
+    )
     assert routing_item["metadata"]["rejected_target_count"] == 2
     assert routing_item["metadata"]["rejected_target_summaries"][0]["model_id"] == "local-model"
     assert routing_item["metadata"]["guardrail_compliant_targets_present"] is True

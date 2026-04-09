@@ -20,7 +20,7 @@
 - [x] wildcard runtime-path routing rules, with exact-path overrides taking precedence
 - [x] first-class local runtime profile for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with degrade-open behavior when no compliant target exists
-- [x] first simulation-grade provider planning pass that scores candidate routes before execution, makes budget steering explicit, carries per-target live feedback and production-readiness state into route choice, and exposes chosen-versus-rejected route details plus simulated route order across runtime audit, operator timeline, and activity-ledger surfaces
+- [x] richer provider planning and route comparison now score candidate routes before execution, make budget steering explicit, carry per-target live feedback plus production-readiness and capability-gap state into route-comparison metadata around selection, and expose planning-winner versus retained-primary tradeoffs, alternate-route margins, and route-comparison summaries across runtime audit, operator timeline, and activity-ledger surfaces
 - [x] operator control-plane surfaces now also synthesize runtime posture, extension health, continuity summaries, and review receipts alongside usage rollups, so deployment and governance legibility does not require reconstructing team state from raw runtime or audit rows
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
@@ -34,12 +34,11 @@
 - [x] the previous runtime-focused slice sequence is fully shipped on `develop`
 - [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v3`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, including richer routing reason surfaces, budget/task-class guardrails, and deeper deterministic proof for bootstrap plus branching behavior
 - [x] `provider-policy-simulation-and-budget-planning-v1` is now represented in the shipped branch state, including candidate-route scoring, explicit budget steering, and cross-surface route legibility
-- [ ] richer runtime work still remains on `develop`, but the remaining gap is now broader long-running or production-like eval depth and stronger live-provider failure modeling rather than missing first-pass planning surfaces
+- [ ] richer runtime work still remains on `develop`, but the remaining gap is now broader live-provider, long-running, and production-like eval depth rather than missing first-pass planning or route-comparison surfaces
 
 ## Still To Do On `develop`
 
-- [ ] deepen provider selection policy beyond the first simulation-grade route scoring and explicit budget steering pass, especially with stronger live-provider feedback loops and production-like failure modeling beyond the new per-target failure-risk/readiness layer
-- [ ] expand eval coverage beyond the shipped REST, WebSocket, observer refresh, delivery policy, strategist-learning continuity, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair/bootstrap, delegated workflow, and workflow-composition behavioral contracts
+- [ ] broaden live-provider and long-running integration proof beyond the shipped deterministic routing audit, operator/activity projection, benchmark-facing runtime planning details, and the current REST, WebSocket, observer refresh, delivery policy, strategist-learning continuity, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair/bootstrap, delegated workflow, and workflow-composition behavioral contracts
 
 ## Completed PR Sequence
 
@@ -71,6 +70,29 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
    expand behavioral eval coverage beyond chat and scheduler seams into observer refresh, consolidation, proactive delivery, and policy-mode guardrails so broader guardian behavior is regression-tested
 
 ## Current Slice Record
+
+### `provider-planning-benchmark-proof-and-live-integration-depth-v2`
+
+- status: complete on `feat/provider-planning-batch-ay-v1`, pending inclusion in the aggregate Batch AY PR for `#366`
+- root cause addressed:
+  - the first planning pass could score routes, but it still hid why Seraph retained a healthy primary when a standby route won the raw planning score
+  - operator/activity surfaces and the runtime audit still lacked a denser chosen-versus-alternate comparison contract that benchmark-facing proof could point to directly
+  - the merged `develop` eval suite also had a stale guardian judgment detail contract that no longer matched the current conservative-ambiguity wording and live-vs-procedural-learning setup
+- scope:
+  - updated `backend/src/llm_runtime.py` so runtime routing now carries planning-priority components, capability-gap penalties, live-feedback penalties, planning winners, retained-primary or legacy-ordering policy mode, best-alternate margins, and route-comparison summaries alongside the selected route
+  - extended `backend/src/api/operator.py` and `backend/src/api/activity.py` so operator and activity surfaces preserve the richer planning comparison metadata instead of collapsing back to only selected-model order
+  - extended `backend/src/evals/harness.py` and the targeted runtime tests so deterministic proof now covers retained-primary versus planning-winner behavior, best-alternate margins, benchmark-facing comparison summaries, and the repaired guardian judgment detail contract
+- local regression fixed before the slice stayed complete:
+  - `tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` on `develop` still asserted an older conservative-ambiguity phrase and no longer injected the live-versus-procedural timing conflict needed for the learning-conflict diagnostics it expected
+  - fixed by making the guardian judgment eval scenario deterministically patch scoped live learning plus recent scoped feedback and by checking the ambiguity guardrail via behavior-relevant wording instead of one stale sentence literal
+- validation:
+  - `python3 -m py_compile backend/src/llm_runtime.py backend/src/api/operator.py backend/src/api/activity.py backend/src/evals/harness.py backend/tests/test_llm_runtime.py backend/tests/test_operator_api.py backend/tests/test_activity_api.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_operator_api.py tests/test_activity_api.py tests/test_eval_harness.py -q -k "routing_metadata or provider_routing_decision_audit or llm_cost_summary_uses_routing_metadata"`
+    - result: `passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_llm_runtime.py -q -k "logs_routing_decision or weighted_policy_scores or guardrail_compliant_target or lower_budget_compliant_route or intent_match_ahead_of_budget_steering"`
+    - result: `passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "guardian_judgment_behavior or provider_routing_decision_audit or test_run_runtime_evals_passes_group_4"`
+    - result: `1 passed`
 
 ### `runtime-planning-provider-feedback-and-live-eval-depth-v2`
 

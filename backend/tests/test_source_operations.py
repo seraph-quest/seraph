@@ -254,6 +254,14 @@ async def test_source_adapters_endpoint_promotes_managed_connector_when_runtime_
             "add_comment_to_issue",
             [{"id": 5, "html_url": "https://example.com/issues/2#issuecomment-5"}],
         ),
+        FakeMCPTool(
+            "create_pull_request",
+            [{"id": 6, "title": "Create pull request route", "html_url": "https://example.com/pulls/6"}],
+        ),
+        FakeMCPTool(
+            "add_review_to_pr",
+            [{"id": 7, "html_url": "https://example.com/pulls/3#pullrequestreview-7"}],
+        ),
     ]
 
     with (
@@ -286,6 +294,16 @@ async def test_source_adapters_endpoint_promotes_managed_connector_when_runtime_
     assert create_action["target_reference_mode"] == "repository"
     assert comment_action["tool_name"] == "add_comment_to_issue"
     assert comment_action["target_reference_mode"] == "work_item"
+    code_activity_write_route = next(item for item in managed["operations"] if item["contract"] == "code_activity.write")
+    assert code_activity_write_route["executable"] is True
+    assert {item["kind"] for item in code_activity_write_route["actions"]} == {"create", "review"}
+    create_pr_action = next(item for item in code_activity_write_route["actions"] if item["kind"] == "create")
+    review_action = next(item for item in code_activity_write_route["actions"] if item["kind"] == "review")
+    assert create_pr_action["tool_name"] == "create_pull_request"
+    assert create_pr_action["target_reference_mode"] == "repository"
+    assert review_action["tool_name"] == "add_review_to_pr"
+    assert review_action["target_reference_mode"] == "pull_request"
+    assert review_action["fixed_argument_keys"] == ["action", "file_comments"]
 
 
 @pytest.mark.asyncio
@@ -1049,6 +1067,242 @@ def test_execute_source_mutation_bundle_executes_issue_comment_action():
     log_event.assert_called_once()
 
 
+def test_execute_source_mutation_bundle_executes_pull_request_create_action():
+    create_pull_request = FakeMCPTool(
+        "create_pull_request",
+        {
+            "id": 601,
+            "title": "Adapter-backed external action depth",
+            "html_url": "https://github.com/seraph-quest/seraph/pull/601",
+            "body": "Open a draft PR from Seraph.",
+        },
+    )
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["code_activity.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "code_activity.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "result_kind": "code_activity",
+                        "actions": [
+                            {
+                                "kind": "create",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "create_pull_request",
+                                "target_reference_mode": "repository",
+                                "target_argument_name": "repository_full_name",
+                                "required_payload_fields": ["title", "body", "head_branch", "base_branch"],
+                                "allowed_payload_fields": ["title", "body", "head_branch", "base_branch", "draft"],
+                                "payload_argument_map": {
+                                    "title": "title",
+                                    "body": "body",
+                                    "head_branch": "head_branch",
+                                    "base_branch": "base_branch",
+                                    "draft": "draft",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[create_pull_request]),
+        patch("src.extensions.source_operations.log_integration_event_sync") as log_event,
+    ):
+        result = execute_source_mutation_bundle(
+            contract="code_activity.write",
+            source="github-managed",
+            action_kind="create",
+            target_reference="seraph-quest/seraph",
+            payload={
+                "title": "Adapter-backed external action depth",
+                "body": "Open a draft PR from Seraph.",
+                "head_branch": "feat/adapter-depth",
+                "base_branch": "develop",
+                "draft": True,
+            },
+        )
+
+    assert result["status"] == "ok"
+    assert create_pull_request.calls == [
+        {
+            "repository_full_name": "seraph-quest/seraph",
+            "title": "Adapter-backed external action depth",
+            "body": "Open a draft PR from Seraph.",
+            "head_branch": "feat/adapter-depth",
+            "base_branch": "develop",
+            "draft": True,
+        }
+    ]
+    assert result["result"]["kind"] == "code_activity"
+    assert result["result"]["location"] == "https://github.com/seraph-quest/seraph/pull/601"
+    log_event.assert_called_once()
+
+
+def test_execute_source_mutation_bundle_executes_pr_review_action_with_fixed_arguments():
+    add_review = FakeMCPTool(
+        "add_review_to_pr",
+        {
+            "id": 777,
+            "html_url": "https://github.com/seraph-quest/seraph/pull/343#pullrequestreview-777",
+            "body": "Posted PR review.",
+        },
+    )
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["code_activity.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "code_activity.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "result_kind": "code_activity",
+                        "actions": [
+                            {
+                                "kind": "review",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_review_to_pr",
+                                "target_reference_mode": "pull_request",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "pr_number",
+                                "required_payload_fields": ["review"],
+                                "allowed_payload_fields": ["review"],
+                                "payload_argument_map": {"review": "review"},
+                                "fixed_arguments": {"action": "COMMENT", "file_comments": []},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[add_review]),
+        patch("src.extensions.source_operations.log_integration_event_sync") as log_event,
+    ):
+        result = execute_source_mutation_bundle(
+            contract="code_activity.write",
+            source="github-managed",
+            action_kind="review",
+            target_reference="seraph-quest/seraph/pull/343",
+            payload={"review": "Looks good overall."},
+        )
+
+    assert result["status"] == "ok"
+    assert add_review.calls == [
+        {
+            "action": "COMMENT",
+            "file_comments": [],
+            "repo_full_name": "seraph-quest/seraph",
+            "pr_number": 343,
+            "review": "Looks good overall.",
+        }
+    ]
+    assert result["result"]["kind"] == "code_activity"
+    assert result["result"]["location"].endswith("#pullrequestreview-777")
+    log_event.assert_called_once()
+
+
+def test_execute_source_mutation_bundle_rejects_payload_override_of_fixed_review_action():
+    add_review = FakeMCPTool("add_review_to_pr", {"id": 777, "html_url": "https://example.com/review/777"})
+    adapter_inventory = {
+        "summary": {"adapter_count": 1, "ready_adapter_count": 1},
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": None,
+                "contracts": ["code_activity.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "code_activity.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "review",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_review_to_pr",
+                                "target_reference_mode": "pull_request",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "pr_number",
+                                "required_payload_fields": ["review"],
+                                "allowed_payload_fields": ["review"],
+                                "payload_argument_map": {"review": "review"},
+                                "fixed_arguments": {"action": "COMMENT", "file_comments": []},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+        patch("src.extensions.source_operations.mcp_manager.get_server_tools", return_value=[add_review]),
+    ):
+        result = execute_source_mutation_bundle(
+            contract="code_activity.write",
+            source="github-managed",
+            action_kind="review",
+            target_reference="seraph-quest/seraph/pull/343",
+            payload={"review": "Looks good overall.", "action": "APPROVE"},
+        )
+
+    assert result["status"] == "failed"
+    assert "undeclared fields" in result["warnings"][0]
+    assert add_review.calls == []
+
+
 def test_execute_source_mutation_bundle_rejects_invalid_target_reference():
     adapter_inventory = {
         "summary": {"adapter_count": 1, "ready_adapter_count": 1},
@@ -1485,6 +1739,158 @@ def test_build_source_report_plan_requires_target_reference_for_publication():
     assert "Provide target_reference" in plan["warnings"][-1]
 
 
+def test_build_source_report_plan_supports_code_activity_review_publication():
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": [],
+        "recommended_starter_packs": [],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "github-managed",
+            }
+        ],
+    }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": "",
+                "contracts": ["work_items.read", "code_activity.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "code_activity.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "review",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_review_to_pr",
+                                "target_reference_mode": "pull_request",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "pr_number",
+                                "required_payload_fields": ["review"],
+                                "allowed_payload_fields": ["review"],
+                                "fixed_arguments": {"action": "COMMENT", "file_comments": []},
+                                "payload_argument_map": {"review": "review"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph/pull/343",
+            publish_contract="code_activity.write",
+            publish_action_kind="review",
+        )
+
+    assert plan["publish_contract"] == "code_activity.write"
+    assert plan["publish_plan"]["status"] == "approval_required"
+    assert plan["publish_plan"]["action"]["kind"] == "review"
+    assert plan["publish_plan"]["approval_scope"]["target"]["contract"] == "code_activity.write"
+    assert plan["publish_plan"]["approval_scope"]["action"]["fixed_argument_keys"] == ["action", "file_comments"]
+
+
+def test_build_source_report_plan_requires_explicit_pull_request_reference_for_review_publication():
+    review_plan = {
+        "status": "ready",
+        "intent": "progress_review",
+        "title": "Progress Review",
+        "recommended_runbooks": [],
+        "recommended_starter_packs": [],
+        "warnings": [],
+        "steps": [
+            {
+                "id": "work_items",
+                "contract": "work_items.read",
+                "status": "ready",
+                "source": "github-managed",
+            }
+        ],
+    }
+    adapter_inventory = {
+        "adapters": [
+            {
+                "name": "github-managed",
+                "provider": "github",
+                "source_kind": "managed_connector",
+                "authenticated": True,
+                "adapter_state": "ready",
+                "degraded_reason": "",
+                "contracts": ["work_items.read", "code_activity.write"],
+                "next_best_sources": [],
+                "operations": [
+                    {
+                        "contract": "code_activity.write",
+                        "input_mode": "structured_action",
+                        "executable": True,
+                        "mutating": True,
+                        "requires_approval": True,
+                        "approval_scope_type": "connector_mutation",
+                        "audit_category": "authenticated_source_mutation",
+                        "actions": [
+                            {
+                                "kind": "review",
+                                "executable": True,
+                                "runtime_server": "github",
+                                "tool_name": "add_review_to_pr",
+                                "target_reference_mode": "pull_request",
+                                "target_argument_name": "repo_full_name",
+                                "number_argument_name": "pr_number",
+                                "required_payload_fields": ["review"],
+                                "allowed_payload_fields": ["review"],
+                                "fixed_arguments": {"action": "COMMENT", "file_comments": []},
+                                "payload_argument_map": {"review": "review"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    with (
+        patch("src.extensions.source_operations.build_source_review_plan", return_value=review_plan),
+        patch("src.extensions.source_operations.list_source_capability_inventory", return_value={}),
+        patch("src.extensions.source_operations.list_source_adapter_inventory", return_value=adapter_inventory),
+    ):
+        plan = build_source_report_plan(
+            intent="progress_review",
+            focus="adapter-backed authenticated operations",
+            target_reference="seraph-quest/seraph#343",
+            publish_contract="code_activity.write",
+        )
+
+    assert plan["publish_plan"]["status"] == "unavailable"
+    assert "owner/repo/pull/number" in plan["publish_plan"]["warnings"][0]
+
+
 @pytest.mark.asyncio
 async def test_source_mutation_plan_endpoint_returns_structured_scope():
     mutation_plan = {
@@ -1558,6 +1964,7 @@ async def test_source_report_plan_endpoint_returns_review_and_publish_plan():
                     "intent": "progress_review",
                     "focus": "adapter-backed authenticated operations",
                     "target_reference": "seraph-quest/seraph#343",
+                    "publish_contract": "code_activity.write",
                 },
             )
 
@@ -1640,6 +2047,7 @@ def test_plan_source_report_tool_renders_publish_plan():
         "status": "ready",
         "intent": "progress_review",
         "title": "Progress Review for adapter-backed authenticated operations",
+        "publish_contract": "code_activity.write",
         "report_outline": [
             "Summarize the current state.",
             "List the strongest evidence.",
@@ -1659,10 +2067,12 @@ def test_plan_source_report_tool_renders_publish_plan():
             intent="progress_review",
             focus="adapter-backed authenticated operations",
             target_reference="seraph-quest/seraph#343",
+            publish_contract="code_activity.write",
         )
 
     assert "status: ready" in result
     assert "publish_plan:" in result
+    assert "- contract: code_activity.write" in result
     assert "- action: comment" in result
     assert "- target: seraph-quest/seraph#343" in result
 

@@ -143,6 +143,7 @@ class SourceReportPlanRequest(BaseModel):
     source: str = ""
     target_reference: str = ""
     publish_action_kind: str = ""
+    publish_contract: str = ""
 
 
 class WorkflowDraftRequest(BaseModel):
@@ -185,6 +186,7 @@ async def source_report_plan(req: SourceReportPlanRequest):
         source=req.source,
         target_reference=req.target_reference,
         publish_action_kind=req.publish_action_kind,
+        publish_contract=req.publish_contract,
     )
 
 

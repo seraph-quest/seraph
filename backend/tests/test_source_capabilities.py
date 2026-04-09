@@ -51,6 +51,7 @@ async def test_source_surfaces_endpoint_exposes_native_and_managed_sources(tmp_p
     assert managed["authenticated"] is True
     assert managed["runtime_state"] == "requires_config"
     assert "repository.read" in managed["contracts"]
+    assert "code_activity.write" in managed["contracts"]
     assert "work_items.read" in managed["contracts"]
     assert "work_items.write" in managed["contracts"]
 

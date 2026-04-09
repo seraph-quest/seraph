@@ -91,6 +91,11 @@ SOURCE_CONTRACTS: tuple[SourceContractDefinition, ...] = (
         preferred_access="managed_connector",
     ),
     SourceContractDefinition(
+        name="code_activity.write",
+        description="Create or update pull-request level activity through a typed authenticated source.",
+        preferred_access="managed_connector",
+    ),
+    SourceContractDefinition(
         name="work_items.read",
         description="Read tracked work items such as issues or pull requests from a typed source.",
         preferred_access="managed_connector",
@@ -106,7 +111,7 @@ _MANAGED_CAPABILITY_CONTRACTS: dict[str, tuple[str, ...]] = {
     "repositories.read": ("repository.read", "code_activity.read"),
     "repositories.write": ("repository.read",),
     "pull_requests.read": ("work_items.read", "code_activity.read"),
-    "pull_requests.write": ("work_items.write",),
+    "pull_requests.write": ("work_items.write", "code_activity.write"),
     "issues.read": ("work_items.read",),
     "issues.write": ("work_items.write",),
 }

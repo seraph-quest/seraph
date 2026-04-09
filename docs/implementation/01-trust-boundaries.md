@@ -43,6 +43,7 @@
 - [x] this workstream now also ships `workflow-authenticated-source-drift-enforcement-v1`
 - [x] this workstream now also ships the first Batch AT aggregate for field-scoped secret-reference injection, per-tool boundary narrowing, and allowlisted authenticated mutation payloads
 - [x] this workstream now also ships the second Batch AT aggregate for session-bound managed-process recovery, so background-process listing, output reads, and stop controls fail closed outside the originating session instead of leaving cross-session recovery handles live
+- [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy and session-partitioned process trust metadata, so `start_process` no longer inherits the generic high-risk approval path and process-runtime approvals/audit receipts now carry the narrower managed-process boundary contract
 
 ## Still To Do On `develop`
 

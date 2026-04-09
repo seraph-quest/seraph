@@ -122,6 +122,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] secret-reference resolution now stays limited to explicit injection-safe surfaces instead of resolving into arbitrary tool calls
 - [x] delegation now keeps generic memory handling separate from vault-backed secret management, with explicit secret/vault routing into a dedicated privileged specialist and deterministic eval coverage for that boundary
 - [x] authenticated MCP-backed tools now carry source-aware boundary context through approval/audit wrapping, and workflow checkpoint reuse blocks authenticated external-source runs instead of treating them like generic MCP replay
+- [x] background process control now exposes explicit session-partition and background-execution trust metadata, and `start_process` requires confirmation even when global approval mode is off so persistent runtime work no longer rides on the generic high-risk approval path
 
 ### Execution and integrations
 

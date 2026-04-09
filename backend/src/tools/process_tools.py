@@ -21,6 +21,7 @@ from smolagents import Tool
 
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
+from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +384,34 @@ def _sanitized_process_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value not in {None, ""}}
 
 
+def _process_approval_context(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    persistent_background_execution: bool,
+) -> dict[str, Any]:
+    context = {
+        "risk_level": get_tool_risk_level(tool_name),
+        "execution_boundaries": get_tool_execution_boundaries(tool_name),
+        "accepts_secret_refs": False,
+        "command_allowlist_enforced": True,
+        "workspace_scoped_paths_only": True,
+        "runtime_log_storage": "temp_runtime_outside_workspace",
+        "persistent_background_execution": persistent_background_execution,
+    }
+    if tool_name in {"start_process", "list_processes", "read_process_output", "stop_process"}:
+        context["session_process_partition"] = True
+    if tool_name in {"start_process", "stop_process"}:
+        context["confirmation_scope"] = "background_process_lifecycle"
+    elif tool_name in {"list_processes", "read_process_output"}:
+        context["confirmation_scope"] = "process_visibility"
+    else:
+        context["confirmation_scope"] = "bounded_command_execution"
+    if tool_name in {"run_command", "start_process"}:
+        context["command"] = _sanitized_process_arguments(arguments).get("command")
+    return context
+
+
 def _command_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -703,6 +732,13 @@ class RunCommandTool(Tool):
     def get_audit_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return _sanitized_process_arguments(arguments)
 
+    def get_approval_context(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return _process_approval_context(
+            "run_command",
+            arguments,
+            persistent_background_execution=False,
+        )
+
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
             payload = dict(args[0])
@@ -771,6 +807,13 @@ class StartProcessTool(Tool):
     def get_audit_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return _sanitized_process_arguments(arguments)
 
+    def get_approval_context(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return _process_approval_context(
+            "start_process",
+            arguments,
+            persistent_background_execution=True,
+        )
+
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
             payload = dict(args[0])
@@ -821,6 +864,13 @@ class ListProcessesTool(Tool):
         payload = _list_processes_audit_payload.get()
         _list_processes_audit_payload.set(None)
         return payload
+
+    def get_approval_context(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return _process_approval_context(
+            "list_processes",
+            {},
+            persistent_background_execution=False,
+        )
 
 
 class ReadProcessOutputTool(Tool):
@@ -876,6 +926,13 @@ class ReadProcessOutputTool(Tool):
 
     def get_audit_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return _sanitized_process_arguments(arguments)
+
+    def get_approval_context(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return _process_approval_context(
+            "read_process_output",
+            arguments,
+            persistent_background_execution=False,
+        )
 
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
@@ -937,6 +994,13 @@ class StopProcessTool(Tool):
 
     def get_audit_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return _sanitized_process_arguments(arguments)
+
+    def get_approval_context(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return _process_approval_context(
+            "stop_process",
+            arguments,
+            persistent_background_execution=False,
+        )
 
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):

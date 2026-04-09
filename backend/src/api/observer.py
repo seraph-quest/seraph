@@ -197,6 +197,12 @@ class ObserverPresenceSurfaceResponse(BaseModel):
     follow_up_prompt: str | None = None
     transport: str | None = None
     source_type: str | None = None
+    provider_kind: str | None = None
+    execution_mode: str | None = None
+    adapter_kind: str | None = None
+    selected: bool = False
+    requires_network: bool = False
+    requires_daemon: bool = False
 
 
 class ObserverPresenceSummaryResponse(BaseModel):
@@ -445,7 +451,6 @@ _IMPORTED_REACH_FAMILY_DEFS: tuple[tuple[str, str], ...] = (
 _PRESENCE_CONTRIBUTION_TYPES = {
     "channel_adapters",
     "messaging_connectors",
-    "node_adapters",
     "observer_definitions",
 }
 
@@ -658,6 +663,7 @@ def _presence_surface_kind(contribution_type: str) -> str:
         "channel_adapters": "channel_adapter",
         "messaging_connectors": "messaging_connector",
         "node_adapters": "node_adapter",
+        "browser_providers": "browser_provider",
         "observer_definitions": "observer_definition",
     }.get(contribution_type, contribution_type)
 
@@ -730,8 +736,78 @@ def _presence_surface_follow_up_prompt(contribution: dict[str, Any]) -> str | No
     )
 
 
+def _browser_provider_surface_detail(item: Any, *, package_label: str) -> str:
+    provider_kind = str(getattr(item, "provider_kind", "") or "browser").replace("_", " ")
+    runtime_state = str(getattr(item, "runtime_state", "") or "unknown").replace("_", " ")
+    name = str(getattr(item, "name", "") or "browser provider")
+    if str(getattr(item, "runtime_state", "") or "") == "staged_local_fallback":
+        return (
+            f"{package_label} exposes {name} as a {provider_kind} browser provider, "
+            "but remote browser reach still falls back to the local runtime."
+        )
+    return f"{package_label} exposes {name} as a {provider_kind} browser provider ({runtime_state})."
+
+
+def _browser_provider_surface_repair_hint(item: Any) -> str | None:
+    runtime_state = str(getattr(item, "runtime_state", "") or "")
+    if runtime_state == "ready":
+        return None
+    if runtime_state == "requires_config":
+        return "Finish browser provider configuration before routing browser-assisted follow-through here."
+    if runtime_state == "disabled":
+        return "Re-enable this browser provider in extension lifecycle state."
+    if runtime_state == "staged_local_fallback":
+        return "Inspect remote browser transport prerequisites before relying on this packaged browser reach."
+    return "Inspect browser provider diagnostics and runtime prerequisites in the operator surface."
+
+
+def _browser_provider_follow_up_prompt(item: Any) -> str | None:
+    if not bool(getattr(item, "selected", False)):
+        return None
+    if str(getattr(item, "runtime_state", "") or "") != "ready":
+        return None
+    name = str(getattr(item, "name", "") or "browser provider")
+    return (
+        f"Plan guarded browser-assisted follow-through via {name}. Confirm the target page, "
+        "authentication boundary, and fallback expectations before acting."
+    )
+
+
+def _node_adapter_surface_detail(item: Any, *, package_label: str) -> str:
+    name = str(getattr(item, "name", "") or "node adapter")
+    adapter_kind = str(getattr(item, "adapter_kind", "") or "companion").replace("_", " ")
+    runtime_state = str(getattr(item, "runtime_state", "") or "unknown").replace("_", " ")
+    return f"{package_label} adds {name} for {adapter_kind} device or companion reach ({runtime_state})."
+
+
+def _node_adapter_surface_repair_hint(item: Any) -> str | None:
+    runtime_state = str(getattr(item, "runtime_state", "") or "")
+    if runtime_state in {"staged_link", "staged_canvas"}:
+        return None
+    if runtime_state == "requires_config":
+        return "Finish node-adapter configuration before routing companion or device follow-through here."
+    if runtime_state == "disabled":
+        return "Re-enable this node adapter in extension lifecycle state."
+    return "Inspect node-adapter diagnostics and daemon prerequisites in the operator surface."
+
+
+def _node_adapter_follow_up_prompt(item: Any) -> str | None:
+    if str(getattr(item, "runtime_state", "") or "") not in {"staged_link", "staged_canvas"}:
+        return None
+    name = str(getattr(item, "name", "") or "node adapter")
+    return (
+        f"Plan guarded companion follow-through via {name}. Confirm the target device or canvas scope, "
+        "execution boundary, and approval posture before acting."
+    )
+
+
 def _observer_presence_surface_payload() -> dict[str, Any]:
     from src.extensions.lifecycle import list_extensions
+    from src.extensions.browser_providers import list_browser_provider_inventory
+    from src.extensions.node_adapters import list_node_adapter_inventory
+    from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
+    from src.extensions.state import connector_enabled_overrides, load_extension_state_payload
+    from config.settings import settings
 
     payload = list_extensions()
     extensions = [
@@ -739,6 +815,13 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         for item in payload.get("extensions", [])
         if isinstance(item, dict)
     ]
+    package_label_by_id = {
+        str(item.get("id") or "").strip(): (
+            str(item.get("display_name") or item.get("id") or "").strip() or "Extension package"
+        )
+        for item in extensions
+        if str(item.get("id") or "").strip()
+    }
 
     surfaces: list[dict[str, Any]] = []
     for extension in extensions:
@@ -796,7 +879,108 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
                     if contribution_type == "observer_definitions"
                     else None
                 ),
+                "provider_kind": None,
+                "execution_mode": None,
+                "adapter_kind": None,
+                "selected": False,
+                "requires_network": False,
+                "requires_daemon": False,
             })
+
+    state_payload = load_extension_state_payload()
+    state_by_id = state_payload.get("extensions") if isinstance(state_payload, dict) else None
+    snapshot = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    enabled_overrides = connector_enabled_overrides(state_by_id if isinstance(state_by_id, dict) else None)
+
+    browser_inventory = list_browser_provider_inventory(
+        snapshot.list_contributions("browser_providers"),
+        state_by_id=state_by_id if isinstance(state_by_id, dict) else None,
+        enabled_overrides=enabled_overrides,
+    )
+    packaged_browser_inventory = [item for item in browser_inventory if item.extension_id != "seraph.runtime-browser"]
+    for item in packaged_browser_inventory:
+        runtime_state = str(getattr(item, "runtime_state", "") or "unknown")
+        ready = runtime_state == "ready"
+        attention = runtime_state in {"requires_config", "disabled", "staged_local_fallback"}
+        follow_up_prompt = _browser_provider_follow_up_prompt(item)
+        package_id = str(getattr(item, "extension_id", "") or "").strip()
+        package_label = package_label_by_id.get(package_id, package_id or "Extension package")
+        if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
+            continue
+        surfaces.append({
+            "id": f"browser_providers:{package_id}:{item.reference}",
+            "kind": "browser_provider",
+            "label": str(getattr(item, "name", "") or "browser provider"),
+            "package_label": package_label,
+            "package_id": package_id or None,
+            "status": runtime_state,
+            "active": bool(getattr(item, "enabled", False)),
+            "ready": ready,
+            "attention": attention,
+            "detail": _browser_provider_surface_detail(item, package_label=package_label),
+            "repair_hint": _browser_provider_surface_repair_hint(item),
+            "follow_up_hint": (
+                "Use operator review before routing browser-assisted follow-through through this provider."
+                if follow_up_prompt
+                else None
+            ),
+            "follow_up_prompt": follow_up_prompt,
+            "transport": None,
+            "source_type": None,
+            "provider_kind": str(getattr(item, "provider_kind", "") or "") or None,
+            "execution_mode": str(getattr(item, "execution_mode", "") or "") or None,
+            "adapter_kind": None,
+            "selected": bool(getattr(item, "selected", False)),
+            "requires_network": bool(getattr(item, "requires_network", False)),
+            "requires_daemon": bool(getattr(item, "requires_daemon", False)),
+        })
+
+    node_inventory = list_node_adapter_inventory(
+        snapshot.list_contributions("node_adapters"),
+        state_by_id=state_by_id if isinstance(state_by_id, dict) else None,
+        enabled_overrides=enabled_overrides,
+    )
+    for item in node_inventory:
+        runtime_state = str(getattr(item, "runtime_state", "") or "unknown")
+        ready = runtime_state in {"staged_link", "staged_canvas"}
+        attention = runtime_state in {"requires_config", "disabled"}
+        follow_up_prompt = _node_adapter_follow_up_prompt(item)
+        package_id = str(getattr(item, "extension_id", "") or "").strip()
+        package_label = package_label_by_id.get(package_id, package_id or "Extension package")
+        if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
+            continue
+        surfaces.append({
+            "id": f"node_adapters:{package_id}:{item.reference}",
+            "kind": "node_adapter",
+            "label": str(getattr(item, "name", "") or "node adapter"),
+            "package_label": package_label,
+            "package_id": package_id or None,
+            "status": runtime_state,
+            "active": bool(getattr(item, "enabled", False)),
+            "ready": ready,
+            "attention": attention,
+            "detail": _node_adapter_surface_detail(item, package_label=package_label),
+            "repair_hint": _node_adapter_surface_repair_hint(item),
+            "follow_up_hint": (
+                "Use operator review before routing companion or device follow-through through this surface."
+                if follow_up_prompt
+                else None
+            ),
+            "follow_up_prompt": follow_up_prompt,
+            "transport": None,
+            "source_type": None,
+            "provider_kind": None,
+            "execution_mode": None,
+            "adapter_kind": str(getattr(item, "adapter_kind", "") or "") or None,
+            "selected": False,
+            "requires_network": bool(getattr(item, "requires_network", False)),
+            "requires_daemon": bool(getattr(item, "requires_daemon", False)),
+        })
 
     surfaces = sorted(
         surfaces,
@@ -1069,7 +1253,7 @@ def _build_continuity_recovery_actions(
                 "open_thread_available": False,
             })
             continue
-        if str(presence_surface.get("kind") or "") in {"channel_adapter", "messaging_connector"} and bool(presence_surface.get("follow_up_prompt")):
+        if str(presence_surface.get("kind") or "") in {"channel_adapter", "messaging_connector", "browser_provider", "node_adapter"} and bool(presence_surface.get("follow_up_prompt")):
             actions.append({
                 "id": f"presence-follow:{presence_surface.get('id')}",
                 "kind": "presence_follow_up",

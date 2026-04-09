@@ -5709,10 +5709,10 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
                 "src.api.observer._observer_presence_surface_payload",
                 return_value={
                     "summary": {
-                        "surface_count": 2,
-                        "active_surface_count": 1,
-                        "ready_surface_count": 1,
-                        "attention_surface_count": 1,
+                        "surface_count": 4,
+                        "active_surface_count": 3,
+                        "ready_surface_count": 2,
+                        "attention_surface_count": 2,
                     },
                     "surfaces": [
                         {
@@ -5748,6 +5748,58 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
                             "follow_up_prompt": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
                             "transport": "native_notification",
                             "source_type": None,
+                            "provider_kind": None,
+                            "execution_mode": None,
+                            "adapter_kind": None,
+                            "selected": False,
+                            "requires_network": False,
+                            "requires_daemon": False,
+                        },
+                        {
+                            "id": "browser_providers:seraph.browserbase:connectors/browser/browserbase.yaml",
+                            "kind": "browser_provider",
+                            "label": "browserbase",
+                            "package_label": "Browserbase Pack",
+                            "package_id": "seraph.browserbase",
+                            "status": "staged_local_fallback",
+                            "active": True,
+                            "ready": False,
+                            "attention": True,
+                            "detail": "Browserbase Pack exposes browserbase as a browserbase browser provider, but remote browser reach still falls back to the local runtime.",
+                            "repair_hint": "Inspect remote browser transport prerequisites before relying on this packaged browser reach.",
+                            "follow_up_hint": None,
+                            "follow_up_prompt": None,
+                            "transport": None,
+                            "source_type": None,
+                            "provider_kind": "browserbase",
+                            "execution_mode": "local_fallback",
+                            "adapter_kind": None,
+                            "selected": False,
+                            "requires_network": True,
+                            "requires_daemon": False,
+                        },
+                        {
+                            "id": "node_adapters:seraph.device:connectors/nodes/atlas-companion.yaml",
+                            "kind": "node_adapter",
+                            "label": "Atlas companion bridge",
+                            "package_label": "Device Pack",
+                            "package_id": "seraph.device",
+                            "status": "staged_link",
+                            "active": True,
+                            "ready": True,
+                            "attention": False,
+                            "detail": "Device Pack adds Atlas companion bridge for companion device or companion reach (staged link).",
+                            "repair_hint": None,
+                            "follow_up_hint": "Use operator review before routing companion or device follow-through through this surface.",
+                            "follow_up_prompt": "Plan guarded companion follow-through via Atlas companion bridge. Confirm the target device or canvas scope, execution boundary, and approval posture before acting.",
+                            "transport": None,
+                            "source_type": None,
+                            "provider_kind": None,
+                            "execution_mode": None,
+                            "adapter_kind": "companion",
+                            "selected": False,
+                            "requires_network": True,
+                            "requires_daemon": True,
                         },
                     ],
                 },
@@ -5800,6 +5852,14 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         "source_adapter_recovery_present": any(item["kind"] == "source_adapter_repair" for item in continuity["recovery_actions"]),
         "presence_recovery_present": any(item["kind"] == "presence_repair" for item in continuity["recovery_actions"]),
         "presence_follow_up_present": any(item["kind"] == "presence_follow_up" for item in continuity["recovery_actions"]),
+        "browser_provider_recovery_present": any(
+            item["kind"] == "presence_repair" and item.get("route") == "browser_provider"
+            for item in continuity["recovery_actions"]
+        ),
+        "node_adapter_follow_up_present": any(
+            item["kind"] == "presence_follow_up" and item.get("route") == "node_adapter"
+            for item in continuity["recovery_actions"]
+        ),
         "imported_reach_recovery_present": any(item["kind"] == "imported_reach_attention" for item in continuity["recovery_actions"]),
         "operator_source_adapter_recovery_present": any(
             item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "source_adapter_repair"
@@ -5813,6 +5873,10 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "imported_reach_attention"
             for item in operator_items
         ),
+        "operator_presence_follow_up_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "presence_follow_up"
+            for item in operator_items
+        ),
         "activity_source_adapter_recovery_present": any(
             item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "source_adapter_repair"
             for item in activity_items
@@ -5823,6 +5887,10 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
         ),
         "activity_imported_reach_recovery_present": any(
             item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "imported_reach_attention"
+            for item in activity_items
+        ),
+        "activity_presence_follow_up_present": any(
+            item["kind"] == "reach_recovery" and item.get("metadata", {}).get("kind") == "presence_follow_up"
             for item in activity_items
         ),
     }

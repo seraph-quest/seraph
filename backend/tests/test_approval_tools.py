@@ -9,6 +9,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
+from src.tools.process_tools import start_process
 from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
 
 
@@ -139,3 +140,21 @@ def test_secret_ref_wrapper_preserves_authenticated_mcp_approval_context(async_d
         "external_mcp",
         "authenticated_external_source",
     ]
+
+
+def test_start_process_requires_approval_even_when_global_mode_is_off(async_db):
+    tool = wrap_tools_for_approval([start_process])[0]
+    tokens = set_runtime_context("s1", "off")
+    try:
+        with pytest.raises(ApprovalRequired) as excinfo:
+            tool(command="pwd")
+        pending = asyncio.run(approval_repository.list_pending(session_id="s1"))
+    finally:
+        reset_runtime_context(tokens)
+
+    request = next(item for item in pending if item["id"] == excinfo.value.approval_id)
+    assert request["tool_name"] == "start_process"
+    assert request["approval_context"]["confirmation_scope"] == "background_process_lifecycle"
+    assert request["approval_context"]["persistent_background_execution"] is True
+    assert request["approval_context"]["session_process_partition"] is True
+    assert request["approval_context"]["runtime_log_storage"] == "temp_runtime_outside_workspace"

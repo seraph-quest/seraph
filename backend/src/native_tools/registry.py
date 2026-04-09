@@ -105,27 +105,28 @@ TOOL_METADATA: dict[str, dict] = {
     "run_command": {
         "description": "Run an approved workspace-scoped command inside the runtime container",
         "policy_modes": ["full"],
-        "execution_boundaries": ["container_process_execution"],
+        "execution_boundaries": ["container_process_execution", "workspace_scoped_paths"],
     },
     "start_process": {
         "description": "Start an approved workspace-scoped background process inside the runtime container",
         "policy_modes": ["full"],
-        "execution_boundaries": ["container_process_management"],
+        "execution_boundaries": ["container_process_management", "background_execution", "session_process_partition"],
+        "approval_behavior": "always",
     },
     "list_processes": {
         "description": "List background processes started through the runtime process manager",
         "policy_modes": ["full"],
-        "execution_boundaries": ["container_process_read"],
+        "execution_boundaries": ["container_process_read", "session_process_partition"],
     },
     "read_process_output": {
         "description": "Read recent stdout/stderr output for a managed background process",
         "policy_modes": ["full"],
-        "execution_boundaries": ["container_process_read"],
+        "execution_boundaries": ["container_process_read", "session_process_partition"],
     },
     "stop_process": {
         "description": "Stop a managed background process inside the runtime container",
         "policy_modes": ["full"],
-        "execution_boundaries": ["container_process_management"],
+        "execution_boundaries": ["container_process_management", "session_process_partition"],
     },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",

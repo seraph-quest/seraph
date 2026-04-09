@@ -86,6 +86,18 @@ class TestAgentFactory:
         finally:
             reset_runtime_context(tokens)
 
+    @patch("src.agent.factory.mcp_manager")
+    @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))
+    def test_get_tools_wraps_start_process_for_approval_even_when_mode_is_off(self, _mock_context, mock_mcp, async_db):
+        mock_mcp.get_tools.return_value = []
+        tools = {tool.name: tool for tool in get_tools()}
+        tokens = set_runtime_context("s1", "off")
+        try:
+            with pytest.raises(ApprovalRequired):
+                tools["start_process"](command="pwd")
+        finally:
+            reset_runtime_context(tokens)
+
     @patch("src.tools.shell_tool.httpx.Client")
     @patch("src.agent.factory.mcp_manager")
     @patch("src.tools.policy.context_manager.get_context", return_value=CurrentContext(tool_policy_mode="full", mcp_policy_mode="full"))

@@ -9,7 +9,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.approval.runtime import get_current_approval_mode, get_current_session_id
 from src.audit.formatting import format_tool_call_summary, redact_for_audit
-from src.tools.policy import get_tool_risk_level
+from src.tools.policy import get_tool_approval_behavior, get_tool_risk_level
 
 
 def _run_async(coro):
@@ -64,7 +64,8 @@ class ApprovalTool(Tool):
         if session_id is None:
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
-        if not self.force_approval and approval_mode != "high_risk":
+        approval_behavior = "always" if self.force_approval else get_tool_approval_behavior(self.name, is_mcp=self.is_mcp)
+        if approval_behavior != "always" and approval_mode != "high_risk":
             return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
         arguments = self._normalize_invocation(args, kwargs)
@@ -133,7 +134,8 @@ def wrap_tools_for_approval(
             tool.name,
             get_tool_risk_level(tool.name, is_mcp=is_mcp),
         )
-        if risk_level == "high":
+        approval_behavior = get_tool_approval_behavior(tool.name, is_mcp=is_mcp)
+        if risk_level == "high" or approval_behavior == "always":
             wrapped.append(ApprovalTool(tool, is_mcp=is_mcp, risk_level_override=risk_level))
         else:
             wrapped.append(tool)

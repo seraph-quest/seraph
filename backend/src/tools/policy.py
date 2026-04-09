@@ -109,6 +109,20 @@ def get_tool_risk_level(tool_name: str, *, is_mcp: bool = False) -> str:
     return "low"
 
 
+def get_tool_approval_behavior(tool_name: str, *, is_mcp: bool = False) -> str:
+    """Return the default approval behavior for a tool outside MCP approval-mode overrides."""
+    if is_mcp:
+        return "high_risk_mode"
+
+    metadata = get_tool_metadata(tool_name)
+    explicit_behavior = metadata.get("approval_behavior") if isinstance(metadata, dict) else None
+    if explicit_behavior in {"never", "high_risk_mode", "always"}:
+        return explicit_behavior
+    if get_tool_risk_level(tool_name, is_mcp=is_mcp) == "high":
+        return "high_risk_mode"
+    return "never"
+
+
 def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False, tool: object | None = None) -> list[str]:
     """Return the execution-boundary tags for a tool."""
     if is_mcp:

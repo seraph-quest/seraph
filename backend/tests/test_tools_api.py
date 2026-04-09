@@ -30,6 +30,22 @@ async def test_tools_api_full_mode_includes_execute_code(client):
 
 
 @pytest.mark.asyncio
+async def test_tools_api_marks_start_process_as_always_approval(client):
+    ctx = CurrentContext(tool_policy_mode="full")
+    with patch("src.tools.policy.context_manager.get_context", return_value=ctx):
+        resp = await client.get("/api/tools")
+    assert resp.status_code == 200
+    entry = next(tool for tool in resp.json() if tool["name"] == "start_process")
+    assert entry["approval_behavior"] == "always"
+    assert entry["requires_approval"] is True
+    assert entry["execution_boundaries"] == [
+        "container_process_management",
+        "background_execution",
+        "session_process_partition",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_tools_api_safe_mode_keeps_clarify_available(client):
     ctx = CurrentContext(tool_policy_mode="safe")
     with patch("src.tools.policy.context_manager.get_context", return_value=ctx):

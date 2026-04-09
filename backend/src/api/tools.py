@@ -5,6 +5,7 @@ from src.agent.factory import get_tools
 from src.agent.specialists import list_specialist_descriptors
 from src.native_tools.registry import get_tool_metadata
 from src.tools.policy import (
+    get_tool_approval_behavior,
     get_current_mcp_policy_mode,
     get_current_tool_policy_mode,
     get_tool_execution_boundaries,
@@ -38,18 +39,12 @@ async def list_tools():
         risk_level = meta.get("risk_level") if meta else None
         if not isinstance(risk_level, str):
             risk_level = get_tool_risk_level(tool.name, is_mcp=is_mcp)
-        secret_ref_fields = get_tool_secret_ref_fields(tool.name, is_mcp=is_mcp, tool=tool)
-        requires_approval = (
-            (is_mcp and mcp_mode == "approval")
-            or ("external_mcp" in execution_boundaries and mcp_mode == "approval")
-            or risk_level == "high"
-        )
         if (is_mcp or "external_mcp" in execution_boundaries) and mcp_mode == "approval":
             approval_behavior = "always"
-        elif risk_level == "high":
-            approval_behavior = "high_risk_mode"
         else:
-            approval_behavior = "never"
+            approval_behavior = get_tool_approval_behavior(tool.name, is_mcp=is_mcp)
+        secret_ref_fields = get_tool_secret_ref_fields(tool.name, is_mcp=is_mcp, tool=tool)
+        requires_approval = approval_behavior != "never"
         result.append({
             "name": tool.name,
             "description": meta.get("description") if meta else getattr(tool, "description", ""),

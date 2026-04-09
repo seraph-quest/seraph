@@ -1362,6 +1362,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
     assert details_by_name["process_recovery_boundary_behavior"]["session_scoped"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["output_path_within_workspace"] is False
+    assert details_by_name["process_recovery_boundary_behavior"]["output_path_under_runtime_tmp"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["owner_list_includes_process"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["owner_output_visible"] is True
     assert details_by_name["process_recovery_boundary_behavior"]["owner_stop_succeeds"] is True
@@ -1476,6 +1477,13 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_run_command"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_execute_code"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_run_command"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_start_process_requires_approval"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_start_process_approval_behavior"] == "always"
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_start_process_boundaries"] == [
+        "container_process_management",
+        "background_execution",
+        "session_process_partition",
+    ]
     assert details_by_name["tool_policy_guardrails_behavior"]["full_hides_shell_execute_alias"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["write_file_accepts_secret_refs"] is False
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_hides_tool"] is True

@@ -1310,6 +1310,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_user_model_behavior"]["memory_context_has_provider_project"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_diagnostics_visible"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_quality_focused"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_query_hint_without_recent_project"] is True
     assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_diagnostics_show_authority"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
     assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
@@ -1324,6 +1325,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["canonical_memory_kept_project"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_missing_project_anchor"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_sync_policy_guarded"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_runtime_contract_visible"] is True
     assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_is_stable_within_session"] is True
@@ -1595,3 +1597,4 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_missing_project_anchor"] is True

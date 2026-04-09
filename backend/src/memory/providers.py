@@ -33,6 +33,12 @@ _PROJECT_SCOPED_BUCKETS = {
     "routine",
     "timeline",
 }
+_WRITEBACK_PROJECT_ANCHOR_KINDS = {
+    MemoryKind.collaborator,
+    MemoryKind.obligation,
+    MemoryKind.routine,
+    MemoryKind.timeline,
+}
 _PROVIDER_WRITEBACK_MIN_CONFIDENCE = 0.55
 _PROVIDER_WRITEBACK_MIN_IMPORTANCE = 0.5
 _CANONICAL_MEMORY_AUTHORITY = "guardian"
@@ -549,6 +555,7 @@ def _select_provider_writeback_memories(
     suppressed_reason_counts = {
         "duplicate": 0,
         "low_quality": 0,
+        "missing_project_anchor": 0,
     }
     suppressed_kind_counts: dict[str, int] = {}
     seen_keys: set[tuple[str, str]] = set()
@@ -562,6 +569,10 @@ def _select_provider_writeback_memories(
             and float(memory.importance) < _PROVIDER_WRITEBACK_MIN_IMPORTANCE
         ):
             suppressed_reason_counts["low_quality"] += 1
+            suppressed_kind_counts[memory.kind.value] = suppressed_kind_counts.get(memory.kind.value, 0) + 1
+            continue
+        if memory.kind in _WRITEBACK_PROJECT_ANCHOR_KINDS and not str(memory.project_name or "").strip():
+            suppressed_reason_counts["missing_project_anchor"] += 1
             suppressed_kind_counts[memory.kind.value] = suppressed_kind_counts.get(memory.kind.value, 0) + 1
             continue
         if memory_key in seen_keys:
@@ -1091,6 +1102,10 @@ async def writeback_additive_memory_providers(
         if suppressed_reason_counts["duplicate"]:
             provider_notes.append(
                 "Duplicate canonical memories were deduplicated before additive provider writeback."
+            )
+        if suppressed_reason_counts["missing_project_anchor"]:
+            provider_notes.append(
+                "Project-scoped canonical memories without an explicit project anchor were not mirrored into additive providers."
             )
         if not eligible_memories:
             diagnostics.append(

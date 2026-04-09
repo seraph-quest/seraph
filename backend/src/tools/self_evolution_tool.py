@@ -46,6 +46,14 @@ def propose_capability_evolution(
     lines.append("constraints:")
     for item in receipt.get("constraints", []):
         lines.append(f"- {item['name']}: {item['status']} ({item['summary']})")
+    if receipt.get("change_summary"):
+        lines.append("change_summary:")
+        for item in receipt["change_summary"]:
+            lines.append(f"- {item}")
+    if receipt.get("review_risks"):
+        lines.append("review_risks:")
+        for item in receipt["review_risks"]:
+            lines.append(f"- {item}")
     lines.append("pr_draft:")
     lines.append(f"- title: {receipt['pr_draft']['title']}")
     return "\n".join(lines)

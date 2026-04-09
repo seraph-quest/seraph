@@ -140,6 +140,8 @@ async def test_evolution_proposal_saves_skill_review_candidate(client, tmp_path,
     )
     assert payload["receipt"]["receipt_path"].endswith("web-briefing-review-candidate.json")
     assert payload["receipt"]["blocked"] is False
+    assert "Required tool scope is unchanged." in payload["receipt"]["change_summary"]
+    assert payload["receipt"]["review_risks"]
 
 
 @pytest.mark.asyncio
@@ -178,6 +180,8 @@ async def test_evolution_validate_blocks_skill_tool_scope_expansion(client, tmp_
     constraint = next(item for item in receipt["constraints"] if item["name"] == "tool_scope_expansion")
     assert constraint["status"] == "blocked"
     assert constraint["details"]["added_tools"] == ["write_file"]
+    assert "Required tools added: write_file." in receipt["change_summary"]
+    assert any("tool_scope_expansion is blocked" in item for item in receipt["review_risks"])
 
 
 @pytest.mark.asyncio
@@ -347,6 +351,10 @@ async def test_evolution_validate_blocks_prompt_pack_privileged_instruction_grow
     constraint = next(item for item in receipt["constraints"] if item["name"] == "instruction_surface_expansion")
     assert constraint["status"] == "blocked"
     assert constraint["details"]["introduced_tokens"] == ["vault://"]
+    assert any(
+        "Prompt candidate introduces privileged tokens: vault://." == item
+        for item in receipt["change_summary"]
+    )
 
 
 @pytest.mark.asyncio
@@ -380,6 +388,7 @@ async def test_evolution_validate_blocks_prompt_pack_privileged_tool_mentions(cl
     assert receipt["blocked"] is True
     constraint = next(item for item in receipt["constraints"] if item["name"] == "instruction_surface_expansion")
     assert "delete_secret" in constraint["details"]["introduced_tokens"]
+    assert any("instruction_surface_expansion is blocked" in item for item in receipt["review_risks"])
 
 
 @pytest.mark.asyncio

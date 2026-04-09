@@ -1172,6 +1172,19 @@ def build_guardian_world_model(
         judgment_risks.append(
             f"Scheduled review and briefing outcomes have degraded across {learning_signal.scheduled_negative_days} day(s)."
         )
+    if (
+        observer_project
+        and competing_project_anchor
+        and learning_signal is not None
+        and (
+            learning_signal.multi_day_negative_days >= 2
+            or learning_signal.scheduled_negative_days >= 2
+            or (learning_signal.not_helpful_count + learning_signal.failed_count) >= 2
+        )
+    ):
+        judgment_risks.append(
+            f"Competing project anchors plus negative intervention trend require conservative judgment around '{observer_project}'."
+        )
     stale_signal_arbitration = _stale_signal_arbitration(
         observer_project=observer_project,
         preferred_project_anchor=preferred_project_anchor,

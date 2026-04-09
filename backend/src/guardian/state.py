@@ -314,6 +314,34 @@ def _learning_diagnostics_lines(
         lines.append(
             f"Procedural memory is still steering: {', '.join(procedural_overrides[:4])}."
         )
+    conflicting_axes = [
+        (
+            f"{decision.axis}(live={decision.live_bias}, "
+            f"procedural={decision.procedural_bias}, "
+            f"winner={decision.selected_source})"
+        )
+        for decision in arbitration.conflicting_decisions()
+    ]
+    if conflicting_axes:
+        lines.append(
+            f"Conflicting live vs procedural biases: {', '.join(conflicting_axes[:4])}."
+        )
+    procedural_override_axes = [
+        decision.axis for decision in arbitration.procedural_override_conflicts()
+    ]
+    if procedural_override_axes:
+        lines.append(
+            "Governed adaptation should stay review-first because procedural memory is "
+            f"overriding live outcomes on {', '.join(procedural_override_axes[:4])}."
+        )
+    live_override_axes = [
+        decision.axis for decision in arbitration.live_override_conflicts()
+    ]
+    if live_override_axes:
+        lines.append(
+            "Fresh live outcomes are overruling older procedural guidance on "
+            f"{', '.join(live_override_axes[:4])}."
+        )
     return tuple(lines)
 
 

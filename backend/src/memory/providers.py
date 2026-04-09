@@ -35,6 +35,15 @@ _PROJECT_SCOPED_BUCKETS = {
 }
 _PROVIDER_WRITEBACK_MIN_CONFIDENCE = 0.55
 _PROVIDER_WRITEBACK_MIN_IMPORTANCE = 0.5
+_CANONICAL_MEMORY_AUTHORITY = "guardian"
+_PROVIDER_ROLE = "additive_adapter"
+_PROVENANCE_CANONICAL = "guardian_canonical"
+_PROVENANCE_EXTERNAL_ADVISORY = "external_advisory"
+_PROVENANCE_PROVIDER_MIRROR = "provider_mirror"
+_CONFLICT_POLICY = "guardian_wins"
+_RECONCILIATION_POLICY = "canonical_first"
+_RETRIEVAL_SYNC_POLICY = "read_augment_only"
+_WRITEBACK_SYNC_POLICY = "post_canonical_guarded_writeback"
 
 _PROVIDER_STALE_WINDOWS_DAYS = {
     MemoryKind.commitment: 30,
@@ -130,6 +139,7 @@ class MemoryProviderInventoryItem:
             "extension_id": self.extension_id,
             "reference": self.reference,
             "notes": list(self.notes),
+            "memory_contract": _provider_memory_contract_payload(),
         }
 
 
@@ -169,6 +179,49 @@ class _ScoredProviderHit:
 
 
 _REGISTERED_MEMORY_PROVIDER_ADAPTERS: dict[str, MemoryProviderAdapter] = {}
+
+
+def _canonical_memory_contract_payload() -> dict[str, Any]:
+    return {
+        "authoritative_memory": _CANONICAL_MEMORY_AUTHORITY,
+        "provider_role": _PROVIDER_ROLE,
+        "canonical_provenance": _PROVENANCE_CANONICAL,
+        "advisory_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
+        "mirror_provenance": _PROVENANCE_PROVIDER_MIRROR,
+        "conflict_policy": _CONFLICT_POLICY,
+        "reconciliation_policy": _RECONCILIATION_POLICY,
+        "retrieval_sync_policy": _RETRIEVAL_SYNC_POLICY,
+        "writeback_sync_policy": _WRITEBACK_SYNC_POLICY,
+    }
+
+
+def _provenance_taxonomy_payload() -> tuple[dict[str, str], ...]:
+    return (
+        {
+            "name": _PROVENANCE_CANONICAL,
+            "authority": _CANONICAL_MEMORY_AUTHORITY,
+            "summary": "Canonical guardian memory and world-model state remain authoritative inside Seraph.",
+        },
+        {
+            "name": _PROVENANCE_EXTERNAL_ADVISORY,
+            "authority": _CANONICAL_MEMORY_AUTHORITY,
+            "summary": "Provider retrieval and user-model evidence can augment recall or modeling but never replace guardian-owned truth.",
+        },
+        {
+            "name": _PROVENANCE_PROVIDER_MIRROR,
+            "authority": _CANONICAL_MEMORY_AUTHORITY,
+            "summary": "Provider writeback mirrors canonically persisted memories after guardrails pass; mirrored copies stay non-authoritative.",
+        },
+    )
+
+
+def _provider_memory_contract_payload() -> dict[str, Any]:
+    return {
+        **_canonical_memory_contract_payload(),
+        "provider_retrieval_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
+        "provider_model_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
+        "provider_writeback_provenance": _PROVENANCE_PROVIDER_MIRROR,
+    }
 
 
 def register_memory_provider_adapter(adapter: MemoryProviderAdapter) -> None:
@@ -606,10 +659,12 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             }
         )
         item["governance"] = {
-            "authoritative_memory": "guardian",
+            "authoritative_memory": _CANONICAL_MEMORY_AUTHORITY,
             "augmentation_mode": "additive_only",
             "modeled_buckets": list(_MODELING_BUCKETS),
             "writeback_state": capability_states.get("consolidation", "undeclared"),
+            "conflict_policy": _CONFLICT_POLICY,
+            "reconciliation_policy": _RECONCILIATION_POLICY,
         }
         item["quality_controls"] = {
             "freshness_windows_days": {
@@ -644,6 +699,13 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             "Provider-backed user or project modeling is additive only; it must not silently replace canonical guardian memory.",
             "Provider-backed consolidation or writeback runs only after canonical guardian persistence succeeds and remains advisory.",
             "When canonical and provider context conflict, guardian-owned memory remains authoritative and provider evidence is advisory.",
+        ],
+        "canonical_memory_contract": _canonical_memory_contract_payload(),
+        "provenance_taxonomy": list(_provenance_taxonomy_payload()),
+        "reconciliation_rules": [
+            "Canonical guardian memory wins when provider evidence conflicts with guardian-owned memory.",
+            "Provider evidence that is stale or does not line up with the live project/query is suppressed before it can shape guardian state.",
+            "Provider writeback mirrors only canonically persisted memories after guardrails pass.",
         ],
         "quality_controls": {
             "freshness_windows_days": {
@@ -829,6 +891,12 @@ async def retrieve_additive_memory_provider_context(
         diagnostics.append(
             {
                 "name": name,
+                "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
+                "provider_role": _PROVIDER_ROLE,
+                "provenance": _PROVENANCE_EXTERNAL_ADVISORY,
+                "conflict_policy": _CONFLICT_POLICY,
+                "reconciliation_policy": _RECONCILIATION_POLICY,
+                "sync_policy": _RETRIEVAL_SYNC_POLICY,
                 "runtime_state": (
                     "unavailable"
                     if failed_capabilities and not capabilities_used
@@ -939,6 +1007,12 @@ async def writeback_additive_memory_providers(
             diagnostics.append(
                 {
                     "name": name,
+                    "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
+                    "provider_role": _PROVIDER_ROLE,
+                    "provenance": _PROVENANCE_PROVIDER_MIRROR,
+                    "conflict_policy": _CONFLICT_POLICY,
+                    "reconciliation_policy": _RECONCILIATION_POLICY,
+                    "sync_policy": _WRITEBACK_SYNC_POLICY,
                     "runtime_state": "ready" if consolidation_state == "ready" else "degraded",
                     "stored_count": 0,
                     "partial_write_count": 0,
@@ -973,6 +1047,12 @@ async def writeback_additive_memory_providers(
             diagnostics.append(
                 {
                     "name": name,
+                    "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
+                    "provider_role": _PROVIDER_ROLE,
+                    "provenance": _PROVENANCE_PROVIDER_MIRROR,
+                    "conflict_policy": _CONFLICT_POLICY,
+                    "reconciliation_policy": _RECONCILIATION_POLICY,
+                    "sync_policy": _WRITEBACK_SYNC_POLICY,
                     "runtime_state": "unavailable",
                     "stored_count": 0,
                     "partial_write_count": 1,
@@ -998,6 +1078,12 @@ async def writeback_additive_memory_providers(
         diagnostics.append(
             {
                 "name": name,
+                "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
+                "provider_role": _PROVIDER_ROLE,
+                "provenance": _PROVENANCE_PROVIDER_MIRROR,
+                "conflict_policy": _CONFLICT_POLICY,
+                "reconciliation_policy": _RECONCILIATION_POLICY,
+                "sync_policy": _WRITEBACK_SYNC_POLICY,
                 "runtime_state": "degraded" if result.degraded or consolidation_state == "degraded" else "ready",
                 "stored_count": int(result.stored_count),
                 "partial_write_count": int(result.partial_write_count),

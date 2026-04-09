@@ -23,6 +23,7 @@
 - [x] the shared continuity snapshot now also carries imported capability-family attention and typed source-adapter degradation, so browser/native route health is no longer the only reach surface visible in observer continuity or cockpit recovery flows
 - [x] broader reach continuity now also propagates into the operator timeline and Activity Ledger, so typed source-adapter and imported-reach recovery is not stranded in the observer endpoint or cockpit-only surfaces
 - [x] observer continuity now also carries explicit presence-surface inventory across channel adapters, messaging connectors, node adapters, and observer definitions, with ready versus attention summaries, follow-up prompts, repair hints, and the same presence recovery surfaced into cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger
+- [x] observer continuity now also carries inventory-backed browser-provider and node-adapter reach surfaces with selected-versus-fallback state, network or daemon prerequisites, and the same repair or follow-up recovery contract propagated into cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 
 ## Working On Now
@@ -38,6 +39,7 @@
 - [x] this workstream now also ships `broader-channel-adapter-surface-v1`
 - [x] this workstream now also ships `reach-evals-and-integration-hardening-v2`
 - [x] this workstream now also ships `cross-surface-presence-contracts-v1`
+- [x] this workstream now also ships `broader-reach-inventory-continuity-v2`
 
 ## Still To Do On `develop`
 
@@ -125,3 +127,52 @@
   - the first triage proof assumed imported-reach follow-through would still land in the top visible rows after the new presence surfaces were added, but that ordering guarantee was no longer truthful once the widened continuity contract legitimately displaced lower-priority rows
   - the first desktop-shell pass truncated recovery rows early enough that the new `presence_follow_up` action could be produced by the backend but never rendered, so the recovery list now exposes enough rows for the new ready-surface follow-up contract to remain actionable
   - the observer continuity hardening from the pre-batch fix is folded into this slice because partial intervention rows were still failing response validation on missing legacy string fields, and that would have made the new broader continuity contract brittle under older stored payloads
+
+## Batch AZ Branch Review Log
+
+### Slice: broader reach inventory continuity v2
+
+- status: complete on `feat/reach-cross-surface-batch-az-v1`, intended for the aggregate Batch AZ PR for `#364`
+- root cause addressed:
+  - broader reach continuity still left packaged browser-provider reach stranded in provider inventory instead of surfacing it through the same observer continuity and recovery contract as other reach surfaces
+  - node adapters only showed up through generic contribution rows, so selected-versus-fallback reach truth, daemon prerequisites, and guarded follow-up posture were missing from the continuity payload
+  - recovery actions only treated messaging and channel surfaces as follow-up-capable, so the widened reach inventory could still stop short of cockpit, timeline, and ledger follow-through control even when the observer payload carried the right reach state
+- delivered in this slice:
+  - inventory-backed browser-provider presence surfaces with selected-versus-fallback state, provider kind, execution mode, and network or daemon prerequisite truth
+  - inventory-backed node-adapter presence surfaces with adapter kind, runtime-state follow-up eligibility, and daemon or network prerequisite truth
+  - the same presence-follow-up recovery contract widened to browser-provider and node-adapter surfaces, so observer continuity can drive cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger from the same richer reach inventory
+  - deterministic observer and eval-harness proof for the widened reach inventory contract
+- validation:
+  - `python3 -m py_compile backend/src/api/observer.py backend/src/evals/harness.py backend/tests/test_observer_api.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_observer_api.py -q -k "presence_surface_payload or continuity_surfaces_imported_reach_and_source_adapter_attention"`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "cross_surface_continuity_behavior or test_main_lists_available_scenarios"`
+  - `cd docs && npm run build -- --out-dir /tmp/seraph-docs-build-az`
+  - `git diff --check`
+- review follow-up captured during validation:
+  - verified subagent review found that removing browser providers and node adapters from the generic presence path made planned, overridden, and invalid packaged reach disappear whenever inventory rows were absent or sanitized, so observer continuity now preserves those generic fallback attention surfaces and lets richer inventory rows overwrite them only when they exist
+  - verified subagent review also found that the first browser-provider follow-up proof asserted an impossible packaged `ready` state, so the continuity contract now treats selected `staged_local_fallback` providers as the truthful guarded follow-up path and pins that fallback-aware behavior in tests and the eval harness
+  - the first inventory-backed observer pass also imported `default_manifest_roots_for_workspace` and `settings` from the wrong modules and referenced `package_label_by_id` before constructing it locally, so those direct validation bugs were fixed on the same branch before the review follow-up landed
+
+## Batch AZ Branch Review Log
+
+### Slice: broader reach inventory continuity v2
+
+- status: complete on `feat/reach-cross-surface-batch-az-v1`, intended for the aggregate Batch AZ PR for `#364`
+- root cause addressed:
+  - broader reach continuity still left packaged browser providers out of the explicit presence-surface inventory, so selected browser reach and degraded remote-browser fallback could remain invisible in the same recovery loop that already carried messaging and adapter continuity
+  - node adapters were still represented only through the generic presence surface contract, so companion or device reach could not expose adapter-specific follow-up or daemon/network prerequisite truth
+  - the reach eval proof still only pinned the earlier messaging/adapter presence contract, so browser-provider and node-adapter continuity could drift without a deterministic observer or eval-harness seam catching it
+- delivered in this slice:
+  - inventory-backed browser-provider presence surfaces in observer continuity, including selected versus fallback state, execution mode, provider kind, and network/daemon prerequisite truth
+  - inventory-backed node-adapter presence surfaces in observer continuity, including adapter kind, staged-link readiness, and network/daemon prerequisite truth
+  - the same broader reach follow-up and repair contract now extends through browser-provider and node-adapter surfaces instead of stopping at generic messaging or adapter inventory
+  - deterministic backend proof for the widened observer continuity payload and the cross-surface continuity eval details that consume it
+- validation:
+  - `python3 -m py_compile backend/src/api/observer.py backend/src/evals/harness.py backend/tests/test_observer_api.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_observer_api.py -q -k "presence_surface_payload or continuity_surfaces_imported_reach_and_source_adapter_attention"`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "cross_surface_continuity_behavior or test_main_lists_available_scenarios"`
+  - `cd docs && npm run build -- --no-minify`
+  - `git diff --check`
+- review follow-up captured during validation:
+  - the first inventory-backed observer pass referenced a package-label lookup that was never built inside `_observer_presence_surface_payload()`, so browser-provider and node-adapter continuity would have failed before returning any payload; the branch now builds that lookup directly from `list_extensions()` before constructing inventory-backed surfaces
+  - a subagent review was requested twice for this Batch AZ diff, but both review passes timed out without returning findings before PR preparation; this branch record therefore relies on the direct validation findings above instead of claiming an unreturned clean review

@@ -1,6 +1,7 @@
 import time
 import types
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -1056,3 +1057,155 @@ class TestObserverAPI:
             and item["repair_hint"] == "Enable the packaged contribution and confirm its runtime prerequisites in the operator surface."
             for item in payload["surfaces"]
         )
+
+    def test_observer_presence_surface_payload_adds_browser_provider_and_node_adapter_inventory(self):
+        registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])
+        registry_instance = SimpleNamespace(snapshot=lambda: registry_snapshot)
+        with (
+            patch(
+                "src.extensions.lifecycle.list_extensions",
+                return_value={
+                    "extensions": [
+                        {"id": "seraph.browserbase", "display_name": "Browserbase Pack", "contributions": []},
+                        {"id": "seraph.device", "display_name": "Device Pack", "contributions": []},
+                    ]
+                },
+            ),
+            patch("src.extensions.state.load_extension_state_payload", return_value={"extensions": {}}),
+            patch("src.extensions.state.connector_enabled_overrides", return_value={}),
+            patch("src.extensions.registry.default_manifest_roots_for_workspace", return_value=[]),
+            patch("src.extensions.registry.ExtensionRegistry", return_value=registry_instance),
+            patch(
+                "src.extensions.browser_providers.list_browser_provider_inventory",
+                return_value=[
+                    SimpleNamespace(
+                        extension_id="seraph.browserbase",
+                        name="browserbase",
+                        provider_kind="browserbase",
+                        description="Managed browser provider",
+                        default_enabled=True,
+                        enabled=True,
+                        reference="connectors/browser/browserbase.yaml",
+                        resolved_path=None,
+                        manifest_root_index=0,
+                        configured=True,
+                        config_keys=("api_key",),
+                        requires_network=True,
+                        requires_daemon=False,
+                        capabilities=("extract", "screenshot"),
+                        execution_mode="local_fallback",
+                        runtime_state="staged_local_fallback",
+                        selected=True,
+                    ),
+                ],
+            ),
+            patch(
+                "src.extensions.node_adapters.list_node_adapter_inventory",
+                return_value=[
+                    SimpleNamespace(
+                        extension_id="seraph.device",
+                        name="Atlas companion bridge",
+                        adapter_kind="companion",
+                        description="Companion node bridge",
+                        enabled=True,
+                        configured=True,
+                        config_keys=("endpoint",),
+                        capabilities=("observe", "handoff"),
+                        requires_network=True,
+                        requires_daemon=True,
+                        runtime_state="staged_link",
+                        reference="connectors/nodes/atlas-companion.yaml",
+                    ),
+                ],
+            ),
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["ready_surface_count"] == 1
+        assert payload["summary"]["attention_surface_count"] == 1
+
+        browser_follow_up = next(
+            item for item in payload["surfaces"] if item["id"] == "browser_providers:seraph.browserbase:connectors/browser/browserbase.yaml"
+        )
+        assert browser_follow_up["kind"] == "browser_provider"
+        assert browser_follow_up["selected"] is True
+        assert browser_follow_up["provider_kind"] == "browserbase"
+        assert browser_follow_up["execution_mode"] == "local_fallback"
+        assert browser_follow_up["attention"] is True
+        assert browser_follow_up["repair_hint"] == "Inspect remote browser transport prerequisites before relying on this packaged browser reach."
+        assert browser_follow_up["follow_up_prompt"].startswith("Plan guarded browser-assisted follow-through via browserbase")
+
+        node_follow_up = next(
+            item for item in payload["surfaces"] if item["id"] == "node_adapters:seraph.device:connectors/nodes/atlas-companion.yaml"
+        )
+        assert node_follow_up["kind"] == "node_adapter"
+        assert node_follow_up["adapter_kind"] == "companion"
+        assert node_follow_up["requires_network"] is True
+        assert node_follow_up["requires_daemon"] is True
+        assert node_follow_up["follow_up_prompt"].startswith("Plan guarded companion follow-through via Atlas companion bridge")
+
+    def test_observer_presence_surface_payload_keeps_browser_provider_and_node_adapter_fallback_attention(self):
+        registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])
+        registry_instance = SimpleNamespace(snapshot=lambda: registry_snapshot)
+        with (
+            patch(
+                "src.extensions.lifecycle.list_extensions",
+                return_value={
+                    "extensions": [
+                        {
+                            "id": "seraph.browserbase",
+                            "display_name": "Browserbase Pack",
+                            "contributions": [
+                                {
+                                    "type": "browser_providers",
+                                    "name": "browserbase remote",
+                                    "provider_kind": "browserbase",
+                                    "reference": "connectors/browser/browserbase.yaml",
+                                    "status": "overridden",
+                                    "enabled": True,
+                                    "configured": True,
+                                },
+                            ],
+                        },
+                        {
+                            "id": "seraph.device",
+                            "display_name": "Device Pack",
+                            "contributions": [
+                                {
+                                    "type": "node_adapters",
+                                    "reference": "connectors/nodes/atlas-companion.yaml",
+                                    "status": "invalid",
+                                    "enabled": True,
+                                    "configured": False,
+                                },
+                            ],
+                        },
+                    ]
+                },
+            ),
+            patch("src.extensions.state.load_extension_state_payload", return_value={"extensions": {}}),
+            patch("src.extensions.state.connector_enabled_overrides", return_value={}),
+            patch("src.extensions.registry.default_manifest_roots_for_workspace", return_value=[]),
+            patch("src.extensions.registry.ExtensionRegistry", return_value=registry_instance),
+            patch("src.extensions.browser_providers.list_browser_provider_inventory", return_value=[]),
+            patch("src.extensions.node_adapters.list_node_adapter_inventory", return_value=[]),
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["attention_surface_count"] == 2
+
+        browser_attention = next(
+            item for item in payload["surfaces"] if item["id"] == "browser_providers:seraph.browserbase:connectors/browser/browserbase.yaml"
+        )
+        assert browser_attention["kind"] == "browser_provider"
+        assert browser_attention["status"] == "overridden"
+        assert browser_attention["repair_hint"] == "Inspect the competing packaged contribution that currently owns this surface."
+
+        node_attention = next(
+            item for item in payload["surfaces"] if item["id"] == "node_adapters:seraph.device:connectors/nodes/atlas-companion.yaml"
+        )
+        assert node_attention["kind"] == "node_adapter"
+        assert node_attention["status"] == "invalid"
+        assert node_attention["repair_hint"] == "Inspect node-adapter diagnostics and daemon prerequisites in the operator surface."

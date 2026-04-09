@@ -4712,6 +4712,9 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
 
 
 async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
+    from src.guardian.learning_evidence import GuardianLearningAxisEvidence, neutral_axis_evidence, ordered_learning_axes
+    from src.memory.procedural_guidance import ProceduralMemoryGuidance
+
     async with _patched_async_db(
         "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
@@ -4787,6 +4790,32 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
                 return_value="",
             ),
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(
+                    return_value=ProceduralMemoryGuidance(
+                        intervention_type="advisory",
+                        timing_bias="prefer_available_windows",
+                        lesson_types=("timing",),
+                        axis_evidence=tuple(
+                            GuardianLearningAxisEvidence(
+                                axis="timing",
+                                field_name="timing_bias",
+                                source="procedural_memory",
+                                bias="prefer_available_windows",
+                                support_count=3,
+                                recency_score=0.45,
+                                confidence_score=0.72,
+                                quality_score=0.78,
+                                metadata_complete=True,
+                            )
+                            if axis == "timing"
+                            else neutral_axis_evidence(axis, source="procedural_memory")
+                            for axis in ordered_learning_axes()
+                        ),
+                    )
+                ),
+            ),
         ):
             state = await build_guardian_state(
                 session_id="current",
@@ -4847,6 +4876,19 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "includes_stale_signal_arbitration": any(
             "Observer project 'Atlas' is being overruled" in item
             for item in state.world_model.stale_signal_arbitration
+        ),
+        "includes_conservative_ambiguity_guardrail": any(
+            "Competing project anchors plus negative intervention trend require conservative judgment"
+            in item
+            for item in state.world_model.judgment_risks
+        ),
+        "has_learning_conflict_diagnostic": any(
+            "Conflicting live vs procedural biases:" in item
+            for item in state.learning_diagnostics
+        ),
+        "has_live_override_diagnostic": any(
+            "Fresh live outcomes are overruling older procedural guidance" in item
+            for item in state.learning_diagnostics
         ),
         "decision_action": decision.action.value,
         "decision_reason": decision.reason,
@@ -7147,6 +7189,10 @@ async def _eval_governed_self_evolution_behavior() -> dict[str, Any]:
             "saved_candidate_has_goal_section": "## Evolution Goal" in saved_candidate,
             "saved_candidate_path": saved_path,
             "stored_receipt_candidate_name": stored_receipt["candidate_name"],
+            "stored_receipt_change_summary_count": len(stored_receipt.get("change_summary", [])),
+            "stored_receipt_review_risk_count": len(stored_receipt.get("review_risks", [])),
+            "proposal_change_summary_present": bool(proposal_receipt.get("change_summary")),
+            "proposal_review_risks_present": bool(proposal_receipt.get("review_risks")),
             "blocked_status": validation_receipt["blocked"],
             "blocked_constraint": next(
                 item for item in validation_receipt["constraints"] if item["name"] == "instruction_surface_expansion"
@@ -7154,6 +7200,10 @@ async def _eval_governed_self_evolution_behavior() -> dict[str, Any]:
             "blocked_tokens": next(
                 item for item in validation_receipt["constraints"] if item["name"] == "instruction_surface_expansion"
             )["details"]["introduced_tokens"],
+            "blocked_review_risk_mentions_trace_coverage": any(
+                "Trace coverage is partial" in item
+                for item in validation_receipt.get("review_risks", [])
+            ),
         }
     finally:
         stack.close()

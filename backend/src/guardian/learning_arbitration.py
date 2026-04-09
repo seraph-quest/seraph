@@ -53,6 +53,31 @@ class GuardianLearningArbitration:
     def selected_weights(self) -> dict[str, float]:
         return {decision.axis: decision.selected_weight for decision in self.decisions}
 
+    def conflicting_decisions(self) -> tuple[LearningAxisArbitration, ...]:
+        return tuple(
+            decision
+            for decision in self.decisions
+            if decision.live_bias != "neutral"
+            and decision.procedural_bias != "neutral"
+            and decision.live_bias != decision.procedural_bias
+            and decision.live_weight > 0.0
+            and decision.procedural_weight > 0.0
+        )
+
+    def procedural_override_conflicts(self) -> tuple[LearningAxisArbitration, ...]:
+        return tuple(
+            decision
+            for decision in self.conflicting_decisions()
+            if decision.selected_source == "procedural_memory"
+        )
+
+    def live_override_conflicts(self) -> tuple[LearningAxisArbitration, ...]:
+        return tuple(
+            decision
+            for decision in self.conflicting_decisions()
+            if decision.selected_source == "live_signal"
+        )
+
 
 def _normalize_evidence(
     *,

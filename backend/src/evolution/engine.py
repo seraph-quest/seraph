@@ -75,6 +75,8 @@ class EvolutionReceipt:
     observations: tuple[str, ...]
     constraints: tuple[EvolutionConstraint, ...]
     evals: tuple[dict[str, Any], ...]
+    change_summary: tuple[str, ...]
+    review_risks: tuple[str, ...]
     pr_draft: dict[str, str]
     saved_path: str | None = None
     receipt_path: str | None = None
@@ -459,8 +461,92 @@ def _quality_state(*, valid: bool, blocked: bool, score: float) -> str:
     return "weak"
 
 
-def _build_pr_draft(target_type: EvolutionTargetType, *, source_name: str, candidate_name: str, objective: str) -> dict[str, str]:
+def _review_lines_from_constraints(
+    target_type: EvolutionTargetType,
+    *,
+    constraints: tuple[EvolutionConstraint, ...],
+    score: float,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    change_summary: list[str] = []
+    review_risks: list[str] = []
+
+    for constraint in constraints:
+        details = constraint.details
+        if target_type == "skill" and constraint.name == "tool_scope_expansion":
+            added_tools = [str(item) for item in details.get("added_tools", [])]
+            removed_tools = [str(item) for item in details.get("removed_tools", [])]
+            if added_tools:
+                change_summary.append(f"Required tools added: {', '.join(added_tools)}.")
+            elif removed_tools:
+                change_summary.append(f"Required tools removed: {', '.join(removed_tools)}.")
+            else:
+                change_summary.append("Required tool scope is unchanged.")
+        elif target_type == "runbook" and constraint.name == "target_surface_drift":
+            before = details.get("before")
+            after = details.get("after")
+            if before == after:
+                change_summary.append("Runbook target surface is unchanged.")
+            else:
+                change_summary.append(f"Runbook target changed from {before} to {after}.")
+        elif target_type == "starter_pack" and constraint.name == "scope_expansion":
+            added_skills = [str(item) for item in details.get("added_skills", [])]
+            added_workflows = [str(item) for item in details.get("added_workflows", [])]
+            added_install_items = [str(item) for item in details.get("added_install_items", [])]
+            if added_skills or added_workflows or added_install_items:
+                segments: list[str] = []
+                if added_skills:
+                    segments.append(f"skills={', '.join(added_skills)}")
+                if added_workflows:
+                    segments.append(f"workflows={', '.join(added_workflows)}")
+                if added_install_items:
+                    segments.append(f"install_items={', '.join(added_install_items)}")
+                change_summary.append(f"Starter-pack scope changed: {'; '.join(segments)}.")
+            else:
+                change_summary.append("Starter-pack install scope is unchanged.")
+        elif target_type == "prompt_pack" and constraint.name == "instruction_surface_expansion":
+            introduced_tokens = [str(item) for item in details.get("introduced_tokens", [])]
+            size_growth = int(details.get("size_growth") or 0)
+            if introduced_tokens:
+                change_summary.append(
+                    f"Prompt candidate introduces privileged tokens: {', '.join(introduced_tokens)}."
+                )
+            else:
+                change_summary.append(f"Prompt size growth stays bounded at {size_growth} chars.")
+
+        if constraint.blocked:
+            review_risks.append(
+                f"{constraint.name} is blocked: {constraint.summary}"
+            )
+
+    if score < 0.9:
+        review_risks.append(
+            "Trace coverage is partial, so human review should verify the variant actually addresses the stated objective."
+        )
+    if not review_risks:
+        review_risks.append(
+            "No blocked guardrails fired, but human review is still required before merge."
+        )
+    if not change_summary:
+        change_summary.append("Variant stays within the existing declared surface.")
+    return tuple(change_summary), tuple(review_risks)
+
+
+def _build_pr_draft(
+    target_type: EvolutionTargetType,
+    *,
+    source_name: str,
+    candidate_name: str,
+    objective: str,
+    review_risks: tuple[str, ...],
+) -> dict[str, str]:
     scope = objective.strip() or f"Governed {target_type.replace('_', ' ')} evolution"
+    risk_block = ""
+    if review_risks:
+        risk_block = (
+            "\n## Review risks\n"
+            + "\n".join(f"- {item}" for item in review_risks[:4])
+            + "\n"
+        )
     return {
         "title": f"Review {candidate_name}",
         "body": (
@@ -468,6 +554,7 @@ def _build_pr_draft(target_type: EvolutionTargetType, *, source_name: str, candi
             f"Review the governed {target_type.replace('_', ' ')} variant for `{source_name}`.\n\n"
             f"## Why\n"
             f"{scope}\n\n"
+            f"{risk_block}"
             "## Review checklist\n"
             "- verify the eval score and constraint receipt\n"
             "- verify no trust-boundary or approval-surface expansion slipped in\n"
@@ -523,6 +610,11 @@ def evaluate_candidate(
     changed = 1.0 if candidate_content.strip() != base_content.strip() else 0.0
     score = round((0.45 * 1.0) + (0.4 * coverage) + (0.15 * changed), 3)
     blocked = any(item.blocked for item in constraints)
+    change_summary, review_risks = _review_lines_from_constraints(
+        target_type,
+        constraints=constraints,
+        score=score,
+    )
     receipt = EvolutionReceipt(
         target_type=target_type,
         source_path=str(resolved_source),
@@ -541,11 +633,14 @@ def evaluate_candidate(
             {"name": "trace_coverage", "passed": coverage >= 0.6 or not normalized_observations, "score": round(coverage, 3)},
             {"name": "candidate_diff_present", "passed": bool(changed), "score": changed},
         ),
+        change_summary=change_summary,
+        review_risks=review_risks,
         pr_draft=_build_pr_draft(
             target_type,
             source_name=str(source_metadata.get("name") or source_metadata.get("title") or resolved_source.stem),
             candidate_name=str(candidate_metadata.get("name") or candidate_metadata.get("title") or resolved_source.stem),
             objective=objective_text,
+            review_risks=review_risks,
         ),
     )
     return receipt

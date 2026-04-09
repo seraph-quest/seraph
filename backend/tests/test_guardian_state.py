@@ -625,7 +625,18 @@ async def test_build_guardian_state_prioritizes_live_project_cross_thread_contin
             "src.profile.service.sync_soul_file_to_profile",
             AsyncMock(return_value={"Identity": "Builder"}),
         ),
-        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch(
+            "src.memory.retrieval_planner.plan_memory_retrieval",
+            AsyncMock(
+                return_value=MemoryRetrievalPlanResult(
+                    semantic_context="",
+                    episodic_context="",
+                    memory_buckets={},
+                    degraded=False,
+                    lane="hybrid",
+                )
+            ),
+        ),
         patch("src.audit.repository.audit_repository.list_events", return_value=[]),
         patch(
             "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
@@ -2624,6 +2635,115 @@ async def test_build_guardian_state_surfaces_learning_diagnostics(async_db):
     assert any("Live learning is currently anchored" in item for item in state.learning_diagnostics)
     assert any("Observed outcomes:" in item for item in state.learning_diagnostics)
     assert any("Long-horizon spread:" in item for item in state.learning_diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_surfaces_learning_conflict_diagnostics(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Should Atlas updates wait for an availability window?")
+    await sm.add_message("current", "assistant", "Let me reconcile the live and procedural guidance.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+    )
+    live_signal = GuardianLearningSignal(
+        intervention_type="advisory",
+        helpful_count=0,
+        not_helpful_count=2,
+        acknowledged_count=0,
+        failed_count=1,
+        bias="reduce_interruptions",
+        phrasing_bias="neutral",
+        cadence_bias="neutral",
+        channel_bias="neutral",
+        escalation_bias="neutral",
+        timing_bias="avoid_focus_windows",
+        blocked_state_bias="neutral",
+        suppression_bias="extend_suppression",
+        thread_preference_bias="neutral",
+        blocked_direct_failure_count=0,
+        blocked_native_success_count=0,
+        available_direct_success_count=0,
+        axis_evidence=_axis_evidence_tuple(
+            "timing",
+            source="live_signal",
+            bias="avoid_focus_windows",
+            support_count=3,
+            recency_score=0.96,
+            confidence_score=0.94,
+            quality_score=0.95,
+        ),
+    )
+    live_resolution = MagicMock(
+        effective_signal=live_signal,
+        dominant_scope="project",
+        decisions=tuple(),
+    )
+    procedural_guidance = ProceduralMemoryGuidance(
+        intervention_type="advisory",
+        timing_bias="prefer_available_windows",
+        lesson_types=("timing",),
+        axis_evidence=_axis_evidence_tuple(
+            "timing",
+            source="procedural_memory",
+            bias="prefer_available_windows",
+            support_count=2,
+            recency_score=0.35,
+            confidence_score=0.64,
+            quality_score=0.72,
+        ),
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(return_value=live_resolution),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=procedural_guidance),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Should Atlas updates wait for an availability window?",
+        )
+
+    assert any(
+        "Conflicting live vs procedural biases:" in item
+        for item in state.learning_diagnostics
+    )
+    assert any(
+        "Fresh live outcomes are overruling older procedural guidance on timing." in item
+        for item in state.learning_diagnostics
+    )
 
 
 @patch("src.agent.factory.ToolCallingAgent")

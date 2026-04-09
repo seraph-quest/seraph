@@ -144,9 +144,14 @@ def test_governed_self_evolution_behavior_runtime_eval_details():
     assert details["saved_candidate_has_goal_section"] is True
     assert details["saved_candidate_path"].endswith("extensions/workspace-capabilities/skills/web-briefing-review-candidate.md")
     assert details["stored_receipt_candidate_name"] == "web-briefing Review Candidate"
+    assert details["stored_receipt_change_summary_count"] >= 1
+    assert details["stored_receipt_review_risk_count"] >= 1
+    assert details["proposal_change_summary_present"] is True
+    assert details["proposal_review_risks_present"] is True
     assert details["blocked_status"] is True
     assert details["blocked_constraint"] == "blocked"
     assert details["blocked_tokens"] == ["vault://"]
+    assert details["blocked_review_risk_mentions_trace_coverage"] is True
 
 
 def test_main_lists_available_scenarios(capsys):
@@ -553,6 +558,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_judgment_behavior"]["stale_signal_arbitration_count"] >= 1
     assert details_by_name["guardian_judgment_behavior"]["includes_ranked_project_diagnostics"] is True
     assert details_by_name["guardian_judgment_behavior"]["includes_stale_signal_arbitration"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_conservative_ambiguity_guardrail"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_learning_conflict_diagnostic"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_live_override_diagnostic"] is True
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3

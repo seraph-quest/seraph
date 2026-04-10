@@ -40,6 +40,7 @@ class GuardianState:
     learning_diagnostics: tuple[str, ...] = ()
     bounded_memory_context: str = ""
     memory_provider_diagnostics: tuple[str, ...] = ()
+    memory_reconciliation_diagnostics: tuple[str, ...] = ()
 
     @property
     def active_goals_summary(self) -> str:
@@ -92,6 +93,11 @@ class GuardianState:
             lines.append("")
             lines.append("Memory provider diagnostics:")
             lines.extend(f"- {item}" for item in self.memory_provider_diagnostics)
+
+        if self.memory_reconciliation_diagnostics:
+            lines.append("")
+            lines.append("Memory reconciliation diagnostics:")
+            lines.extend(f"- {item}" for item in self.memory_reconciliation_diagnostics)
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -442,6 +448,80 @@ def _memory_provider_diagnostic_lines(
     return tuple(lines)
 
 
+def _memory_reconciliation_diagnostic_lines(summary: dict[str, object]) -> tuple[str, ...]:
+    if not isinstance(summary, dict):
+        return ()
+
+    policy = summary.get("policy")
+    policy_map = policy if isinstance(policy, dict) else {}
+    state = str(summary.get("state") or "steady")
+    lines = [
+        (
+            f"state={state}, active={int(summary.get('active_count') or 0)}, "
+            f"superseded={int(summary.get('superseded_count') or 0)}, "
+            f"archived={int(summary.get('archived_count') or 0)}, "
+            f"contradictions={int(summary.get('contradiction_edge_count') or 0)}"
+        )
+    ]
+
+    authoritative = str(policy_map.get("authoritative_memory") or "").strip()
+    reconciliation = str(policy_map.get("reconciliation_policy") or "").strip()
+    forgetting = str(policy_map.get("forgetting_policy") or "").strip()
+    if authoritative or reconciliation or forgetting:
+        lines.append(
+            "policy="
+            + ", ".join(
+                part
+                for part in (
+                    f"authoritative={authoritative}" if authoritative else "",
+                    f"reconciliation={reconciliation}" if reconciliation else "",
+                    f"forgetting={forgetting}" if forgetting else "",
+                )
+                if part
+            )
+        )
+
+    if str(summary.get("error") or "").strip():
+        lines.append(f"error={summary['error']}")
+
+    recent_conflicts = summary.get("recent_conflicts")
+    if isinstance(recent_conflicts, list) and recent_conflicts:
+        item = recent_conflicts[0] if isinstance(recent_conflicts[0], dict) else {}
+        lines.append(
+            "recent_conflict="
+            + ", ".join(
+                part
+                for part in (
+                    f"summary={str(item.get('summary') or '').strip()}",
+                    f"reason={str(item.get('reason') or 'superseded').strip()}",
+                    (
+                        f"superseded_by={str(item.get('superseded_by_memory_id')).strip()}"
+                        if item.get("superseded_by_memory_id")
+                        else ""
+                    ),
+                )
+                if part and not part.endswith("=")
+            )
+        )
+
+    recent_archivals = summary.get("recent_archivals")
+    if isinstance(recent_archivals, list) and recent_archivals:
+        item = recent_archivals[0] if isinstance(recent_archivals[0], dict) else {}
+        lines.append(
+            "recent_archival="
+            + ", ".join(
+                part
+                for part in (
+                    f"summary={str(item.get('summary') or '').strip()}",
+                    f"reason={str(item.get('reason') or 'archived').strip()}",
+                )
+                if part and not part.endswith("=")
+            )
+        )
+
+    return tuple(lines)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -452,6 +532,7 @@ async def build_guardian_state(
 ) -> GuardianState:
     """Build one explicit guardian-state object from current repo surfaces."""
     from src.memory.soul import render_soul_text
+    from src.memory.decay import summarize_memory_reconciliation_state
     from src.memory.procedural_guidance import load_procedural_memory_guidance
     from src.memory.retrieval_planner import plan_memory_retrieval
     from src.memory.snapshots import (
@@ -536,6 +617,14 @@ async def build_guardian_state(
     episodic_memory_context = retrieval.episodic_context
     memory_buckets = retrieval.memory_buckets
     memory_provider_diagnostics = _memory_provider_diagnostic_lines(retrieval.provider_diagnostics)
+    try:
+        memory_reconciliation_summary = await summarize_memory_reconciliation_state()
+    except Exception:
+        logger.debug("Failed to load memory reconciliation diagnostics", exc_info=True)
+        memory_reconciliation_summary = {}
+    memory_reconciliation_diagnostics = _memory_reconciliation_diagnostic_lines(
+        memory_reconciliation_summary
+    )
     try:
         snapshot_session_key = None
         if session_id is not None and session_record is not None:
@@ -629,5 +718,6 @@ async def build_guardian_state(
             active_project=observer_context.active_project,
         ),
         memory_provider_diagnostics=memory_provider_diagnostics,
+        memory_reconciliation_diagnostics=memory_reconciliation_diagnostics,
         confidence=confidence,
     )

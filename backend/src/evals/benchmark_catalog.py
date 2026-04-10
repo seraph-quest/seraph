@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
+from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
+
 
 @dataclass(frozen=True)
 class BenchmarkSuiteDefinition:
@@ -23,6 +25,21 @@ class BenchmarkSuiteDefinition:
 
 
 _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME,
+        label="Guardian memory benchmark",
+        description=(
+            "Pins reasoning-heavy engineering-memory retrieval, contradiction-aware ranking, "
+            "selective forgetting, and operator-visible failure reporting into one CI-gated suite."
+        ),
+        benchmark_axis="guardian_memory_quality",
+        operator_summary=(
+            "Guardian memory quality is benchmarked as contradiction-aware, selective, and operator-visible "
+            "instead of just measuring raw recall volume."
+        ),
+        remaining_gap="Live long-horizon workload replay and external benchmark parity still remain for future work.",
+        scenario_names=GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES,
+    ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",
         label="Memory, continuity, and workflows",

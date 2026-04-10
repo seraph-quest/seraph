@@ -4853,14 +4853,53 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 4,
+            suite_count: 5,
             scenario_count: 32,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
             governed_improvement_status: "review_gated",
           },
+          memory_benchmark: {
+            summary: {
+              suite_name: "guardian_memory_quality",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "memory_proof_visible",
+              scenario_count: 8,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 2,
+              contradiction_state: "conflict_reconciled",
+              selective_forgetting_state: "active",
+            },
+            failure_report: [
+              {
+                type: "contradiction_reconciled",
+                summary: "Atlas release date corrected after contradictory note.",
+                reason: "contradiction",
+              },
+              {
+                type: "selective_forgetting_archive",
+                summary: "Archived obsolete Hermes coordination draft.",
+                reason: "archived",
+              },
+            ],
+            policy: {
+              retrieval_ranking_policy: "contradiction_aware_query_and_project_weighted",
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
           suites: [
+            {
+              name: "guardian_memory_quality",
+              label: "Guardian memory benchmark",
+              description: "Contradiction-aware memory benchmark suite",
+              benchmark_axis: "guardian_memory_quality",
+              operator_summary: "Guardian memory quality stays operator-visible and CI-gated.",
+              remaining_gap: "Broader live-provider and computer-use proof still remains.",
+              scenario_count: 8,
+              scenario_names: ["memory_contradiction_ranking_behavior"],
+            },
             {
               name: "memory_continuity_workflows",
               label: "Memory, continuity, and workflows",
@@ -4885,13 +4924,13 @@ describe("CockpitView", () => {
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 4,
+            required_suite_count: 5,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
               requires_human_review: true,
               blocks_on_constraint_failure: true,
-              required_benchmark_suites: ["memory_continuity_workflows", "computer_use_browser_desktop"],
+              required_benchmark_suites: ["guardian_memory_quality", "memory_continuity_workflows", "computer_use_browser_desktop"],
               proof_contract: "deterministic_benchmark_suites_plus_review_receipts",
             },
           },
@@ -4982,7 +5021,10 @@ describe("CockpitView", () => {
     expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/4 suites · 32 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/5 suites · 32 scenarios · deterministic proof backed · 2 evolution targets/);
+    expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();
   });

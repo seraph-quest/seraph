@@ -43,6 +43,28 @@ _STOPWORDS = {
     "with",
 }
 
+_POSITIVE_CUES = (
+    "active",
+    "available",
+    "on track",
+    "preferred",
+    "prefers",
+    "ready",
+)
+
+_NEGATIVE_CUES = (
+    "avoid",
+    "blocked",
+    "canceled",
+    "cancelled",
+    "delayed",
+    "dislike",
+    "dislikes",
+    "failed",
+    "not helpful",
+    "paused",
+)
+
 
 @dataclass(frozen=True)
 class HybridMemoryHit:
@@ -59,6 +81,7 @@ class HybridMemoryRetrievalResult:
     buckets: dict[str, tuple[str, ...]]
     degraded: bool
     hits: tuple[HybridMemoryHit, ...]
+    diagnostics: tuple[dict[str, object], ...] = ()
 
 
 def _now() -> datetime:
@@ -140,7 +163,86 @@ def _dedupe_hits(hits: list[HybridMemoryHit]) -> tuple[HybridMemoryHit, ...]:
     )
 
 
-def _render_result(hits: tuple[HybridMemoryHit, ...], *, limit: int, degraded: bool) -> HybridMemoryRetrievalResult:
+def _contains_cue(text: str, cue: str) -> bool:
+    pattern = r"\b" + r"\s+".join(re.escape(part) for part in cue.lower().split()) + r"\b"
+    return re.search(pattern, text) is not None
+
+
+def _cue_polarity(text: str) -> int:
+    normalized = text.lower()
+    negative = any(_contains_cue(normalized, cue) for cue in _NEGATIVE_CUES)
+    positive = any(_contains_cue(normalized, cue) for cue in _POSITIVE_CUES)
+    if positive and not negative:
+        return 1
+    if negative and not positive:
+        return -1
+    return 0
+
+
+def _anchor_tokens(text: str) -> set[str]:
+    cue_words = {
+        token
+        for cue in (*_POSITIVE_CUES, *_NEGATIVE_CUES)
+        for token in re.findall(r"[a-z0-9]+", cue)
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= 3 and token not in _STOPWORDS and token not in cue_words
+    }
+
+
+def _contradictory_hits(left: HybridMemoryHit, right: HybridMemoryHit) -> bool:
+    if left.bucket != right.bucket or left.bucket == "episode":
+        return False
+    left_polarity = _cue_polarity(left.text)
+    right_polarity = _cue_polarity(right.text)
+    if left_polarity == 0 or right_polarity == 0 or left_polarity == right_polarity:
+        return False
+    return len(_anchor_tokens(left.text) & _anchor_tokens(right.text)) >= 2
+
+
+def _apply_contradiction_aware_ranking(
+    hits: tuple[HybridMemoryHit, ...],
+) -> tuple[tuple[HybridMemoryHit, ...], tuple[dict[str, object], ...]]:
+    kept: list[HybridMemoryHit] = []
+    suppressed: list[dict[str, object]] = []
+    for hit in hits:
+        winner = next((candidate for candidate in kept if _contradictory_hits(candidate, hit)), None)
+        if winner is None:
+            kept.append(hit)
+            continue
+        suppressed.append(
+            {
+                "reason": "lower_ranked_contradiction",
+                "bucket": hit.bucket,
+                "suppressed_text": hit.text,
+                "suppressed_source": hit.source,
+                "winner_text": winner.text,
+                "winner_source": winner.source,
+            }
+        )
+    diagnostics = ({
+        "ranking_policy": "contradiction_aware_active_only",
+        "suppressed_contradiction_count": len(suppressed),
+        "suppressed_examples": list(suppressed[:3]),
+        "status_filter": "active_only",
+        "suppression_reasons": [
+            "superseded_status",
+            "archived_status",
+            "lower_ranked_contradiction",
+        ],
+    },)
+    return tuple(kept), diagnostics
+
+
+def _render_result(
+    hits: tuple[HybridMemoryHit, ...],
+    *,
+    limit: int,
+    degraded: bool,
+    diagnostics: tuple[dict[str, object], ...] = (),
+) -> HybridMemoryRetrievalResult:
     selected = hits[:limit]
     buckets: dict[str, list[str]] = {}
     lines: list[str] = []
@@ -156,6 +258,7 @@ def _render_result(hits: tuple[HybridMemoryHit, ...], *, limit: int, degraded: b
         buckets={key: tuple(values) for key, values in buckets.items()},
         degraded=degraded,
         hits=selected,
+        diagnostics=diagnostics,
     )
 
 
@@ -378,4 +481,6 @@ async def retrieve_hybrid_memory(
             )
         )
 
-    return _render_result(_dedupe_hits(combined_hits), limit=limit, degraded=vector_degraded)
+    deduped_hits = _dedupe_hits(combined_hits)
+    ranked_hits, diagnostics = _apply_contradiction_aware_ranking(deduped_hits)
+    return _render_result(ranked_hits, limit=limit, degraded=vector_degraded, diagnostics=diagnostics)

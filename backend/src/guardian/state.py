@@ -41,6 +41,9 @@ class GuardianState:
     bounded_memory_context: str = ""
     memory_provider_diagnostics: tuple[str, ...] = ()
     memory_reconciliation_diagnostics: tuple[str, ...] = ()
+    intent_uncertainty_level: str = "clear"
+    intent_resolution: str = "proceed"
+    intent_uncertainty_diagnostics: tuple[str, ...] = ()
 
     @property
     def active_goals_summary(self) -> str:
@@ -98,6 +101,13 @@ class GuardianState:
             lines.append("")
             lines.append("Memory reconciliation diagnostics:")
             lines.extend(f"- {item}" for item in self.memory_reconciliation_diagnostics)
+
+        if self.intent_uncertainty_diagnostics:
+            lines.append("")
+            lines.append(
+                f"Intent uncertainty: {self.intent_uncertainty_level} (recommended resolution: {self.intent_resolution})"
+            )
+            lines.extend(f"- {item}" for item in self.intent_uncertainty_diagnostics)
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -522,6 +532,84 @@ def _memory_reconciliation_diagnostic_lines(summary: dict[str, object]) -> tuple
     return tuple(lines)
 
 
+def _normalize_free_text(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _intent_uncertainty_diagnostics(
+    *,
+    user_message: str | None,
+    observer_context: CurrentContext,
+    world_model: GuardianWorldModel,
+) -> tuple[str, str, tuple[str, ...]]:
+    diagnostics: list[str] = []
+    normalized_message = _normalize_free_text(user_message)
+    ambiguous_tokens = {
+        "this",
+        "that",
+        "it",
+        "them",
+        "those",
+        "these",
+        "here",
+        "there",
+    }
+    message_tokens = set(normalized_message.split())
+    has_ambiguous_reference = bool(normalized_message) and bool(message_tokens & ambiguous_tokens)
+    project_anchor_ambiguous = any(
+        "project-anchor evidence remains ambiguous" in item.lower()
+        or "project-anchor evidence remains split" in item.lower()
+        for item in world_model.judgment_risks
+    )
+    competing_project_drift = any(
+        "competing project evidence currently favors" in item.lower()
+        or "attention is drifting toward" in item.lower()
+        for item in world_model.judgment_risks
+    )
+    split_preference_evidence = any(
+        "evidence is split between" in item.lower()
+        for item in world_model.preference_inference_diagnostics
+    )
+    observer_uncertain = observer_context.observer_confidence != "grounded"
+
+    if has_ambiguous_reference and (project_anchor_ambiguous or competing_project_drift):
+        diagnostics.append(
+            "The request uses an ambiguous referent while project-anchor evidence is split, so the intended target is not grounded."
+        )
+    elif has_ambiguous_reference and len(world_model.active_projects) > 1:
+        diagnostics.append(
+            "The request uses an ambiguous referent while multiple active projects remain live in the world model."
+        )
+
+    if project_anchor_ambiguous:
+        diagnostics.append(
+            "Competing project anchors remain close enough that the guardian should not overcommit to one project target."
+        )
+    elif competing_project_drift:
+        diagnostics.append(
+            "Recent continuity or execution evidence points toward a competing project, so intent resolution should stay conservative."
+        )
+
+    if split_preference_evidence:
+        diagnostics.append(
+            "Preference evidence is split, so the guardian should explain the uncertainty instead of presenting one interaction style as settled."
+        )
+
+    if observer_uncertain:
+        diagnostics.append(
+            f"Observer confidence is {observer_context.observer_confidence}, which weakens intent resolution from live state."
+        )
+
+    if not diagnostics:
+        return "clear", "proceed", ()
+
+    if has_ambiguous_reference and (project_anchor_ambiguous or competing_project_drift or len(world_model.active_projects) > 1):
+        return "high", "clarify", tuple(diagnostics)
+    if observer_uncertain or split_preference_evidence:
+        return "medium", "proceed_with_caution", tuple(diagnostics)
+    return "medium", "defer_or_clarify", tuple(diagnostics)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -689,6 +777,13 @@ async def build_guardian_state(
         ),
         recent_sessions=_status_for_text(recent_sessions_summary),
     )
+    intent_uncertainty_level, intent_resolution, intent_uncertainty_diagnostics = (
+        _intent_uncertainty_diagnostics(
+            user_message=user_message or memory_query,
+            observer_context=observer_context,
+            world_model=world_model,
+        )
+    )
 
     return GuardianState(
         soul_context=soul_context,
@@ -719,5 +814,8 @@ async def build_guardian_state(
         ),
         memory_provider_diagnostics=memory_provider_diagnostics,
         memory_reconciliation_diagnostics=memory_reconciliation_diagnostics,
+        intent_uncertainty_level=intent_uncertainty_level,
+        intent_resolution=intent_resolution,
+        intent_uncertainty_diagnostics=intent_uncertainty_diagnostics,
         confidence=confidence,
     )

@@ -168,7 +168,7 @@ def bundled_skills_dir(tmp_path):
         "display_name: Catalog Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: bundled\n"
@@ -498,7 +498,7 @@ class TestCatalogAPI:
             "display_name: Broken Pack\n"
             "kind: capability-pack\n"
             "compatibility:\n"
-            "  seraph: \">=2026.3.19\"\n"
+            "  seraph: \">=2026.4.10\"\n"
             "publisher:\n"
             "  name: Seraph\n"
             "trust: bundled\n"
@@ -528,7 +528,7 @@ class TestCatalogAPI:
             "seraph-hermes-session-memory",
             "manifest.yaml",
         )
-        manifest_text = installed_manifest.read_text(encoding="utf-8").replace("version: 2026.3.23", "version: 2026.3.19")
+        manifest_text = installed_manifest.read_text(encoding="utf-8").replace("version: 2026.3.23", "version: 2026.4.10")
         installed_manifest.write_text(manifest_text, encoding="utf-8")
 
         update = await client.post("/api/catalog/install/seraph.hermes-session-memory")

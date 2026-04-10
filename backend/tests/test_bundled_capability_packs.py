@@ -20,7 +20,7 @@ def _write_override_pack(workspace_dir: Path) -> Path:
         "display_name: Local Overrides\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"

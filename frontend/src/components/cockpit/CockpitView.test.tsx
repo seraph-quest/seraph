@@ -1489,8 +1489,8 @@ describe("CockpitView", () => {
           },
           runtime_posture: {
             runtime: {
-              version: "2026.3.19",
-              build_id: "SERAPH_PRIME_v2026.3.19",
+              version: "2026.4.10",
+              build_id: "SERAPH_PRIME_v2026.4.10",
               provider: "openrouter",
               model: "openrouter/openai/gpt-4.1-mini",
               model_label: "gpt-4.1-mini",
@@ -8548,8 +8548,8 @@ describe("CockpitView", () => {
           version: "2026.4.01",
           version_line: "2026.4",
           compatibility: {
-            seraph: ">=2026.3.19",
-            current_version: "2026.3.19",
+            seraph: ">=2026.4.10",
+            current_version: "2026.4.10",
             compatible: true,
           },
           ok: true,
@@ -8652,7 +8652,7 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(within(studio).getByRole("button", { name: "Update package" })).toBeInTheDocument());
     expect(within(studio).getByText("update workspace · 2026.3.21 -> 2026.4.01 · upgrade")).toBeInTheDocument();
-    expect(within(studio).getByText("compatible · Seraph >=2026.3.19 · current 2026.3.19")).toBeInTheDocument();
+    expect(within(studio).getByText("compatible · Seraph >=2026.4.10 · current 2026.4.10")).toBeInTheDocument();
     expect(within(studio).getByText("ready · no doctor or load errors")).toBeInTheDocument();
     fireEvent.click(within(studio).getByRole("button", { name: "Update package" }));
 
@@ -10267,8 +10267,8 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/runtime/status")) {
         return Promise.resolve(mockResponse({
-          version: "2026.3.19",
-          build_id: "SERAPH_PRIME_v2026.3.19",
+          version: "2026.4.10",
+          build_id: "SERAPH_PRIME_v2026.4.10",
           provider: "openrouter",
           model: "openrouter/openai/gpt-4.1-mini",
           model_label: "gpt-4.1-mini",
@@ -10360,8 +10360,8 @@ describe("CockpitView", () => {
           },
           runtime_posture: {
             runtime: {
-              version: "2026.3.19",
-              build_id: "SERAPH_PRIME_v2026.3.19",
+              version: "2026.4.10",
+              build_id: "SERAPH_PRIME_v2026.4.10",
               provider: "openrouter",
               model: "openrouter/openai/gpt-4.1-mini",
               model_label: "gpt-4.1-mini",

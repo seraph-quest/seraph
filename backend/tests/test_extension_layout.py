@@ -29,8 +29,8 @@ def test_iter_extension_manifest_paths_discovers_manifest_files_once(tmp_path: P
     pack_b = root / "connectors" / "github-pack"
     pack_a.mkdir(parents=True)
     pack_b.mkdir(parents=True)
-    (pack_a / "manifest.yaml").write_text("id: a\nversion: 2026.3.21\ndisplay_name: A\nkind: capability-pack\ncompatibility:\n  seraph: '>=2026.3.19'\npublisher:\n  name: Seraph\ntrust: local\ncontributes:\n  skills:\n    - skills/a.md\n", encoding="utf-8")
-    (pack_b / "manifest.yml").write_text("id: b\nversion: 2026.3.21\ndisplay_name: B\nkind: connector-pack\ncompatibility:\n  seraph: '>=2026.3.19'\npublisher:\n  name: Seraph\ntrust: local\ncontributes:\n  mcp_servers:\n    - mcp/b.json\n", encoding="utf-8")
+    (pack_a / "manifest.yaml").write_text("id: a\nversion: 2026.3.21\ndisplay_name: A\nkind: capability-pack\ncompatibility:\n  seraph: '>=2026.4.10'\npublisher:\n  name: Seraph\ntrust: local\ncontributes:\n  skills:\n    - skills/a.md\n", encoding="utf-8")
+    (pack_b / "manifest.yml").write_text("id: b\nversion: 2026.3.21\ndisplay_name: B\nkind: connector-pack\ncompatibility:\n  seraph: '>=2026.4.10'\npublisher:\n  name: Seraph\ntrust: local\ncontributes:\n  mcp_servers:\n    - mcp/b.json\n", encoding="utf-8")
 
     manifest_paths = iter_extension_manifest_paths([str(root), str(pack_a / "manifest.yaml")])
 
@@ -49,7 +49,7 @@ def test_iter_extension_manifest_paths_skips_nested_contribution_manifests(tmp_p
     nested_manifest = package_dir / "skills" / "manifest.yaml"
     package_dir.mkdir(parents=True)
     nested_manifest.parent.mkdir(parents=True)
-    (package_dir / "manifest.yaml").write_text("id: a\nversion: 2026.3.21\ndisplay_name: A\nkind: capability-pack\ncompatibility:\n  seraph: '>=2026.3.19'\npublisher:\n  name: Seraph\ntrust: local\ncontributes:\n  skills:\n    - skills/a.md\n", encoding="utf-8")
+    (package_dir / "manifest.yaml").write_text("id: a\nversion: 2026.3.21\ndisplay_name: A\nkind: capability-pack\ncompatibility:\n  seraph: '>=2026.4.10'\npublisher:\n  name: Seraph\ntrust: local\ncontributes:\n  skills:\n    - skills/a.md\n", encoding="utf-8")
     nested_manifest.write_text("ignored: true\n", encoding="utf-8")
 
     manifest_paths = iter_extension_manifest_paths([str(root)])

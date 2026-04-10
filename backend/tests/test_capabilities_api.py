@@ -30,7 +30,7 @@ def _setup_manifest_pack_and_runbook_managers(tmp_path):
         "display_name: Research Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -236,7 +236,7 @@ def test_mcp_status_list_exposes_packaged_toolset_presets(tmp_path):
         "display_name: GitHub Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -304,7 +304,7 @@ def test_doctor_reports_missing_mcp_server_reference_for_toolset_preset(tmp_path
         "display_name: GitHub Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -512,7 +512,7 @@ async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_i
                 "bundled": True,
                 "trust": "bundled",
                 "version": "2026.3.23",
-                "installed_version": "2026.3.19",
+                "installed_version": "2026.4.10",
                 "update_available": True,
                 "contribution_types": ["context_packs", "skills"],
                 "status": "ready",
@@ -1105,7 +1105,7 @@ def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_
         "display_name: Local Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"

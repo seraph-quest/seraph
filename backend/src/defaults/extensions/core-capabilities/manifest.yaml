@@ -3,7 +3,7 @@ version: 2026.4.6
 display_name: Core Capabilities
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: bundled

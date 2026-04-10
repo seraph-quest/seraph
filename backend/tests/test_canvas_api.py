@@ -16,7 +16,7 @@ def _write_canvas_pack(workspace):
         "display_name: OpenClaw Canvas\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"

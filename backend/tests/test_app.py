@@ -23,8 +23,8 @@ async def test_runtime_status_exposes_release_and_model(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == "2026.3.19"
-    assert payload["build_id"] == "SERAPH_PRIME_v2026.3.19"
+    assert payload["version"] == "2026.4.10"
+    assert payload["build_id"] == "SERAPH_PRIME_v2026.4.10"
     assert payload["provider"] == "openrouter"
     assert payload["model"] == settings.default_model
     assert payload["model_label"] == settings.default_model.split("/")[-1]

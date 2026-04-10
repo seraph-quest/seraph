@@ -306,6 +306,53 @@ def _normalize_source_systems(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_credential_egress_policies(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        mode = str(item.get("mode") or "").strip()
+        transport = str(item.get("transport") or "").strip()
+        allowed_hosts = tuple(_normalize_string_list(item.get("allowed_hosts")))
+        key = (mode, transport, allowed_hosts)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "mode": mode or "unknown",
+                "transport": transport or "unknown",
+                "allowed_hosts": list(allowed_hosts),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            str(item.get("mode") or ""),
+            str(item.get("transport") or ""),
+            tuple(item.get("allowed_hosts") or []),
+        )
+    )
+    return normalized
+
+
+def _normalize_trust_partition(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    mode = str(value.get("mode") or "").strip()
+    if not mode:
+        return None
+    return {
+        "mode": mode,
+        "background_capable": bool(value.get("background_capable", False)),
+        "authenticated_source": bool(value.get("authenticated_source", False)),
+        "credential_egress_policy_count": int(value.get("credential_egress_policy_count", 0) or 0),
+        "blocked": bool(value.get("blocked", False)),
+    }
+
+
 def normalize_workflow_approval_context(
     value: Any,
     *,
@@ -321,6 +368,8 @@ def normalize_workflow_approval_context(
     authenticated_source = bool(value.get("authenticated_source", False))
     delegation_target_unresolved = bool(value.get("delegation_target_unresolved", False))
     source_systems = _normalize_source_systems(value.get("source_systems"))
+    credential_egress_policies = _normalize_credential_egress_policies(value.get("credential_egress_policies"))
+    trust_partition = _normalize_trust_partition(value.get("trust_partition"))
     if not any(
         [
             risk_level,
@@ -332,6 +381,8 @@ def normalize_workflow_approval_context(
             authenticated_source,
             delegation_target_unresolved,
             source_systems,
+            credential_egress_policies,
+            trust_partition,
         ]
     ):
         return None
@@ -352,6 +403,10 @@ def normalize_workflow_approval_context(
         normalized["delegation_target_unresolved"] = True
     if source_systems:
         normalized["source_systems"] = source_systems
+    if credential_egress_policies:
+        normalized["credential_egress_policies"] = credential_egress_policies
+    if trust_partition:
+        normalized["trust_partition"] = trust_partition
     return normalized
 
 
@@ -363,6 +418,8 @@ def approval_context_requires_tracked_lineage(value: dict[str, Any] | None) -> b
     if bool(value.get("authenticated_source", False)):
         return True
     if bool(value.get("delegation_target_unresolved", False)):
+        return True
+    if _normalize_credential_egress_policies(value.get("credential_egress_policies")):
         return True
     if _normalize_string_list(value.get("delegated_specialists")):
         return True
@@ -517,9 +574,11 @@ def _approval_context_for_workflow(
     accepts_secret_refs = False
     authenticated_source = False
     source_systems: list[dict[str, Any]] = []
+    credential_egress_policies: list[dict[str, Any]] = []
     delegated_specialists: list[str] = []
     delegated_tool_names: list[str] = []
     delegation_target_unresolved = False
+    trust_partition: dict[str, Any] | None = None
     risk_level = "low"
     for tool_name in workflow.step_tools:
         canonical_name = canonical_tool_name(tool_name)
@@ -589,6 +648,12 @@ def _approval_context_for_workflow(
                 source_systems,
                 list(delegate_context.get("source_systems", [])),
             )
+            for policy in delegate_context.get("credential_egress_policies", []):
+                if isinstance(policy, dict) and policy not in credential_egress_policies:
+                    credential_egress_policies.append(policy)
+            normalized_partition = _normalize_trust_partition(delegate_context.get("trust_partition"))
+            if normalized_partition is not None:
+                trust_partition = normalized_partition
     return {
         "workflow_name": workflow.name,
         "risk_level": risk_level,
@@ -596,9 +661,11 @@ def _approval_context_for_workflow(
         "accepts_secret_refs": accepts_secret_refs,
         "authenticated_source": authenticated_source,
         "source_systems": source_systems,
+        "credential_egress_policies": credential_egress_policies,
         "delegated_specialists": sorted(dict.fromkeys(delegated_specialists)),
         "delegated_tool_names": sorted(dict.fromkeys(delegated_tool_names)),
         "delegation_target_unresolved": delegation_target_unresolved,
+        "trust_partition": trust_partition,
         "step_tools": sorted(dict.fromkeys(canonical_step_tools)),
     }
 

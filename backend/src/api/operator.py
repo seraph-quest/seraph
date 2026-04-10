@@ -1996,6 +1996,8 @@ def _background_process_preview(processes: list[dict[str, Any]], *, limit: int) 
             "exit_code": process.get("exit_code"),
             "started_at": process.get("started_at"),
             "session_id": process.get("session_id"),
+            "worker_disposable": bool(process.get("worker_disposable", False)),
+            "trust_partition": str(process.get("trust_partition") or "unknown"),
         })
     return preview
 
@@ -2024,6 +2026,7 @@ def _background_handoff_bundle(runs: list[dict[str, Any]]) -> dict[str, Any]:
             "artifact_paths": [],
             "resume_checkpoint_label": None,
             "summary": None,
+            "trust_partition": None,
         }
 
     selected = sorted(
@@ -2031,6 +2034,7 @@ def _background_handoff_bundle(runs: list[dict[str, Any]]) -> dict[str, Any]:
         key=lambda run: _workflow_orchestration_priority(run),
         reverse=True,
     )[0]
+    trust_boundary = _handoff_trust_boundary(selected) or workflow_surface_resume_metadata(selected).get("trust_boundary")
     return {
         "available": True,
         "target_type": (
@@ -2050,6 +2054,16 @@ def _background_handoff_bundle(runs: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "resume_checkpoint_label": workflow_surface_resume_metadata(selected).get("resume_checkpoint_label"),
         "summary": selected.get("summary"),
+        "trust_partition": {
+            "kind": "branch_handoff",
+            "session_bound": bool(selected.get("thread_id")),
+            "execution_boundaries": (
+                list(selected.get("execution_boundaries"))
+                if isinstance(selected.get("execution_boundaries"), list)
+                else []
+            ),
+            "trust_boundary": trust_boundary,
+        },
     }
 
 
@@ -2107,6 +2121,16 @@ def _background_session_entries(
             1 for process in processes if str(process.get("status") or "") == "running"
         )
         lead_process = processes[0] if processes else None
+        trust_partition = {
+            "kind": "background_session",
+            "session_id": session_id,
+            "background_process_partitioned": all(bool(process.get("session_scoped", False)) for process in processes),
+            "lead_process_disposable": bool(isinstance(lead_process, dict) and lead_process.get("worker_disposable")),
+            "branch_handoff_session_bound": bool(branch_handoff.get("available")) and bool(
+                isinstance(branch_handoff.get("trust_partition"), dict)
+                and branch_handoff["trust_partition"].get("session_bound")
+            ),
+        }
         entries.append({
             "session_id": session_id,
             "title": str(session.get("title") or "Untitled session"),
@@ -2125,6 +2149,7 @@ def _background_session_entries(
             ),
             "branch_handoff_available": bool(branch_handoff.get("available")),
             "branch_handoff": branch_handoff,
+            "trust_partition": trust_partition,
             "lead_process": (
                 {
                     "process_id": lead_process.get("process_id"),
@@ -2134,6 +2159,8 @@ def _background_session_entries(
                     "cwd": lead_process.get("cwd"),
                     "status": lead_process.get("status"),
                     "started_at": lead_process.get("started_at"),
+                    "worker_disposable": bool(lead_process.get("worker_disposable", False)),
+                    "trust_partition": str(lead_process.get("trust_partition") or "unknown"),
                 }
                 if isinstance(lead_process, dict)
                 else None

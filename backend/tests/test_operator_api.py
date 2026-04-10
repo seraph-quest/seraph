@@ -1119,6 +1119,9 @@ async def test_operator_background_sessions_surface_managed_processes_and_branch
                     "exit_code": None,
                     "started_at": "2026-03-20T10:03:00Z",
                     "output_path": "/tmp/proc-1.log",
+                    "worker_root": "/tmp/seraph-runtime/workers/proc-1",
+                    "worker_disposable": True,
+                    "trust_partition": "session_disposable_worker",
                     "session_scoped": True,
                     "session_id": "session-1",
                 },
@@ -1132,6 +1135,9 @@ async def test_operator_background_sessions_surface_managed_processes_and_branch
                     "exit_code": 0,
                     "started_at": "2026-03-20T09:03:00Z",
                     "output_path": "/tmp/proc-2.log",
+                    "worker_root": "/tmp/seraph-runtime/workers/proc-2",
+                    "worker_disposable": True,
+                    "trust_partition": "session_disposable_worker",
                     "session_scoped": True,
                     "session_id": "session-2",
                 },
@@ -1163,8 +1169,15 @@ async def test_operator_background_sessions_surface_managed_processes_and_branch
     assert first["branch_handoff"]["target_type"] == "workflow_branch"
     assert first["branch_handoff"]["workflow_name"] == "repo-review"
     assert first["branch_handoff"]["artifact_paths"] == ["notes/branch-review.md"]
+    assert first["branch_handoff"]["trust_partition"]["kind"] == "branch_handoff"
+    assert first["branch_handoff"]["trust_partition"]["session_bound"] is True
     assert first["lead_process"]["process_id"] == "proc-1"
+    assert first["lead_process"]["worker_disposable"] is True
+    assert first["lead_process"]["trust_partition"] == "session_disposable_worker"
     assert first["background_processes"][0]["session_id"] == "session-1"
+    assert first["background_processes"][0]["worker_disposable"] is True
+    assert first["trust_partition"]["background_process_partitioned"] is True
+    assert first["trust_partition"]["lead_process_disposable"] is True
 
     second = payload["sessions"][1]
     assert second["session_id"] == "session-2"

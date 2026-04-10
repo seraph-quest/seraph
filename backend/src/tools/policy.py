@@ -187,6 +187,37 @@ def get_tool_source_context(tool: object | None) -> dict[str, object] | None:
     return None
 
 
+def get_tool_credential_egress_policy(
+    tool_name: str,
+    *,
+    is_mcp: bool = False,
+    tool: object | None = None,
+) -> dict[str, object] | None:
+    """Return the credential-egress policy visible through tool wrapper layers."""
+    if not is_mcp:
+        return None
+    source_context = get_tool_source_context(tool)
+    if not isinstance(source_context, dict):
+        return None
+    policy = source_context.get("credential_egress_policy")
+    if not isinstance(policy, dict):
+        return None
+    mode = str(policy.get("mode") or "").strip()
+    transport = str(policy.get("transport") or "").strip()
+    allowed_hosts = [
+        str(item).strip()
+        for item in list(policy.get("allowed_hosts") or [])
+        if str(item).strip()
+    ]
+    if not any([mode, transport, allowed_hosts]):
+        return None
+    return {
+        "mode": mode or "unknown",
+        "transport": transport or "unknown",
+        "allowed_hosts": sorted(dict.fromkeys(allowed_hosts)),
+    }
+
+
 def _normalize_secret_ref_fields(value: object) -> list[str]:
     if not isinstance(value, list):
         return []

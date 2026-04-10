@@ -132,6 +132,15 @@ def test_infer_delegation_approval_context_preserves_mcp_secret_ref_fields():
         "headers": {"type": "object", "description": "Authentication headers"},
         "body": {"type": "string", "description": "Request body"},
     }
+    mcp_tool.seraph_source_context = {
+        "authenticated_source": True,
+        "hostname": "api.example.com",
+        "credential_egress_policy": {
+            "mode": "explicit_host_allowlist",
+            "transport": "https",
+            "allowed_hosts": ["api.example.com"],
+        },
+    }
     specialist = SimpleNamespace(name="mcp_tasks", tools=[mcp_tool])
 
     approval_context = infer_delegation_approval_context(
@@ -141,3 +150,12 @@ def test_infer_delegation_approval_context_preserves_mcp_secret_ref_fields():
     )
 
     assert approval_context["accepts_secret_refs"] is True
+    assert approval_context["credential_egress_policies"] == [
+        {
+            "mode": "explicit_host_allowlist",
+            "transport": "https",
+            "allowed_hosts": ["api.example.com"],
+        }
+    ]
+    assert approval_context["trust_partition"]["mode"] == "delegated_specialist"
+    assert approval_context["trust_partition"]["credential_egress_policy_count"] == 1

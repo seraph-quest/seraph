@@ -115,6 +115,25 @@ def _normalize_string_list(value: Any) -> list[str]:
     return sorted(normalized)
 
 
+def _normalize_credential_egress_policy(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    mode = str(value.get("mode") or "").strip()
+    transport = str(value.get("transport") or "").strip()
+    allowed_hosts = [
+        str(item).strip()
+        for item in list(value.get("allowed_hosts") or [])
+        if str(item).strip()
+    ]
+    if not any([mode, transport, allowed_hosts]):
+        return None
+    return {
+        "mode": mode or "unknown",
+        "transport": transport or "unknown",
+        "allowed_hosts": sorted(dict.fromkeys(allowed_hosts)),
+    }
+
+
 def _build_specialists_by_name(specialists: Iterable[object]) -> dict[str, object]:
     specialists_by_name: dict[str, object] = {}
     for specialist in specialists:
@@ -156,6 +175,7 @@ def infer_delegation_approval_context(
     """Infer the approval-context surface for a delegated specialist route."""
     from src.native_tools.registry import canonical_tool_name
     from src.tools.policy import (
+        get_tool_credential_egress_policy,
         get_tool_execution_boundaries,
         get_tool_risk_level,
         get_tool_source_context,
@@ -171,6 +191,7 @@ def infer_delegation_approval_context(
     accepts_secret_refs = False
     authenticated_source = False
     source_systems: list[dict[str, Any]] = []
+    credential_egress_policies: list[dict[str, Any]] = []
     delegated_tool_names: list[str] = []
     risk_level = "low"
 
@@ -223,11 +244,32 @@ def infer_delegation_approval_context(
             }
             if source_system not in source_systems:
                 source_systems.append(source_system)
+        egress_policy = get_tool_credential_egress_policy(
+            canonical_name,
+            is_mcp=is_mcp,
+            tool=tool,
+        )
+        if egress_policy and egress_policy not in credential_egress_policies:
+            credential_egress_policies.append(egress_policy)
 
     unresolved = selected_name is None
     if unresolved:
         risk_level = "high"
         accepts_secret_refs = True
+    trust_partition = {
+        "mode": "delegated_specialist" if not unresolved else "unresolved_delegation",
+        "background_capable": bool(
+            {
+                "background_execution",
+                "container_process_management",
+                "session_process_partition",
+            }
+            & set(execution_boundaries)
+        ),
+        "authenticated_source": authenticated_source,
+        "credential_egress_policy_count": len(credential_egress_policies),
+        "blocked": unresolved,
+    }
 
     return {
         "delegated_specialist": selected_name,
@@ -238,6 +280,8 @@ def infer_delegation_approval_context(
         "accepts_secret_refs": accepts_secret_refs,
         "authenticated_source": authenticated_source,
         "source_systems": source_systems,
+        "credential_egress_policies": credential_egress_policies,
+        "trust_partition": trust_partition,
     }
 
 

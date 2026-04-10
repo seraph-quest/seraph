@@ -292,6 +292,53 @@ def _normalize_source_systems(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_credential_egress_policies(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        mode = str(item.get("mode") or "").strip()
+        transport = str(item.get("transport") or "").strip()
+        allowed_hosts = tuple(_normalize_string_list(item.get("allowed_hosts")))
+        key = (mode, transport, allowed_hosts)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "mode": mode or "unknown",
+                "transport": transport or "unknown",
+                "allowed_hosts": list(allowed_hosts),
+            }
+        )
+    normalized.sort(
+        key=lambda item: (
+            str(item.get("mode") or ""),
+            str(item.get("transport") or ""),
+            tuple(item.get("allowed_hosts") or []),
+        )
+    )
+    return normalized
+
+
+def _normalize_trust_partition(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    mode = str(value.get("mode") or "").strip()
+    if not mode:
+        return None
+    return {
+        "mode": mode,
+        "background_capable": bool(value.get("background_capable", False)),
+        "authenticated_source": bool(value.get("authenticated_source", False)),
+        "credential_egress_policy_count": int(value.get("credential_egress_policy_count", 0) or 0),
+        "blocked": bool(value.get("blocked", False)),
+    }
+
+
 def _normalize_approval_context(value: Any, *, workflow_name: str | None = None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -303,6 +350,8 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
     authenticated_source = bool(value.get("authenticated_source", False))
     delegation_target_unresolved = bool(value.get("delegation_target_unresolved", False))
     source_systems = _normalize_source_systems(value.get("source_systems"))
+    credential_egress_policies = _normalize_credential_egress_policies(value.get("credential_egress_policies"))
+    trust_partition = _normalize_trust_partition(value.get("trust_partition"))
     if not any(
         [
             risk_level,
@@ -314,6 +363,8 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
             authenticated_source,
             delegation_target_unresolved,
             source_systems,
+            credential_egress_policies,
+            trust_partition,
         ]
     ):
         return None
@@ -334,6 +385,10 @@ def _normalize_approval_context(value: Any, *, workflow_name: str | None = None)
         normalized["delegation_target_unresolved"] = True
     if source_systems:
         normalized["source_systems"] = source_systems
+    if credential_egress_policies:
+        normalized["credential_egress_policies"] = credential_egress_policies
+    if trust_partition:
+        normalized["trust_partition"] = trust_partition
     return normalized
 
 
@@ -362,6 +417,12 @@ def _workflow_current_approval_context(
     source_systems = _normalize_source_systems(workflow_meta.get("source_systems"))
     if source_systems:
         normalized["source_systems"] = source_systems
+    credential_egress_policies = _normalize_credential_egress_policies(workflow_meta.get("credential_egress_policies"))
+    if credential_egress_policies:
+        normalized["credential_egress_policies"] = credential_egress_policies
+    trust_partition = _normalize_trust_partition(workflow_meta.get("trust_partition"))
+    if trust_partition:
+        normalized["trust_partition"] = trust_partition
     return normalized
 
 
@@ -376,9 +437,11 @@ def _approval_context_surface_summary(value: dict[str, Any] | None) -> dict[str,
         "step_tools": _normalize_string_list(value.get("step_tools")),
         "authenticated_source": bool(value.get("authenticated_source", False)),
         "source_systems": _normalize_source_systems(value.get("source_systems")),
+        "credential_egress_policies": _normalize_credential_egress_policies(value.get("credential_egress_policies")),
         "delegated_specialists": _normalize_string_list(value.get("delegated_specialists")),
         "delegated_tool_names": _normalize_string_list(value.get("delegated_tool_names")),
         "delegation_target_unresolved": bool(value.get("delegation_target_unresolved", False)),
+        "trust_partition": _normalize_trust_partition(value.get("trust_partition")),
     }
     return summary
 
@@ -398,9 +461,11 @@ def _approval_context_changed_fields(
         "step_tools",
         "authenticated_source",
         "source_systems",
+        "credential_egress_policies",
         "delegated_specialists",
         "delegated_tool_names",
         "delegation_target_unresolved",
+        "trust_partition",
     ):
         if recorded.get(field_name) != current.get(field_name):
             changed_fields.append(field_name)

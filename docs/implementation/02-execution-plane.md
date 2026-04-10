@@ -41,6 +41,7 @@
 - [x] operator control-plane synthesis now exposes workspace governance modes, role inventory, usage rollups, runtime posture, review receipts, and blocked-workflow or approval handoff state through one operator API instead of leaving team-control context split across settings, audit, extensions, continuity, and workflow surfaces
 - [x] managed background processes now bind recovery visibility to the originating session, so list/read/stop recovery handles fail closed outside that session instead of leaving cross-session process recovery broadly discoverable
 - [x] process-runtime tool metadata and approval receipts now expose explicit session-partition plus background-execution trust context, and `start_process` now requires confirmation even when global approval mode is off so persistent runtime work no longer inherits the generic high-risk tool path
+- [x] process execution now also uses disposable worker roots outside the workspace for direct command and background-process runtime state, MCP secret refs require explicit credential-egress allowlists before connector-bound execution can receive secrets, and workflow/operator surfaces preserve delegated plus branch-handoff trust partitions instead of flattening those execution boundaries into generic approval context
 - [x] the operator API now also exposes a workspace-level background-session substrate that joins session-owned managed processes, workflow branch-handoff bundles, and session continuity snippets instead of leaving long-running background work split between process handles, workflow rows, and ad hoc session recovery
 - [x] the operator API now also exposes searchable engineering-memory bundles for repositories and pull requests, grouping workflow continuity, approval targets, audit receipts, artifact follow-through, and matched session snippets by shared reference instead of leaving repo context fragmented across threads and operator surfaces
 - [x] the operator API now also exposes an explicit continuity graph that links sessions, workflows, approvals, artifacts, notifications, deferred guardian items, and interventions through one evidence-backed graph instead of forcing operators to infer those relationships from separate background-session, timeline, and observer surfaces
@@ -63,13 +64,14 @@
 - [x] this workstream now also ships the first Batch AU aggregate for operator control-plane governance, usage/runtime posture synthesis, and collaboration-safe handoff receipts across approvals, workflows, audit, continuity, and extension state
 - [x] this workstream now also ships the first Batch AW aggregate for broader authenticated adapter operations, PR-native `code_activity.write` create or review actions, fixed-argument bounded external execution, and report-publication contract selection that stays truthful across work-item versus pull-request publication paths
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy, richer managed-process trust receipts, and deterministic eval proof that the process-runtime boundary stays both session-partitioned and operator-visible
+- [x] this workstream now also ships the second Batch BA aggregate for disposable worker lifecycle isolation, explicit credential-egress policy surfaced across tool/workflow/operator APIs, and preserved trust-partition receipts for delegated plus background-handoff execution
 - [x] this workstream now also ships the first Batch BD aggregate for long-running workflow operating-layer density across the operator API, cockpit orchestration lane, and runtime eval harness, including long-run state compaction, queue-state supervision, denser repair paths, branch/output debugger context, and explicit long-horizon workflow proof
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
 - [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, queue-state recovery supervision, branch/output debugger density, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
-- [ ] broader external system leverage without weakening trust boundaries
+- [ ] broader external system leverage without weakening trust boundaries or the new credential-egress contract
 
 ## Current Slice Record
 

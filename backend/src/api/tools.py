@@ -8,6 +8,7 @@ from src.tools.policy import (
     get_tool_approval_behavior,
     get_current_mcp_policy_mode,
     get_current_tool_policy_mode,
+    get_tool_credential_egress_policy,
     get_tool_execution_boundaries,
     get_tool_risk_level,
     get_tool_secret_ref_fields,
@@ -59,6 +60,11 @@ async def list_tools():
                 "authenticated_source": bool(
                     isinstance(source_context, dict)
                     and source_context.get("authenticated_source")
+                ),
+                "credential_egress_policy": get_tool_credential_egress_policy(
+                    tool.name,
+                    is_mcp=True,
+                    tool=tool,
                 ),
             } if is_mcp else {}),
         })

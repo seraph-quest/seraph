@@ -111,17 +111,34 @@ def _workspace_root() -> Path:
     return Path(settings.workspace_dir).resolve()
 
 
-def _process_runtime_root() -> Path:
+def _runtime_root() -> Path:
     workspace_tag = uuid.uuid5(uuid.NAMESPACE_URL, str(_workspace_root()))
-    root = Path(tempfile.gettempdir()) / "seraph_runtime" / str(workspace_tag)
-    path = root / "processes"
+    path = Path(tempfile.gettempdir()) / "seraph_runtime" / str(workspace_tag)
     path.mkdir(parents=True, exist_ok=True)
-    for candidate in (root.parent, root, path):
+    for candidate in (path.parent, path):
         try:
             candidate.chmod(0o700)
         except OSError:
             logger.debug("Failed to tighten permissions on %s", candidate, exc_info=True)
     return path
+
+
+def _prepare_runtime_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    for candidate in (path.parent, path):
+        try:
+            candidate.chmod(0o700)
+        except OSError:
+            logger.debug("Failed to tighten permissions on %s", candidate, exc_info=True)
+    return path
+
+
+def _process_runtime_root() -> Path:
+    return _prepare_runtime_dir(_runtime_root() / "processes")
+
+
+def _worker_runtime_root(worker_id: str) -> Path:
+    return _prepare_runtime_dir(_runtime_root() / "workers" / worker_id)
 
 
 def _normalize_cwd(raw_cwd: str | None) -> Path:
@@ -390,6 +407,8 @@ def _process_approval_context(
     *,
     persistent_background_execution: bool,
 ) -> dict[str, Any]:
+    worker_scope = "per_process" if persistent_background_execution else "per_invocation"
+    trust_partition = "session_disposable_worker" if persistent_background_execution else "invocation_disposable_worker"
     context = {
         "risk_level": get_tool_risk_level(tool_name),
         "execution_boundaries": get_tool_execution_boundaries(tool_name),
@@ -397,6 +416,10 @@ def _process_approval_context(
         "command_allowlist_enforced": True,
         "workspace_scoped_paths_only": True,
         "runtime_log_storage": "temp_runtime_outside_workspace",
+        "runtime_worker_storage": "temp_runtime_outside_workspace",
+        "disposable_worker_runtime": True,
+        "worker_scope": worker_scope,
+        "trust_partition": trust_partition,
         "persistent_background_execution": persistent_background_execution,
     }
     if tool_name in {"start_process", "list_processes", "read_process_output", "stop_process"}:
@@ -412,10 +435,39 @@ def _process_approval_context(
     return context
 
 
-def _command_env() -> dict[str, str]:
+def _delete_runtime_dir(path: Path) -> None:
+    if not path.exists():
+        return
+    for candidate in sorted(path.rglob("*"), reverse=True):
+        try:
+            if candidate.is_dir():
+                candidate.rmdir()
+            else:
+                candidate.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to delete runtime artifact %s", candidate, exc_info=True)
+    try:
+        path.rmdir()
+    except OSError:
+        logger.debug("Failed to delete runtime directory %s", path, exc_info=True)
+
+
+def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
-    env["HOME"] = str(_workspace_root())
+    if worker_root is None:
+        env["HOME"] = str(_workspace_root())
+        return env
+    worker_root_str = str(worker_root)
+    env["HOME"] = worker_root_str
+    env["TMPDIR"] = worker_root_str
+    env["TMP"] = worker_root_str
+    env["TEMP"] = worker_root_str
+    env["XDG_CACHE_HOME"] = worker_root_str
+    env["XDG_STATE_HOME"] = worker_root_str
+    env["XDG_DATA_HOME"] = worker_root_str
+    env["PIP_CACHE_DIR"] = worker_root_str
+    env["NPM_CONFIG_CACHE"] = worker_root_str
     return env
 
 
@@ -441,6 +493,7 @@ class ManagedProcess:
     args: list[str]
     cwd: str
     output_path: Path
+    worker_root: Path
     started_at: datetime
     owner_session_id: str | None
 
@@ -456,6 +509,9 @@ class ManagedProcess:
             "exit_code": exit_code,
             "started_at": self.started_at.isoformat(),
             "output_path": str(self.output_path),
+            "worker_root": str(self.worker_root),
+            "worker_disposable": True,
+            "trust_partition": "session_disposable_worker",
             "session_scoped": self.owner_session_id is not None,
             "session_id": self.owner_session_id,
         }
@@ -506,6 +562,12 @@ class ProcessRuntimeManager:
             process.output_path.unlink(missing_ok=True)
         except OSError:
             logger.debug("Failed to delete process log %s", process.output_path, exc_info=True)
+        _delete_runtime_dir(process.worker_root)
+
+    @staticmethod
+    def _cleanup_worker_if_exited(process: ManagedProcess) -> None:
+        if process.popen.poll() is not None:
+            _delete_runtime_dir(process.worker_root)
 
     def run_command(
         self,
@@ -521,6 +583,7 @@ class ProcessRuntimeManager:
             cwd=cwd,
         )
         timeout = _normalize_timeout_seconds(timeout_seconds)
+        worker_root = _worker_runtime_root(uuid.uuid4().hex)
         try:
             result = subprocess.run(
                 [executable, *args],
@@ -528,10 +591,11 @@ class ProcessRuntimeManager:
                 capture_output=True,
                 text=True,
                 shell=False,
-                env=_command_env(),
+                env=_command_env(worker_root=worker_root),
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
+            _delete_runtime_dir(worker_root)
             return {
                 "ok": False,
                 "timed_out": True,
@@ -542,6 +606,9 @@ class ProcessRuntimeManager:
                 "cwd": str(resolved_cwd),
                 "timeout_seconds": timeout,
             }
+        finally:
+            if "result" in locals():
+                _delete_runtime_dir(worker_root)
 
         return {
             "ok": result.returncode == 0,
@@ -568,6 +635,7 @@ class ProcessRuntimeManager:
         )
         process_id = uuid.uuid4().hex
         output_path = _process_runtime_root() / f"{process_id}.log"
+        worker_root = _worker_runtime_root(process_id)
         output_fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(output_fd, "w", encoding="utf-8", errors="replace") as output_stream:
             popen = subprocess.Popen(
@@ -578,7 +646,7 @@ class ProcessRuntimeManager:
                 stdin=subprocess.DEVNULL,
                 text=True,
                 shell=False,
-                env=_command_env(),
+                env=_command_env(worker_root=worker_root),
                 start_new_session=True,
             )
 
@@ -589,6 +657,7 @@ class ProcessRuntimeManager:
             args=args,
             cwd=str(resolved_cwd),
             output_path=output_path,
+            worker_root=worker_root,
             started_at=_utc_now(),
             owner_session_id=get_current_session_id(),
         )
@@ -604,11 +673,15 @@ class ProcessRuntimeManager:
                 for process in self._processes.values()
                 if self._is_visible_to_session(process, session_id)
             ]
+        for process in visible:
+            self._cleanup_worker_if_exited(process)
         return self._sorted_process_payloads(visible)
 
     def list_all_processes(self) -> list[dict[str, Any]]:
         with self._lock:
             processes = list(self._processes.values())
+        for process in processes:
+            self._cleanup_worker_if_exited(process)
         return self._sorted_process_payloads(processes)
 
     def read_process_output(self, process_id: str, *, max_chars: int = _PROCESS_OUTPUT_DEFAULT) -> dict[str, Any] | None:
@@ -617,6 +690,7 @@ class ProcessRuntimeManager:
             process = self._processes.get(process_id)
         if process is None or not self._is_visible_to_session(process, session_id):
             return None
+        self._cleanup_worker_if_exited(process)
         bounded = max(1, min(max_chars, _PROCESS_OUTPUT_MAX))
         output, truncated = _tail_text(process.output_path, max_chars=bounded)
         payload = process.status_payload()
@@ -635,7 +709,9 @@ class ProcessRuntimeManager:
             process = self._processes.get(process_id)
         if process is None or not self._is_visible_to_session(process, session_id):
             return None
-        return self._stop_managed_process(process, force=force)
+        payload = self._stop_managed_process(process, force=force)
+        self._cleanup_worker_if_exited(process)
+        return payload
 
     def reset_for_tests(self) -> None:
         with self._lock:

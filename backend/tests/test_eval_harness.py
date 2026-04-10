@@ -1608,6 +1608,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_requires_approval"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_accepts_secret_refs"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_secret_ref_fields"] == ["headers"]
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_credential_egress_visible"] is True
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1
@@ -1734,6 +1735,9 @@ def test_background_session_runtime_eval_exposes_expected_details():
     assert details["lead_session_branch_target_type"] is True
     assert details["lead_session_continue_message"] is True
     assert details["lead_session_artifact_visible"] is True
+    assert details["lead_session_partition_visible"] is True
+    assert details["lead_session_disposable_worker_visible"] is True
+    assert details["lead_session_branch_partition_visible"] is True
     assert details["blocked_session_continue_message"] is True
     assert details["blocked_session_handoff_present"] is True
 

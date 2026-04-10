@@ -4633,12 +4633,12 @@ describe("CockpitView", () => {
     const guardianWindow = guardianTitle.closest(".cockpit-window") as HTMLElement;
 
     expect(within(guardianWindow).getByText("overall confidence")).toBeInTheDocument();
+    await within(guardianWindow).findByText("clarify first");
+    await within(guardianWindow).findByText("Atlas release planning");
+    await within(guardianWindow).findByText("Prefer clarification before interrupting.");
     expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
-    expect(within(guardianWindow).getByText("clarify first")).toBeInTheDocument();
-    expect(within(guardianWindow).getByText("Atlas release planning")).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
-    expect(within(guardianWindow).getByText("Prefer clarification before interrupting.")).toBeInTheDocument();
   });
 
   it("hides a pane from its window close control", async () => {

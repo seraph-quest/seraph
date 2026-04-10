@@ -230,6 +230,137 @@ interface OperatorWorkflowOrchestration {
   workflows: WorkflowOrchestrationWorkflowEntry[];
 }
 
+interface OperatorBackgroundSessionHandoff {
+  available: boolean;
+  target_type: string;
+  continue_message?: string | null;
+  workflow_name?: string | null;
+  run_identity?: string | null;
+  branch_kind?: string | null;
+  branch_depth: number;
+  artifact_paths: string[];
+  resume_checkpoint_label?: string | null;
+  summary?: string | null;
+}
+
+interface OperatorBackgroundProcessEntry {
+  process_id: string;
+  pid?: number | null;
+  command?: string | null;
+  args: string[];
+  cwd?: string | null;
+  status?: string | null;
+  started_at?: string | null;
+  session_id?: string | null;
+}
+
+interface OperatorBackgroundSessionEntry {
+  session_id: string;
+  title: string;
+  latest_updated_at: string;
+  last_message?: string | null;
+  workflow_count: number;
+  active_workflows: number;
+  blocked_workflows: number;
+  background_process_count: number;
+  running_background_process_count: number;
+  lead_workflow_name?: string | null;
+  lead_workflow_status?: string | null;
+  continue_message?: string | null;
+  branch_handoff_available: boolean;
+  branch_handoff: OperatorBackgroundSessionHandoff;
+  lead_process?: OperatorBackgroundProcessEntry | null;
+  background_processes: OperatorBackgroundProcessEntry[];
+}
+
+interface OperatorBackgroundSessions {
+  summary: {
+    tracked_sessions: number;
+    background_process_count: number;
+    running_background_process_count: number;
+    sessions_with_branch_handoff: number;
+    sessions_with_active_workflows: number;
+  };
+  sessions: OperatorBackgroundSessionEntry[];
+}
+
+interface OperatorEngineeringMemorySessionMatch {
+  session_id?: string | null;
+  title?: string | null;
+  matched_at?: string | null;
+  snippet?: string | null;
+  source?: string | null;
+}
+
+interface OperatorEngineeringMemoryBundle {
+  reference: string;
+  target_kind: string;
+  repository_reference?: string | null;
+  latest_updated_at: string;
+  workflow_count: number;
+  approval_count: number;
+  audit_event_count: number;
+  session_match_count: number;
+  thread_ids: string[];
+  thread_labels: string[];
+  artifact_paths: string[];
+  continue_message?: string | null;
+  session_matches: OperatorEngineeringMemorySessionMatch[];
+}
+
+interface OperatorEngineeringMemory {
+  summary: {
+    query?: string | null;
+    tracked_bundles: number;
+    repository_bundle_count: number;
+    pull_request_bundle_count: number;
+    work_item_bundle_count: number;
+    search_match_count: number;
+  };
+  bundles: OperatorEngineeringMemoryBundle[];
+}
+
+interface OperatorContinuityGraphSessionEntry {
+  id: string;
+  kind: string;
+  title: string;
+  summary?: string | null;
+  updated_at: string;
+  thread_id?: string | null;
+  continue_message?: string | null;
+  metadata: {
+    pending_notification_count: number;
+    queued_insight_count: number;
+    recent_intervention_count: number;
+    item_count: number;
+    primary_surface?: string | null;
+    continuity_surface?: string | null;
+    workflow_count: number;
+    approval_count: number;
+    notification_count: number;
+    intervention_count: number;
+    artifact_count: number;
+    linked_item_count: number;
+  };
+}
+
+interface OperatorContinuityGraph {
+  summary: {
+    continuity_health?: string | null;
+    primary_surface?: string | null;
+    recommended_focus?: string | null;
+    tracked_sessions: number;
+    workflow_count: number;
+    approval_count: number;
+    notification_count: number;
+    queued_insight_count: number;
+    intervention_count: number;
+    artifact_count: number;
+    edge_count: number;
+  };
+  sessions: OperatorContinuityGraphSessionEntry[];
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -1150,6 +1281,28 @@ interface OperatorWorkflowOrchestrationEntry {
   outputPath: string | null;
 }
 
+interface OperatorBackgroundSupervisionEntry {
+  id: string;
+  sessionId: string;
+  title: string;
+  detail: string;
+  meta: string;
+  threadId: string | null;
+  continueMessage: string | null;
+  workflow: WorkflowRunRecord | null;
+  latestBranch: WorkflowRunRecord | null;
+  outputPath: string | null;
+}
+
+interface OperatorEngineeringMemoryEntry {
+  id: string;
+  reference: string;
+  detail: string;
+  meta: string;
+  threadId: string | null;
+  continueMessage: string | null;
+}
+
 interface ArtifactLineageResolution {
   sourceWorkflow: WorkflowRunRecord | null;
   candidateWorkflows: WorkflowRunRecord[];
@@ -1791,6 +1944,229 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
               ))
               : [],
             step_focus: normalizeStepFocus(workflow.step_focus),
+          }];
+        })
+      : [],
+  };
+}
+
+function normalizeOperatorBackgroundSessions(value: unknown): OperatorBackgroundSessions | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  return {
+    summary: {
+      tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
+      background_process_count: typeof summaryRecord.background_process_count === "number" ? summaryRecord.background_process_count : 0,
+      running_background_process_count: typeof summaryRecord.running_background_process_count === "number" ? summaryRecord.running_background_process_count : 0,
+      sessions_with_branch_handoff: typeof summaryRecord.sessions_with_branch_handoff === "number" ? summaryRecord.sessions_with_branch_handoff : 0,
+      sessions_with_active_workflows: typeof summaryRecord.sessions_with_active_workflows === "number" ? summaryRecord.sessions_with_active_workflows : 0,
+    },
+    sessions: Array.isArray(record.sessions)
+      ? record.sessions.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const session = entry as Record<string, unknown>;
+          const handoff = session.branch_handoff;
+          const leadProcess = session.lead_process;
+          return [{
+            session_id: typeof session.session_id === "string" ? session.session_id : "",
+            title: typeof session.title === "string" ? session.title : "Untitled session",
+            latest_updated_at: typeof session.latest_updated_at === "string" ? session.latest_updated_at : "",
+            last_message: typeof session.last_message === "string" ? session.last_message : null,
+            workflow_count: typeof session.workflow_count === "number" ? session.workflow_count : 0,
+            active_workflows: typeof session.active_workflows === "number" ? session.active_workflows : 0,
+            blocked_workflows: typeof session.blocked_workflows === "number" ? session.blocked_workflows : 0,
+            background_process_count: typeof session.background_process_count === "number" ? session.background_process_count : 0,
+            running_background_process_count: typeof session.running_background_process_count === "number" ? session.running_background_process_count : 0,
+            lead_workflow_name: typeof session.lead_workflow_name === "string" ? session.lead_workflow_name : null,
+            lead_workflow_status: typeof session.lead_workflow_status === "string" ? session.lead_workflow_status : null,
+            continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
+            branch_handoff_available: Boolean(session.branch_handoff_available),
+            branch_handoff: handoff && typeof handoff === "object" && !Array.isArray(handoff)
+              ? {
+                  available: Boolean((handoff as Record<string, unknown>).available),
+                  target_type: typeof (handoff as Record<string, unknown>).target_type === "string" ? String((handoff as Record<string, unknown>).target_type) : "none",
+                  continue_message: typeof (handoff as Record<string, unknown>).continue_message === "string" ? String((handoff as Record<string, unknown>).continue_message) : null,
+                  workflow_name: typeof (handoff as Record<string, unknown>).workflow_name === "string" ? String((handoff as Record<string, unknown>).workflow_name) : null,
+                  run_identity: typeof (handoff as Record<string, unknown>).run_identity === "string" ? String((handoff as Record<string, unknown>).run_identity) : null,
+                  branch_kind: typeof (handoff as Record<string, unknown>).branch_kind === "string" ? String((handoff as Record<string, unknown>).branch_kind) : null,
+                  branch_depth: typeof (handoff as Record<string, unknown>).branch_depth === "number" ? Number((handoff as Record<string, unknown>).branch_depth) : 0,
+                  artifact_paths: Array.isArray((handoff as Record<string, unknown>).artifact_paths)
+                    ? ((handoff as Record<string, unknown>).artifact_paths as unknown[]).filter((item): item is string => typeof item === "string")
+                    : [],
+                  resume_checkpoint_label: typeof (handoff as Record<string, unknown>).resume_checkpoint_label === "string" ? String((handoff as Record<string, unknown>).resume_checkpoint_label) : null,
+                  summary: typeof (handoff as Record<string, unknown>).summary === "string" ? String((handoff as Record<string, unknown>).summary) : null,
+                }
+              : {
+                  available: false,
+                  target_type: "none",
+                  continue_message: null,
+                  workflow_name: null,
+                  run_identity: null,
+                  branch_kind: null,
+                  branch_depth: 0,
+                  artifact_paths: [],
+                  resume_checkpoint_label: null,
+                  summary: null,
+                },
+            lead_process: leadProcess && typeof leadProcess === "object" && !Array.isArray(leadProcess)
+              ? {
+                  process_id: typeof (leadProcess as Record<string, unknown>).process_id === "string" ? String((leadProcess as Record<string, unknown>).process_id) : "process",
+                  pid: typeof (leadProcess as Record<string, unknown>).pid === "number" ? Number((leadProcess as Record<string, unknown>).pid) : null,
+                  command: typeof (leadProcess as Record<string, unknown>).command === "string" ? String((leadProcess as Record<string, unknown>).command) : null,
+                  args: Array.isArray((leadProcess as Record<string, unknown>).args)
+                    ? ((leadProcess as Record<string, unknown>).args as unknown[]).filter((item): item is string => typeof item === "string")
+                    : [],
+                  cwd: typeof (leadProcess as Record<string, unknown>).cwd === "string" ? String((leadProcess as Record<string, unknown>).cwd) : null,
+                  status: typeof (leadProcess as Record<string, unknown>).status === "string" ? String((leadProcess as Record<string, unknown>).status) : null,
+                  started_at: typeof (leadProcess as Record<string, unknown>).started_at === "string" ? String((leadProcess as Record<string, unknown>).started_at) : null,
+                  session_id: typeof (leadProcess as Record<string, unknown>).session_id === "string" ? String((leadProcess as Record<string, unknown>).session_id) : null,
+                }
+              : null,
+            background_processes: Array.isArray(session.background_processes)
+              ? session.background_processes.flatMap((process) => {
+                  if (!process || typeof process !== "object" || Array.isArray(process)) return [];
+                  const processRecord = process as Record<string, unknown>;
+                  return [{
+                    process_id: typeof processRecord.process_id === "string" ? processRecord.process_id : "process",
+                    pid: typeof processRecord.pid === "number" ? processRecord.pid : null,
+                    command: typeof processRecord.command === "string" ? processRecord.command : null,
+                    args: Array.isArray(processRecord.args)
+                      ? processRecord.args.filter((item): item is string => typeof item === "string")
+                      : [],
+                    cwd: typeof processRecord.cwd === "string" ? processRecord.cwd : null,
+                    status: typeof processRecord.status === "string" ? processRecord.status : null,
+                    started_at: typeof processRecord.started_at === "string" ? processRecord.started_at : null,
+                    session_id: typeof processRecord.session_id === "string" ? processRecord.session_id : null,
+                  }];
+                })
+              : [],
+          }];
+        }).filter((entry) => entry.session_id)
+      : [],
+  };
+}
+
+function normalizeOperatorEngineeringMemory(value: unknown): OperatorEngineeringMemory | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  return {
+    summary: {
+      query: typeof summaryRecord.query === "string" ? summaryRecord.query : null,
+      tracked_bundles: typeof summaryRecord.tracked_bundles === "number" ? summaryRecord.tracked_bundles : 0,
+      repository_bundle_count: typeof summaryRecord.repository_bundle_count === "number" ? summaryRecord.repository_bundle_count : 0,
+      pull_request_bundle_count: typeof summaryRecord.pull_request_bundle_count === "number" ? summaryRecord.pull_request_bundle_count : 0,
+      work_item_bundle_count: typeof summaryRecord.work_item_bundle_count === "number" ? summaryRecord.work_item_bundle_count : 0,
+      search_match_count: typeof summaryRecord.search_match_count === "number" ? summaryRecord.search_match_count : 0,
+    },
+    bundles: Array.isArray(record.bundles)
+      ? record.bundles.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const bundle = entry as Record<string, unknown>;
+          return [{
+            reference: typeof bundle.reference === "string" ? bundle.reference : "",
+            target_kind: typeof bundle.target_kind === "string" ? bundle.target_kind : "unknown",
+            repository_reference: typeof bundle.repository_reference === "string" ? bundle.repository_reference : null,
+            latest_updated_at: typeof bundle.latest_updated_at === "string" ? bundle.latest_updated_at : "",
+            workflow_count: typeof bundle.workflow_count === "number" ? bundle.workflow_count : 0,
+            approval_count: typeof bundle.approval_count === "number" ? bundle.approval_count : 0,
+            audit_event_count: typeof bundle.audit_event_count === "number" ? bundle.audit_event_count : 0,
+            session_match_count: typeof bundle.session_match_count === "number" ? bundle.session_match_count : 0,
+            thread_ids: Array.isArray(bundle.thread_ids)
+              ? bundle.thread_ids.filter((item): item is string => typeof item === "string")
+              : [],
+            thread_labels: Array.isArray(bundle.thread_labels)
+              ? bundle.thread_labels.filter((item): item is string => typeof item === "string")
+              : [],
+            artifact_paths: Array.isArray(bundle.artifact_paths)
+              ? bundle.artifact_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            continue_message: typeof bundle.continue_message === "string" ? bundle.continue_message : null,
+            session_matches: Array.isArray(bundle.session_matches)
+              ? bundle.session_matches.flatMap((item) => {
+                  if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+                  const match = item as Record<string, unknown>;
+                  return [{
+                    session_id: typeof match.session_id === "string" ? match.session_id : null,
+                    title: typeof match.title === "string" ? match.title : null,
+                    matched_at: typeof match.matched_at === "string" ? match.matched_at : null,
+                    snippet: typeof match.snippet === "string" ? match.snippet : null,
+                    source: typeof match.source === "string" ? match.source : null,
+                  }];
+                })
+              : [],
+          }];
+        }).filter((entry) => entry.reference)
+      : [],
+  };
+}
+
+function normalizeOperatorContinuityGraph(value: unknown): OperatorContinuityGraph | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  return {
+    summary: {
+      continuity_health: typeof summaryRecord.continuity_health === "string" ? summaryRecord.continuity_health : null,
+      primary_surface: typeof summaryRecord.primary_surface === "string" ? summaryRecord.primary_surface : null,
+      recommended_focus: typeof summaryRecord.recommended_focus === "string" ? summaryRecord.recommended_focus : null,
+      tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
+      workflow_count: typeof summaryRecord.workflow_count === "number" ? summaryRecord.workflow_count : 0,
+      approval_count: typeof summaryRecord.approval_count === "number" ? summaryRecord.approval_count : 0,
+      notification_count: typeof summaryRecord.notification_count === "number" ? summaryRecord.notification_count : 0,
+      queued_insight_count: typeof summaryRecord.queued_insight_count === "number" ? summaryRecord.queued_insight_count : 0,
+      intervention_count: typeof summaryRecord.intervention_count === "number" ? summaryRecord.intervention_count : 0,
+      artifact_count: typeof summaryRecord.artifact_count === "number" ? summaryRecord.artifact_count : 0,
+      edge_count: typeof summaryRecord.edge_count === "number" ? summaryRecord.edge_count : 0,
+    },
+    sessions: Array.isArray(record.sessions)
+      ? record.sessions.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const session = entry as Record<string, unknown>;
+          const metadata = session.metadata;
+          if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+          const metadataRecord = metadata as Record<string, unknown>;
+          return [{
+            id: typeof session.id === "string" ? session.id : "session",
+            kind: typeof session.kind === "string" ? session.kind : "session",
+            title: typeof session.title === "string" ? session.title : "Untitled session",
+            summary: typeof session.summary === "string" ? session.summary : null,
+            updated_at: typeof session.updated_at === "string" ? session.updated_at : "",
+            thread_id: typeof session.thread_id === "string" ? session.thread_id : null,
+            continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
+            metadata: {
+              pending_notification_count: typeof metadataRecord.pending_notification_count === "number" ? metadataRecord.pending_notification_count : 0,
+              queued_insight_count: typeof metadataRecord.queued_insight_count === "number" ? metadataRecord.queued_insight_count : 0,
+              recent_intervention_count: typeof metadataRecord.recent_intervention_count === "number" ? metadataRecord.recent_intervention_count : 0,
+              item_count: typeof metadataRecord.item_count === "number" ? metadataRecord.item_count : 0,
+              primary_surface: typeof metadataRecord.primary_surface === "string" ? metadataRecord.primary_surface : null,
+              continuity_surface: typeof metadataRecord.continuity_surface === "string" ? metadataRecord.continuity_surface : null,
+              workflow_count: typeof metadataRecord.workflow_count === "number" ? metadataRecord.workflow_count : 0,
+              approval_count: typeof metadataRecord.approval_count === "number" ? metadataRecord.approval_count : 0,
+              notification_count: typeof metadataRecord.notification_count === "number" ? metadataRecord.notification_count : 0,
+              intervention_count: typeof metadataRecord.intervention_count === "number" ? metadataRecord.intervention_count : 0,
+              artifact_count: typeof metadataRecord.artifact_count === "number" ? metadataRecord.artifact_count : 0,
+              linked_item_count: typeof metadataRecord.linked_item_count === "number" ? metadataRecord.linked_item_count : 0,
+            },
           }];
         })
       : [],
@@ -3149,6 +3525,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
   const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
+  const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
+  const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
+  const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
@@ -3325,6 +3704,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       activityLedgerResult,
       controlPlaneResult,
       workflowOrchestrationResult,
+      backgroundSessionsResult,
+      engineeringMemoryResult,
+      continuityGraphResult,
       workflowRunsResult,
       artifactLineageRunsResult,
       toolModeResult,
@@ -3341,6 +3723,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/control-plane`),
       fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
+      fetchJson(`${API_URL}/api/operator/background-sessions`),
+      fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
+      fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
@@ -3400,6 +3785,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
+    setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
+    setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
+    setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
@@ -4316,6 +4704,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       `${operatorControlPlane.usage.blocked_workflows} blocked workflows`,
     ].join(" · ")
     : null;
+  const backgroundContinuitySummary = (
+    operatorBackgroundSessions
+    && operatorEngineeringMemory
+    && operatorContinuityGraph
+  )
+    ? [
+      `${operatorBackgroundSessions.summary.tracked_sessions} sessions`,
+      `${operatorBackgroundSessions.summary.running_background_process_count}/${operatorBackgroundSessions.summary.background_process_count} running procs`,
+      `${operatorEngineeringMemory.summary.tracked_bundles} bundles`,
+      `${operatorContinuityGraph.summary.edge_count} edges`,
+    ].join(" · ")
+    : null;
   const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
   const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
   const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
@@ -4783,6 +5183,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     });
     return new Map(entries);
   }, [operatorWorkflowOrchestration]);
+  const continuityGraphSessionByThreadId = useMemo(() => {
+    const entries = operatorContinuityGraph?.sessions.flatMap((entry) => (
+      entry.thread_id ? [[entry.thread_id, entry] as const] : []
+    )) ?? [];
+    return new Map(entries);
+  }, [operatorContinuityGraph]);
   const operatorWorkflowOrchestrationEntries = useMemo<OperatorWorkflowOrchestrationEntry[]>(() => {
     if (!operatorWorkflowOrchestration) return [];
     return operatorWorkflowOrchestration.sessions.map((entry) => {
@@ -4812,6 +5218,69 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       };
     });
   }, [operatorWorkflowOrchestration, orchestrationWorkflowRunByIdentity, workflowRunByIdentity]);
+  const operatorBackgroundSupervisionEntries = useMemo<OperatorBackgroundSupervisionEntry[]>(() => {
+    if (!operatorBackgroundSessions) return [];
+    return operatorBackgroundSessions.sessions.map((entry) => {
+      const workflow = entry.branch_handoff.run_identity
+        ? workflowRunByIdentity.get(entry.branch_handoff.run_identity)
+          ?? orchestrationWorkflowRunByIdentity.get(entry.branch_handoff.run_identity)
+          ?? null
+        : null;
+      const continuitySession = continuityGraphSessionByThreadId.get(entry.session_id) ?? null;
+      const latestBranch = workflow ? workflowLatestBranchRun(workflow) : null;
+      const detail = [
+        entry.lead_workflow_name ? `${entry.lead_workflow_name}` : null,
+        entry.lead_workflow_status ? formatContinuityLabel(entry.lead_workflow_status) : null,
+        entry.lead_process?.command ? `proc ${entry.lead_process.command}` : null,
+        entry.branch_handoff_available ? `${entry.branch_handoff.target_type.replace(/_/g, " ")}` : null,
+        entry.branch_handoff.summary ?? entry.last_message ?? null,
+      ].filter(Boolean).join(" · ");
+      const meta = [
+        `${entry.workflow_count} workflows`,
+        entry.active_workflows > 0 ? `${entry.active_workflows} active` : null,
+        entry.blocked_workflows > 0 ? `${entry.blocked_workflows} blocked` : null,
+        entry.running_background_process_count > 0 ? `${entry.running_background_process_count} running proc` : null,
+        continuitySession ? `${continuitySession.metadata.linked_item_count} linked` : null,
+        continuitySession?.metadata.notification_count ? `${continuitySession.metadata.notification_count} notifications` : null,
+        continuitySession?.metadata.artifact_count ? `${continuitySession.metadata.artifact_count} artifacts` : null,
+        entry.latest_updated_at ? formatAge(entry.latest_updated_at) : null,
+      ].filter(Boolean).join(" · ");
+      return {
+        id: `background:${entry.session_id}`,
+        sessionId: entry.session_id,
+        title: entry.title,
+        detail,
+        meta,
+        threadId: entry.session_id,
+        continueMessage: entry.continue_message ?? continuitySession?.continue_message ?? null,
+        workflow,
+        latestBranch,
+        outputPath: workflow ? workflowPrimaryOutputPath(workflow) : null,
+      };
+    });
+  }, [continuityGraphSessionByThreadId, operatorBackgroundSessions, orchestrationWorkflowRunByIdentity, workflowRunByIdentity]);
+  const operatorEngineeringMemoryEntries = useMemo<OperatorEngineeringMemoryEntry[]>(() => {
+    if (!operatorEngineeringMemory) return [];
+    return operatorEngineeringMemory.bundles.slice(0, 3).map((entry) => ({
+      id: `memory:${entry.reference}`,
+      reference: entry.reference,
+      detail: [
+        entry.target_kind.replace(/_/g, " "),
+        entry.repository_reference && entry.repository_reference !== entry.reference ? entry.repository_reference : null,
+        entry.artifact_paths[0] ?? null,
+      ].filter(Boolean).join(" · "),
+      meta: [
+        entry.workflow_count > 0 ? `${entry.workflow_count} workflows` : null,
+        entry.approval_count > 0 ? `${entry.approval_count} approvals` : null,
+        entry.audit_event_count > 0 ? `${entry.audit_event_count} receipts` : null,
+        entry.session_match_count > 0 ? `${entry.session_match_count} matches` : null,
+        entry.thread_labels[0] ?? null,
+        entry.latest_updated_at ? formatAge(entry.latest_updated_at) : null,
+      ].filter(Boolean).join(" · "),
+      threadId: entry.thread_ids[0] ?? entry.session_matches[0]?.session_id ?? null,
+      continueMessage: entry.continue_message ?? null,
+    }));
+  }, [operatorEngineeringMemory]);
   const primaryTriageEntry = operatorTriageEntries[0] ?? null;
   const primaryApprovalTriageEntry = operatorTriageEntries.find((entry) => entry.approval) ?? null;
   const primaryWorkflowTriageEntry = operatorTriageEntries.find((entry) => entry.workflow) ?? null;
@@ -4910,6 +5379,32 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
   function openOperatorWorkflowOrchestrationThread(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.threadId) return;
+    void openThread(entry.threadId);
+  }
+  function inspectOperatorBackgroundSupervisionEntry(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    inspectWorkflowRun(entry.workflow);
+  }
+  function continueOperatorBackgroundSupervisionEntry(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+      return;
+    }
+    if (entry.workflow) {
+      continueWorkflowRun(entry.workflow);
+    }
+  }
+  function openOperatorBackgroundSupervisionThread(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
+    if (!entry?.threadId) return;
+    void openThread(entry.threadId);
+  }
+  function continueOperatorEngineeringMemoryEntry(entry: OperatorEngineeringMemoryEntry | null | undefined) {
+    if (!entry?.continueMessage) return;
+    void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+  }
+  function openOperatorEngineeringMemoryThread(entry: OperatorEngineeringMemoryEntry | null | undefined) {
     if (!entry?.threadId) return;
     void openThread(entry.threadId);
   }
@@ -10839,6 +11334,142 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </>
                     ) : (
                       <div className="cockpit-empty">Workflow orchestration summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Background continuity">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">background continuity</span>
+                      <span className="cockpit-operator-link">{backgroundContinuitySummary ?? "summary unavailable"}</span>
+                    </div>
+                    {operatorBackgroundSessions && operatorEngineeringMemory && operatorContinuityGraph ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${operatorBackgroundSessions.summary.sessions_with_branch_handoff} handoff-ready`,
+                            `${operatorBackgroundSessions.summary.sessions_with_active_workflows} active sessions`,
+                            `${operatorEngineeringMemory.summary.repository_bundle_count} repos`,
+                            `${operatorEngineeringMemory.summary.pull_request_bundle_count} prs`,
+                            `${operatorEngineeringMemory.summary.work_item_bundle_count} work items`,
+                            operatorContinuityGraph.summary.recommended_focus
+                              ? `focus ${operatorContinuityGraph.summary.recommended_focus}`
+                              : null,
+                          ].filter(Boolean).join(" · ")}
+                        </div>
+                        {operatorBackgroundSupervisionEntries.map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <button
+                              type="button"
+                              className="cockpit-operator-details cockpit-operator-details--button"
+                              aria-label={`Inspect background continuity for ${entry.title}`}
+                              onClick={() => inspectOperatorBackgroundSupervisionEntry(entry)}
+                              disabled={!entry.workflow}
+                            >
+                              <div className="cockpit-value">{entry.title}</div>
+                              <div className="cockpit-operator-note">{entry.detail || "Background handoff is ready for inspection."}</div>
+                              <div className="cockpit-operator-note">{entry.meta}</div>
+                            </button>
+                            <div className="cockpit-operator-actions">
+                              {entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Inspect background continuity for ${entry.title}`}
+                                  onClick={() => inspectOperatorBackgroundSupervisionEntry(entry)}
+                                >
+                                  inspect
+                                </button>
+                              )}
+                              {(entry.continueMessage || (entry.workflow && workflowCanContinue(entry.workflow))) && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Continue background continuity for ${entry.title}`}
+                                  onClick={() => continueOperatorBackgroundSupervisionEntry(entry)}
+                                >
+                                  continue
+                                </button>
+                              )}
+                              {entry.outputPath && entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Use latest output for background continuity ${entry.title}`}
+                                  onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                                >
+                                  use output
+                                </button>
+                              )}
+                              {entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Draft next step for background continuity ${entry.title}`}
+                                  onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                                >
+                                  draft next step
+                                </button>
+                              )}
+                              {entry.latestBranch && entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Inspect latest branch for background continuity ${entry.title}`}
+                                  onClick={() => inspectLatestWorkflowBranch(entry.workflow)}
+                                >
+                                  latest branch
+                                </button>
+                              )}
+                              {entry.threadId && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Open thread for background continuity ${entry.title}`}
+                                  onClick={() => openOperatorBackgroundSupervisionThread(entry)}
+                                >
+                                  open thread
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorEngineeringMemoryEntries.map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{entry.reference}</div>
+                              <div className="cockpit-operator-note">{entry.detail || "Engineering memory bundle"}</div>
+                              <div className="cockpit-operator-note">{entry.meta}</div>
+                            </div>
+                            <div className="cockpit-operator-actions">
+                              {entry.continueMessage ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Continue engineering memory for ${entry.reference}`}
+                                  onClick={() => continueOperatorEngineeringMemoryEntry(entry)}
+                                >
+                                  continue
+                                </button>
+                              ) : null}
+                              {entry.threadId ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Open thread for engineering memory ${entry.reference}`}
+                                  onClick={() => openOperatorEngineeringMemoryThread(entry)}
+                                >
+                                  open thread
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorBackgroundSupervisionEntries.length === 0 && operatorEngineeringMemoryEntries.length === 0 ? (
+                          <div className="cockpit-empty">No background supervision or engineering-memory handoff is available yet.</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Background continuity summary unavailable.</div>
                     )}
                   </section>
 

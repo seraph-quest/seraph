@@ -28,6 +28,7 @@
 - [x] generated doctor-plan and replay repair bundles no longer batch-apply multiple privileged mutations from one click; multi-step privileged fixes now require step-by-step operator execution
 - [x] authenticated MCP-backed tools now preserve source-specific approval and audit context through wrapper layers, and workflow checkpoint/replay paths fail closed when a run crosses into an authenticated external-source boundary instead of treating it like generic MCP read access
 - [x] tool metadata and runtime secret-ref handling now fail closed to explicit field-level injection surfaces, and connector-backed authenticated mutation bundles now reject undeclared payload fields instead of passing arbitrary write arguments through to external runtimes
+- [x] managed execution now also uses disposable worker roots outside the workspace for direct command and background-process runtime state, MCP secret-ref resolution now requires an explicit credential-egress allowlist, and delegated/workflow/operator trust receipts now preserve connector-egress plus branch-handoff trust partitions instead of flattening privileged execution back to a generic session boundary
 
 ## Working On Now
 
@@ -44,10 +45,11 @@
 - [x] this workstream now also ships the first Batch AT aggregate for field-scoped secret-reference injection, per-tool boundary narrowing, and allowlisted authenticated mutation payloads
 - [x] this workstream now also ships the second Batch AT aggregate for session-bound managed-process recovery, so background-process listing, output reads, and stop controls fail closed outside the originating session instead of leaving cross-session recovery handles live
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy and session-partitioned process trust metadata, so `start_process` no longer inherits the generic high-risk approval path and process-runtime approvals/audit receipts now carry the narrower managed-process boundary contract
+- [x] this workstream now also ships the second Batch BA aggregate for disposable worker runtime isolation, explicit credential-egress allowlists for secret-bearing MCP execution, and preserved trust-partition receipts across delegated, workflow, and background-handoff surfaces
 
 ## Still To Do On `develop`
 
-- [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, credential-placeholder, and specialist-surface hardening passes
+- [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, disposable worker roots, credential-egress policy, and specialist-surface hardening passes
 - [ ] add deeper policy distinctions inside MCP and external execution paths
 - [ ] keep trust UX strict without making approvals noisy or unusable
 

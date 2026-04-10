@@ -15,6 +15,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.process_tools import (
+    _runtime_root,
     list_processes,
     process_runtime_manager,
     read_process_output,
@@ -53,6 +54,29 @@ def test_run_command_success():
     )
 
     assert "guardian process ready" in result
+
+
+def test_run_command_uses_disposable_worker_home_and_cleans_up():
+    script_name = _write_script(
+        "wave1_process_worker_env.py",
+        """
+        import os
+        print(os.environ["HOME"])
+        print(os.environ["TMPDIR"])
+        """,
+    )
+
+    result = run_command(
+        command="python3",
+        args_json=f'["{script_name}"]',
+    )
+
+    lines = [line.strip() for line in result.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert not lines[0].startswith(str(Path(settings.workspace_dir).resolve()))
+    assert lines[0] == lines[1]
+    workers_root = _runtime_root() / "workers"
+    assert not workers_root.exists() or not any(workers_root.iterdir())
 
 
 def test_run_command_rejects_inline_python():
@@ -185,6 +209,12 @@ def test_start_list_read_and_stop_process():
 
     stopped = stop_process(process_id=process_id)
     assert f"Stopped process '{process_id}'" in stopped
+    payload = next(
+        process
+        for process in process_runtime_manager.list_processes()
+        if process["process_id"] == process_id
+    )
+    assert not Path(payload["worker_root"]).exists()
 
 
 def test_stop_process_missing_returns_error():
@@ -296,3 +326,6 @@ def test_process_output_logs_live_outside_the_workspace():
 
     assert not str(payload["output_path"]).startswith(str(Path(settings.workspace_dir).resolve()))
     assert stat.S_IMODE(os.stat(payload["output_path"]).st_mode) == 0o600
+    assert payload["worker_disposable"] is True
+    assert payload["trust_partition"] == "session_disposable_worker"
+    assert not str(payload["worker_root"]).startswith(str(Path(settings.workspace_dir).resolve()))

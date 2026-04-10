@@ -7284,6 +7284,9 @@ async def _eval_background_session_handoff_behavior() -> dict[str, Any]:
                     "status": "running",
                     "exit_code": None,
                     "started_at": "2026-03-20T10:03:00Z",
+                    "worker_disposable": True,
+                    "trust_partition": "session_disposable_worker",
+                    "session_scoped": True,
                     "session_id": "thread-1",
                 },
                 {
@@ -7295,6 +7298,9 @@ async def _eval_background_session_handoff_behavior() -> dict[str, Any]:
                     "status": "exited",
                     "exit_code": 0,
                     "started_at": "2026-03-20T09:03:00Z",
+                    "worker_disposable": True,
+                    "trust_partition": "session_disposable_worker",
+                    "session_scoped": True,
                     "session_id": "thread-2",
                 },
             ],
@@ -7315,6 +7321,9 @@ async def _eval_background_session_handoff_behavior() -> dict[str, Any]:
         "lead_session_branch_target_type": lead["branch_handoff"]["target_type"] == "workflow_branch",
         "lead_session_continue_message": lead["continue_message"] == "Continue Atlas branch review.",
         "lead_session_artifact_visible": lead["branch_handoff"]["artifact_paths"] == ["notes/branch-review.md"],
+        "lead_session_partition_visible": lead["trust_partition"]["background_process_partitioned"] is True,
+        "lead_session_disposable_worker_visible": lead["lead_process"]["worker_disposable"] is True,
+        "lead_session_branch_partition_visible": lead["branch_handoff"]["trust_partition"]["session_bound"] is True,
         "blocked_session_continue_message": blocked["continue_message"] == "Resume cleanup after approval.",
         "blocked_session_handoff_present": blocked["branch_handoff"]["available"] is True,
     }
@@ -9741,6 +9750,15 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
         "headers": {"type": "object", "description": "Authentication headers"},
         "body": {"type": "string", "description": "Request body"},
     }
+    mcp_tool.seraph_source_context = {
+        "authenticated_source": True,
+        "hostname": "api.example.com",
+        "credential_egress_policy": {
+            "mode": "explicit_host_allowlist",
+            "transport": "https",
+            "allowed_hosts": ["api.example.com"],
+        },
+    }
 
     try:
         with (
@@ -9780,6 +9798,7 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "full_start_process_requires_approval": full_tools["start_process"]["requires_approval"],
             "full_start_process_approval_behavior": full_tools["start_process"]["approval_behavior"],
             "full_start_process_boundaries": full_tools["start_process"]["execution_boundaries"],
+            "full_start_process_disposable_worker_runtime": full_tools["start_process"]["approval_behavior"] == "always",
             "full_hides_shell_execute_alias": "shell_execute" not in full_tools,
             "write_file_accepts_secret_refs": full_tools["write_file"]["accepts_secret_refs"],
             "mcp_disabled_hides_tool": "mcp_tasks" not in disabled_tools,
@@ -9787,6 +9806,7 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "mcp_approval_requires_approval": approval_tools["mcp_tasks"]["requires_approval"],
             "mcp_approval_accepts_secret_refs": approval_tools["mcp_tasks"]["accepts_secret_refs"],
             "mcp_approval_secret_ref_fields": approval_tools["mcp_tasks"]["secret_ref_fields"],
+            "mcp_approval_credential_egress_visible": approval_tools["mcp_tasks"]["credential_egress_policy"]["allowed_hosts"] == ["api.example.com"],
         }
     finally:
         stack.close()

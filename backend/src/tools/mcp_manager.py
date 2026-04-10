@@ -127,6 +127,15 @@ class MCPManager:
             item for item in (credential_sources or []) if isinstance(item, str) and item.strip()
         ]
         authenticated_source = bool(used_headers or auth_hint.strip() or normalized_credential_sources)
+        credential_egress_policy = {
+            "mode": (
+                "explicit_host_allowlist"
+                if authenticated_source and bool(parsed.hostname)
+                else "no_credentials" if not authenticated_source else "blocked"
+            ),
+            "transport": parsed.scheme or "unknown",
+            "allowed_hosts": [parsed.hostname] if parsed.hostname else [],
+        }
         return {
             "server_name": name,
             "url": url,
@@ -138,6 +147,7 @@ class MCPManager:
             "extension_id": extension_id,
             "extension_reference": extension_reference,
             "extension_display_name": extension_display_name,
+            "credential_egress_policy": credential_egress_policy,
         }
 
     @staticmethod
@@ -151,6 +161,7 @@ class MCPManager:
                 "hostname": str(_context.get("hostname") or ""),
                 "authenticated_source": bool(_context.get("authenticated_source")),
                 "credential_sources": list(_context.get("credential_sources") or []),
+                "credential_egress_policy": dict(_context.get("credential_egress_policy") or {}),
                 "source": str(_context.get("source") or "manual"),
                 "extension_id": _context.get("extension_id"),
                 "extension_reference": _context.get("extension_reference"),

@@ -17,6 +17,16 @@ class DummyHeaderTool:
         "body": {"type": "string", "description": "Request body"},
     }
     output_type = "string"
+    def __init__(self):
+        self.seraph_source_context = {
+            "authenticated_source": True,
+            "hostname": "api.example.com",
+            "credential_egress_policy": {
+                "mode": "explicit_host_allowlist",
+                "transport": "https",
+                "allowed_hosts": ["api.example.com"],
+            },
+        }
 
     def __call__(self, *args, **kwargs):
         return {"args": args, "kwargs": kwargs}
@@ -24,6 +34,19 @@ class DummyHeaderTool:
 
 class DummyWriteTool(DummyHeaderTool):
     name = "write_file"
+
+
+class DummyUnboundMcpTool(DummyHeaderTool):
+    def __init__(self):
+        self.seraph_source_context = {
+            "authenticated_source": True,
+            "hostname": "",
+            "credential_egress_policy": {
+                "mode": "blocked",
+                "transport": "https",
+                "allowed_hosts": [],
+            },
+        }
 
 
 def _issue_ref_for_session(session_id: str) -> str:
@@ -76,6 +99,17 @@ def test_secret_ref_wrapper_blocks_disallowed_tools():
     try:
         with pytest.raises(ValueError, match="cannot receive secret references"):
             wrapped(body=f"token={secret_ref}")
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_secret_ref_wrapper_blocks_mcp_refs_without_explicit_egress_allowlist():
+    wrapped = SecretRefResolvingTool(DummyUnboundMcpTool())
+    secret_ref = _issue_ref_for_session("s1")
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with pytest.raises(ValueError, match="credential egress allowlist"):
+            wrapped(headers={"Authorization": f"Bearer {secret_ref}"})
     finally:
         reset_runtime_context(tokens)
 

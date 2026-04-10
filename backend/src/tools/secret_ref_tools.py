@@ -5,7 +5,11 @@ from __future__ import annotations
 from smolagents import Tool, tool
 
 from src.approval.runtime import get_current_session_id
-from src.tools.policy import get_tool_secret_ref_fields, tool_accepts_secret_refs
+from src.tools.policy import (
+    get_tool_credential_egress_policy,
+    get_tool_secret_ref_fields,
+    tool_accepts_secret_refs,
+)
 from src.tools.vault_tools import _log_secret_event, _run
 from src.vault.refs import _REF_PREFIX
 from src.vault.refs import issue_secret_ref, resolve_secret_refs
@@ -63,6 +67,17 @@ class SecretRefResolvingTool(Tool):
                     f"Tool '{self.name}' can only receive secret references in allowlisted fields: "
                     f"{', '.join(secret_ref_fields) or 'none'}. Refs were provided in: {field_list}."
                 )
+            if self._is_mcp:
+                egress_policy = get_tool_credential_egress_policy(
+                    self.name,
+                    is_mcp=True,
+                    tool=self.wrapped_tool,
+                )
+                allowed_hosts = list((egress_policy or {}).get("allowed_hosts") or [])
+                if str((egress_policy or {}).get("mode") or "") != "explicit_host_allowlist" or not allowed_hosts:
+                    raise ValueError(
+                        f"Tool '{self.name}' cannot receive secret references without an explicit credential egress allowlist."
+                    )
         resolved_invocation = {
             key: (
                 resolve_secret_refs(value, session_id)

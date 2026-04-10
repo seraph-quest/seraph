@@ -107,4 +107,5 @@ The benchmark is clear enough to set priorities:
 
 - Seraph’s strongest relative moat is still guardian-specific memory plus intervention scaffolding.
 - Seraph’s biggest gaps are now operator cockpit quality, workflow control ergonomics, adapter-first external capability contracts, native reach, and execution hardening.
+- The implementation proof layer should keep getting denser: benchmark status should be readable through explicit suites and governed-improvement gates, not only through long flat scenario lists or one-off PR receipts.
 - The next product push should therefore combine guardian-state and intervention improvements with an interface, adapter, and execution program, not just more runtime seam work.

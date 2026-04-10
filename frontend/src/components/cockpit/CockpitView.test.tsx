@@ -4850,6 +4850,53 @@ describe("CockpitView", () => {
           handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
         }));
       }
+      if (url.includes("/api/operator/benchmark-proof")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            suite_count: 4,
+            scenario_count: 32,
+            benchmark_posture: "deterministic_proof_backed",
+            operator_status: "operator_visible",
+            remaining_gap: "live_provider_and_real_computer_use_depth",
+            governed_improvement_status: "review_gated",
+          },
+          suites: [
+            {
+              name: "memory_continuity_workflows",
+              label: "Memory, continuity, and workflows",
+              description: "Memory and workflow endurance suite",
+              benchmark_axis: "memory_and_workflow_endurance",
+              operator_summary: "Guardian memory and workflow continuity retain recoverable state.",
+              remaining_gap: "Broader live-provider and production-like replay is still missing.",
+              scenario_count: 14,
+              scenario_names: ["workflow_operating_layer_behavior"],
+            },
+            {
+              name: "computer_use_browser_desktop",
+              label: "Computer-use, browser, and desktop execution",
+              description: "Browser and desktop suite",
+              benchmark_axis: "computer_use_execution",
+              operator_summary: "Browser and desktop continuity paths stay visible and auditable.",
+              remaining_gap: "A fuller real browser-task harness still remains.",
+              scenario_count: 6,
+              scenario_names: ["browser_runtime_audit"],
+            },
+          ],
+          governed_improvement: {
+            target_count: 2,
+            target_types: ["prompt_pack", "skill"],
+            required_suite_count: 4,
+            gate_policy: {
+              min_review_ready_score: 0.7,
+              min_strong_score: 0.9,
+              requires_human_review: true,
+              blocks_on_constraint_failure: true,
+              required_benchmark_suites: ["memory_continuity_workflows", "computer_use_browser_desktop"],
+              proof_contract: "deterministic_benchmark_suites_plus_review_receipts",
+            },
+          },
+        }));
+      }
       if (url.includes("/api/operator/guardian-state")) {
         return Promise.resolve(mockResponse({
           summary: {
@@ -4924,6 +4971,8 @@ describe("CockpitView", () => {
 
     const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
     const guardianWindow = guardianTitle.closest(".cockpit-window") as HTMLElement;
+    const operatorTitle = await screen.findByText("Operator terminal", { selector: ".cockpit-window-title" });
+    const operatorWindow = operatorTitle.closest(".cockpit-window") as HTMLElement;
 
     expect(within(guardianWindow).getByText("overall confidence")).toBeInTheDocument();
     await within(guardianWindow).findByText("clarify first");
@@ -4932,6 +4981,10 @@ describe("CockpitView", () => {
     expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
     expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
+    await within(operatorWindow).findByText("benchmark proof");
+    await within(operatorWindow).findByText(/4 suites · 32 scenarios · deterministic proof backed · 2 evolution targets/);
+    expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();
   });
 
   it("hides a pane from its window close control", async () => {
@@ -10131,7 +10184,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(19));
+    await waitFor(() => expect(cockpitFetchCount).toBe(20));
     view.unmount();
 
     await act(async () => {

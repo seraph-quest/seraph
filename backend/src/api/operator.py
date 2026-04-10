@@ -26,6 +26,8 @@ from src.api.workflows import (
 from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
+from src.evals.benchmark_catalog import benchmark_suite_report
+from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.observer.insight_queue import insight_queue
@@ -2408,6 +2410,47 @@ async def get_operator_control_plane(
                 session_id=session_id,
             ),
             "review_receipts": _review_receipts(audit_events, session_titles),
+        },
+    }
+
+
+@router.get("/operator/benchmark-proof")
+async def get_operator_benchmark_proof():
+    suites = benchmark_suite_report()
+    evolution_targets = list_evolution_targets()
+    required_suite_names = {
+        str(name)
+        for name in evolution_benchmark_gate_policy().get("required_benchmark_suites", [])
+        if str(name).strip()
+    }
+    unique_scenarios = {
+        str(scenario_name)
+        for suite in suites
+        for scenario_name in suite.get("scenario_names", [])
+        if isinstance(scenario_name, str) and scenario_name.strip()
+    }
+    target_types = sorted(
+        {
+            str(target.get("target_type"))
+            for target in evolution_targets
+            if isinstance(target, dict) and target.get("target_type")
+        }
+    )
+    return {
+        "summary": {
+            "suite_count": len(suites),
+            "scenario_count": len(unique_scenarios),
+            "benchmark_posture": "deterministic_proof_backed",
+            "operator_status": "operator_visible",
+            "remaining_gap": "live_provider_and_real_computer_use_depth",
+            "governed_improvement_status": "review_gated",
+        },
+        "suites": suites,
+        "governed_improvement": {
+            "target_count": len(evolution_targets),
+            "target_types": target_types,
+            "gate_policy": evolution_benchmark_gate_policy(),
+            "required_suite_count": len(required_suite_names),
         },
     }
 

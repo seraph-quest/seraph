@@ -16,6 +16,7 @@ from src.extensions.capability_contributions import parse_prompt_pack_definition
 from src.extensions.manifest import load_extension_manifest
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
 from src.extensions.workspace_package import save_workspace_contribution, workspace_capability_package_root
+from src.evals.benchmark_catalog import benchmark_suite_names
 from src.native_tools.registry import TOOL_METADATA
 from src.runbooks.loader import Runbook, parse_runbook_content
 from src.runbooks.manager import runbook_manager
@@ -77,6 +78,7 @@ class EvolutionReceipt:
     evals: tuple[dict[str, Any], ...]
     change_summary: tuple[str, ...]
     review_risks: tuple[str, ...]
+    benchmark_gate: dict[str, Any]
     pr_draft: dict[str, str]
     saved_path: str | None = None
     receipt_path: str | None = None
@@ -563,6 +565,47 @@ def _build_pr_draft(
     }
 
 
+def evolution_benchmark_gate_policy() -> dict[str, Any]:
+    return {
+        "min_review_ready_score": 0.7,
+        "min_strong_score": 0.9,
+        "requires_human_review": True,
+        "blocks_on_constraint_failure": True,
+        "required_benchmark_suites": list(benchmark_suite_names()),
+        "proof_contract": "deterministic_benchmark_suites_plus_review_receipts",
+    }
+
+
+def _benchmark_gate_payload(
+    *,
+    constraints: tuple[EvolutionConstraint, ...],
+    blocked: bool,
+    score: float,
+) -> dict[str, Any]:
+    policy = evolution_benchmark_gate_policy()
+    blocked_constraints = [item.name for item in constraints if item.blocked]
+    if blocked:
+        rollout_state = "blocked"
+        regression_gate = "blocked"
+    elif score >= float(policy["min_strong_score"]):
+        rollout_state = "review_ready"
+        regression_gate = "pass"
+    elif score >= float(policy["min_review_ready_score"]):
+        rollout_state = "guarded_review"
+        regression_gate = "warn"
+    else:
+        rollout_state = "weak"
+        regression_gate = "warn"
+    return {
+        "rollout_state": rollout_state,
+        "regression_gate": regression_gate,
+        "requires_human_review": bool(policy["requires_human_review"]),
+        "required_benchmark_suites": list(policy["required_benchmark_suites"]),
+        "blocked_constraints": blocked_constraints,
+        "proof_contract": str(policy["proof_contract"]),
+    }
+
+
 def _write_receipt(candidate_file_name: str, receipt: EvolutionReceipt) -> str:
     receipts_dir = workspace_capability_package_root() / "evolution" / "receipts"
     receipts_dir.mkdir(parents=True, exist_ok=True)
@@ -635,6 +678,11 @@ def evaluate_candidate(
         ),
         change_summary=change_summary,
         review_risks=review_risks,
+        benchmark_gate=_benchmark_gate_payload(
+            constraints=constraints,
+            blocked=blocked,
+            score=score,
+        ),
         pr_draft=_build_pr_draft(
             target_type,
             source_name=str(source_metadata.get("name") or source_metadata.get("title") or resolved_source.stem),

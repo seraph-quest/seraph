@@ -457,6 +457,7 @@ class ManagedProcess:
             "started_at": self.started_at.isoformat(),
             "output_path": str(self.output_path),
             "session_scoped": self.owner_session_id is not None,
+            "session_id": self.owner_session_id,
         }
 
 
@@ -464,6 +465,17 @@ class ProcessRuntimeManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._processes: dict[str, ManagedProcess] = {}
+
+    @staticmethod
+    def _sorted_process_payloads(processes: list[ManagedProcess]) -> list[dict[str, Any]]:
+        return [
+            process.status_payload()
+            for process in sorted(
+                processes,
+                key=lambda item: item.started_at,
+                reverse=True,
+            )
+        ]
 
     @staticmethod
     def _is_visible_to_session(process: ManagedProcess, session_id: str | None) -> bool:
@@ -587,18 +599,17 @@ class ProcessRuntimeManager:
     def list_processes(self) -> list[dict[str, Any]]:
         session_id = get_current_session_id()
         with self._lock:
-            return [
-                process.status_payload()
-                for process in sorted(
-                    (
-                        process
-                        for process in self._processes.values()
-                        if self._is_visible_to_session(process, session_id)
-                    ),
-                    key=lambda item: item.started_at,
-                    reverse=True,
-                )
+            visible = [
+                process
+                for process in self._processes.values()
+                if self._is_visible_to_session(process, session_id)
             ]
+        return self._sorted_process_payloads(visible)
+
+    def list_all_processes(self) -> list[dict[str, Any]]:
+        with self._lock:
+            processes = list(self._processes.values())
+        return self._sorted_process_payloads(processes)
 
     def read_process_output(self, process_id: str, *, max_chars: int = _PROCESS_OUTPUT_DEFAULT) -> dict[str, Any] | None:
         session_id = get_current_session_id()

@@ -6845,6 +6845,130 @@ async def _eval_threaded_operator_timeline_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_background_session_handoff_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_background_sessions
+
+    branch_run = {
+        "id": "run-branch",
+        "workflow_name": "repo-review",
+        "summary": "branch review ready for continuation",
+        "status": "running",
+        "started_at": "2026-03-20T10:00:00Z",
+        "updated_at": "2026-03-20T10:05:00Z",
+        "thread_id": "thread-1",
+        "thread_label": "Atlas thread",
+        "thread_continue_message": "Continue Atlas branch review.",
+        "artifact_paths": ["notes/branch-review.md"],
+        "branch_kind": "branch_from_checkpoint",
+        "branch_depth": 1,
+        "parent_run_identity": "thread-1:workflow_repo_review:root",
+        "root_run_identity": "thread-1:workflow_repo_review:root",
+        "run_identity": "thread-1:workflow_repo_review:branch-1",
+        "availability": "ready",
+        "pending_approval_count": 0,
+        "checkpoint_candidates": [
+            {
+                "step_id": "draft",
+                "label": "Draft review",
+                "kind": "branch_from_checkpoint",
+                "status": "succeeded",
+            }
+        ],
+        "step_records": [
+            {"id": "draft", "tool": "write_file", "status": "running"},
+        ],
+    }
+    blocked_run = {
+        "id": "run-blocked",
+        "workflow_name": "cleanup",
+        "summary": "cleanup blocked waiting on approval",
+        "status": "awaiting_approval",
+        "started_at": "2026-03-20T09:00:00Z",
+        "updated_at": "2026-03-20T09:02:00Z",
+        "thread_id": "thread-2",
+        "thread_label": "Cleanup thread",
+        "thread_continue_message": "Resume cleanup after approval.",
+        "artifact_paths": [],
+        "branch_kind": None,
+        "branch_depth": 0,
+        "parent_run_identity": None,
+        "root_run_identity": "thread-2:workflow_cleanup:root",
+        "run_identity": "thread-2:workflow_cleanup:root",
+        "availability": "blocked",
+        "pending_approval_count": 1,
+        "checkpoint_candidates": [],
+        "step_records": [
+            {"id": "approve", "tool": "write_file", "status": "awaiting_approval"},
+        ],
+    }
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[
+                {
+                    "id": "thread-1",
+                    "title": "Atlas thread",
+                    "last_message": "Please review the branch output.",
+                    "updated_at": "2026-03-20T10:04:00Z",
+                },
+                {
+                    "id": "thread-2",
+                    "title": "Cleanup thread",
+                    "last_message": "Cleanup is waiting on approval.",
+                    "updated_at": "2026-03-20T09:01:00Z",
+                },
+            ],
+        ),
+        patch("src.api.operator._list_workflow_runs", return_value=[branch_run, blocked_run]),
+        patch(
+            "src.api.operator.process_runtime_manager.list_all_processes",
+            return_value=[
+                {
+                    "process_id": "proc-1",
+                    "pid": 1234,
+                    "command": "/usr/bin/python3",
+                    "args": ["worker.py"],
+                    "cwd": "/workspace",
+                    "status": "running",
+                    "exit_code": None,
+                    "started_at": "2026-03-20T10:03:00Z",
+                    "session_id": "thread-1",
+                },
+                {
+                    "process_id": "proc-2",
+                    "pid": 1235,
+                    "command": "git",
+                    "args": ["status"],
+                    "cwd": "/workspace",
+                    "status": "exited",
+                    "exit_code": 0,
+                    "started_at": "2026-03-20T09:03:00Z",
+                    "session_id": "thread-2",
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_background_sessions(limit_sessions=6, limit_processes=2)
+
+    sessions = payload["sessions"]
+    lead = sessions[0]
+    blocked = sessions[1]
+    return {
+        "tracked_sessions": payload["summary"]["tracked_sessions"] == 2,
+        "running_background_process_count": payload["summary"]["running_background_process_count"] == 1,
+        "sessions_with_branch_handoff": payload["summary"]["sessions_with_branch_handoff"] == 2,
+        "lead_session_is_branch_thread": lead["session_id"] == "thread-1",
+        "lead_session_has_running_process": lead["running_background_process_count"] == 1,
+        "lead_session_branch_handoff_available": lead["branch_handoff"]["available"] is True,
+        "lead_session_branch_target_type": lead["branch_handoff"]["target_type"] == "workflow_branch",
+        "lead_session_continue_message": lead["continue_message"] == "Continue Atlas branch review.",
+        "lead_session_artifact_visible": lead["branch_handoff"]["artifact_paths"] == ["notes/branch-review.md"],
+        "blocked_session_continue_message": blocked["continue_message"] == "Resume cleanup after approval.",
+        "blocked_session_handoff_present": blocked["branch_handoff"]["available"] is True,
+    }
+
+
 async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
@@ -8855,6 +8979,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="The operator timeline keeps workflows, approvals, notifications, queued bundles, interventions, and failures bound to one thread with the right continue and replay metadata.",
         runner=_eval_threaded_operator_timeline_behavior,
+    ),
+    EvalScenario(
+        name="background_session_handoff_behavior",
+        category="behavior",
+        description="Workspace background-session inventory links managed processes, branch handoff, and workflow continuation into one continuity substrate.",
+        runner=_eval_background_session_handoff_behavior,
     ),
     EvalScenario(
         name="workflow_boundary_blocked_surface_behavior",

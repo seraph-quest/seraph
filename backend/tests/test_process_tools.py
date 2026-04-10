@@ -240,6 +240,38 @@ def test_process_recovery_is_scoped_to_the_starting_session():
         reset_runtime_context(owner_tokens)
 
 
+def test_list_all_processes_ignores_runtime_session_visibility_for_operator_surfaces():
+    script_name = _write_script(
+        "wave3_process_operator_visibility.py",
+        """
+        import time
+        print("operator-visible", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+    finally:
+        reset_runtime_context(owner_tokens)
+
+    other_tokens = set_runtime_context("other-session", "high_risk")
+    try:
+        assert process_id not in list_processes()
+        payload = next(
+            process
+            for process in process_runtime_manager.list_all_processes()
+            if process["process_id"] == process_id
+        )
+        assert payload["session_id"] == "owner-session"
+        assert payload["session_scoped"] is True
+        assert payload["status"] == "running"
+    finally:
+        reset_runtime_context(other_tokens)
+
+
 def test_process_output_logs_live_outside_the_workspace():
     script_name = _write_script(
         "wave2_process_log_location.py",

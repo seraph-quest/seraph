@@ -41,6 +41,7 @@
 - [x] operator control-plane synthesis now exposes workspace governance modes, role inventory, usage rollups, runtime posture, review receipts, and blocked-workflow or approval handoff state through one operator API instead of leaving team-control context split across settings, audit, extensions, continuity, and workflow surfaces
 - [x] managed background processes now bind recovery visibility to the originating session, so list/read/stop recovery handles fail closed outside that session instead of leaving cross-session process recovery broadly discoverable
 - [x] process-runtime tool metadata and approval receipts now expose explicit session-partition plus background-execution trust context, and `start_process` now requires confirmation even when global approval mode is off so persistent runtime work no longer inherits the generic high-risk tool path
+- [x] the operator API now also exposes a workspace-level background-session substrate that joins session-owned managed processes, workflow branch-handoff bundles, and session continuity snippets instead of leaving long-running background work split between process handles, workflow rows, and ad hoc session recovery
 
 ## Working On Now
 

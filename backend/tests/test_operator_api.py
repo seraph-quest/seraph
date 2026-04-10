@@ -775,6 +775,161 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
 
 
 @pytest.mark.asyncio
+async def test_operator_background_sessions_surface_managed_processes_and_branch_handoff(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-branch",
+                        "workflow_name": "repo-review",
+                        "summary": "branch review ready for continuation",
+                        "status": "running",
+                        "started_at": "2026-03-20T10:00:00Z",
+                        "updated_at": "2026-03-20T10:05:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "Atlas thread",
+                        "thread_continue_message": "Continue Atlas branch review.",
+                        "artifact_paths": ["notes/branch-review.md"],
+                        "branch_kind": "branch_from_checkpoint",
+                        "branch_depth": 1,
+                        "parent_run_identity": "session-1:workflow_repo_review:root",
+                        "root_run_identity": "session-1:workflow_repo_review:root",
+                        "run_identity": "session-1:workflow_repo_review:branch-1",
+                        "availability": "ready",
+                        "pending_approval_count": 0,
+                        "checkpoint_candidates": [
+                            {
+                                "step_id": "draft",
+                                "label": "Draft review",
+                                "kind": "branch_from_checkpoint",
+                                "status": "succeeded",
+                            }
+                        ],
+                        "step_records": [
+                            {"id": "draft", "tool": "write_file", "status": "running"},
+                        ],
+                    },
+                    {
+                        "id": "run-blocked",
+                        "workflow_name": "cleanup",
+                        "summary": "cleanup blocked waiting on approval",
+                        "status": "awaiting_approval",
+                        "started_at": "2026-03-20T09:00:00Z",
+                        "updated_at": "2026-03-20T09:02:00Z",
+                        "thread_id": "session-2",
+                        "thread_label": "Cleanup thread",
+                        "thread_continue_message": "Resume cleanup after approval.",
+                        "artifact_paths": [],
+                        "branch_kind": None,
+                        "branch_depth": 0,
+                        "parent_run_identity": None,
+                        "root_run_identity": "session-2:workflow_cleanup:root",
+                        "run_identity": "session-2:workflow_cleanup:root",
+                        "availability": "blocked",
+                        "pending_approval_count": 1,
+                        "checkpoint_candidates": [],
+                        "step_records": [
+                            {"id": "approve", "tool": "write_file", "status": "awaiting_approval"},
+                        ],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "session-1",
+                        "title": "Atlas thread",
+                        "last_message": "Please review the branch output.",
+                        "updated_at": "2026-03-20T10:04:00Z",
+                    },
+                    {
+                        "id": "session-2",
+                        "title": "Cleanup thread",
+                        "last_message": "Cleanup is waiting on approval.",
+                        "updated_at": "2026-03-20T09:01:00Z",
+                    },
+                    {
+                        "id": "session-3",
+                        "title": "Idle thread",
+                        "last_message": "No background work here.",
+                        "updated_at": "2026-03-20T08:00:00Z",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.process_runtime_manager.list_all_processes",
+            return_value=[
+                {
+                    "process_id": "proc-1",
+                    "pid": 1234,
+                    "command": "/usr/bin/python3",
+                    "args": ["worker.py"],
+                    "cwd": "/workspace",
+                    "status": "running",
+                    "exit_code": None,
+                    "started_at": "2026-03-20T10:03:00Z",
+                    "output_path": "/tmp/proc-1.log",
+                    "session_scoped": True,
+                    "session_id": "session-1",
+                },
+                {
+                    "process_id": "proc-2",
+                    "pid": 1235,
+                    "command": "git",
+                    "args": ["status"],
+                    "cwd": "/workspace",
+                    "status": "exited",
+                    "exit_code": 0,
+                    "started_at": "2026-03-20T09:03:00Z",
+                    "output_path": "/tmp/proc-2.log",
+                    "session_scoped": True,
+                    "session_id": "session-2",
+                },
+            ],
+        ),
+    ):
+        resp = await client.get(
+            "/api/operator/background-sessions",
+            params={"limit_sessions": 6, "limit_processes": 2},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["tracked_sessions"] == 2
+    assert payload["summary"]["background_process_count"] == 2
+    assert payload["summary"]["running_background_process_count"] == 1
+    assert payload["summary"]["sessions_with_branch_handoff"] == 2
+    assert payload["summary"]["sessions_with_active_workflows"] == 2
+
+    first = payload["sessions"][0]
+    assert first["session_id"] == "session-1"
+    assert first["title"] == "Atlas thread"
+    assert first["background_process_count"] == 1
+    assert first["running_background_process_count"] == 1
+    assert first["workflow_count"] == 1
+    assert first["lead_workflow_name"] == "repo-review"
+    assert first["continue_message"] == "Continue Atlas branch review."
+    assert first["branch_handoff_available"] is True
+    assert first["branch_handoff"]["target_type"] == "workflow_branch"
+    assert first["branch_handoff"]["workflow_name"] == "repo-review"
+    assert first["branch_handoff"]["artifact_paths"] == ["notes/branch-review.md"]
+    assert first["lead_process"]["process_id"] == "proc-1"
+    assert first["background_processes"][0]["session_id"] == "session-1"
+
+    second = payload["sessions"][1]
+    assert second["session_id"] == "session-2"
+    assert second["blocked_workflows"] == 1
+    assert second["branch_handoff"]["target_type"] == "workflow_run"
+    assert second["continue_message"] == "Resume cleanup after approval."
+
+
+@pytest.mark.asyncio
 async def test_operator_timeline_projects_routing_metadata(client):
     with (
         patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),

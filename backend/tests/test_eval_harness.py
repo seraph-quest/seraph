@@ -213,6 +213,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_composition_behavior" in captured.out
     assert "workflow_approval_threading_behavior" in captured.out
     assert "threaded_operator_timeline_behavior" in captured.out
+    assert "background_session_handoff_behavior" in captured.out
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "approval_explainability_surface_behavior" in captured.out
     assert "source_report_action_workflow_behavior" in captured.out
@@ -335,6 +336,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "workflow_composition_behavior",
                 "workflow_approval_threading_behavior",
                 "threaded_operator_timeline_behavior",
+                "background_session_handoff_behavior",
                 "workflow_boundary_blocked_surface_behavior",
                 "approval_explainability_surface_behavior",
                 "source_adapter_evidence_behavior",
@@ -1617,3 +1619,28 @@ def test_memory_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
     assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_missing_project_anchor"] is True
+
+
+def test_background_session_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "background_session_handoff_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["background_session_handoff_behavior"]
+    assert details["tracked_sessions"] is True
+    assert details["running_background_process_count"] is True
+    assert details["sessions_with_branch_handoff"] is True
+    assert details["lead_session_is_branch_thread"] is True
+    assert details["lead_session_has_running_process"] is True
+    assert details["lead_session_branch_handoff_available"] is True
+    assert details["lead_session_branch_target_type"] is True
+    assert details["lead_session_continue_message"] is True
+    assert details["lead_session_artifact_visible"] is True
+    assert details["blocked_session_continue_message"] is True
+    assert details["blocked_session_handoff_present"] is True

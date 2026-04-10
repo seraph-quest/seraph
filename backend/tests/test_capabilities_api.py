@@ -512,7 +512,7 @@ async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_i
                 "bundled": True,
                 "trust": "bundled",
                 "version": "2026.3.23",
-                "installed_version": "2026.4.10",
+                "installed_version": "2026.3.20",
                 "update_available": True,
                 "contribution_types": ["context_packs", "skills"],
                 "status": "ready",

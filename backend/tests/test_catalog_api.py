@@ -528,7 +528,7 @@ class TestCatalogAPI:
             "seraph-hermes-session-memory",
             "manifest.yaml",
         )
-        manifest_text = installed_manifest.read_text(encoding="utf-8").replace("version: 2026.3.23", "version: 2026.4.10")
+        manifest_text = installed_manifest.read_text(encoding="utf-8").replace("version: 2026.3.23", "version: 2026.3.20")
         installed_manifest.write_text(manifest_text, encoding="utf-8")
 
         update = await client.post("/api/catalog/install/seraph.hermes-session-memory")

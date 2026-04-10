@@ -127,7 +127,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.3.19",
+        version="2026.4.10",
         debug=settings.debug,
         lifespan=lifespan,
     )

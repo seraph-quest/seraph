@@ -17,7 +17,7 @@ def _write_node_pack(workspace):
         "display_name: OpenClaw Node\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"

@@ -3,7 +3,7 @@ version: 2026.3.23
 display_name: Hermes GitHub MCP
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: bundled

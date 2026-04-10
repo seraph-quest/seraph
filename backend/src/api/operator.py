@@ -1046,8 +1046,8 @@ def _continuity_operator_items(
 def _runtime_status_payload() -> dict[str, Any]:
     model = settings.default_model.strip()
     return {
-        "version": "2026.3.19",
-        "build_id": "SERAPH_PRIME_v2026.3.19",
+        "version": "2026.4.10",
+        "build_id": "SERAPH_PRIME_v2026.4.10",
         "provider": _runtime_provider_label(),
         "model": model,
         "model_label": _runtime_model_label(model),

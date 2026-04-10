@@ -278,7 +278,7 @@ def scaffold_extension_package(
     trust: str = "local",
     contributions: list[str] | None = None,
     version: str | None = None,
-    seraph_compatibility: str = ">=2026.3.19",
+    seraph_compatibility: str = ">=2026.4.10",
     publisher_name: str = "Seraph",
 ) -> ScaffoldedExtensionPackage:
     package_path = Path(package_root)

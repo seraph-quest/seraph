@@ -14,7 +14,7 @@ version: 2026.3.21
 display_name: Missing Files
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -33,7 +33,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -55,7 +55,7 @@ version: 2026.3.21
 display_name: Skill Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -84,7 +84,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.skill-pack"))
@@ -105,7 +105,7 @@ version: 2026.3.21
 display_name: Unreadable Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -125,7 +125,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.unreadable-pack"))
@@ -145,7 +145,7 @@ version: 2026.3.21
 display_name: Suspicious Skill Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -173,7 +173,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.suspicious-skill-pack"))
@@ -193,7 +193,7 @@ version: 2026.3.21
 display_name: Suspicious Workflow Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -225,7 +225,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.suspicious-workflow-pack"))
@@ -245,7 +245,7 @@ version: 2026.3.21
 display_name: Example Skill Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -273,7 +273,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.example-skill-pack"))
@@ -293,7 +293,7 @@ version: 2026.3.21
 display_name: Prompt Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -315,7 +315,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.prompt-pack"))
@@ -335,7 +335,7 @@ version: 2026.3.23
 display_name: Context Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -363,7 +363,7 @@ instructions: |
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.context-pack"))
@@ -383,7 +383,7 @@ version: 2026.3.23
 display_name: Toolset Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -408,7 +408,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.toolset-pack"))
@@ -429,7 +429,7 @@ version: 2026.3.23
 display_name: Toolset Network Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -451,7 +451,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.toolset-network-pack"))
@@ -472,7 +472,7 @@ version: 2026.3.23
 display_name: Browser Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -494,7 +494,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.browser-pack"))
@@ -515,7 +515,7 @@ version: 2026.3.21
 display_name: Workflow Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -551,7 +551,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.workflow-pack"))
@@ -572,7 +572,7 @@ version: 2026.3.21
 display_name: Networked Workflow Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -605,7 +605,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.networked-workflow-pack"))
@@ -628,7 +628,7 @@ version: 2026.3.21
 display_name: Connector Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -650,7 +650,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.connector-pack"))
@@ -671,7 +671,7 @@ version: 2026.3.21
 display_name: Invalid Connector Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -690,7 +690,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.invalid-connector-pack"))
@@ -710,7 +710,7 @@ version: 2026.3.21
 display_name: Missing MCP Fields
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -732,7 +732,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.missing-mcp-fields"))
@@ -753,7 +753,7 @@ version: 2026.3.21
 display_name: Unsupported MCP Transport
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -775,7 +775,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.unsupported-mcp-transport"))
@@ -796,7 +796,7 @@ version: 2026.3.21
 display_name: Bad Managed Connector
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -824,7 +824,7 @@ config_fields:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.bad-managed-connector"))
@@ -845,7 +845,7 @@ version: 2026.3.21
 display_name: Secret Managed Connector
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -875,7 +875,7 @@ config_fields:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.secret-managed-connector"))
@@ -896,7 +896,7 @@ version: 2026.3.21
 display_name: Bad Observer Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -920,7 +920,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.bad-observer-pack"))
@@ -941,7 +941,7 @@ version: 2026.3.21
 display_name: Calendar Observer Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -968,7 +968,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.calendar-observer-pack"))
@@ -989,7 +989,7 @@ version: 2026.3.21
 display_name: Bad Channel Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -1013,7 +1013,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     result = doctor_extension(registry.snapshot().get_extension("seraph.bad-channel-pack"))
@@ -1033,7 +1033,7 @@ version: 2026.3.21
 display_name: Bad
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -1049,7 +1049,7 @@ contributes:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     report = doctor_snapshot(registry.snapshot())

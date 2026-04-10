@@ -332,7 +332,7 @@ def _write_catalog_skill_package(root: str, item: dict[str, Any], source_path: s
         "version": "2026.3.21",
         "display_name": name,
         "kind": "capability-pack",
-        "compatibility": {"seraph": ">=2026.3.19"},
+        "compatibility": {"seraph": ">=2026.4.10"},
         "publisher": {"name": "Seraph Catalog"},
         "trust": "local",
         "contributes": {
@@ -365,7 +365,7 @@ def _write_catalog_mcp_package(root: str, item: dict[str, Any]) -> str:
             f"display_name: {name}",
             "kind: connector-pack",
             "compatibility:",
-            '  seraph: ">=2026.3.19"',
+            '  seraph: ">=2026.4.10"',
             "publisher:",
             "  name: Seraph Catalog",
             "trust: local",

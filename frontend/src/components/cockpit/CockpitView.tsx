@@ -156,6 +156,62 @@ interface OperatorControlPlane {
   };
 }
 
+interface OperatorGuardianStateSummary {
+  session_id?: string | null;
+  overall_confidence: string;
+  observer_confidence: string;
+  world_model_confidence: string;
+  memory_confidence: string;
+  current_session_confidence: string;
+  recent_sessions_confidence: string;
+  intent_uncertainty_level: string;
+  intent_resolution: string;
+  current_focus: string;
+  focus_source: string;
+  focus_alignment: string;
+  intervention_receptivity: string;
+  dominant_thread: string;
+  user_model_confidence: string;
+}
+
+interface OperatorGuardianStateExplanation {
+  judgment_proof_lines: string[];
+  intent_uncertainty_diagnostics: string[];
+  judgment_risks: string[];
+  corroboration_sources: string[];
+  preference_inference_diagnostics: string[];
+  learning_diagnostics: string[];
+  memory_provider_diagnostics: string[];
+  memory_reconciliation_diagnostics: string[];
+}
+
+interface OperatorGuardianStateGuidance {
+  active_projects: string[];
+  active_commitments: string[];
+  active_blockers: string[];
+  next_up: string[];
+  learning_guidance: string | null;
+  recent_execution_summary: string | null;
+}
+
+interface OperatorGuardianStateObserver {
+  user_state?: string | null;
+  interruption_mode?: string | null;
+  active_window?: string | null;
+  active_project?: string | null;
+  active_goals_summary?: string | null;
+  screen_context?: string | null;
+  data_quality?: string | null;
+  is_working_hours?: boolean | null;
+}
+
+interface OperatorGuardianState {
+  summary: OperatorGuardianStateSummary;
+  explanation: OperatorGuardianStateExplanation;
+  operator_guidance: OperatorGuardianStateGuidance;
+  observer: OperatorGuardianStateObserver;
+}
+
 interface WorkflowOrchestrationStepFocus {
   kind: string;
   step_id?: string | null;
@@ -1950,6 +2006,100 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
   };
 }
 
+function normalizeOperatorGuardianState(value: unknown): OperatorGuardianState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  const explanation = record.explanation;
+  const operatorGuidance = record.operator_guidance;
+  const observer = record.observer;
+  if (
+    !summary || typeof summary !== "object" || Array.isArray(summary)
+    || !explanation || typeof explanation !== "object" || Array.isArray(explanation)
+    || !operatorGuidance || typeof operatorGuidance !== "object" || Array.isArray(operatorGuidance)
+    || !observer || typeof observer !== "object" || Array.isArray(observer)
+  ) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const explanationRecord = explanation as Record<string, unknown>;
+  const guidanceRecord = operatorGuidance as Record<string, unknown>;
+  const observerRecord = observer as Record<string, unknown>;
+  return {
+    summary: {
+      session_id: typeof summaryRecord.session_id === "string" ? summaryRecord.session_id : null,
+      overall_confidence: typeof summaryRecord.overall_confidence === "string" ? summaryRecord.overall_confidence : "unknown",
+      observer_confidence: typeof summaryRecord.observer_confidence === "string" ? summaryRecord.observer_confidence : "unknown",
+      world_model_confidence: typeof summaryRecord.world_model_confidence === "string" ? summaryRecord.world_model_confidence : "unknown",
+      memory_confidence: typeof summaryRecord.memory_confidence === "string" ? summaryRecord.memory_confidence : "unknown",
+      current_session_confidence: typeof summaryRecord.current_session_confidence === "string" ? summaryRecord.current_session_confidence : "unknown",
+      recent_sessions_confidence: typeof summaryRecord.recent_sessions_confidence === "string" ? summaryRecord.recent_sessions_confidence : "unknown",
+      intent_uncertainty_level: typeof summaryRecord.intent_uncertainty_level === "string" ? summaryRecord.intent_uncertainty_level : "clear",
+      intent_resolution: typeof summaryRecord.intent_resolution === "string" ? summaryRecord.intent_resolution : "proceed",
+      current_focus: typeof summaryRecord.current_focus === "string" ? summaryRecord.current_focus : "No clear focus signal",
+      focus_source: typeof summaryRecord.focus_source === "string" ? summaryRecord.focus_source : "unknown",
+      focus_alignment: typeof summaryRecord.focus_alignment === "string" ? summaryRecord.focus_alignment : "unknown",
+      intervention_receptivity: typeof summaryRecord.intervention_receptivity === "string" ? summaryRecord.intervention_receptivity : "unknown",
+      dominant_thread: typeof summaryRecord.dominant_thread === "string" ? summaryRecord.dominant_thread : "No dominant thread",
+      user_model_confidence: typeof summaryRecord.user_model_confidence === "string" ? summaryRecord.user_model_confidence : "empty",
+    },
+    explanation: {
+      judgment_proof_lines: Array.isArray(explanationRecord.judgment_proof_lines)
+        ? explanationRecord.judgment_proof_lines.filter((item): item is string => typeof item === "string")
+        : [],
+      intent_uncertainty_diagnostics: Array.isArray(explanationRecord.intent_uncertainty_diagnostics)
+        ? explanationRecord.intent_uncertainty_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      judgment_risks: Array.isArray(explanationRecord.judgment_risks)
+        ? explanationRecord.judgment_risks.filter((item): item is string => typeof item === "string")
+        : [],
+      corroboration_sources: Array.isArray(explanationRecord.corroboration_sources)
+        ? explanationRecord.corroboration_sources.filter((item): item is string => typeof item === "string")
+        : [],
+      preference_inference_diagnostics: Array.isArray(explanationRecord.preference_inference_diagnostics)
+        ? explanationRecord.preference_inference_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      learning_diagnostics: Array.isArray(explanationRecord.learning_diagnostics)
+        ? explanationRecord.learning_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      memory_provider_diagnostics: Array.isArray(explanationRecord.memory_provider_diagnostics)
+        ? explanationRecord.memory_provider_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      memory_reconciliation_diagnostics: Array.isArray(explanationRecord.memory_reconciliation_diagnostics)
+        ? explanationRecord.memory_reconciliation_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+    },
+    operator_guidance: {
+      active_projects: Array.isArray(guidanceRecord.active_projects)
+        ? guidanceRecord.active_projects.filter((item): item is string => typeof item === "string")
+        : [],
+      active_commitments: Array.isArray(guidanceRecord.active_commitments)
+        ? guidanceRecord.active_commitments.filter((item): item is string => typeof item === "string")
+        : [],
+      active_blockers: Array.isArray(guidanceRecord.active_blockers)
+        ? guidanceRecord.active_blockers.filter((item): item is string => typeof item === "string")
+        : [],
+      next_up: Array.isArray(guidanceRecord.next_up)
+        ? guidanceRecord.next_up.filter((item): item is string => typeof item === "string")
+        : [],
+      learning_guidance: typeof guidanceRecord.learning_guidance === "string" ? guidanceRecord.learning_guidance : null,
+      recent_execution_summary: typeof guidanceRecord.recent_execution_summary === "string" ? guidanceRecord.recent_execution_summary : null,
+    },
+    observer: {
+      user_state: typeof observerRecord.user_state === "string" ? observerRecord.user_state : null,
+      interruption_mode: typeof observerRecord.interruption_mode === "string" ? observerRecord.interruption_mode : null,
+      active_window: typeof observerRecord.active_window === "string" ? observerRecord.active_window : null,
+      active_project: typeof observerRecord.active_project === "string" ? observerRecord.active_project : null,
+      active_goals_summary: typeof observerRecord.active_goals_summary === "string" ? observerRecord.active_goals_summary : null,
+      screen_context: typeof observerRecord.screen_context === "string" ? observerRecord.screen_context : null,
+      data_quality: typeof observerRecord.data_quality === "string" ? observerRecord.data_quality : null,
+      is_working_hours: typeof observerRecord.is_working_hours === "boolean" ? observerRecord.is_working_hours : null,
+    },
+  };
+}
+
 function normalizeOperatorBackgroundSessions(value: unknown): OperatorBackgroundSessions | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -3524,6 +3674,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
   const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
+  const [operatorGuardianState, setOperatorGuardianState] = useState<OperatorGuardianState | null>(null);
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
   const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
@@ -3703,6 +3854,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       extensionsResult,
       activityLedgerResult,
       controlPlaneResult,
+      guardianStateResult,
       workflowOrchestrationResult,
       backgroundSessionsResult,
       engineeringMemoryResult,
@@ -3722,6 +3874,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/control-plane`),
+      fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       fetchJson(`${API_URL}/api/operator/background-sessions`),
       fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
@@ -3784,6 +3937,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setExtensionPackages([]);
     }
     setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
     setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
     setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
@@ -9823,7 +9977,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <CockpitWorkspaceWindow
             panelId="guardian_state_pane"
             title="Guardian state"
-            meta={`${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`}
+            meta={
+              operatorGuardianState
+                ? `${operatorGuardianState.summary.overall_confidence} · ${operatorGuardianState.summary.intent_resolution.replace(/_/g, " ")}`
+                : `${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`
+            }
             hint={COCKPIT_WINDOW_HINTS.guardianState}
             showHint={cockpitHintsEnabled}
             minWidth={420}
@@ -9833,34 +9991,104 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-state-grid">
                 <div>
+                  <div className="cockpit-key">overall confidence</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.summary.overall_confidence ?? "pending"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">intent resolution</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState
+                      ? operatorGuardianState.summary.intent_resolution.replace(/_/g, " ")
+                      : "unknown"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">world confidence</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.summary.world_model_confidence ?? "unknown"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">user-model confidence</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.summary.user_model_confidence ?? "unknown"}
+                  </div>
+                </div>
+                <div>
                   <div className="cockpit-key">user state</div>
-                  <div className="cockpit-value">{observerState?.user_state ?? "unknown"}</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.observer.user_state ?? observerState?.user_state ?? "unknown"}
+                  </div>
                 </div>
                 <div>
                   <div className="cockpit-key">interrupt mode</div>
-                  <div className="cockpit-value">{observerState?.interruption_mode ?? "unknown"}</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.observer.interruption_mode ?? observerState?.interruption_mode ?? "unknown"}
+                  </div>
                 </div>
                 <div>
                   <div className="cockpit-key">active window</div>
-                  <div className="cockpit-value">{observerState?.active_window ?? "not observed"}</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.observer.active_window ?? observerState?.active_window ?? "not observed"}
+                  </div>
                 </div>
                 <div>
                   <div className="cockpit-key">work hours</div>
                   <div className="cockpit-value">
-                    {observerState?.is_working_hours ? "within window" : "outside window"}
+                    {(operatorGuardianState?.observer.is_working_hours ?? observerState?.is_working_hours)
+                      ? "within window"
+                      : "outside window"}
                   </div>
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">current focus</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.summary.current_focus ?? "No guardian focus synthesized yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">judgment proof</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.judgment_proof_lines.length
+                    ? operatorGuardianState.explanation.judgment_proof_lines.join(" • ")
+                    : "No explicit proof lines surfaced yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">judgment risks</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.judgment_risks.length
+                    ? operatorGuardianState.explanation.judgment_risks.join(" • ")
+                    : "No elevated judgment risks."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">next up</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.operator_guidance.next_up.length
+                    ? operatorGuardianState.operator_guidance.next_up.join(" • ")
+                    : "No immediate next step surfaced."}
                 </div>
               </div>
               <div className="cockpit-context-block">
                 <div className="cockpit-key">screen context</div>
                 <div className="cockpit-value cockpit-value--multiline">
-                  {observerState?.screen_context ?? "No screen context ingested yet."}
+                  {operatorGuardianState?.observer.screen_context ?? observerState?.screen_context ?? "No screen context ingested yet."}
                 </div>
               </div>
               <div className="cockpit-context-block">
                 <div className="cockpit-key">active goals</div>
                 <div className="cockpit-value cockpit-value--multiline">
-                  {observerState?.active_goals_summary ?? "Goal summary unavailable."}
+                  {operatorGuardianState?.observer.active_goals_summary ?? observerState?.active_goals_summary ?? "Goal summary unavailable."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">learning guidance</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.operator_guidance.learning_guidance ?? "No explicit learning guidance yet."}
                 </div>
               </div>
               <div className="cockpit-context-block">

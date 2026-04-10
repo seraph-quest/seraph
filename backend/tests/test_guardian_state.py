@@ -1615,6 +1615,148 @@ def test_build_guardian_world_model_lowers_receptivity_on_multi_day_negative_tre
     assert model.intervention_receptivity == "medium"
 
 
+def test_build_guardian_world_model_surfaces_user_model_preference_inference():
+    observer_context = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Protect Atlas focus time",
+        active_project="Atlas",
+        active_window="Calendar",
+        screen_context="Heads-down Atlas launch work",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="high",
+        salience_reason="active_goals",
+        interruption_cost="high",
+        user_state="deep_work",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=observer_context,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="",
+        recent_intervention_feedback="",
+        active_projects=("Atlas",),
+        memory_buckets={
+            "preference": ("Prefers concise updates during Atlas launch work.",),
+            "procedural": (
+                "For advisory interventions, avoid direct interruption during deep-work windows.",
+                "For advisory interventions, prefer async native continuation when the user is blocked.",
+                "For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately.",
+            ),
+        },
+        learning_signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="reduce_interruptions",
+            phrasing_bias="be_brief_and_literal",
+            cadence_bias="bundle_more",
+            channel_bias="prefer_native_notification",
+            escalation_bias="prefer_async_native",
+            timing_bias="avoid_focus_windows",
+            blocked_state_bias="prefer_async_for_blocked_state",
+            suppression_bias="extend_suppression",
+            thread_preference_bias="prefer_existing_thread",
+            blocked_direct_failure_count=2,
+            blocked_native_success_count=1,
+            available_direct_success_count=0,
+        ),
+    )
+
+    assert model.user_model_confidence == "grounded"
+    assert (
+        "Interruption preference: prefer async or bundled follow-through when urgency is not high."
+        in model.user_model_signals
+    )
+    assert "Communication preference: prefer brief, literal wording." in model.user_model_signals
+    assert "Thread preference: prefer existing-thread continuation for follow-up." in model.user_model_signals
+    assert (
+        "Cadence preference: slower bundled follow-through is safer than rapid re-interruption."
+        in model.user_model_signals
+    )
+    assert any(
+        "Interruption preference inferred from procedural guidance, live learning, observer state."
+        == item
+        for item in model.preference_inference_diagnostics
+    )
+    assert any(
+        "User-model evidence sources: live learning, observer state, preference memory, procedural guidance."
+        == item
+        for item in model.preference_inference_diagnostics
+    )
+    prompt = model.to_prompt_block()
+    assert "User-model confidence: grounded" in prompt
+    assert "User-model signals:" in prompt
+    assert "Preference inference diagnostics:" in prompt
+
+
+def test_build_guardian_world_model_marks_split_user_model_preference_evidence():
+    observer_context = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Check Atlas launch readiness",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas launch notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        user_state="available",
+    )
+
+    model = build_guardian_world_model(
+        observer_context=observer_context,
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="",
+        recent_intervention_feedback="",
+        active_projects=("Atlas",),
+        memory_buckets={
+            "procedural": (
+                "For advisory interventions, avoid direct interruption during deep-work windows.",
+            ),
+        },
+        learning_signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="be_more_direct",
+            cadence_bias="check_in_sooner",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="resume_faster",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        ),
+    )
+
+    assert model.user_model_confidence == "partial"
+    assert (
+        "Interruption preference evidence is split between guarded_async, direct_when_available."
+        in model.preference_inference_diagnostics
+    )
+    assert any(
+        item.startswith("Communication preference inferred from ")
+        for item in model.preference_inference_diagnostics
+    )
+    assert "Communication preference: prefer direct phrasing over softer framing." in model.user_model_signals
+
+
 def test_build_guardian_world_model_ignores_unrelated_obligation_watchpoints():
     observer_context = CurrentContext(
         time_of_day="morning",

@@ -41,6 +41,9 @@ class GuardianWorldModel:
     routine_watchpoints: tuple[str, ...] = ()
     collaborator_watchpoints: tuple[str, ...] = ()
     corroboration_sources: tuple[str, ...] = ()
+    user_model_confidence: str = "empty"
+    user_model_signals: tuple[str, ...] = ()
+    preference_inference_diagnostics: tuple[str, ...] = ()
     project_ranking_diagnostics: tuple[str, ...] = ()
     stale_signal_arbitration: tuple[str, ...] = ()
     judgment_risks: tuple[str, ...] = ()
@@ -52,6 +55,14 @@ class GuardianWorldModel:
             f"Focus alignment: {self.focus_alignment}",
             f"Intervention receptivity: {self.intervention_receptivity}",
         ]
+        if self.user_model_confidence != "empty" or self.user_model_signals:
+            lines.append(f"User-model confidence: {self.user_model_confidence}")
+        if self.user_model_signals:
+            lines.append("User-model signals:")
+            lines.extend(f"- {item}" for item in self.user_model_signals)
+        if self.preference_inference_diagnostics:
+            lines.append("Preference inference diagnostics:")
+            lines.extend(f"- {item}" for item in self.preference_inference_diagnostics)
         if self.corroboration_sources:
             lines.append(f"Corroboration sources: {', '.join(self.corroboration_sources)}")
         if self.project_ranking_diagnostics:
@@ -255,6 +266,215 @@ def _shares_topic_token(candidate: str, topic: str | None) -> bool:
     if not candidate_tokens or not topic_tokens:
         return False
     return bool(candidate_tokens & topic_tokens)
+
+
+def _contains_any_phrase(items: list[str], phrases: tuple[str, ...]) -> bool:
+    for item in items:
+        normalized = _normalize_topic(item)
+        if any(phrase in normalized for phrase in phrases):
+            return True
+    return False
+
+
+def _format_sources(sources: list[str]) -> str:
+    ordered = list(_dedupe(sources))
+    return ", ".join(ordered)
+
+
+def _infer_user_model(
+    *,
+    observer_context: CurrentContext,
+    preference_constraints: list[str],
+    procedural_constraints: list[str],
+    learning_signal: GuardianLearningSignal | None,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    diagnostics: list[str] = []
+    signals: list[str] = []
+    source_labels: set[str] = set()
+    durable_constraints = list(_dedupe(preference_constraints + procedural_constraints))
+
+    interruption_votes: list[tuple[str, str]] = []
+    communication_votes: list[tuple[str, str]] = []
+    thread_votes: list[tuple[str, str]] = []
+    cadence_votes: list[tuple[str, str]] = []
+
+    if preference_constraints:
+        source_labels.add("preference_memory")
+    if procedural_constraints:
+        source_labels.add("procedural_guidance")
+
+    if _contains_any_phrase(
+        durable_constraints,
+        (
+            "avoid direct interruption",
+            "prefer async native",
+            "bundle lower urgency",
+            "bundle lower urgency check ins",
+            "blocked",
+            "focus windows",
+            "quiet periods",
+        ),
+    ):
+        interruption_votes.append(("guarded_async", "procedural_guidance"))
+    if _contains_any_phrase(
+        durable_constraints,
+        (
+            "brief",
+            "literal",
+            "concise",
+        ),
+    ):
+        communication_votes.append(("brief_literal", "preference_memory"))
+    if _contains_any_phrase(
+        durable_constraints,
+        (
+            "direct wording",
+            "be more direct",
+        ),
+    ):
+        communication_votes.append(("direct", "procedural_guidance"))
+    if _contains_any_phrase(
+        durable_constraints,
+        (
+            "existing thread",
+            "same thread",
+        ),
+    ):
+        thread_votes.append(("prefer_existing_thread", "procedural_guidance"))
+    if _contains_any_phrase(
+        durable_constraints,
+        (
+            "clean thread",
+            "explicit reset",
+        ),
+    ):
+        thread_votes.append(("prefer_clean_thread", "procedural_guidance"))
+    if _contains_any_phrase(
+        durable_constraints,
+        (
+            "bundle lower urgency",
+            "quiet periods",
+            "interrupting immediately",
+        ),
+    ):
+        cadence_votes.append(("bundle_more", "procedural_guidance"))
+
+    if learning_signal is not None:
+        if any(
+            (
+                learning_signal.bias != "neutral",
+                learning_signal.phrasing_bias != "neutral",
+                learning_signal.cadence_bias != "neutral",
+                learning_signal.channel_bias != "neutral",
+                learning_signal.escalation_bias != "neutral",
+                learning_signal.timing_bias != "neutral",
+                learning_signal.blocked_state_bias != "neutral",
+                learning_signal.suppression_bias != "neutral",
+                learning_signal.thread_preference_bias != "neutral",
+            )
+        ):
+            source_labels.add("live_learning")
+        if (
+            learning_signal.bias == "reduce_interruptions"
+            or learning_signal.channel_bias == "prefer_native_notification"
+            or learning_signal.escalation_bias == "prefer_async_native"
+            or learning_signal.timing_bias == "avoid_focus_windows"
+            or learning_signal.blocked_state_bias in {
+                "avoid_blocked_state_interruptions",
+                "prefer_async_for_blocked_state",
+            }
+        ):
+            interruption_votes.append(("guarded_async", "live_learning"))
+        if (
+            learning_signal.bias == "prefer_direct_delivery"
+            or learning_signal.timing_bias == "prefer_available_windows"
+        ):
+            interruption_votes.append(("direct_when_available", "live_learning"))
+        if learning_signal.phrasing_bias == "be_brief_and_literal":
+            communication_votes.append(("brief_literal", "live_learning"))
+        elif learning_signal.phrasing_bias == "be_more_direct":
+            communication_votes.append(("direct", "live_learning"))
+        if learning_signal.thread_preference_bias == "prefer_existing_thread":
+            thread_votes.append(("prefer_existing_thread", "live_learning"))
+        elif learning_signal.thread_preference_bias == "prefer_clean_thread":
+            thread_votes.append(("prefer_clean_thread", "live_learning"))
+        if learning_signal.cadence_bias == "bundle_more" or learning_signal.suppression_bias == "extend_suppression":
+            cadence_votes.append(("bundle_more", "live_learning"))
+        elif learning_signal.cadence_bias == "check_in_sooner" or learning_signal.suppression_bias == "resume_faster":
+            cadence_votes.append(("resume_faster", "live_learning"))
+
+    if observer_context.user_state in {"deep_work", "in_meeting", "away"} or observer_context.interruption_mode == "focus":
+        source_labels.add("observer_state")
+        interruption_votes.append(("guarded_async", "observer_state"))
+
+    def _resolve_votes(
+        *,
+        label: str,
+        votes: list[tuple[str, str]],
+        signal_map: dict[str, str],
+    ) -> None:
+        if not votes:
+            return
+        unique_values = list(_dedupe([value for value, _ in votes]))
+        vote_sources = [source for _, source in votes]
+        if len(unique_values) > 1:
+            diagnostics.append(
+                f"{label} evidence is split between {', '.join(unique_values)}."
+            )
+            return
+        value = unique_values[0]
+        rendered = signal_map.get(value)
+        if not rendered:
+            return
+        signals.append(rendered)
+        diagnostics.append(
+            f"{label} inferred from {_format_sources(vote_sources).replace('_', ' ')}."
+        )
+
+    _resolve_votes(
+        label="Interruption preference",
+        votes=interruption_votes,
+        signal_map={
+            "guarded_async": "Interruption preference: prefer async or bundled follow-through when urgency is not high.",
+            "direct_when_available": "Interruption preference: direct delivery is acceptable when the user is explicitly available.",
+        },
+    )
+    _resolve_votes(
+        label="Communication preference",
+        votes=communication_votes,
+        signal_map={
+            "brief_literal": "Communication preference: prefer brief, literal wording.",
+            "direct": "Communication preference: prefer direct phrasing over softer framing.",
+        },
+    )
+    _resolve_votes(
+        label="Thread preference",
+        votes=thread_votes,
+        signal_map={
+            "prefer_existing_thread": "Thread preference: prefer existing-thread continuation for follow-up.",
+            "prefer_clean_thread": "Thread preference: prefer a clean thread after repeated failures.",
+        },
+    )
+    _resolve_votes(
+        label="Cadence preference",
+        votes=cadence_votes,
+        signal_map={
+            "bundle_more": "Cadence preference: slower bundled follow-through is safer than rapid re-interruption.",
+            "resume_faster": "Cadence preference: aligned follow-up can resume sooner after good outcomes.",
+        },
+    )
+
+    if not signals and not diagnostics:
+        return "empty", (), ()
+
+    grounded_sources = len(source_labels) >= 2
+    has_conflict = any("is split between" in item for item in diagnostics)
+    confidence = "grounded" if grounded_sources and signals and not has_conflict else "partial"
+    if source_labels:
+        diagnostics.append(
+            f"User-model evidence sources: {_format_sources(sorted(source_labels)).replace('_', ' ')}."
+        )
+    return confidence, _dedupe(signals), _dedupe(diagnostics)
 
 
 @dataclass(frozen=True)
@@ -1197,6 +1417,12 @@ def build_guardian_world_model(
         stale_recent_threads=stale_anchor_threads_for_arbitration,
         distinct_ranked_projects=distinct_ranked_projects,
     )
+    user_model_confidence, user_model_signals, preference_inference_diagnostics = _infer_user_model(
+        observer_context=observer_context,
+        preference_constraints=preference_constraints,
+        procedural_constraints=procedural_constraints,
+        learning_signal=learning_signal,
+    )
 
     return GuardianWorldModel(
         current_focus=current_focus,
@@ -1228,6 +1454,9 @@ def build_guardian_world_model(
         routine_watchpoints=routine_watchpoints,
         collaborator_watchpoints=collaborator_watchpoints,
         corroboration_sources=_dedupe(corroboration_sources),
+        user_model_confidence=user_model_confidence,
+        user_model_signals=user_model_signals,
+        preference_inference_diagnostics=preference_inference_diagnostics,
         project_ranking_diagnostics=project_ranking_diagnostics,
         stale_signal_arbitration=stale_signal_arbitration,
         judgment_risks=_dedupe(judgment_risks),

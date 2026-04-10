@@ -4957,6 +4957,11 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "focus_source": state.world_model.focus_source,
             "focus_alignment": state.world_model.focus_alignment,
             "intervention_receptivity": state.world_model.intervention_receptivity,
+            "user_model_confidence": state.world_model.user_model_confidence,
+            "user_model_signal_count": len(state.world_model.user_model_signals),
+            "preference_inference_diagnostics_count": len(
+                state.world_model.preference_inference_diagnostics
+            ),
             "project_ranking_diagnostics_count": len(state.world_model.project_ranking_diagnostics),
             "stale_signal_arbitration_count": len(state.world_model.stale_signal_arbitration),
             "active_blockers": list(state.world_model.active_blockers),
@@ -4990,6 +4995,14 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             "includes_project_ranking_diagnostics": any(
                 "Investor brief: score=" in item
                 for item in state.world_model.project_ranking_diagnostics
+            ),
+            "has_guarded_async_user_model_signal": any(
+                "prefer async or bundled follow-through" in item
+                for item in state.world_model.user_model_signals
+            ),
+            "has_brief_literal_user_model_signal": any(
+                "prefer brief, literal wording" in item
+                for item in state.world_model.user_model_signals
             ),
             "agent_instructions_include_world_model": "World model:" in instructions,
             "agent_instructions_include_focus": "Current focus: Prepare investor brief while in Arc" in instructions,
@@ -5274,6 +5287,16 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "has_live_override_diagnostic": any(
             "Fresh live outcomes are overruling older procedural guidance" in item
             for item in state.learning_diagnostics
+        ),
+        "user_model_confidence": state.world_model.user_model_confidence,
+        "user_model_signal_count": len(state.world_model.user_model_signals),
+        "has_user_model_signal": any(
+            "preference:" in item.lower()
+            for item in state.world_model.user_model_signals
+        ),
+        "has_user_model_sources_diagnostic": any(
+            item.startswith("User-model evidence sources:")
+            for item in state.world_model.preference_inference_diagnostics
         ),
         "decision_action": decision.action.value,
         "decision_reason": decision.reason,

@@ -563,6 +563,11 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_world_model_behavior"]["includes_follow_through_risk"] is True
     assert details_by_name["guardian_world_model_behavior"]["project_ranking_diagnostics_count"] >= 1
     assert details_by_name["guardian_world_model_behavior"]["includes_project_ranking_diagnostics"] is True
+    assert details_by_name["guardian_world_model_behavior"]["user_model_confidence"] == "grounded"
+    assert details_by_name["guardian_world_model_behavior"]["user_model_signal_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["preference_inference_diagnostics_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["has_guarded_async_user_model_signal"] is True
+    assert details_by_name["guardian_world_model_behavior"]["has_brief_literal_user_model_signal"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_learning_diagnostics"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
@@ -589,6 +594,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_judgment_behavior"]["includes_conservative_ambiguity_guardrail"] is True
     assert details_by_name["guardian_judgment_behavior"]["has_learning_conflict_diagnostic"] is True
     assert details_by_name["guardian_judgment_behavior"]["has_live_override_diagnostic"] is True
+    assert details_by_name["guardian_judgment_behavior"]["user_model_confidence"] == "grounded"
+    assert details_by_name["guardian_judgment_behavior"]["user_model_signal_count"] >= 2
+    assert details_by_name["guardian_judgment_behavior"]["has_user_model_signal"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_user_model_sources_diagnostic"] is True
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3

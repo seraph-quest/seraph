@@ -2956,67 +2956,64 @@ def _eval_shell_tool_timeout_contract() -> dict[str, Any]:
 
 async def _eval_process_recovery_boundary_behavior() -> dict[str, Any]:
     process_runtime_manager.reset_for_tests()
-    script_path: str | None = None
     process_id: str | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            suffix="_process_scope_eval.py",
-            dir=settings.workspace_dir,
-            encoding="utf-8",
-            delete=False,
-        ) as handle:
-            handle.write("import time\nprint('scoped-ready', flush=True)\ntime.sleep(30)\n")
-            script_path = handle.name
+        with tempfile.TemporaryDirectory(prefix="seraph-process-scope-") as tmpdir:
+            script_path = os.path.join(tmpdir, "process_scope_eval.py")
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write("import time\nprint('scoped-ready', flush=True)\ntime.sleep(30)\n")
 
-        owner_tokens = set_runtime_context("owner-session", "high_risk")
-        try:
-            started = start_process(command="python3", args_json=json.dumps([os.path.basename(script_path)]))
-            process_id = started.split("process=")[1].split(",")[0]
-            owner_payloads = process_runtime_manager.list_processes()
-        finally:
-            reset_runtime_context(owner_tokens)
+            with patch.object(settings, "workspace_dir", tmpdir):
+                owner_tokens = set_runtime_context("owner-session", "high_risk")
+                try:
+                    started = start_process(
+                        command="python3",
+                        args_json=json.dumps([os.path.basename(script_path)]),
+                    )
+                    process_id = started.split("process=")[1].split(",")[0]
+                    owner_payloads = process_runtime_manager.list_processes()
+                finally:
+                    reset_runtime_context(owner_tokens)
 
-        other_tokens = set_runtime_context("other-session", "high_risk")
-        try:
-            other_list = list_processes()
-            other_read = read_process_output(process_id=process_id)
-            other_stop = stop_process(process_id=process_id)
-        finally:
-            reset_runtime_context(other_tokens)
+                other_tokens = set_runtime_context("other-session", "high_risk")
+                try:
+                    other_list = list_processes()
+                    other_read = read_process_output(process_id=process_id)
+                    other_stop = stop_process(process_id=process_id)
+                finally:
+                    reset_runtime_context(other_tokens)
 
-        owner_tokens = set_runtime_context("owner-session", "high_risk")
-        try:
-            owner_list = ""
-            owner_output = ""
-            for _ in range(20):
-                owner_list = list_processes()
-                owner_output = read_process_output(process_id=process_id)
-                if process_id in owner_list and "scoped-ready" in owner_output:
-                    break
-                await asyncio.sleep(0.05)
-            owner_stop = stop_process(process_id=process_id)
-        finally:
-            reset_runtime_context(owner_tokens)
+                owner_tokens = set_runtime_context("owner-session", "high_risk")
+                try:
+                    owner_list = ""
+                    owner_output = ""
+                    for _ in range(20):
+                        owner_list = list_processes()
+                        owner_output = read_process_output(process_id=process_id)
+                        if process_id in owner_list and "scoped-ready" in owner_output:
+                            break
+                        await asyncio.sleep(0.05)
+                    owner_stop = stop_process(process_id=process_id)
+                finally:
+                    reset_runtime_context(owner_tokens)
 
-        owner_payload = next(payload for payload in owner_payloads if payload["process_id"] == process_id)
-        return {
-            "process_id": process_id,
-            "session_scoped": owner_payload["session_scoped"],
-            "output_path_within_workspace": owner_payload["output_path"].startswith(str(settings.workspace_dir)),
-            "output_path_under_runtime_tmp": "/seraph_runtime/" in owner_payload["output_path"],
-            "owner_list_includes_process": process_id in owner_list,
-            "owner_output_visible": "scoped-ready" in owner_output,
-            "owner_stop_succeeds": f"Stopped process '{process_id}'" in owner_stop,
-            "other_list_hidden": process_id not in other_list,
-            "other_read_hidden": other_read == f"Error: Process '{process_id}' was not found.",
-            "other_stop_hidden": other_stop == f"Error: Process '{process_id}' was not found.",
-        }
+                owner_payload = next(
+                    payload for payload in owner_payloads if payload["process_id"] == process_id
+                )
+                return {
+                    "process_id": process_id,
+                    "session_scoped": owner_payload["session_scoped"],
+                    "output_path_within_workspace": owner_payload["output_path"].startswith(tmpdir),
+                    "output_path_under_runtime_tmp": "/seraph_runtime/" in owner_payload["output_path"],
+                    "owner_list_includes_process": process_id in owner_list,
+                    "owner_output_visible": "scoped-ready" in owner_output,
+                    "owner_stop_succeeds": f"Stopped process '{process_id}'" in owner_stop,
+                    "other_list_hidden": process_id not in other_list,
+                    "other_read_hidden": other_read == f"Error: Process '{process_id}' was not found.",
+                    "other_stop_hidden": other_stop == f"Error: Process '{process_id}' was not found.",
+                }
     finally:
         process_runtime_manager.reset_for_tests()
-        if script_path:
-            with suppress(FileNotFoundError):
-                os.unlink(script_path)
 
 
 async def _eval_shell_tool_runtime_audit() -> dict[str, Any]:
@@ -4508,6 +4505,7 @@ async def _eval_memory_reconciliation_policy_behavior() -> dict[str, Any]:
     from src.db.models import MemoryEdgeType
     from src.memory.procedural_guidance import ProceduralMemoryGuidance
     from src.memory.retrieval_planner import MemoryRetrievalPlanResult
+    from src.memory.retrieval_planner import MemoryRetrievalPlanResult
 
     async with _patched_async_db(
         "src.agent.session.get_session",
@@ -5104,6 +5102,7 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         ordered_learning_axes,
     )
     from src.memory.procedural_guidance import ProceduralMemoryGuidance
+    from src.memory.retrieval_planner import MemoryRetrievalPlanResult
 
     live_axis_evidence: list[GuardianLearningAxisEvidence] = []
     live_scope_decisions: list[GuardianLearningScopeDecision] = []
@@ -5343,6 +5342,107 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
                 user_message="Can you finish this today?",
             )
 
+        split_preference_ctx = CurrentContext(
+            time_of_day="morning",
+            day_of_week="Monday",
+            is_working_hours=True,
+            active_goals_summary="Support Atlas launch",
+            active_project="Atlas",
+            active_window="VS Code",
+            screen_context="Reviewing Atlas release notes",
+            data_quality="good",
+            observer_confidence="partial",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="medium",
+            interruption_mode="normal",
+        )
+        split_preference_signal = GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="be_more_direct",
+            cadence_bias="check_in_sooner",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="resume_faster",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        )
+        split_preference_resolution = ScopedGuardianLearningResolution(
+            effective_signal=split_preference_signal,
+            dominant_scope="thread_project",
+            decisions=tuple(),
+        )
+        split_preference_procedural_guidance = ProceduralMemoryGuidance(
+            intervention_type="advisory",
+            timing_bias="neutral",
+            lesson_types=("timing",),
+            axis_evidence=tuple(),
+        )
+        split_preference_retrieval = MemoryRetrievalPlanResult(
+            semantic_context="",
+            episodic_context="",
+            memory_buckets={
+                "procedural": (
+                    "For advisory interventions, avoid direct interruption during deep-work windows.",
+                ),
+            },
+            degraded=False,
+            lane="semantic",
+        )
+        split_preference_arbitration = MagicMock(
+            effective_signal=split_preference_signal,
+            decisions=tuple(),
+        )
+        split_preference_arbitration.conflicting_decisions.return_value = []
+        split_preference_arbitration.procedural_override_conflicts.return_value = []
+        split_preference_arbitration.live_override_conflicts.return_value = []
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=split_preference_ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.plan_memory_retrieval",
+                AsyncMock(return_value=split_preference_retrieval),
+            ),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(return_value=split_preference_resolution),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+                AsyncMock(return_value=""),
+            ),
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(return_value=split_preference_procedural_guidance),
+            ),
+            patch(
+                "src.guardian.learning_arbitration.arbitrate_learning_signal",
+                return_value=split_preference_arbitration,
+            ),
+        ):
+            split_preference_state = await build_guardian_state(
+                session_id="current",
+                user_message="Should I nudge the Atlas owner now?",
+            )
+
         decision = decide_intervention(
             message_type="proactive",
             intervention_type="advisory",
@@ -5433,6 +5533,27 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         ),
         "ambiguous_request_prompt_includes_intent_uncertainty": (
             "Intent uncertainty:" in ambiguous_state.to_prompt_block()
+        ),
+        "judgment_proof_count": len(state.judgment_proof_lines),
+        "has_project_target_proof": any(
+            item.startswith("Project-target proof:")
+            for item in state.judgment_proof_lines
+        ),
+        "has_referent_proof": any(
+            item.startswith("Referent proof:")
+            for item in ambiguous_state.judgment_proof_lines
+        ),
+        "prompt_includes_judgment_proof": "Judgment proof:" in ambiguous_state.to_prompt_block(),
+        "split_preference_has_interaction_style_proof": any(
+            item.startswith("Interaction-style proof:")
+            for item in split_preference_state.judgment_proof_lines
+        ),
+        "split_preference_has_observer_proof": any(
+            item.startswith("Observer proof:")
+            for item in split_preference_state.judgment_proof_lines
+        ),
+        "split_preference_prompt_includes_judgment_proof": (
+            "Judgment proof:" in split_preference_state.to_prompt_block()
         ),
         "decision_action": decision.action.value,
         "decision_reason": decision.reason,

@@ -618,6 +618,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
         details_by_name["guardian_judgment_behavior"]["ambiguous_request_prompt_includes_intent_uncertainty"]
         is True
     )
+    assert details_by_name["guardian_judgment_behavior"]["judgment_proof_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["has_project_target_proof"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_referent_proof"] is True
+    assert details_by_name["guardian_judgment_behavior"]["prompt_includes_judgment_proof"] is True
+    assert (
+        details_by_name["guardian_judgment_behavior"]["split_preference_has_interaction_style_proof"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["split_preference_has_observer_proof"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["split_preference_prompt_includes_judgment_proof"]
+        is True
+    )
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3

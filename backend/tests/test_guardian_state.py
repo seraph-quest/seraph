@@ -3210,10 +3210,19 @@ async def test_build_guardian_state_marks_ambiguous_project_request_for_clarific
         "project anchor" in item.lower() or "project-anchor" in item.lower()
         for item in state.intent_uncertainty_diagnostics
     )
+    assert any(
+        "project-target proof:" in item.lower()
+        for item in state.judgment_proof_lines
+    )
+    assert any(
+        "referent proof:" in item.lower()
+        for item in state.judgment_proof_lines
+    )
     assert (
         "Intent uncertainty: high (recommended resolution: clarify)"
         in state.to_prompt_block()
     )
+    assert "Judgment proof:" in state.to_prompt_block()
 
 
 @pytest.mark.asyncio
@@ -3332,6 +3341,14 @@ async def test_build_guardian_state_marks_split_preference_evidence_as_caution(a
     assert any(
         "observer confidence is partial" in item.lower()
         for item in state.intent_uncertainty_diagnostics
+    )
+    assert any(
+        "interaction-style proof:" in item.lower()
+        for item in state.judgment_proof_lines
+    )
+    assert any(
+        "observer proof:" in item.lower()
+        for item in state.judgment_proof_lines
     )
     assert (
         "Intent uncertainty: medium (recommended resolution: proceed_with_caution)"

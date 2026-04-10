@@ -28,6 +28,7 @@ from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
+from src.tools.process_tools import process_runtime_manager
 
 router = APIRouter()
 
@@ -469,6 +470,177 @@ def _workflow_orchestration_sessions(
     )[:limit]
 
 
+def _background_session_priority(entry: dict[str, Any]) -> tuple[int, int, int, int, datetime]:
+    return (
+        int(entry.get("running_background_process_count") or 0),
+        int(entry.get("active_workflows") or 0),
+        int(entry.get("blocked_workflows") or 0),
+        int(entry.get("branch_handoff_available") or 0),
+        _parse_iso(str(entry.get("latest_updated_at") or "")),
+    )
+
+
+def _background_process_preview(processes: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    preview: list[dict[str, Any]] = []
+    for process in processes[:limit]:
+        preview.append({
+            "process_id": process.get("process_id"),
+            "pid": process.get("pid"),
+            "command": process.get("command"),
+            "args": process.get("args") if isinstance(process.get("args"), list) else [],
+            "cwd": process.get("cwd"),
+            "status": process.get("status"),
+            "exit_code": process.get("exit_code"),
+            "started_at": process.get("started_at"),
+            "session_id": process.get("session_id"),
+        })
+    return preview
+
+
+def _background_handoff_bundle(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    branch_candidates = [
+        run
+        for run in runs
+        if isinstance(run, dict)
+        and (
+            run.get("branch_kind") is not None
+            or run.get("parent_run_identity") is not None
+            or run.get("retry_from_step_draft")
+            or run.get("thread_continue_message")
+        )
+    ]
+    if not branch_candidates:
+        return {
+            "available": False,
+            "target_type": "none",
+            "continue_message": None,
+            "workflow_name": None,
+            "run_identity": None,
+            "branch_kind": None,
+            "branch_depth": 0,
+            "artifact_paths": [],
+            "resume_checkpoint_label": None,
+            "summary": None,
+        }
+
+    selected = sorted(
+        branch_candidates,
+        key=lambda run: _workflow_orchestration_priority(run),
+        reverse=True,
+    )[0]
+    return {
+        "available": True,
+        "target_type": (
+            "workflow_branch"
+            if selected.get("branch_kind") is not None or selected.get("parent_run_identity") is not None
+            else "workflow_run"
+        ),
+        "continue_message": workflow_surface_continue_message(selected),
+        "workflow_name": selected.get("workflow_name"),
+        "run_identity": selected.get("run_identity"),
+        "branch_kind": selected.get("branch_kind"),
+        "branch_depth": int(selected.get("branch_depth") or 0),
+        "artifact_paths": (
+            list(selected.get("artifact_paths"))
+            if isinstance(selected.get("artifact_paths"), list)
+            else []
+        ),
+        "resume_checkpoint_label": workflow_surface_resume_metadata(selected).get("resume_checkpoint_label"),
+        "summary": selected.get("summary"),
+    }
+
+
+def _background_session_entries(
+    sessions: list[dict[str, Any]],
+    workflow_runs: list[dict[str, Any]],
+    process_payloads: list[dict[str, Any]],
+    *,
+    limit_sessions: int,
+    limit_processes: int,
+) -> list[dict[str, Any]]:
+    session_index = {
+        str(session["id"]): session
+        for session in sessions
+        if isinstance(session, dict) and isinstance(session.get("id"), str)
+    }
+    workflow_by_session: dict[str, list[dict[str, Any]]] = {}
+    for run in workflow_runs:
+        session_id = run.get("thread_id")
+        if isinstance(session_id, str):
+            workflow_by_session.setdefault(session_id, []).append(run)
+
+    process_by_session: dict[str, list[dict[str, Any]]] = {}
+    for process in process_payloads:
+        session_id = process.get("session_id")
+        if isinstance(session_id, str):
+            process_by_session.setdefault(session_id, []).append(process)
+
+    relevant_session_ids = sorted(set(workflow_by_session) | set(process_by_session))
+    entries: list[dict[str, Any]] = []
+    for session_id in relevant_session_ids:
+        runs = workflow_by_session.get(session_id, [])
+        processes = process_by_session.get(session_id, [])
+        session = session_index.get(session_id, {})
+        lead_run = (
+            sorted(runs, key=lambda run: _workflow_orchestration_priority(run), reverse=True)[0]
+            if runs
+            else None
+        )
+        latest_updated_at = max(
+            [
+                _parse_iso(str(session.get("updated_at") or "")),
+                *[_parse_iso(str(run.get("updated_at") or run.get("started_at") or "")) for run in runs],
+                *[_parse_iso(str(process.get("started_at") or "")) for process in processes],
+            ]
+        ).isoformat()
+        branch_handoff = _background_handoff_bundle(runs)
+        active_workflows = sum(
+            1 for run in runs if not _workflow_terminal_status(str(run.get("status") or ""))
+        )
+        blocked_workflows = sum(
+            1 for run in runs if str(run.get("availability") or "") == "blocked"
+        )
+        running_background_process_count = sum(
+            1 for process in processes if str(process.get("status") or "") == "running"
+        )
+        lead_process = processes[0] if processes else None
+        entries.append({
+            "session_id": session_id,
+            "title": str(session.get("title") or "Untitled session"),
+            "latest_updated_at": latest_updated_at,
+            "last_message": session.get("last_message"),
+            "workflow_count": len(runs),
+            "active_workflows": active_workflows,
+            "blocked_workflows": blocked_workflows,
+            "background_process_count": len(processes),
+            "running_background_process_count": running_background_process_count,
+            "lead_workflow_name": lead_run.get("workflow_name") if isinstance(lead_run, dict) else None,
+            "lead_workflow_status": lead_run.get("status") if isinstance(lead_run, dict) else None,
+            "continue_message": (
+                branch_handoff.get("continue_message")
+                or (workflow_surface_continue_message(lead_run) if isinstance(lead_run, dict) else None)
+            ),
+            "branch_handoff_available": bool(branch_handoff.get("available")),
+            "branch_handoff": branch_handoff,
+            "lead_process": (
+                {
+                    "process_id": lead_process.get("process_id"),
+                    "pid": lead_process.get("pid"),
+                    "command": lead_process.get("command"),
+                    "args": lead_process.get("args") if isinstance(lead_process.get("args"), list) else [],
+                    "cwd": lead_process.get("cwd"),
+                    "status": lead_process.get("status"),
+                    "started_at": lead_process.get("started_at"),
+                }
+                if isinstance(lead_process, dict)
+                else None
+            ),
+            "background_processes": _background_process_preview(processes, limit=limit_processes),
+        })
+
+    return sorted(entries, key=_background_session_priority, reverse=True)[:limit_sessions]
+
+
 def _review_receipts(audit_events: list[dict[str, Any]], session_titles: dict[str, str]) -> list[dict[str, Any]]:
     receipts: list[dict[str, Any]] = []
     for event in audit_events:
@@ -730,6 +902,43 @@ async def get_operator_workflow_orchestration(
             workflow_runs,
             limit=limit_workflows,
         ),
+    }
+
+
+@router.get("/operator/background-sessions")
+async def get_operator_background_sessions(
+    limit_sessions: int = Query(default=6, ge=1, le=20),
+    limit_processes: int = Query(default=3, ge=1, le=10),
+):
+    sessions, workflow_runs = await asyncio.gather(
+        session_manager.list_sessions(),
+        _list_workflow_runs(limit=max(limit_sessions * 8, 60), session_id=None),
+    )
+    process_payloads = await asyncio.to_thread(process_runtime_manager.list_all_processes)
+    background_sessions = _background_session_entries(
+        sessions,
+        workflow_runs,
+        process_payloads if isinstance(process_payloads, list) else [],
+        limit_sessions=limit_sessions,
+        limit_processes=limit_processes,
+    )
+    return {
+        "summary": {
+            "tracked_sessions": len(background_sessions),
+            "background_process_count": len(process_payloads) if isinstance(process_payloads, list) else 0,
+            "running_background_process_count": sum(
+                1
+                for process in (process_payloads if isinstance(process_payloads, list) else [])
+                if str(process.get("status") or "") == "running"
+            ),
+            "sessions_with_branch_handoff": sum(
+                1 for entry in background_sessions if bool(entry.get("branch_handoff_available"))
+            ),
+            "sessions_with_active_workflows": sum(
+                1 for entry in background_sessions if int(entry.get("active_workflows") or 0) > 0
+            ),
+        },
+        "sessions": background_sessions,
     }
 
 

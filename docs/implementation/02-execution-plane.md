@@ -45,6 +45,7 @@
 - [x] the operator API now also exposes searchable engineering-memory bundles for repositories and pull requests, grouping workflow continuity, approval targets, audit receipts, artifact follow-through, and matched session snippets by shared reference instead of leaving repo context fragmented across threads and operator surfaces
 - [x] the operator API now also exposes an explicit continuity graph that links sessions, workflows, approvals, artifacts, notifications, deferred guardian items, and interventions through one evidence-backed graph instead of forcing operators to infer those relationships from separate background-session, timeline, and observer surfaces
 - [x] the cockpit operator surface now composes background sessions, engineering-memory bundles, and the continuity graph into one background-supervision lane with direct continue/open-thread/latest-output/latest-branch/next-step control instead of making operators pivot across three separate continuity endpoints to resume long-running work
+- [x] the operator workflow-orchestration surface now also compacts long-running runs into explicit state capsules with visible-versus-compacted step counts, artifact totals, recent-step labels, and preserved retry/checkpoint/repair paths instead of forcing operators to reconstruct durable recovery state from raw step lists alone
 
 ## Working On Now
 
@@ -62,11 +63,12 @@
 - [x] this workstream now also ships the first Batch AU aggregate for operator control-plane governance, usage/runtime posture synthesis, and collaboration-safe handoff receipts across approvals, workflows, audit, continuity, and extension state
 - [x] this workstream now also ships the first Batch AW aggregate for broader authenticated adapter operations, PR-native `code_activity.write` create or review actions, fixed-argument bounded external execution, and report-publication contract selection that stays truthful across work-item versus pull-request publication paths
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy, richer managed-process trust receipts, and deterministic eval proof that the process-runtime boundary stays both session-partitioned and operator-visible
+- [x] this workstream now also ships the first Batch BD slice for workflow context condensation and long-run state compaction across the operator API, cockpit orchestration lane, and runtime eval harness
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
+- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Current Slice Record

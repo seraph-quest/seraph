@@ -1209,7 +1209,7 @@ describe("CockpitView", () => {
 
     const orchestration = await screen.findByLabelText("Workflow orchestration");
     await waitFor(() => {
-      expect(within(orchestration).getByText("4 workflows · 2 sessions")).toBeInTheDocument();
+      expect(within(orchestration).getByText("4 workflows · 2 sessions · 0 compacted")).toBeInTheDocument();
       expect(within(orchestration).getByText("Atlas thread")).toBeInTheDocument();
       expect(within(orchestration).getByText("web-brief-to-file · degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
       expect(within(orchestration).getByText("Ambient workflows")).toBeInTheDocument();
@@ -1530,6 +1530,10 @@ describe("CockpitView", () => {
             blocked_workflows: 0,
             awaiting_approval_workflows: 0,
             recoverable_workflows: 1,
+            long_running_workflows: 1,
+            compacted_workflows: 1,
+            total_step_count: 5,
+            compacted_step_count: 2,
           },
           sessions: [
             {
@@ -1546,6 +1550,12 @@ describe("CockpitView", () => {
               lead_status: "degraded",
               lead_summary: "workflow_web_brief_to_file failed at write_file",
               continue_message: "Continue Atlas workflow",
+              total_step_count: 0,
+              compacted_step_count: 0,
+              compacted_workflow_count: 1,
+              long_running_workflow_count: 0,
+              artifact_count: 0,
+              lead_state_capsule: null,
               lead_step_focus: {
                 kind: "failure",
                 step_id: "write_file",
@@ -1580,14 +1590,42 @@ describe("CockpitView", () => {
               artifact_paths: ["notes/brief.md"],
               step_records: [
                 {
-                  id: "write_file",
+                  id: "scope",
+                  index: 0,
+                  tool: "session_search",
+                  status: "succeeded",
+                  result_summary: "Scoped existing brief context",
+                },
+                {
+                  id: "collect",
                   index: 1,
+                  tool: "web_search",
+                  status: "succeeded",
+                  result_summary: "Collected source material",
+                },
+                {
+                  id: "outline",
+                  index: 2,
+                  tool: "llm_plan",
+                  status: "succeeded",
+                  result_summary: "Outlined the brief",
+                },
+                {
+                  id: "write_file",
+                  index: 3,
                   tool: "write_file",
                   status: "failed",
                   error_summary: "write_file blocked by approval",
                   recovery_hint: "Approve the pending write step and continue the workflow.",
                   recovery_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
                   is_recoverable: true,
+                },
+                {
+                  id: "notify",
+                  index: 4,
+                  tool: "notify_user",
+                  status: "pending",
+                  result_summary: "Queue follow-up notification",
                 },
               ],
               pending_approval_count: 0,
@@ -1609,6 +1647,20 @@ describe("CockpitView", () => {
                 recovery_action_count: 1,
                 is_recoverable: true,
               },
+              is_long_running: true,
+              is_compacted: true,
+              duration_minutes: 37,
+              step_count: 5,
+              visible_step_count: 3,
+              compacted_step_count: 2,
+              artifact_count: 1,
+              preserved_recovery_paths: ["retry_from_step", "checkpoint_branch", "step_repair"],
+              recent_step_labels: [
+                "outline / llm_plan / succeeded",
+                "write_file / write_file / failed",
+                "notify / notify_user / pending",
+              ],
+              state_capsule: "5 steps · 2 compacted · 1 artifact · preserves retry from step, checkpoint branch, step repair",
             },
           ],
         }));
@@ -1622,8 +1674,17 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const orchestration = await screen.findByLabelText("Workflow orchestration");
+    await waitFor(() => {
+      expect(orchestration).toHaveTextContent(/1 workflows · 1 sessions · 1 compacted/i);
+      expect(orchestration).toHaveTextContent(/1 active · 0 awaiting approval · 0 blocked · 1 recoverable · 1 long-running · 5 steps · 2 compacted/i);
+    });
     const row = (await within(orchestration).findByText("Atlas thread")).closest(".cockpit-operator-row--entry");
     expect(row).not.toBeNull();
+    expect(row as HTMLElement).toHaveTextContent(/1 long-running · 5 steps · 2 compacted · 1 artifacts?/i);
+    expect(row as HTMLElement).toHaveTextContent(/5 steps · 2 compacted · 1 artifact · preserves retry from step, checkpoint branch, step repair/i);
+    expect(row as HTMLElement).toHaveTextContent(/visible steps 3\/5/i);
+    expect(row as HTMLElement).toHaveTextContent(/outline \/ llm_plan \/ succeeded/i);
+    expect(row as HTMLElement).toHaveTextContent(/notify \/ notify_user \/ pending/i);
     expect(
       within(row as HTMLElement).getAllByRole("button", { name: "Inspect workflow orchestration for Atlas thread" }),
     ).toHaveLength(2);

@@ -7309,6 +7309,98 @@ async def _eval_background_session_handoff_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_orchestration
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[
+                {"id": "session-1", "title": "Atlas thread"},
+                {"id": "session-2", "title": "Daily brief thread"},
+            ],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-1",
+                    "run_identity": "session-1:workflow_repo_review:1",
+                    "workflow_name": "repo-review",
+                    "summary": "Waiting on guarded approval",
+                    "status": "awaiting_approval",
+                    "availability": "blocked",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "started_at": "2026-04-10T10:00:00Z",
+                    "updated_at": "2026-04-10T10:45:00Z",
+                    "thread_continue_message": "Resume repo review.",
+                    "pending_approval_count": 1,
+                    "artifact_paths": ["notes/repo-review.md", "notes/repo-review-followup.md"],
+                    "checkpoint_candidates": [{"step_id": "collect", "label": "collect"}],
+                    "step_records": [
+                        {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                        {"id": "compare", "index": 2, "tool": "diff_compare", "status": "succeeded"},
+                        {"id": "draft", "index": 3, "tool": "write_file", "status": "succeeded"},
+                        {"id": "approve", "index": 4, "tool": "write_file", "status": "awaiting_approval"},
+                    ],
+                },
+                {
+                    "id": "run-2",
+                    "run_identity": "session-2:workflow_daily_brief:1",
+                    "workflow_name": "daily-brief",
+                    "summary": "Failed while drafting follow-up",
+                    "status": "failed",
+                    "availability": "blocked",
+                    "thread_id": "session-2",
+                    "thread_label": "Daily brief thread",
+                    "started_at": "2026-04-10T09:00:00Z",
+                    "updated_at": "2026-04-10T09:40:00Z",
+                    "thread_continue_message": "Retry the daily brief.",
+                    "retry_from_step_draft": "Retry daily brief from publish step.",
+                    "artifact_paths": ["notes/daily-brief.md"],
+                    "replay_block_reason": "approval_context_changed",
+                    "step_records": [
+                        {"id": "gather", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "outline", "index": 1, "tool": "llm_plan", "status": "succeeded"},
+                        {"id": "draft", "index": 2, "tool": "write_file", "status": "succeeded"},
+                        {
+                            "id": "publish",
+                            "index": 3,
+                            "tool": "write_file",
+                            "status": "failed",
+                            "recovery_actions": [{"type": "set_tool_policy"}],
+                            "is_recoverable": True,
+                        },
+                    ],
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+
+    first_session = payload["sessions"][0]
+    first_workflow = payload["workflows"][0]
+    second_workflow = payload["workflows"][1]
+    return {
+        "long_running_summary_visible": payload["summary"]["long_running_workflows"] == 2,
+        "compacted_summary_visible": payload["summary"]["compacted_workflows"] == 2,
+        "total_step_count_visible": payload["summary"]["total_step_count"] == 9,
+        "compacted_step_count_visible": payload["summary"]["compacted_step_count"] == 3,
+        "session_capsule_mentions_steps": str(first_session["lead_state_capsule"]).startswith("5 steps"),
+        "session_compaction_count_visible": first_session["compacted_workflow_count"] == 1,
+        "first_workflow_compacted": first_workflow["is_compacted"] is True,
+        "first_workflow_steps_trimmed": len(first_workflow["step_records"]) == 3,
+        "first_workflow_preserves_checkpoint": "checkpoint_branch" in first_workflow["preserved_recovery_paths"],
+        "first_workflow_preserves_approval": "approval_gate" in first_workflow["preserved_recovery_paths"],
+        "first_workflow_recent_steps_trimmed": first_workflow["visible_step_count"] == 3,
+        "second_workflow_preserves_repair": "step_repair" in second_workflow["preserved_recovery_paths"],
+        "second_workflow_boundary_receipt_visible": "boundary_receipt" in second_workflow["preserved_recovery_paths"],
+        "second_workflow_approval_not_hallucinated": "approval_gate" not in second_workflow["preserved_recovery_paths"],
+    }
+
+
 async def _eval_engineering_memory_bundle_behavior() -> dict[str, Any]:
     from src.api.operator import get_operator_engineering_memory
 
@@ -9731,6 +9823,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Workspace background-session inventory links managed processes, branch handoff, and workflow continuation into one continuity substrate.",
         runner=_eval_background_session_handoff_behavior,
+    ),
+    EvalScenario(
+        name="workflow_context_condenser_behavior",
+        category="behavior",
+        description="Workflow orchestration exposes compacted long-run state capsules without dropping checkpoint, approval, or repair recovery facts.",
+        runner=_eval_workflow_context_condenser_behavior,
     ),
     EvalScenario(
         name="engineering_memory_bundle_behavior",

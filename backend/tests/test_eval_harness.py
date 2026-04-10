@@ -215,6 +215,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "background_session_handoff_behavior" in captured.out
     assert "engineering_memory_bundle_behavior" in captured.out
+    assert "operator_continuity_graph_behavior" in captured.out
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "approval_explainability_surface_behavior" in captured.out
     assert "source_report_action_workflow_behavior" in captured.out
@@ -339,6 +340,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "threaded_operator_timeline_behavior",
                 "background_session_handoff_behavior",
                 "engineering_memory_bundle_behavior",
+                "operator_continuity_graph_behavior",
                 "workflow_boundary_blocked_surface_behavior",
                 "approval_explainability_surface_behavior",
                 "source_adapter_evidence_behavior",
@@ -1671,3 +1673,33 @@ def test_engineering_memory_runtime_eval_exposes_expected_details():
     assert details["first_bundle_artifact_visible"] is True
     assert details["second_bundle_is_repository"] is True
     assert details["second_bundle_has_session_match"] is True
+    assert details["summary_totals_match_all_bundles"] is True
+
+
+def test_operator_continuity_graph_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "operator_continuity_graph_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["operator_continuity_graph_behavior"]
+    assert details["tracked_sessions"] is True
+    assert details["workflow_count"] is True
+    assert details["approval_count"] is True
+    assert details["notification_count"] is True
+    assert details["queued_insight_count"] is True
+    assert details["artifact_count"] is True
+    assert details["atlas_session_continue_message"] is True
+    assert details["atlas_session_workflow_count"] is True
+    assert details["atlas_session_artifact_count"] is True
+    assert details["has_session_workflow_edge"] is True
+    assert details["has_workflow_artifact_edge"] is True
+    assert details["has_notification_intervention_edge"] is True
+    assert details["has_queued_intervention_edge"] is True
+    assert details["has_inferred_notification_intervention_edge"] is True
+    assert details["inferred_intervention_marks_missing_recent_context"] is True

@@ -7079,6 +7079,209 @@ async def _eval_engineering_memory_bundle_behavior() -> dict[str, Any]:
         "first_bundle_artifact_visible": first["artifact_paths"] == ["notes/pr-390-review.md"],
         "second_bundle_is_repository": second["reference"] == "seraph-quest/seraph",
         "second_bundle_has_session_match": second["session_match_count"] == 1,
+        "summary_totals_match_all_bundles": payload["summary"]["tracked_bundles"] == len(payload["bundles"]),
+    }
+
+
+async def _eval_operator_continuity_graph_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_continuity_graph
+
+    intervention_1 = types.SimpleNamespace(
+        id="intervention-1",
+        session_id="session-1",
+        intervention_type="alert",
+        content_excerpt="Atlas branch review is waiting.",
+        updated_at="2026-04-10T10:06:00Z",
+        latest_outcome="notification_acked",
+        transport="native_notification",
+        policy_action="act",
+    )
+    intervention_2 = types.SimpleNamespace(
+        id="intervention-2",
+        session_id="session-2",
+        intervention_type="advisory",
+        content_excerpt="Bundle the roadmap follow-up.",
+        updated_at="2026-04-10T09:12:00Z",
+        latest_outcome="queued",
+        transport=None,
+        policy_action="bundle",
+    )
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[
+                {
+                    "id": "session-1",
+                    "title": "Atlas thread",
+                    "last_message": "Please review the branch output.",
+                    "updated_at": "2026-04-10T10:05:00Z",
+                },
+                {
+                    "id": "session-2",
+                    "title": "Roadmap thread",
+                    "last_message": "Bundle the roadmap follow-up.",
+                    "updated_at": "2026-04-10T09:10:00Z",
+                },
+            ],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-1",
+                    "workflow_name": "repo-review",
+                    "summary": "Review Atlas branch output before publish.",
+                    "status": "running",
+                    "started_at": "2026-04-10T10:00:00Z",
+                    "updated_at": "2026-04-10T10:04:00Z",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "thread_continue_message": "Continue Atlas branch review.",
+                    "artifact_paths": ["notes/atlas-review.md"],
+                    "run_identity": "session-1:repo-review:atlas",
+                    "branch_kind": "recovery_branch",
+                    "availability": "ready",
+                }
+            ],
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            return_value=[
+                {
+                    "id": "approval-1",
+                    "tool_name": "execute_source_mutation",
+                    "summary": "Publish Atlas review receipt.",
+                    "created_at": "2026-04-10T10:03:00Z",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "resume_message": "Resume Atlas publication after approval.",
+                    "risk_level": "high",
+                    "approval_scope": {
+                        "target": {
+                            "reference": "seraph-quest/seraph/pull/390",
+                        }
+                    },
+                }
+            ],
+        ),
+        patch(
+            "src.api.operator.native_notification_queue.list",
+            return_value=[
+                types.SimpleNamespace(
+                    id="note-1",
+                    session_id="session-1",
+                    thread_id="session-1",
+                    title="Atlas review alert",
+                    body="Atlas branch review is waiting.",
+                    intervention_type="alert",
+                    urgency=4,
+                    resume_message="Continue from Atlas notification.",
+                    created_at="2026-04-10T10:05:30Z",
+                    intervention_id="intervention-1",
+                    continuation_mode="resume_thread",
+                    thread_source="session",
+                ),
+                types.SimpleNamespace(
+                    id="note-2",
+                    session_id="session-1",
+                    thread_id="session-1",
+                    title="Atlas inferred alert",
+                    body="Atlas follow-up is waiting.",
+                    intervention_type="alert",
+                    urgency=3,
+                    resume_message="Continue from Atlas inferred notification.",
+                    created_at="2026-04-10T10:05:40Z",
+                    intervention_id="intervention-missing",
+                    continuation_mode="resume_thread",
+                    thread_source="session",
+                )
+            ],
+        ),
+        patch(
+            "src.api.operator.insight_queue.peek_all",
+            return_value=[
+                types.SimpleNamespace(
+                    id="queued-1",
+                    session_id="session-2",
+                    intervention_id="intervention-2",
+                    intervention_type="advisory",
+                    content="Bundle the roadmap follow-up.",
+                    created_at="2026-04-10T09:11:00Z",
+                    reasoning="high_interruption_cost",
+                )
+            ],
+        ),
+        patch(
+            "src.api.operator.guardian_feedback_repository.list_recent",
+            return_value=[intervention_1, intervention_2],
+        ),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            return_value={
+                "summary": {
+                    "continuity_health": "attention",
+                    "primary_surface": "native_notification",
+                    "recommended_focus": "Atlas thread",
+                },
+                "threads": [
+                    {
+                        "thread_id": "session-1",
+                        "thread_label": "Atlas thread",
+                        "summary": "Atlas branch review is waiting.",
+                        "latest_updated_at": "2026-04-10T10:06:00Z",
+                        "continue_message": "Continue Atlas branch review.",
+                        "pending_notification_count": 1,
+                        "queued_insight_count": 0,
+                        "recent_intervention_count": 1,
+                        "item_count": 3,
+                        "primary_surface": "native_notification",
+                        "continuity_surface": "native_notification",
+                    },
+                    {
+                        "thread_id": "session-2",
+                        "thread_label": "Roadmap thread",
+                        "summary": "Bundle the roadmap follow-up.",
+                        "latest_updated_at": "2026-04-10T09:12:00Z",
+                        "continue_message": "Follow up on this deferred guardian item: Bundle the roadmap follow-up.",
+                        "pending_notification_count": 0,
+                        "queued_insight_count": 1,
+                        "recent_intervention_count": 1,
+                        "item_count": 2,
+                        "primary_surface": "bundle_queue",
+                        "continuity_surface": "bundle_queue",
+                    },
+                ],
+            },
+        ),
+    ):
+        payload = await get_operator_continuity_graph(limit_sessions=6)
+
+    edge_kinds = {(item["kind"], item["source_id"], item["target_id"]) for item in payload["edges"]}
+    atlas_session = next(item for item in payload["sessions"] if item["thread_id"] == "session-1")
+    inferred_intervention = next(item for item in payload["nodes"] if item["id"] == "intervention:intervention-missing")
+    return {
+        "tracked_sessions": payload["summary"]["tracked_sessions"] == 2,
+        "workflow_count": payload["summary"]["workflow_count"] == 1,
+        "approval_count": payload["summary"]["approval_count"] == 1,
+        "notification_count": payload["summary"]["notification_count"] == 2,
+        "queued_insight_count": payload["summary"]["queued_insight_count"] == 1,
+        "artifact_count": payload["summary"]["artifact_count"] == 1,
+        "atlas_session_continue_message": atlas_session["continue_message"] == "Continue Atlas branch review.",
+        "atlas_session_workflow_count": atlas_session["metadata"]["workflow_count"] == 1,
+        "atlas_session_artifact_count": atlas_session["metadata"]["artifact_count"] == 1,
+        "has_session_workflow_edge": ("session_workflow", "session:session-1", "workflow:run-1") in edge_kinds,
+        "has_workflow_artifact_edge": ("workflow_artifact", "workflow:run-1", "artifact:notes/atlas-review.md") in edge_kinds,
+        "has_notification_intervention_edge": ("notification_intervention", "notification:note-1", "intervention:intervention-1") in edge_kinds,
+        "has_queued_intervention_edge": ("queued_intervention", "queued:queued-1", "intervention:intervention-2") in edge_kinds,
+        "has_inferred_notification_intervention_edge": (
+            "notification_intervention",
+            "notification:note-2",
+            "intervention:intervention-missing",
+        )
+        in edge_kinds,
+        "inferred_intervention_marks_missing_recent_context": inferred_intervention["metadata"].get("missing_recent_context")
+        is True,
     }
 
 
@@ -9104,6 +9307,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Operator engineering memory groups repository and pull-request continuity into searchable bundles instead of scattering the context across sessions, approvals, and audit rows.",
         runner=_eval_engineering_memory_bundle_behavior,
+    ),
+    EvalScenario(
+        name="operator_continuity_graph_behavior",
+        category="behavior",
+        description="Operator continuity graph links sessions, workflows, approvals, artifacts, notifications, and deferred guardian items through one explicit continuity contract.",
+        runner=_eval_operator_continuity_graph_behavior,
     ),
     EvalScenario(
         name="workflow_boundary_blocked_surface_behavior",

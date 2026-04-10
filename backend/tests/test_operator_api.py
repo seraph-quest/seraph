@@ -1075,6 +1075,530 @@ async def test_operator_engineering_memory_groups_repo_and_pr_bundles(client):
 
 
 @pytest.mark.asyncio
+async def test_operator_continuity_graph_links_sessions_workflows_artifacts_and_notifications(client):
+    intervention_1 = SimpleNamespace(
+        id="intervention-1",
+        session_id="session-1",
+        intervention_type="alert",
+        content_excerpt="Atlas branch review is waiting.",
+        updated_at="2026-04-10T10:06:00Z",
+        latest_outcome="notification_acked",
+        transport="native_notification",
+        policy_action="act",
+    )
+    intervention_2 = SimpleNamespace(
+        id="intervention-2",
+        session_id="session-2",
+        intervention_type="advisory",
+        content_excerpt="Bundle the roadmap follow-up.",
+        updated_at="2026-04-10T09:12:00Z",
+        latest_outcome="queued",
+        transport=None,
+        policy_action="bundle",
+    )
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "session-1",
+                        "title": "Atlas thread",
+                        "last_message": "Please review the branch output.",
+                        "updated_at": "2026-04-10T10:05:00Z",
+                    },
+                    {
+                        "id": "session-2",
+                        "title": "Roadmap thread",
+                        "last_message": "Bundle the roadmap follow-up.",
+                        "updated_at": "2026-04-10T09:10:00Z",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-1",
+                        "workflow_name": "repo-review",
+                        "summary": "Review Atlas branch output before publish.",
+                        "status": "running",
+                        "started_at": "2026-04-10T10:00:00Z",
+                        "updated_at": "2026-04-10T10:04:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "Atlas thread",
+                        "thread_continue_message": "Continue Atlas branch review.",
+                        "artifact_paths": ["notes/atlas-review.md"],
+                        "run_identity": "session-1:repo-review:atlas",
+                        "branch_kind": "recovery_branch",
+                        "availability": "ready",
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "approval-1",
+                        "tool_name": "execute_source_mutation",
+                        "summary": "Publish Atlas review receipt.",
+                        "created_at": "2026-04-10T10:03:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "Atlas thread",
+                        "resume_message": "Resume Atlas publication after approval.",
+                        "risk_level": "high",
+                        "approval_scope": {
+                            "target": {
+                                "reference": "seraph-quest/seraph/pull/390",
+                            }
+                        },
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.native_notification_queue.list",
+            AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="note-1",
+                        session_id="session-1",
+                        thread_id="session-1",
+                        title="Atlas review alert",
+                        body="Atlas branch review is waiting.",
+                        intervention_type="alert",
+                        urgency=4,
+                        resume_message="Continue from Atlas notification.",
+                        created_at="2026-04-10T10:05:30Z",
+                        intervention_id="intervention-1",
+                        continuation_mode="resume_thread",
+                        thread_source="session",
+                    )
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.insight_queue.peek_all",
+            AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="queued-1",
+                        session_id="session-2",
+                        intervention_id="intervention-2",
+                        intervention_type="advisory",
+                        content="Bundle the roadmap follow-up.",
+                        created_at="2026-04-10T09:11:00Z",
+                        reasoning="high_interruption_cost",
+                    )
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.guardian_feedback_repository.list_recent",
+            AsyncMock(return_value=[intervention_1, intervention_2]),
+        ),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "native_notification",
+                        "recommended_focus": "Atlas thread",
+                    },
+                    "threads": [
+                        {
+                            "thread_id": "session-1",
+                            "thread_label": "Atlas thread",
+                            "summary": "Atlas branch review is waiting.",
+                            "latest_updated_at": "2026-04-10T10:06:00Z",
+                            "continue_message": "Continue Atlas branch review.",
+                            "pending_notification_count": 1,
+                            "queued_insight_count": 0,
+                            "recent_intervention_count": 1,
+                            "item_count": 3,
+                            "primary_surface": "native_notification",
+                            "continuity_surface": "native_notification",
+                        },
+                        {
+                            "thread_id": "session-2",
+                            "thread_label": "Roadmap thread",
+                            "summary": "Bundle the roadmap follow-up.",
+                            "latest_updated_at": "2026-04-10T09:12:00Z",
+                            "continue_message": "Follow up on this deferred guardian item: Bundle the roadmap follow-up.",
+                            "pending_notification_count": 0,
+                            "queued_insight_count": 1,
+                            "recent_intervention_count": 1,
+                            "item_count": 2,
+                            "primary_surface": "bundle_queue",
+                            "continuity_surface": "bundle_queue",
+                        },
+                    ],
+                }
+            ),
+        ),
+    ):
+        resp = await client.get("/api/operator/continuity-graph", params={"limit_sessions": 6})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["continuity_health"] == "attention"
+    assert payload["summary"]["tracked_sessions"] == 2
+    assert payload["summary"]["workflow_count"] == 1
+    assert payload["summary"]["approval_count"] == 1
+    assert payload["summary"]["notification_count"] == 1
+    assert payload["summary"]["queued_insight_count"] == 1
+    assert payload["summary"]["intervention_count"] == 2
+    assert payload["summary"]["artifact_count"] == 1
+
+    atlas_session = next(item for item in payload["sessions"] if item["thread_id"] == "session-1")
+    assert atlas_session["metadata"]["workflow_count"] == 1
+    assert atlas_session["metadata"]["approval_count"] == 1
+    assert atlas_session["metadata"]["notification_count"] == 1
+    assert atlas_session["metadata"]["artifact_count"] == 1
+    assert atlas_session["continue_message"] == "Continue Atlas branch review."
+
+    edge_kinds = {(item["kind"], item["source_id"], item["target_id"]) for item in payload["edges"]}
+    assert ("session_workflow", "session:session-1", "workflow:run-1") in edge_kinds
+    assert ("workflow_artifact", "workflow:run-1", "artifact:notes/atlas-review.md") in edge_kinds
+    assert ("session_approval", "session:session-1", "approval:approval-1") in edge_kinds
+    assert ("session_notification", "session:session-1", "notification:note-1") in edge_kinds
+    assert ("notification_intervention", "notification:note-1", "intervention:intervention-1") in edge_kinds
+    assert ("queued_intervention", "queued:queued-1", "intervention:intervention-2") in edge_kinds
+
+
+@pytest.mark.asyncio
+async def test_operator_engineering_memory_applies_window_and_reports_total_bundle_counts(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-pr",
+                        "workflow_name": "repo-review",
+                        "summary": "Review seraph-quest/seraph/pull/390 before publish.",
+                        "status": "running",
+                        "started_at": "2026-04-10T10:00:00Z",
+                        "updated_at": "2026-04-10T10:04:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "PR review thread",
+                        "thread_continue_message": "Continue review for seraph-quest/seraph/pull/390.",
+                        "artifact_paths": ["notes/pr-390-review.md"],
+                    },
+                    {
+                        "id": "run-repo",
+                        "workflow_name": "roadmap-refresh",
+                        "summary": "Planning work for seraph-quest/seraph roadmap.",
+                        "status": "running",
+                        "started_at": "2026-04-10T09:00:00Z",
+                        "updated_at": "2026-04-10T09:15:00Z",
+                        "thread_id": "session-2",
+                        "thread_label": "Roadmap thread",
+                        "thread_continue_message": "Continue seraph-quest/seraph roadmap refresh.",
+                        "artifact_paths": ["notes/roadmap-refresh.md"],
+                    },
+                    {
+                        "id": "run-stale",
+                        "workflow_name": "old-review",
+                        "summary": "Stale follow-up for seraph-quest/seraph#12 should not appear.",
+                        "status": "completed",
+                        "started_at": "2026-04-07T08:00:00Z",
+                        "updated_at": "2026-04-07T08:05:00Z",
+                        "thread_id": "session-stale",
+                        "thread_label": "Stale thread",
+                        "thread_continue_message": "Old follow-up",
+                        "artifact_paths": [],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "approval-work-item",
+                        "tool_name": "execute_source_mutation",
+                        "summary": "Publish receipt to seraph-quest/seraph#12.",
+                        "created_at": "2026-04-10T10:03:00Z",
+                        "thread_id": "session-3",
+                        "thread_label": "Issue thread",
+                        "resume_message": "Resume seraph-quest/seraph#12 publication.",
+                        "risk_level": "high",
+                        "approval_scope": {
+                            "target": {
+                                "reference": "seraph-quest/seraph#12",
+                            }
+                        },
+                    },
+                    {
+                        "id": "approval-stale",
+                        "tool_name": "execute_source_mutation",
+                        "summary": "Old stale approval for seraph-quest/seraph#77.",
+                        "created_at": "2026-04-07T07:00:00Z",
+                        "thread_id": "session-stale",
+                        "thread_label": "Stale thread",
+                        "resume_message": "Ignore stale approval",
+                        "risk_level": "medium",
+                        "approval_scope": {
+                            "target": {
+                                "reference": "seraph-quest/seraph#77",
+                            }
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-pr",
+                        "event_type": "authenticated_source_mutation",
+                        "tool_name": "add_review_to_pr",
+                        "summary": "Published review receipt to seraph-quest/seraph/pull/390.",
+                        "created_at": "2026-04-10T10:04:00Z",
+                        "session_id": "session-1",
+                        "details": {
+                            "target_reference": "seraph-quest/seraph/pull/390",
+                        },
+                    },
+                    {
+                        "id": "audit-repo",
+                        "event_type": "authenticated_source_mutation",
+                        "tool_name": "create_pull_request",
+                        "summary": "Opened planning PR from seraph-quest/seraph.",
+                        "created_at": "2026-04-10T09:16:00Z",
+                        "session_id": "session-2",
+                        "details": {
+                            "target_reference": "seraph-quest/seraph",
+                        },
+                    },
+                    {
+                        "id": "audit-work-item",
+                        "event_type": "authenticated_source_mutation",
+                        "tool_name": "reply_to_issue",
+                        "summary": "Posted follow-up to seraph-quest/seraph#12.",
+                        "created_at": "2026-04-10T10:06:00Z",
+                        "session_id": "session-3",
+                        "details": {
+                            "target_reference": "seraph-quest/seraph#12",
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.search_sessions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "session_id": "session-1",
+                        "title": "PR review thread",
+                        "matched_at": "2026-04-10T10:02:00Z",
+                        "snippet": "Need to finish seraph-quest/seraph/pull/390 review and publish the receipt.",
+                        "source": "message",
+                    },
+                    {
+                        "session_id": "session-2",
+                        "title": "Roadmap thread",
+                        "matched_at": "2026-04-10T09:10:00Z",
+                        "snippet": "Planning work for seraph-quest/seraph roadmap and next batch.",
+                        "source": "message",
+                    },
+                    {
+                        "session_id": "session-3",
+                        "title": "Issue thread",
+                        "matched_at": "2026-04-10T10:01:00Z",
+                        "snippet": "Need to follow up on seraph-quest/seraph#12.",
+                        "source": "message",
+                    },
+                    {
+                        "session_id": "session-stale",
+                        "title": "Stale thread",
+                        "matched_at": "2026-04-07T07:05:00Z",
+                        "snippet": "Old note for seraph-quest/seraph#77.",
+                        "source": "message",
+                    },
+                ]
+            ),
+        ),
+    ):
+        resp = await client.get(
+            "/api/operator/engineering-memory",
+            params={"q": "seraph", "limit_bundles": 2, "limit_session_matches": 3, "window_hours": 24},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["tracked_bundles"] == 3
+    assert payload["summary"]["pull_request_bundle_count"] == 1
+    assert payload["summary"]["repository_bundle_count"] == 1
+    assert payload["summary"]["work_item_bundle_count"] == 1
+    assert payload["summary"]["search_match_count"] == 3
+    assert len(payload["bundles"]) == 2
+    assert len(payload["search_matches"]) == 3
+    assert all(bundle["reference"] != "seraph-quest/seraph#77" for bundle in payload["bundles"])
+
+
+@pytest.mark.asyncio
+async def test_operator_continuity_graph_preserves_cross_session_and_inferred_intervention_edges(client):
+    intervention_cross_session = SimpleNamespace(
+        id="intervention-cross",
+        session_id="session-2",
+        intervention_type="advisory",
+        content_excerpt="Bundle the roadmap follow-up.",
+        updated_at="2026-04-10T09:12:00Z",
+        latest_outcome="queued",
+        transport=None,
+        policy_action="bundle",
+    )
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "session-1",
+                        "title": "Atlas thread",
+                        "last_message": "Please review the branch output.",
+                        "updated_at": "2026-04-10T10:05:00Z",
+                    },
+                    {
+                        "id": "session-2",
+                        "title": "Roadmap thread",
+                        "last_message": "Bundle the roadmap follow-up.",
+                        "updated_at": "2026-04-10T09:10:00Z",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-1",
+                        "workflow_name": "repo-review",
+                        "summary": "Review Atlas branch output before publish.",
+                        "status": "running",
+                        "started_at": "2026-04-10T10:00:00Z",
+                        "updated_at": "2026-04-10T10:04:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "Atlas thread",
+                        "thread_continue_message": "Continue Atlas branch review.",
+                        "artifact_paths": ["notes/atlas-review.md"],
+                        "run_identity": "session-1:repo-review:atlas",
+                        "branch_kind": "recovery_branch",
+                        "availability": "ready",
+                    }
+                ]
+            ),
+        ),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.native_notification_queue.list",
+            AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="note-1",
+                        session_id="session-1",
+                        thread_id="session-1",
+                        title="Atlas review alert",
+                        body="Atlas branch review is waiting.",
+                        intervention_type="alert",
+                        urgency=4,
+                        resume_message="Continue from Atlas notification.",
+                        created_at="2026-04-10T10:05:30Z",
+                        intervention_id="intervention-cross",
+                        continuation_mode="resume_thread",
+                        thread_source="session",
+                    ),
+                    SimpleNamespace(
+                        id="note-2",
+                        session_id="session-1",
+                        thread_id="session-1",
+                        title="Atlas inferred alert",
+                        body="Atlas follow-up is waiting.",
+                        intervention_type="alert",
+                        urgency=3,
+                        resume_message="Continue from Atlas inferred notification.",
+                        created_at="2026-04-10T10:05:40Z",
+                        intervention_id="intervention-missing",
+                        continuation_mode="resume_thread",
+                        thread_source="session",
+                    ),
+                ]
+            ),
+        ),
+        patch("src.api.operator.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.guardian_feedback_repository.list_recent",
+            AsyncMock(return_value=[intervention_cross_session]),
+        ),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "native_notification",
+                        "recommended_focus": "Atlas thread",
+                    },
+                    "threads": [
+                        {
+                            "thread_id": "session-1",
+                            "thread_label": "Atlas thread",
+                            "summary": "Atlas branch review is waiting.",
+                            "latest_updated_at": "2026-04-10T10:06:00Z",
+                            "continue_message": "Continue Atlas branch review.",
+                            "pending_notification_count": 2,
+                            "queued_insight_count": 0,
+                            "recent_intervention_count": 0,
+                            "item_count": 3,
+                            "primary_surface": "native_notification",
+                            "continuity_surface": "native_notification",
+                        },
+                        {
+                            "thread_id": "session-2",
+                            "thread_label": "Roadmap thread",
+                            "summary": "Bundle the roadmap follow-up.",
+                            "latest_updated_at": "2026-04-10T09:12:00Z",
+                            "continue_message": "Bundle the roadmap follow-up.",
+                            "pending_notification_count": 0,
+                            "queued_insight_count": 0,
+                            "recent_intervention_count": 1,
+                            "item_count": 1,
+                            "primary_surface": "bundle_queue",
+                            "continuity_surface": "bundle_queue",
+                        },
+                    ],
+                }
+            ),
+        ),
+    ):
+        resp = await client.get("/api/operator/continuity-graph", params={"limit_sessions": 1})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    edge_kinds = {(item["kind"], item["source_id"], item["target_id"]) for item in payload["edges"]}
+    assert ("notification_intervention", "notification:note-1", "intervention:intervention-cross") in edge_kinds
+    assert ("notification_intervention", "notification:note-2", "intervention:intervention-missing") in edge_kinds
+
+    inferred = next(item for item in payload["nodes"] if item["id"] == "intervention:intervention-missing")
+    assert inferred["metadata"]["missing_recent_context"] is True
+    assert inferred["metadata"]["inferred_from"] == "notification"
+
+
+@pytest.mark.asyncio
 async def test_operator_timeline_projects_routing_metadata(client):
     with (
         patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),

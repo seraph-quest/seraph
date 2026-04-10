@@ -201,6 +201,10 @@ def _engineering_matches_query(
     return any(normalized_query in str(value or "").lower() for value in haystacks)
 
 
+def _within_operator_window(value: str | datetime | None, cutoff: datetime) -> bool:
+    return _parse_iso(value) >= cutoff
+
+
 def _build_engineering_memory_bundles(
     workflow_runs: list[dict[str, Any]],
     pending_approvals: list[dict[str, Any]],
@@ -208,7 +212,7 @@ def _build_engineering_memory_bundles(
     session_search_matches: list[dict[str, Any]],
     *,
     normalized_query: str,
-    limit_bundles: int,
+    limit_bundles: int | None,
     limit_session_matches: int,
 ) -> list[dict[str, Any]]:
     matched_references_by_session: dict[str, set[str]] = {}
@@ -410,7 +414,552 @@ def _build_engineering_memory_bundles(
                 "artifact_paths": sorted(bundle["artifact_paths"]),
             }
         )
-    return sorted(finalized, key=_engineering_bundle_priority, reverse=True)[:limit_bundles]
+    finalized_sorted = sorted(finalized, key=_engineering_bundle_priority, reverse=True)
+    if isinstance(limit_bundles, int):
+        return finalized_sorted[:limit_bundles]
+    return finalized_sorted
+
+
+def _continuity_graph_session_key(session_id: str | None) -> str:
+    return session_id if isinstance(session_id, str) and session_id else "__ambient__"
+
+
+def _continuity_graph_session_node_id(session_key: str) -> str:
+    return "session:ambient" if session_key == "__ambient__" else f"session:{session_key}"
+
+
+def _continuity_graph_kind_priority(kind: str) -> int:
+    priorities = {
+        "session": 7,
+        "ambient_session": 6,
+        "workflow_run": 5,
+        "approval": 4,
+        "notification": 3,
+        "queued_insight": 2,
+        "intervention": 1,
+        "artifact": 0,
+    }
+    return priorities.get(kind, -1)
+
+
+def _continuity_graph_node_priority(node: dict[str, Any]) -> tuple[int, datetime, str]:
+    return (
+        _continuity_graph_kind_priority(str(node.get("kind") or "")),
+        _parse_iso(str(node.get("updated_at") or "")),
+        str(node.get("id") or ""),
+    )
+
+
+def _continuity_graph_session_priority(session: dict[str, Any]) -> tuple[int, int, datetime]:
+    return (
+        int(session.get("linked_item_count") or 0),
+        int(session.get("artifact_count") or 0),
+        _parse_iso(str(session.get("updated_at") or "")),
+    )
+
+
+def _continuity_graph_edge(
+    source_id: str,
+    target_id: str,
+    *,
+    kind: str,
+    session_key: str,
+    updated_at: str,
+    label: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": f"{kind}:{source_id}->{target_id}",
+        "source_id": source_id,
+        "target_id": target_id,
+        "kind": kind,
+        "label": label or kind.replace("_", " "),
+        "updated_at": updated_at,
+        "metadata": metadata or {},
+        "_session_key": session_key,
+    }
+
+
+def _build_operator_continuity_graph(
+    sessions: list[dict[str, Any]],
+    workflow_runs: list[dict[str, Any]],
+    pending_approvals: list[dict[str, Any]],
+    notifications: list[Any],
+    queued_insights: list[Any],
+    recent_interventions: list[Any],
+    continuity_snapshot: dict[str, Any],
+    *,
+    session_id: str | None,
+    limit_sessions: int,
+) -> dict[str, Any]:
+    session_index = {
+        str(item["id"]): item
+        for item in sessions
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    snapshot_threads = {
+        _continuity_graph_session_key(
+            item.get("thread_id") if isinstance(item, dict) else None
+        ): item
+        for item in (continuity_snapshot.get("threads") if isinstance(continuity_snapshot, dict) else [])
+        if isinstance(item, dict)
+    }
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    edge_ids: set[str] = set()
+    session_members: dict[str, set[str]] = {}
+    session_artifacts: dict[str, set[str]] = {}
+    intervention_sessions: dict[str, str] = {}
+    selected_session_id = session_id if isinstance(session_id, str) and session_id else None
+    intervention_source_sessions = {
+        str(getattr(intervention, "id", "") or ""): str(getattr(intervention, "session_id", "") or "")
+        for intervention in recent_interventions
+        if isinstance(getattr(intervention, "id", None), str) and isinstance(getattr(intervention, "session_id", None), str)
+    }
+
+    def ensure_session_node(session_key: str) -> dict[str, Any]:
+        node_id = _continuity_graph_session_node_id(session_key)
+        if node_id in nodes:
+            return nodes[node_id]
+        session_payload = session_index.get(session_key, {}) if session_key != "__ambient__" else {}
+        thread_payload = snapshot_threads.get(session_key, {})
+        title = (
+            str(session_payload.get("title") or "")
+            or str(thread_payload.get("thread_label") or "")
+            or ("Ambient continuity" if session_key == "__ambient__" else "Untitled session")
+        )
+        summary = (
+            session_payload.get("last_message")
+            or thread_payload.get("summary")
+            or thread_payload.get("detail")
+        )
+        updated_at = max(
+            _parse_iso(str(session_payload.get("updated_at") or "")),
+            _parse_iso(str(thread_payload.get("latest_updated_at") or "")),
+        ).isoformat()
+        node = {
+            "id": node_id,
+            "kind": "ambient_session" if session_key == "__ambient__" else "session",
+            "title": title,
+            "summary": summary,
+            "updated_at": updated_at,
+            "thread_id": None if session_key == "__ambient__" else session_key,
+            "continue_message": thread_payload.get("continue_message"),
+            "metadata": {
+                "pending_notification_count": int(thread_payload.get("pending_notification_count") or 0),
+                "queued_insight_count": int(thread_payload.get("queued_insight_count") or 0),
+                "recent_intervention_count": int(thread_payload.get("recent_intervention_count") or 0),
+                "item_count": int(thread_payload.get("item_count") or 0),
+                "primary_surface": thread_payload.get("primary_surface"),
+                "continuity_surface": thread_payload.get("continuity_surface"),
+            },
+        }
+        nodes[node_id] = node
+        session_members.setdefault(session_key, set())
+        session_artifacts.setdefault(session_key, set())
+        return node
+
+    def add_node(node: dict[str, Any], *, session_key: str | None = None) -> dict[str, Any]:
+        existing = nodes.get(str(node["id"]))
+        if existing is None:
+            nodes[str(node["id"])] = node
+        else:
+            if _parse_iso(str(node.get("updated_at") or "")) > _parse_iso(str(existing.get("updated_at") or "")):
+                existing["updated_at"] = node.get("updated_at")
+            if not existing.get("summary") and node.get("summary"):
+                existing["summary"] = node.get("summary")
+            if not existing.get("continue_message") and node.get("continue_message"):
+                existing["continue_message"] = node.get("continue_message")
+        if session_key is not None:
+            ensure_session_node(session_key)
+            session_members.setdefault(session_key, set()).add(str(node["id"]))
+        return nodes[str(node["id"])]
+
+    def add_edge(edge: dict[str, Any]) -> None:
+        edge_id = str(edge["id"])
+        if edge_id in edge_ids:
+            return
+        edge_ids.add(edge_id)
+        edges.append(edge)
+
+    def ensure_intervention_reference_node(
+        intervention_ref: str,
+        *,
+        source_node: dict[str, Any],
+    ) -> str:
+        target_id = f"intervention:{intervention_ref}"
+        if target_id in nodes:
+            return target_id
+        add_node(
+            {
+                "id": target_id,
+                "kind": "intervention",
+                "title": str(source_node.get("title") or "guardian intervention"),
+                "summary": str(source_node.get("summary") or ""),
+                "updated_at": str(source_node.get("updated_at") or ""),
+                "thread_id": source_node.get("thread_id"),
+                "continue_message": source_node.get("continue_message"),
+                "metadata": {
+                    "latest_outcome": None,
+                    "transport": None,
+                    "policy_action": None,
+                    "missing_recent_context": True,
+                    "inferred_from": source_node.get("kind"),
+                },
+            }
+        )
+        return target_id
+
+    def should_include_source(source_session_id: str | None) -> bool:
+        if selected_session_id is None:
+            return True
+        return source_session_id == selected_session_id
+
+    for run in workflow_runs:
+        source_session_id = run.get("thread_id") if isinstance(run.get("thread_id"), str) else None
+        if not should_include_source(source_session_id):
+            continue
+        session_key = _continuity_graph_session_key(source_session_id)
+        workflow_id = f"workflow:{run.get('id')}"
+        workflow_node = add_node(
+            {
+                "id": workflow_id,
+                "kind": "workflow_run",
+                "title": str(run.get("workflow_name") or "workflow"),
+                "summary": str(run.get("summary") or ""),
+                "updated_at": str(run.get("updated_at") or run.get("started_at") or ""),
+                "thread_id": source_session_id,
+                "continue_message": workflow_surface_continue_message(run),
+                "metadata": {
+                    "status": run.get("status"),
+                    "run_identity": run.get("run_identity"),
+                    "branch_kind": run.get("branch_kind"),
+                    "availability": run.get("availability"),
+                },
+            },
+            session_key=session_key,
+        )
+        add_edge(
+            _continuity_graph_edge(
+                _continuity_graph_session_node_id(session_key),
+                workflow_id,
+                kind="session_workflow",
+                label="session runs workflow",
+                session_key=session_key,
+                updated_at=str(workflow_node.get("updated_at") or ""),
+            )
+        )
+        for artifact_path in (
+            list(run.get("artifact_paths"))
+            if isinstance(run.get("artifact_paths"), list)
+            else []
+        ):
+            if not isinstance(artifact_path, str) or not artifact_path:
+                continue
+            artifact_id = f"artifact:{artifact_path}"
+            add_node(
+                {
+                    "id": artifact_id,
+                    "kind": "artifact",
+                    "title": artifact_path,
+                    "summary": f"Artifact from {run.get('workflow_name') or 'workflow'}",
+                    "updated_at": str(run.get("updated_at") or run.get("started_at") or ""),
+                    "thread_id": source_session_id,
+                    "continue_message": None,
+                    "metadata": {
+                        "path": artifact_path,
+                    },
+                },
+                session_key=session_key,
+            )
+            session_artifacts.setdefault(session_key, set()).add(artifact_path)
+            add_edge(
+                _continuity_graph_edge(
+                    workflow_id,
+                    artifact_id,
+                    kind="workflow_artifact",
+                    label="workflow produced artifact",
+                    session_key=session_key,
+                    updated_at=str(run.get("updated_at") or run.get("started_at") or ""),
+                    metadata={"path": artifact_path},
+                )
+            )
+
+    for approval in pending_approvals:
+        source_session_id = approval.get("thread_id") or approval.get("session_id")
+        source_session_id = source_session_id if isinstance(source_session_id, str) else None
+        if not should_include_source(source_session_id):
+            continue
+        session_key = _continuity_graph_session_key(source_session_id)
+        approval_id = f"approval:{approval.get('id')}"
+        approval_metadata = approval_surface_metadata(approval)
+        add_node(
+            {
+                "id": approval_id,
+                "kind": "approval",
+                "title": str(approval.get("tool_name") or "approval"),
+                "summary": str(approval.get("summary") or "Approval pending"),
+                "updated_at": str(approval.get("created_at") or ""),
+                "thread_id": source_session_id,
+                "continue_message": approval.get("resume_message"),
+                "metadata": {
+                    "risk_level": approval.get("risk_level"),
+                    "approval_scope": approval_metadata.get("approval_scope"),
+                },
+            },
+            session_key=session_key,
+        )
+        add_edge(
+            _continuity_graph_edge(
+                _continuity_graph_session_node_id(session_key),
+                approval_id,
+                kind="session_approval",
+                label="session awaits approval",
+                session_key=session_key,
+                updated_at=str(approval.get("created_at") or ""),
+            )
+        )
+
+    for notification in notifications:
+        payload = notification if isinstance(notification, dict) else getattr(notification, "__dict__", {})
+        source_session_id = (
+            payload.get("thread_id")
+            or payload.get("session_id")
+            or intervention_source_sessions.get(str(payload.get("intervention_id") or ""))
+        )
+        source_session_id = source_session_id if isinstance(source_session_id, str) else None
+        if not should_include_source(source_session_id):
+            continue
+        session_key = _continuity_graph_session_key(source_session_id)
+        notification_id = f"notification:{payload.get('id')}"
+        add_node(
+            {
+                "id": notification_id,
+                "kind": "notification",
+                "title": str(payload.get("title") or "notification"),
+                "summary": str(payload.get("body") or ""),
+                "updated_at": str(payload.get("created_at") or ""),
+                "thread_id": source_session_id,
+                "continue_message": payload.get("resume_message") or payload.get("body"),
+                "metadata": {
+                    "intervention_id": payload.get("intervention_id"),
+                    "continuation_mode": payload.get("continuation_mode"),
+                    "thread_source": payload.get("thread_source"),
+                },
+            },
+            session_key=session_key,
+        )
+        add_edge(
+            _continuity_graph_edge(
+                _continuity_graph_session_node_id(session_key),
+                notification_id,
+                kind="session_notification",
+                label="session has notification",
+                session_key=session_key,
+                updated_at=str(payload.get("created_at") or ""),
+            )
+        )
+
+    for insight in queued_insights:
+        payload = insight if isinstance(insight, dict) else getattr(insight, "__dict__", {})
+        source_session_id = payload.get("session_id") or intervention_source_sessions.get(
+            str(payload.get("intervention_id") or "")
+        )
+        source_session_id = source_session_id if isinstance(source_session_id, str) else None
+        if not should_include_source(source_session_id):
+            continue
+        session_key = _continuity_graph_session_key(source_session_id)
+        insight_id = f"queued:{payload.get('id')}"
+        add_node(
+            {
+                "id": insight_id,
+                "kind": "queued_insight",
+                "title": str(payload.get("intervention_type") or "queued insight"),
+                "summary": str(payload.get("content") or ""),
+                "updated_at": str(payload.get("created_at") or ""),
+                "thread_id": source_session_id,
+                "continue_message": (
+                    f"Follow up on this deferred guardian item: {payload.get('content')}"
+                    if payload.get("content")
+                    else None
+                ),
+                "metadata": {
+                    "intervention_id": payload.get("intervention_id"),
+                    "reasoning": payload.get("reasoning"),
+                },
+            },
+            session_key=session_key,
+        )
+        add_edge(
+            _continuity_graph_edge(
+                _continuity_graph_session_node_id(session_key),
+                insight_id,
+                kind="session_queued_insight",
+                label="session has deferred guardian item",
+                session_key=session_key,
+                updated_at=str(payload.get("created_at") or ""),
+            )
+        )
+
+    for intervention in recent_interventions:
+        source_session_id = getattr(intervention, "session_id", None)
+        source_session_id = source_session_id if isinstance(source_session_id, str) else None
+        if not should_include_source(source_session_id):
+            continue
+        session_key = _continuity_graph_session_key(source_session_id)
+        intervention_ref = str(getattr(intervention, "id", "") or "")
+        intervention_id = f"intervention:{intervention_ref}"
+        intervention_sessions[intervention_ref] = session_key
+        add_node(
+            {
+                "id": intervention_id,
+                "kind": "intervention",
+                "title": str(getattr(intervention, "intervention_type", "intervention")),
+                "summary": str(getattr(intervention, "content_excerpt", "") or getattr(intervention, "content", "")),
+                "updated_at": _timeline_timestamp(getattr(intervention, "updated_at", None)),
+                "thread_id": source_session_id,
+                "continue_message": (
+                    f"Continue from this guardian intervention: {getattr(intervention, 'content_excerpt', '')}"
+                    if getattr(intervention, "content_excerpt", None)
+                    else None
+                ),
+                "metadata": {
+                    "latest_outcome": getattr(intervention, "latest_outcome", None),
+                    "transport": getattr(intervention, "transport", None),
+                    "policy_action": getattr(intervention, "policy_action", None),
+                },
+            },
+            session_key=session_key,
+        )
+        add_edge(
+            _continuity_graph_edge(
+                _continuity_graph_session_node_id(session_key),
+                intervention_id,
+                kind="session_intervention",
+                label="session has guardian intervention",
+                session_key=session_key,
+                updated_at=_timeline_timestamp(getattr(intervention, "updated_at", None)),
+            )
+        )
+
+    for node in list(nodes.values()):
+        if str(node.get("kind") or "") == "notification":
+            intervention_ref = str(node.get("metadata", {}).get("intervention_id") or "")
+            if intervention_ref:
+                target_id = ensure_intervention_reference_node(intervention_ref, source_node=node)
+                add_edge(
+                    _continuity_graph_edge(
+                        str(node["id"]),
+                        target_id,
+                        kind="notification_intervention",
+                        label="notification delivers guardian intervention",
+                        session_key=_continuity_graph_session_key(node.get("thread_id")),
+                        updated_at=str(node.get("updated_at") or ""),
+                    )
+                )
+        if str(node.get("kind") or "") == "queued_insight":
+            intervention_ref = str(node.get("metadata", {}).get("intervention_id") or "")
+            if intervention_ref:
+                target_id = ensure_intervention_reference_node(intervention_ref, source_node=node)
+                add_edge(
+                    _continuity_graph_edge(
+                        str(node["id"]),
+                        target_id,
+                        kind="queued_intervention",
+                        label="deferred guardian item references intervention",
+                        session_key=_continuity_graph_session_key(node.get("thread_id")),
+                        updated_at=str(node.get("updated_at") or ""),
+                    )
+                )
+
+    session_nodes: list[dict[str, Any]] = []
+    for session_key, member_ids in session_members.items():
+        session_node = ensure_session_node(session_key)
+        counts: dict[str, int] = {}
+        for member_id in member_ids:
+            kind = str(nodes.get(member_id, {}).get("kind") or "")
+            counts[kind] = counts.get(kind, 0) + 1
+        metadata = dict(session_node.get("metadata") or {})
+        metadata.update({
+            "workflow_count": counts.get("workflow_run", 0),
+            "approval_count": counts.get("approval", 0),
+            "notification_count": counts.get("notification", 0),
+            "queued_insight_count": counts.get("queued_insight", metadata.get("queued_insight_count", 0)),
+            "intervention_count": counts.get("intervention", 0),
+            "artifact_count": len(session_artifacts.get(session_key, set())),
+            "linked_item_count": sum(counts.values()),
+        })
+        session_node["metadata"] = metadata
+        session_node["linked_item_count"] = metadata["linked_item_count"]
+        session_node["artifact_count"] = metadata["artifact_count"]
+        session_nodes.append(session_node)
+
+    selected_session_keys = [
+        "__ambient__" if str(item.get("id")) == "session:ambient" else str(item.get("thread_id") or "")
+        for item in sorted(session_nodes, key=_continuity_graph_session_priority, reverse=True)[:limit_sessions]
+        if str(item.get("id") or "")
+    ]
+    selected_session_keys = [item for item in selected_session_keys if item]
+    selected_session_set = set(selected_session_keys)
+
+    filtered_edges = [
+        {
+            key: value
+            for key, value in edge.items()
+            if key != "_session_key"
+        }
+        for edge in sorted(
+            (item for item in edges if str(item.get("_session_key") or "") in selected_session_set),
+            key=lambda item: (
+                _parse_iso(str(item.get("updated_at") or "")),
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+    ]
+    included_node_ids = {
+        node_id
+        for edge in filtered_edges
+        for node_id in (str(edge.get("source_id") or ""), str(edge.get("target_id") or ""))
+        if node_id
+    }
+    for session_key in selected_session_keys:
+        included_node_ids.add(_continuity_graph_session_node_id(session_key))
+
+    filtered_nodes = sorted(
+        [node for node_id, node in nodes.items() if node_id in included_node_ids],
+        key=_continuity_graph_node_priority,
+        reverse=True,
+    )
+    filtered_sessions = [
+        node
+        for node in filtered_nodes
+        if str(node.get("kind") or "") in {"session", "ambient_session"}
+    ]
+
+    summary = continuity_snapshot.get("summary") if isinstance(continuity_snapshot.get("summary"), dict) else {}
+    return {
+        "summary": {
+            "continuity_health": summary.get("continuity_health"),
+            "primary_surface": summary.get("primary_surface"),
+            "recommended_focus": summary.get("recommended_focus"),
+            "tracked_sessions": len(filtered_sessions),
+            "workflow_count": sum(1 for node in filtered_nodes if str(node.get("kind") or "") == "workflow_run"),
+            "approval_count": sum(1 for node in filtered_nodes if str(node.get("kind") or "") == "approval"),
+            "notification_count": sum(1 for node in filtered_nodes if str(node.get("kind") or "") == "notification"),
+            "queued_insight_count": sum(
+                1 for node in filtered_nodes if str(node.get("kind") or "") == "queued_insight"
+            ),
+            "intervention_count": sum(
+                1 for node in filtered_nodes if str(node.get("kind") or "") == "intervention"
+            ),
+            "artifact_count": sum(1 for node in filtered_nodes if str(node.get("kind") or "") == "artifact"),
+            "edge_count": len(filtered_edges),
+        },
+        "sessions": filtered_sessions,
+        "nodes": filtered_nodes,
+        "edges": filtered_edges,
+    }
 
 
 def _continuity_action_timestamp(snapshot: dict[str, Any]) -> str:
@@ -1327,39 +1876,78 @@ async def get_operator_engineering_memory(
         if normalized_query
         else asyncio.sleep(0, result=[]),
     )
-    bundles = _build_engineering_memory_bundles(
-        workflow_runs,
-        pending_approvals,
-        audit_events,
-        session_search_matches if isinstance(session_search_matches, list) else [],
+    filtered_workflow_runs = [
+        run
+        for run in (workflow_runs if isinstance(workflow_runs, list) else [])
+        if isinstance(run, dict) and _within_operator_window(run.get("updated_at") or run.get("started_at"), cutoff)
+    ]
+    filtered_pending_approvals = [
+        approval
+        for approval in (pending_approvals if isinstance(pending_approvals, list) else [])
+        if isinstance(approval, dict) and _within_operator_window(approval.get("created_at"), cutoff)
+    ]
+    filtered_session_search_matches = [
+        match
+        for match in (session_search_matches if isinstance(session_search_matches, list) else [])
+        if isinstance(match, dict) and _within_operator_window(match.get("matched_at"), cutoff)
+    ]
+    all_bundles = _build_engineering_memory_bundles(
+        filtered_workflow_runs,
+        filtered_pending_approvals,
+        audit_events if isinstance(audit_events, list) else [],
+        filtered_session_search_matches,
         normalized_query=_engineering_query(normalized_query),
-        limit_bundles=limit_bundles,
+        limit_bundles=None,
         limit_session_matches=limit_session_matches,
     )
+    bundles = all_bundles[:limit_bundles]
     return {
         "summary": {
             "query": normalized_query or None,
-            "tracked_bundles": len(bundles),
+            "tracked_bundles": len(all_bundles),
             "repository_bundle_count": sum(
-                1 for bundle in bundles if str(bundle.get("target_kind") or "") == "repository"
+                1 for bundle in all_bundles if str(bundle.get("target_kind") or "") == "repository"
             ),
             "pull_request_bundle_count": sum(
-                1 for bundle in bundles if str(bundle.get("target_kind") or "") == "pull_request"
+                1 for bundle in all_bundles if str(bundle.get("target_kind") or "") == "pull_request"
             ),
             "work_item_bundle_count": sum(
-                1 for bundle in bundles if str(bundle.get("target_kind") or "") == "work_item"
+                1 for bundle in all_bundles if str(bundle.get("target_kind") or "") == "work_item"
             ),
-            "search_match_count": len(session_search_matches)
-            if isinstance(session_search_matches, list)
-            else 0,
+            "search_match_count": len(filtered_session_search_matches),
         },
         "search_matches": (
-            session_search_matches[:limit_session_matches]
-            if isinstance(session_search_matches, list)
-            else []
+            filtered_session_search_matches[:limit_session_matches]
         ),
         "bundles": bundles,
     }
+
+
+@router.get("/operator/continuity-graph")
+async def get_operator_continuity_graph(
+    session_id: str | None = Query(default=None),
+    limit_sessions: int = Query(default=6, ge=1, le=20),
+):
+    sessions, workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, continuity_snapshot = await asyncio.gather(
+        session_manager.list_sessions(),
+        _list_workflow_runs(limit=max(limit_sessions * 8, 60), session_id=session_id),
+        approval_repository.list_pending(session_id=session_id, limit=max(limit_sessions * 4, 40)),
+        native_notification_queue.list(),
+        insight_queue.peek_all(),
+        guardian_feedback_repository.list_recent(limit=max(limit_sessions * 8, 60), session_id=session_id),
+        build_observer_continuity_snapshot(),
+    )
+    return _build_operator_continuity_graph(
+        sessions if isinstance(sessions, list) else [],
+        workflow_runs if isinstance(workflow_runs, list) else [],
+        pending_approvals if isinstance(pending_approvals, list) else [],
+        notifications if isinstance(notifications, list) else [],
+        queued_insights if isinstance(queued_insights, list) else [],
+        recent_interventions if isinstance(recent_interventions, list) else [],
+        continuity_snapshot if isinstance(continuity_snapshot, dict) else {},
+        session_id=session_id,
+        limit_sessions=limit_sessions,
+    )
 
 
 @router.get("/operator/timeline")

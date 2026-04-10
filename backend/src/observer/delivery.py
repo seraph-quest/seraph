@@ -357,6 +357,10 @@ async def deliver_or_queue(
             learning_blocked_state_bias=effective_learning_signal.blocked_state_bias,
             learning_suppression_bias=effective_learning_signal.suppression_bias,
             learning_thread_preference_bias=effective_learning_signal.thread_preference_bias,
+            learning_multi_day_positive_days=effective_learning_signal.multi_day_positive_days,
+            learning_multi_day_negative_days=effective_learning_signal.multi_day_negative_days,
+            learning_scheduled_positive_days=effective_learning_signal.scheduled_positive_days,
+            learning_scheduled_negative_days=effective_learning_signal.scheduled_negative_days,
         )
 
         event_details = {
@@ -385,6 +389,10 @@ async def deliver_or_queue(
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,
             "learning_failed_count": learning_signal.failed_count,
+            "learning_multi_day_positive_days": learning_signal.multi_day_positive_days,
+            "learning_multi_day_negative_days": learning_signal.multi_day_negative_days,
+            "learning_scheduled_positive_days": learning_signal.scheduled_positive_days,
+            "learning_scheduled_negative_days": learning_signal.scheduled_negative_days,
             "learning_arbitration_mode": "evidence_weighted",
             "learning_arbitration_sources": learning_arbitration_sources,
             "learning_arbitration_reasons": learning_arbitration_reasons,

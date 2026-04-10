@@ -1384,6 +1384,12 @@ def build_guardian_world_model(
         judgment_risks.append(
             f"Multi-day intervention outcomes have skewed negative across {learning_signal.multi_day_negative_days} day(s)."
         )
+        active_constraints.append(
+            "Long-horizon intervention outcomes favor abstaining from low-urgency guidance until the pattern improves."
+        )
+        judgment_risks.append(
+            "Long-horizon intervention outcomes favor conservative abstention for non-urgent guidance."
+        )
     if (
         learning_signal is not None
         and learning_signal.scheduled_negative_days >= 2
@@ -1391,6 +1397,12 @@ def build_guardian_world_model(
     ):
         judgment_risks.append(
             f"Scheduled review and briefing outcomes have degraded across {learning_signal.scheduled_negative_days} day(s)."
+        )
+        active_constraints.append(
+            "Scheduled guidance should defer when recent review and briefing outcomes remain unstable."
+        )
+        judgment_risks.append(
+            "Scheduled intervention outcomes favor deferring routine guidance until review stability recovers."
         )
     if (
         observer_project

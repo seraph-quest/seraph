@@ -5441,6 +5441,7 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
 
 async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
+    from src.observer.intervention_policy import decide_intervention
 
     async with _patched_async_db(
         "src.agent.session.get_session",
@@ -5556,11 +5557,54 @@ async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
                 session_id="current",
                 active_project="Investor brief",
             )
+            abstention_decision = decide_intervention(
+                message_type="proactive",
+                intervention_type="advisory",
+                content="Try another low-urgency investor brief nudge.",
+                urgency=3,
+                user_state="available",
+                interruption_mode="balanced",
+                attention_budget_remaining=2,
+                guardian_confidence="grounded",
+                observer_confidence="grounded",
+                salience_level="medium",
+                salience_reason="active_goals",
+                interruption_cost="medium",
+                learning_suppression_bias=signal.suppression_bias,
+                learning_multi_day_positive_days=signal.multi_day_positive_days,
+                learning_multi_day_negative_days=signal.multi_day_negative_days,
+                learning_scheduled_positive_days=signal.scheduled_positive_days,
+                learning_scheduled_negative_days=signal.scheduled_negative_days,
+            )
+            scheduled_decision = decide_intervention(
+                message_type="proactive",
+                intervention_type="advisory",
+                content="Run the routine investor brief check-in.",
+                urgency=2,
+                user_state="available",
+                interruption_mode="balanced",
+                attention_budget_remaining=2,
+                is_scheduled=True,
+                guardian_confidence="grounded",
+                observer_confidence="grounded",
+                salience_level="medium",
+                salience_reason="active_goals",
+                interruption_cost="medium",
+                learning_suppression_bias=signal.suppression_bias,
+                learning_multi_day_positive_days=signal.multi_day_positive_days,
+                learning_multi_day_negative_days=signal.multi_day_negative_days,
+                learning_scheduled_positive_days=signal.scheduled_positive_days,
+                learning_scheduled_negative_days=signal.scheduled_negative_days,
+            )
 
     return {
         "multi_day_negative_days": signal.multi_day_negative_days,
         "scheduled_negative_days": signal.scheduled_negative_days,
         "intervention_receptivity": state.world_model.intervention_receptivity,
+        "abstention_action": abstention_decision.action.value,
+        "abstention_reason": abstention_decision.reason,
+        "scheduled_action": scheduled_decision.action.value,
+        "scheduled_reason": scheduled_decision.reason,
         "learning_diagnostics_count": len(state.learning_diagnostics),
         "has_goal_alignment_signal": any(
             "aligns with project anchor 'Investor brief'" in item
@@ -5582,12 +5626,28 @@ async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
             "Multi-day intervention outcomes have skewed negative" in item
             for item in state.world_model.judgment_risks
         ),
+        "has_abstention_risk": any(
+            "favor conservative abstention" in item
+            for item in state.world_model.judgment_risks
+        ),
+        "has_scheduled_deferral_risk": any(
+            "favor deferring routine guidance" in item
+            for item in state.world_model.judgment_risks
+        ),
         "has_learning_scope_diagnostic": any(
             "Live learning is currently anchored" in item
             for item in state.learning_diagnostics
         ),
         "has_learning_spread_diagnostic": any(
             "Long-horizon spread:" in item
+            for item in state.learning_diagnostics
+        ),
+        "has_learning_abstention_diagnostic": any(
+            "favors abstaining from low-urgency guidance" in item
+            for item in state.learning_diagnostics
+        ),
+        "has_learning_scheduled_diagnostic": any(
+            "favors deferring routine guidance" in item
             for item in state.learning_diagnostics
         ),
     }

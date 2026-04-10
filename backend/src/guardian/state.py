@@ -542,6 +542,9 @@ def _intent_uncertainty_diagnostics(
     observer_context: CurrentContext,
     world_model: GuardianWorldModel,
 ) -> tuple[str, str, tuple[str, ...]]:
+    if not str(user_message or "").strip():
+        return "clear", "proceed", ()
+
     diagnostics: list[str] = []
     normalized_message = _normalize_free_text(user_message)
     ambiguous_tokens = {
@@ -551,11 +554,28 @@ def _intent_uncertainty_diagnostics(
         "them",
         "those",
         "these",
-        "here",
-        "there",
     }
     message_tokens = set(normalized_message.split())
-    has_ambiguous_reference = bool(normalized_message) and bool(message_tokens & ambiguous_tokens)
+    known_anchors = [
+        observer_context.active_project,
+        observer_context.active_goals_summary,
+        observer_context.current_event,
+        *world_model.active_projects,
+    ]
+    normalized_anchors = [
+        _normalize_free_text(item)
+        for item in known_anchors
+        if _normalize_free_text(item)
+    ]
+    has_explicit_anchor = any(
+        anchor in normalized_message
+        for anchor in normalized_anchors
+    )
+    has_ambiguous_reference = (
+        bool(normalized_message)
+        and bool(message_tokens & ambiguous_tokens)
+        and not has_explicit_anchor
+    )
     project_anchor_ambiguous = any(
         "project-anchor evidence remains ambiguous" in item.lower()
         or "project-anchor evidence remains split" in item.lower()
@@ -779,7 +799,7 @@ async def build_guardian_state(
     )
     intent_uncertainty_level, intent_resolution, intent_uncertainty_diagnostics = (
         _intent_uncertainty_diagnostics(
-            user_message=user_message or memory_query,
+            user_message=user_message,
             observer_context=observer_context,
             world_model=world_model,
         )

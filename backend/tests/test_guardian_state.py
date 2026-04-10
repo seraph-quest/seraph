@@ -3270,6 +3270,144 @@ async def test_build_guardian_state_marks_split_preference_evidence_as_caution(a
     )
 
 
+@pytest.mark.asyncio
+async def test_build_guardian_state_does_not_mark_explicit_project_reference_as_ambiguous(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Can Atlas finish this today?")
+    await sm.add_message("current", "assistant", "Let me reconcile the active project signals first.")
+    await sm.get_or_create("prior")
+    await sm.update_title("prior", "Hermes migration follow-up")
+    await sm.add_message("prior", "assistant", "Ship the Hermes rollout note.")
+
+    await memory_repository.create_memory(
+        content="Hermes migration remains the live delivery project.",
+        kind=MemoryKind.project,
+        summary="Hermes migration",
+        importance=0.92,
+    )
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+    )
+    live_resolution = MagicMock(
+        effective_signal=GuardianLearningSignal.neutral("advisory"),
+        dominant_scope="global",
+        decisions=tuple(),
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch(
+            "src.audit.repository.audit_repository.list_events",
+            return_value=[
+                {
+                    "event_type": "tool_result",
+                    "tool_name": "workflow_hermes_migration",
+                    "details": {
+                        "workflow_name": "Hermes migration",
+                        "continued_error_steps": ["notify_release"],
+                    },
+                }
+            ],
+        ),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas", "Hermes migration"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(return_value=live_resolution),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Can Atlas finish this today?",
+        )
+
+    assert not any(
+        "ambiguous referent" in item.lower()
+        for item in state.intent_uncertainty_diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_ignores_memory_query_only_for_intent_uncertainty(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Support Atlas launch",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+    )
+    live_resolution = MagicMock(
+        effective_signal=GuardianLearningSignal.neutral("advisory"),
+        dominant_scope="global",
+        decisions=tuple(),
+    )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(return_value=live_resolution),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            memory_query="current priorities, commitments, and recent intervention patterns",
+        )
+
+    assert state.intent_uncertainty_level == "clear"
+    assert state.intent_resolution == "proceed"
+    assert state.intent_uncertainty_diagnostics == ()
+
+
 @patch("src.agent.factory.ToolCallingAgent")
 @patch("src.agent.factory.get_model")
 def test_create_agent_injects_guardian_state(mock_get_model, mock_agent_cls):

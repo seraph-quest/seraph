@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -33,6 +34,33 @@ from src.tools.process_tools import process_runtime_manager
 router = APIRouter()
 
 
+_ENGINEERING_PULL_REQUEST_RE = re.compile(
+    r"\b(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>\d+)\b"
+)
+_ENGINEERING_WORK_ITEM_RE = re.compile(
+    r"\b(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>\d+)\b"
+)
+_ENGINEERING_REPOSITORY_RE = re.compile(
+    r"\b(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)\b"
+)
+_ENGINEERING_FILELIKE_SUFFIXES = (
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".py",
+    ".tsx",
+    ".ts",
+    ".jsx",
+    ".js",
+    ".css",
+    ".html",
+    ".sh",
+    ".log",
+)
+
+
 def _parse_iso(value: str | datetime | None) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
@@ -46,6 +74,343 @@ def _timeline_timestamp(value: str | datetime | None) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value or "")
+
+
+def _engineering_query(value: str | None) -> str:
+    return " ".join(str(value or "").split()).strip().lower()
+
+
+def _engineering_filelike_reference(candidate: str) -> bool:
+    lower = candidate.lower()
+    return any(lower.endswith(suffix) for suffix in _ENGINEERING_FILELIKE_SUFFIXES)
+
+
+def _extract_engineering_references(
+    *values: str | None,
+    allow_repository: bool = True,
+) -> list[dict[str, str]]:
+    matches: list[tuple[int, int, dict[str, str]]] = []
+
+    def _occupied(start: int, end: int) -> bool:
+        return any(not (end <= left or start >= right) for left, right, _ in matches)
+
+    for raw_value in values:
+        text = " ".join(str(raw_value or "").split()).strip()
+        if not text:
+            continue
+        for pattern, target_kind in (
+            (_ENGINEERING_PULL_REQUEST_RE, "pull_request"),
+            (_ENGINEERING_WORK_ITEM_RE, "work_item"),
+        ):
+            for match in pattern.finditer(text):
+                repository_reference = f"{match.group('owner')}/{match.group('repo')}"
+                reference = (
+                    f"{repository_reference}/pull/{match.group('number')}"
+                    if target_kind == "pull_request"
+                    else f"{repository_reference}#{match.group('number')}"
+                )
+                matches.append(
+                    (
+                        match.start(),
+                        match.end(),
+                        {
+                            "reference": reference,
+                            "target_kind": target_kind,
+                            "repository_reference": repository_reference,
+                        },
+                    )
+                )
+        if not allow_repository:
+            continue
+        for match in _ENGINEERING_REPOSITORY_RE.finditer(text):
+            if _occupied(match.start(), match.end()):
+                continue
+            reference = f"{match.group('owner')}/{match.group('repo')}"
+            if _engineering_filelike_reference(reference):
+                continue
+            matches.append(
+                (
+                    match.start(),
+                    match.end(),
+                    {
+                        "reference": reference,
+                        "target_kind": "repository",
+                        "repository_reference": reference,
+                    },
+                )
+            )
+
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for _, _, item in sorted(matches, key=lambda entry: (entry[0], entry[1])):
+        reference = item["reference"]
+        if reference in seen:
+            continue
+        seen.add(reference)
+        ordered.append(item)
+    return ordered
+
+
+def _engineering_target_priority(target_kind: str) -> int:
+    if target_kind == "pull_request":
+        return 3
+    if target_kind == "work_item":
+        return 2
+    if target_kind == "repository":
+        return 1
+    return 0
+
+
+def _engineering_bundle_priority(bundle: dict[str, Any]) -> tuple[int, int, datetime]:
+    signal_count = (
+        int(bundle.get("workflow_count") or 0)
+        + int(bundle.get("approval_count") or 0)
+        + int(bundle.get("audit_event_count") or 0)
+        + int(bundle.get("session_match_count") or 0)
+    )
+    return (
+        _engineering_target_priority(str(bundle.get("target_kind") or "")),
+        signal_count,
+        _parse_iso(str(bundle.get("latest_updated_at") or "")),
+    )
+
+
+def _engineering_matches_query(
+    source: dict[str, Any],
+    normalized_query: str,
+    matched_references_by_session: dict[str, set[str]],
+) -> bool:
+    if not normalized_query:
+        return True
+    session_id = source.get("session_id")
+    reference = str(source.get("reference") or "")
+    if (
+        isinstance(session_id, str)
+        and reference
+        and reference in matched_references_by_session.get(session_id, set())
+    ):
+        return True
+    haystacks = [
+        reference,
+        source.get("repository_reference"),
+        source.get("title"),
+        source.get("summary"),
+        source.get("continue_message"),
+        source.get("snippet"),
+    ]
+    return any(normalized_query in str(value or "").lower() for value in haystacks)
+
+
+def _build_engineering_memory_bundles(
+    workflow_runs: list[dict[str, Any]],
+    pending_approvals: list[dict[str, Any]],
+    audit_events: list[dict[str, Any]],
+    session_search_matches: list[dict[str, Any]],
+    *,
+    normalized_query: str,
+    limit_bundles: int,
+    limit_session_matches: int,
+) -> list[dict[str, Any]]:
+    matched_references_by_session: dict[str, set[str]] = {}
+    for item in session_search_matches:
+        if not isinstance(item, dict) or not isinstance(item.get("session_id"), str):
+            continue
+        session_id = str(item["session_id"])
+        for ref in _extract_engineering_references(
+            str(item.get("title") or ""),
+            str(item.get("snippet") or ""),
+        ):
+            matched_references_by_session.setdefault(session_id, set()).add(ref["reference"])
+    source_entries: list[dict[str, Any]] = []
+
+    for run in workflow_runs:
+        references = _extract_engineering_references(
+            str(run.get("summary") or ""),
+            str(workflow_surface_continue_message(run) or ""),
+            str(run.get("thread_continue_message") or ""),
+        )
+        for ref in references:
+            source_entries.append(
+                {
+                    **ref,
+                    "source_kind": "workflow",
+                    "session_id": run.get("thread_id"),
+                    "thread_label": run.get("thread_label"),
+                    "title": run.get("workflow_name"),
+                    "summary": run.get("summary"),
+                    "status": run.get("status"),
+                    "updated_at": str(run.get("updated_at") or run.get("started_at") or ""),
+                    "continue_message": workflow_surface_continue_message(run),
+                    "artifact_paths": list(run.get("artifact_paths") or [])
+                    if isinstance(run.get("artifact_paths"), list)
+                    else [],
+                }
+            )
+
+    for approval in pending_approvals:
+        approval_metadata = approval_surface_metadata(approval)
+        approval_scope = approval_metadata.get("approval_scope")
+        target_reference = (
+            approval_scope.get("target", {}).get("reference")
+            if isinstance(approval_scope, dict)
+            and isinstance(approval_scope.get("target"), dict)
+            else None
+        )
+        references = _extract_engineering_references(str(target_reference or ""))
+        for ref in references:
+            source_entries.append(
+                {
+                    **ref,
+                    "source_kind": "approval",
+                    "session_id": approval.get("thread_id") or approval.get("session_id"),
+                    "thread_label": approval.get("thread_label"),
+                    "title": approval.get("tool_name"),
+                    "summary": approval.get("summary"),
+                    "status": approval.get("risk_level") or "pending",
+                    "updated_at": str(approval.get("created_at") or ""),
+                    "continue_message": approval.get("resume_message"),
+                    "artifact_paths": [],
+                }
+            )
+
+    for event in audit_events:
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        target_reference = details.get("target_reference") if isinstance(details.get("target_reference"), str) else ""
+        references = _extract_engineering_references(
+            target_reference,
+            str(event.get("summary") or ""),
+        )
+        for ref in references:
+            source_entries.append(
+                {
+                    **ref,
+                    "source_kind": "audit",
+                    "session_id": event.get("session_id"),
+                    "thread_label": None,
+                    "title": event.get("tool_name") or event.get("event_type"),
+                    "summary": event.get("summary"),
+                    "status": event.get("event_type"),
+                    "updated_at": str(event.get("created_at") or ""),
+                    "continue_message": None,
+                    "artifact_paths": [],
+                }
+            )
+
+    for match in session_search_matches:
+        if not isinstance(match, dict):
+            continue
+        references = _extract_engineering_references(
+            str(match.get("title") or ""),
+            str(match.get("snippet") or ""),
+        )
+        for ref in references:
+            source_entries.append(
+                {
+                    **ref,
+                    "source_kind": "session_search",
+                    "session_id": match.get("session_id"),
+                    "thread_label": match.get("title"),
+                    "title": match.get("title"),
+                    "summary": match.get("snippet"),
+                    "status": match.get("source"),
+                    "updated_at": str(match.get("matched_at") or ""),
+                    "continue_message": None,
+                    "snippet": match.get("snippet"),
+                    "artifact_paths": [],
+                }
+            )
+
+    bundles: dict[str, dict[str, Any]] = {}
+    for source in source_entries:
+        if not _engineering_matches_query(source, normalized_query, matched_references_by_session):
+            continue
+        reference = str(source.get("reference") or "")
+        if not reference:
+            continue
+        bundle = bundles.setdefault(
+            reference,
+            {
+                "reference": reference,
+                "target_kind": source.get("target_kind"),
+                "repository_reference": source.get("repository_reference"),
+                "latest_updated_at": source.get("updated_at") or "",
+                "workflow_count": 0,
+                "approval_count": 0,
+                "audit_event_count": 0,
+                "session_match_count": 0,
+                "thread_ids": set(),
+                "thread_labels": set(),
+                "artifact_paths": set(),
+                "continue_message": None,
+                "evidence": [],
+                "session_matches": [],
+                "review_receipts": [],
+            },
+        )
+        updated_at = str(source.get("updated_at") or "")
+        if _parse_iso(updated_at) > _parse_iso(str(bundle.get("latest_updated_at") or "")):
+            bundle["latest_updated_at"] = updated_at
+        session_id = source.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            bundle["thread_ids"].add(session_id)
+        thread_label = source.get("thread_label")
+        if isinstance(thread_label, str) and thread_label:
+            bundle["thread_labels"].add(thread_label)
+        artifact_paths = source.get("artifact_paths")
+        if isinstance(artifact_paths, list):
+            for artifact_path in artifact_paths:
+                if isinstance(artifact_path, str) and artifact_path:
+                    bundle["artifact_paths"].add(artifact_path)
+        if not bundle.get("continue_message") and isinstance(source.get("continue_message"), str):
+            bundle["continue_message"] = source.get("continue_message")
+
+        source_kind = str(source.get("source_kind") or "")
+        if source_kind == "workflow":
+            bundle["workflow_count"] += 1
+        elif source_kind == "approval":
+            bundle["approval_count"] += 1
+        elif source_kind == "audit":
+            bundle["audit_event_count"] += 1
+        elif source_kind == "session_search":
+            bundle["session_match_count"] += 1
+
+        evidence_entry = {
+            "source_kind": source_kind,
+            "title": source.get("title"),
+            "summary": source.get("summary"),
+            "status": source.get("status"),
+            "thread_id": source.get("session_id"),
+            "thread_label": source.get("thread_label"),
+            "updated_at": updated_at,
+        }
+        if source_kind == "session_search":
+            if len(bundle["session_matches"]) < limit_session_matches:
+                bundle["session_matches"].append(
+                    {
+                        "session_id": source.get("session_id"),
+                        "title": source.get("title"),
+                        "matched_at": updated_at,
+                        "snippet": source.get("snippet") or source.get("summary"),
+                        "source": source.get("status"),
+                    }
+                )
+        else:
+            if len(bundle["evidence"]) < 4:
+                bundle["evidence"].append(evidence_entry)
+        if source_kind == "audit" and len(bundle["review_receipts"]) < 3:
+            bundle["review_receipts"].append(evidence_entry)
+
+    finalized: list[dict[str, Any]] = []
+    for bundle in bundles.values():
+        finalized.append(
+            {
+                **bundle,
+                "thread_ids": sorted(bundle["thread_ids"]),
+                "thread_labels": sorted(bundle["thread_labels"]),
+                "artifact_paths": sorted(bundle["artifact_paths"]),
+            }
+        )
+    return sorted(finalized, key=_engineering_bundle_priority, reverse=True)[:limit_bundles]
 
 
 def _continuity_action_timestamp(snapshot: dict[str, Any]) -> str:
@@ -939,6 +1304,61 @@ async def get_operator_background_sessions(
             ),
         },
         "sessions": background_sessions,
+    }
+
+
+@router.get("/operator/engineering-memory")
+async def get_operator_engineering_memory(
+    q: str | None = Query(default=None),
+    limit_bundles: int = Query(default=6, ge=1, le=20),
+    limit_session_matches: int = Query(default=3, ge=1, le=10),
+    window_hours: int = Query(default=168, ge=1, le=720),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    normalized_query = " ".join(str(q or "").split()).strip()
+    workflow_runs, pending_approvals, audit_events, session_search_matches = await asyncio.gather(
+        _list_workflow_runs(limit=max(limit_bundles * 8, 80), session_id=None),
+        approval_repository.list_pending(session_id=None, limit=max(limit_bundles * 4, 40)),
+        audit_repository.list_events(limit=max(limit_bundles * 10, 120), session_id=None, since=cutoff),
+        session_manager.search_sessions(
+            normalized_query,
+            limit=max(limit_session_matches * 3, 8),
+        )
+        if normalized_query
+        else asyncio.sleep(0, result=[]),
+    )
+    bundles = _build_engineering_memory_bundles(
+        workflow_runs,
+        pending_approvals,
+        audit_events,
+        session_search_matches if isinstance(session_search_matches, list) else [],
+        normalized_query=_engineering_query(normalized_query),
+        limit_bundles=limit_bundles,
+        limit_session_matches=limit_session_matches,
+    )
+    return {
+        "summary": {
+            "query": normalized_query or None,
+            "tracked_bundles": len(bundles),
+            "repository_bundle_count": sum(
+                1 for bundle in bundles if str(bundle.get("target_kind") or "") == "repository"
+            ),
+            "pull_request_bundle_count": sum(
+                1 for bundle in bundles if str(bundle.get("target_kind") or "") == "pull_request"
+            ),
+            "work_item_bundle_count": sum(
+                1 for bundle in bundles if str(bundle.get("target_kind") or "") == "work_item"
+            ),
+            "search_match_count": len(session_search_matches)
+            if isinstance(session_search_matches, list)
+            else 0,
+        },
+        "search_matches": (
+            session_search_matches[:limit_session_matches]
+            if isinstance(session_search_matches, list)
+            else []
+        ),
+        "bundles": bundles,
     }
 
 

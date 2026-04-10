@@ -214,6 +214,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_approval_threading_behavior" in captured.out
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "background_session_handoff_behavior" in captured.out
+    assert "engineering_memory_bundle_behavior" in captured.out
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "approval_explainability_surface_behavior" in captured.out
     assert "source_report_action_workflow_behavior" in captured.out
@@ -337,6 +338,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "workflow_approval_threading_behavior",
                 "threaded_operator_timeline_behavior",
                 "background_session_handoff_behavior",
+                "engineering_memory_bundle_behavior",
                 "workflow_boundary_blocked_surface_behavior",
                 "approval_explainability_surface_behavior",
                 "source_adapter_evidence_behavior",
@@ -1644,3 +1646,28 @@ def test_background_session_runtime_eval_exposes_expected_details():
     assert details["lead_session_artifact_visible"] is True
     assert details["blocked_session_continue_message"] is True
     assert details["blocked_session_handoff_present"] is True
+
+
+def test_engineering_memory_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "engineering_memory_bundle_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["engineering_memory_bundle_behavior"]
+    assert details["tracked_bundles"] is True
+    assert details["search_match_count"] is True
+    assert details["pull_request_bundle_count"] is True
+    assert details["first_bundle_is_pull_request"] is True
+    assert details["first_bundle_has_workflow"] is True
+    assert details["first_bundle_has_approval"] is True
+    assert details["first_bundle_has_audit_receipt"] is True
+    assert details["first_bundle_has_session_match"] is True
+    assert details["first_bundle_artifact_visible"] is True
+    assert details["second_bundle_is_repository"] is True
+    assert details["second_bundle_has_session_match"] is True

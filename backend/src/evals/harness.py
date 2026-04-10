@@ -6969,6 +6969,119 @@ async def _eval_background_session_handoff_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_engineering_memory_bundle_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_engineering_memory
+
+    workflow_runs = [
+        {
+            "id": "run-pr",
+            "workflow_name": "repo-review",
+            "summary": "Review seraph-quest/seraph/pull/390 before merge.",
+            "status": "running",
+            "started_at": "2026-04-10T10:00:00Z",
+            "updated_at": "2026-04-10T10:05:00Z",
+            "thread_id": "thread-1",
+            "thread_label": "PR review thread",
+            "thread_continue_message": "Continue review for seraph-quest/seraph/pull/390.",
+            "artifact_paths": ["notes/pr-390-review.md"],
+        },
+        {
+            "id": "run-repo",
+            "workflow_name": "planning",
+            "summary": "Refresh roadmap for seraph-quest/seraph.",
+            "status": "completed",
+            "started_at": "2026-04-09T09:00:00Z",
+            "updated_at": "2026-04-09T09:15:00Z",
+            "thread_id": "thread-2",
+            "thread_label": "Roadmap thread",
+            "thread_continue_message": "Continue roadmap refresh for seraph-quest/seraph.",
+            "artifact_paths": ["notes/roadmap-refresh.md"],
+        },
+    ]
+    approvals = [
+        {
+            "id": "approval-1",
+            "tool_name": "execute_source_mutation",
+            "summary": "Publish review receipt to PR 390.",
+            "risk_level": "high",
+            "created_at": "2026-04-10T10:03:00Z",
+            "thread_id": "thread-1",
+            "thread_label": "PR review thread",
+            "resume_message": "Continue PR review publication.",
+            "approval_scope": {
+                "target": {
+                    "reference": "seraph-quest/seraph/pull/390",
+                }
+            },
+        }
+    ]
+    audit_events = [
+        {
+            "id": "audit-pr",
+            "event_type": "authenticated_source_mutation",
+            "tool_name": "add_review_to_pr",
+            "summary": "Published review receipt to seraph-quest/seraph/pull/390.",
+            "created_at": "2026-04-10T10:04:00Z",
+            "session_id": "thread-1",
+            "details": {"target_reference": "seraph-quest/seraph/pull/390"},
+        },
+        {
+            "id": "audit-repo",
+            "event_type": "authenticated_source_mutation",
+            "tool_name": "create_pull_request",
+            "summary": "Opened planning PR from seraph-quest/seraph.",
+            "created_at": "2026-04-09T09:16:00Z",
+            "session_id": "thread-2",
+            "details": {"target_reference": "seraph-quest/seraph"},
+        },
+    ]
+    session_matches = [
+        {
+            "session_id": "thread-1",
+            "title": "PR review thread",
+            "matched_at": "2026-04-10T10:02:00Z",
+            "snippet": "Need to finish seraph-quest/seraph/pull/390 review and publish the receipt.",
+            "source": "message",
+        },
+        {
+            "session_id": "thread-2",
+            "title": "Roadmap thread",
+            "matched_at": "2026-04-09T09:10:00Z",
+            "snippet": "Planning work for seraph-quest/seraph roadmap and next batch.",
+            "source": "message",
+        },
+    ]
+
+    with (
+        patch("src.api.operator._list_workflow_runs", return_value=workflow_runs),
+        patch("src.api.operator.approval_repository.list_pending", return_value=approvals),
+        patch("src.api.operator.audit_repository.list_events", return_value=audit_events),
+        patch("src.api.operator.session_manager.search_sessions", return_value=session_matches),
+    ):
+        payload = await get_operator_engineering_memory(
+            q="seraph",
+            limit_bundles=6,
+            limit_session_matches=3,
+            window_hours=168,
+        )
+
+    first = payload["bundles"][0]
+    second = payload["bundles"][1]
+    return {
+        "tracked_bundles": payload["summary"]["tracked_bundles"] == 2,
+        "search_match_count": payload["summary"]["search_match_count"] == 2,
+        "pull_request_bundle_count": payload["summary"]["pull_request_bundle_count"] == 1,
+        "first_bundle_is_pull_request": first["reference"] == "seraph-quest/seraph/pull/390",
+        "first_bundle_has_workflow": first["workflow_count"] == 1,
+        "first_bundle_has_approval": first["approval_count"] == 1,
+        "first_bundle_has_audit_receipt": len(first["review_receipts"]) == 1,
+        "first_bundle_has_session_match": first["session_match_count"] == 1,
+        "first_bundle_artifact_visible": first["artifact_paths"] == ["notes/pr-390-review.md"],
+        "second_bundle_is_repository": second["reference"] == "seraph-quest/seraph",
+        "second_bundle_has_session_match": second["session_match_count"] == 1,
+    }
+
+
 async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
@@ -8985,6 +9098,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Workspace background-session inventory links managed processes, branch handoff, and workflow continuation into one continuity substrate.",
         runner=_eval_background_session_handoff_behavior,
+    ),
+    EvalScenario(
+        name="engineering_memory_bundle_behavior",
+        category="behavior",
+        description="Operator engineering memory groups repository and pull-request continuity into searchable bundles instead of scattering the context across sessions, approvals, and audit rows.",
+        runner=_eval_engineering_memory_bundle_behavior,
     ),
     EvalScenario(
         name="workflow_boundary_blocked_surface_behavior",

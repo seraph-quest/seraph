@@ -930,6 +930,151 @@ async def test_operator_background_sessions_surface_managed_processes_and_branch
 
 
 @pytest.mark.asyncio
+async def test_operator_engineering_memory_groups_repo_and_pr_bundles(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-pr",
+                        "workflow_name": "repo-review",
+                        "summary": "Review seraph-quest/seraph/pull/390 before merge.",
+                        "status": "running",
+                        "started_at": "2026-04-10T10:00:00Z",
+                        "updated_at": "2026-04-10T10:05:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "PR review thread",
+                        "thread_continue_message": "Continue review for seraph-quest/seraph/pull/390.",
+                        "artifact_paths": ["notes/pr-390-review.md"],
+                    },
+                    {
+                        "id": "run-repo",
+                        "workflow_name": "planning",
+                        "summary": "Refresh roadmap for seraph-quest/seraph.",
+                        "status": "completed",
+                        "started_at": "2026-04-09T09:00:00Z",
+                        "updated_at": "2026-04-09T09:15:00Z",
+                        "thread_id": "session-2",
+                        "thread_label": "Roadmap thread",
+                        "thread_continue_message": "Continue roadmap refresh for seraph-quest/seraph.",
+                        "artifact_paths": ["notes/roadmap-refresh.md"],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "approval-1",
+                        "tool_name": "execute_source_mutation",
+                        "summary": "Publish review receipt to PR 390.",
+                        "risk_level": "high",
+                        "created_at": "2026-04-10T10:03:00Z",
+                        "thread_id": "session-1",
+                        "thread_label": "PR review thread",
+                        "resume_message": "Continue PR review publication.",
+                        "approval_scope": {
+                            "target": {
+                                "reference": "seraph-quest/seraph/pull/390",
+                            }
+                        },
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-pr",
+                        "event_type": "authenticated_source_mutation",
+                        "tool_name": "add_review_to_pr",
+                        "summary": "Published review receipt to seraph-quest/seraph/pull/390.",
+                        "created_at": "2026-04-10T10:04:00Z",
+                        "session_id": "session-1",
+                        "details": {
+                            "target_reference": "seraph-quest/seraph/pull/390",
+                        },
+                    },
+                    {
+                        "id": "audit-repo",
+                        "event_type": "authenticated_source_mutation",
+                        "tool_name": "create_pull_request",
+                        "summary": "Opened planning PR from seraph-quest/seraph.",
+                        "created_at": "2026-04-09T09:16:00Z",
+                        "session_id": "session-2",
+                        "details": {
+                            "target_reference": "seraph-quest/seraph",
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.search_sessions",
+            AsyncMock(
+                return_value=[
+                    {
+                        "session_id": "session-1",
+                        "title": "PR review thread",
+                        "matched_at": "2026-04-10T10:02:00Z",
+                        "snippet": "Need to finish seraph-quest/seraph/pull/390 review and publish the receipt.",
+                        "source": "message",
+                    },
+                    {
+                        "session_id": "session-2",
+                        "title": "Roadmap thread",
+                        "matched_at": "2026-04-09T09:10:00Z",
+                        "snippet": "Planning work for seraph-quest/seraph roadmap and next batch.",
+                        "source": "message",
+                    },
+                ]
+            ),
+        ),
+    ):
+        resp = await client.get(
+            "/api/operator/engineering-memory",
+            params={"q": "seraph", "limit_bundles": 6, "limit_session_matches": 3},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["query"] == "seraph"
+    assert payload["summary"]["tracked_bundles"] == 2
+    assert payload["summary"]["pull_request_bundle_count"] == 1
+    assert payload["summary"]["repository_bundle_count"] == 1
+    assert payload["summary"]["search_match_count"] == 2
+    assert len(payload["search_matches"]) == 2
+
+    first = payload["bundles"][0]
+    assert first["reference"] == "seraph-quest/seraph/pull/390"
+    assert first["target_kind"] == "pull_request"
+    assert first["workflow_count"] == 1
+    assert first["approval_count"] == 1
+    assert first["audit_event_count"] == 1
+    assert first["session_match_count"] == 1
+    assert first["thread_ids"] == ["session-1"]
+    assert first["thread_labels"] == ["PR review thread"]
+    assert first["continue_message"] == "Continue review for seraph-quest/seraph/pull/390."
+    assert first["artifact_paths"] == ["notes/pr-390-review.md"]
+    assert first["session_matches"][0]["session_id"] == "session-1"
+    assert first["review_receipts"][0]["source_kind"] == "audit"
+
+    second = payload["bundles"][1]
+    assert second["reference"] == "seraph-quest/seraph"
+    assert second["target_kind"] == "repository"
+    assert second["workflow_count"] == 1
+    assert second["audit_event_count"] == 1
+    assert second["session_match_count"] == 1
+    assert second["thread_ids"] == ["session-2"]
+    assert second["artifact_paths"] == ["notes/roadmap-refresh.md"]
+
+
+@pytest.mark.asyncio
 async def test_operator_timeline_projects_routing_metadata(client):
     with (
         patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),

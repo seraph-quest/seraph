@@ -598,6 +598,26 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_judgment_behavior"]["user_model_signal_count"] >= 2
     assert details_by_name["guardian_judgment_behavior"]["has_user_model_signal"] is True
     assert details_by_name["guardian_judgment_behavior"]["has_user_model_sources_diagnostic"] is True
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_intent_uncertainty_level"]
+        == "high"
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_resolution"]
+        == "clarify"
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_has_referent_diagnostic"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_has_project_anchor_diagnostic"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_prompt_includes_intent_uncertainty"]
+        is True
+    )
     assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
     assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
     assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3

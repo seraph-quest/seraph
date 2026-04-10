@@ -4886,6 +4886,11 @@ async def _eval_guardian_state_synthesis() -> dict[str, Any]:
 
 
 async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    from src.guardian.feedback import GuardianLearningSignal
+    from src.guardian.learning_evidence import GuardianLearningAxisEvidence
+
     async with _patched_async_db(
         "src.agent.session.get_session",
         "src.guardian.feedback.get_session",
@@ -4909,6 +4914,59 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             salience_reason="aligned_work_activity",
             interruption_cost="high",
             attention_budget_remaining=1,
+            interruption_mode="focus",
+        )
+        live_signal = GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=1,
+            bias="reduce_interruptions",
+            phrasing_bias="be_brief_and_literal",
+            cadence_bias="neutral",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="avoid_focus_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="neutral",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=0,
+            axis_evidence=(
+                GuardianLearningAxisEvidence(
+                    axis="delivery",
+                    field_name="bias",
+                    source="live_signal",
+                    bias="reduce_interruptions",
+                    support_count=3,
+                    weighted_support=3.0,
+                    recency_score=1.0,
+                    confidence_score=1.0,
+                    quality_score=1.0,
+                    last_confirmed_at=datetime.now(timezone.utc),
+                    active_day_count=2,
+                ),
+                GuardianLearningAxisEvidence(
+                    axis="phrasing",
+                    field_name="phrasing_bias",
+                    source="live_signal",
+                    bias="be_brief_and_literal",
+                    support_count=3,
+                    weighted_support=3.0,
+                    recency_score=1.0,
+                    confidence_score=1.0,
+                    quality_score=1.0,
+                    last_confirmed_at=datetime.now(timezone.utc),
+                    active_day_count=2,
+                ),
+            ),
+        )
+        live_resolution = MagicMock(
+            effective_signal=live_signal,
+            dominant_scope="project",
+            decisions=tuple(),
         )
 
         with (
@@ -4934,6 +4992,20 @@ async def _eval_guardian_world_model_behavior() -> dict[str, Any]:
             patch(
                 "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
                 return_value=["Investor brief", "Fundraising follow-up"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(return_value=live_resolution),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+                AsyncMock(
+                    return_value="- advisory delivered, feedback=not_helpful: Too many nudges during prep.",
+                ),
+            ),
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(return_value=None),
             ),
             patch(
                 "src.guardian.feedback.guardian_feedback_repository.summarize_recent",
@@ -5037,7 +5109,53 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
     live_scope_decisions: list[GuardianLearningScopeDecision] = []
     for axis in ordered_learning_axes():
         field_name = learning_field_for_axis(axis)
-        if axis == "timing":
+        if axis == "delivery":
+            evidence = GuardianLearningAxisEvidence(
+                axis=axis,
+                field_name=field_name,
+                source="live_signal",
+                bias="reduce_interruptions",
+                support_count=3,
+                weighted_support=3.0,
+                recency_score=0.94,
+                confidence_score=0.9,
+                quality_score=0.9,
+                metadata_complete=True,
+            )
+            live_scope_decisions.append(
+                GuardianLearningScopeDecision(
+                    axis=axis,
+                    field_name=field_name,
+                    selected_scope="thread_project",
+                    selected_bias=evidence.bias,
+                    selected_weight=learning_evidence_weight(evidence),
+                    reason="strongest_scope",
+                )
+            )
+        elif axis == "phrasing":
+            evidence = GuardianLearningAxisEvidence(
+                axis=axis,
+                field_name=field_name,
+                source="live_signal",
+                bias="be_brief_and_literal",
+                support_count=3,
+                weighted_support=3.0,
+                recency_score=0.94,
+                confidence_score=0.9,
+                quality_score=0.9,
+                metadata_complete=True,
+            )
+            live_scope_decisions.append(
+                GuardianLearningScopeDecision(
+                    axis=axis,
+                    field_name=field_name,
+                    selected_scope="thread_project",
+                    selected_bias=evidence.bias,
+                    selected_weight=learning_evidence_weight(evidence),
+                    reason="strongest_scope",
+                )
+            )
+        elif axis == "timing":
             evidence = GuardianLearningAxisEvidence(
                 axis=axis,
                 field_name=field_name,
@@ -5080,8 +5198,8 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         not_helpful_count=2,
         acknowledged_count=0,
         failed_count=1,
-        bias="neutral",
-        phrasing_bias="neutral",
+        bias="reduce_interruptions",
+        phrasing_bias="be_brief_and_literal",
         cadence_bias="neutral",
         channel_bias="neutral",
         escalation_bias="neutral",
@@ -5150,6 +5268,7 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
             salience_level="medium",
             salience_reason="active_goals",
             interruption_cost="medium",
+            interruption_mode="focus",
         )
 
         with (
@@ -5218,6 +5337,10 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
             state = await build_guardian_state(
                 session_id="current",
                 user_message="What matters for Atlas today?",
+            )
+            ambiguous_state = await build_guardian_state(
+                session_id="current",
+                user_message="Can you finish this today?",
             )
 
         decision = decide_intervention(
@@ -5297,6 +5420,19 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
         "has_user_model_sources_diagnostic": any(
             item.startswith("User-model evidence sources:")
             for item in state.world_model.preference_inference_diagnostics
+        ),
+        "ambiguous_request_intent_uncertainty_level": ambiguous_state.intent_uncertainty_level,
+        "ambiguous_request_resolution": ambiguous_state.intent_resolution,
+        "ambiguous_request_has_referent_diagnostic": any(
+            "ambiguous referent" in item.lower()
+            for item in ambiguous_state.intent_uncertainty_diagnostics
+        ),
+        "ambiguous_request_has_project_anchor_diagnostic": any(
+            "project-anchor" in item.lower() or "project anchors" in item.lower()
+            for item in ambiguous_state.intent_uncertainty_diagnostics
+        ),
+        "ambiguous_request_prompt_includes_intent_uncertainty": (
+            "Intent uncertainty:" in ambiguous_state.to_prompt_block()
         ),
         "decision_action": decision.action.value,
         "decision_reason": decision.reason,

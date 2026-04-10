@@ -44,6 +44,7 @@ class GuardianState:
     intent_uncertainty_level: str = "clear"
     intent_resolution: str = "proceed"
     intent_uncertainty_diagnostics: tuple[str, ...] = ()
+    judgment_proof_lines: tuple[str, ...] = ()
 
     @property
     def active_goals_summary(self) -> str:
@@ -108,6 +109,11 @@ class GuardianState:
                 f"Intent uncertainty: {self.intent_uncertainty_level} (recommended resolution: {self.intent_resolution})"
             )
             lines.extend(f"- {item}" for item in self.intent_uncertainty_diagnostics)
+
+        if self.judgment_proof_lines:
+            lines.append("")
+            lines.append("Judgment proof:")
+            lines.extend(f"- {item}" for item in self.judgment_proof_lines)
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -644,6 +650,66 @@ def _intent_uncertainty_diagnostics(
     return "medium", "defer_or_clarify", tuple(diagnostics)
 
 
+def _judgment_proof_lines(
+    *,
+    observer_context: CurrentContext,
+    world_model: GuardianWorldModel,
+    intent_uncertainty_diagnostics: tuple[str, ...],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    lower_risks = [item.lower() for item in world_model.judgment_risks]
+    lower_preference_diagnostics = [
+        item.lower() for item in world_model.preference_inference_diagnostics
+    ]
+    lower_intent_diagnostics = [item.lower() for item in intent_uncertainty_diagnostics]
+
+    project_anchor_split = any(
+        "project-anchor evidence remains split" in item
+        or "project-anchor evidence remains ambiguous" in item
+        for item in lower_risks
+    )
+    competing_project_drift = any(
+        "competing project evidence currently favors" in item
+        or "attention is drifting toward" in item
+        for item in lower_risks
+    )
+    split_preference_evidence = any(
+        "evidence is split between" in item for item in lower_preference_diagnostics
+    )
+    ambiguous_referent = any("ambiguous referent" in item for item in lower_intent_diagnostics)
+    observer_uncertain = observer_context.observer_confidence != "grounded"
+
+    if project_anchor_split and competing_project_drift:
+        lines.append(
+            "Project-target proof: live observer context conflicts with recalled continuity or execution evidence, so the intended project is not grounded."
+        )
+    elif project_anchor_split:
+        lines.append(
+            "Project-target proof: live observer context and recalled project evidence are split, so target selection remains ambiguous."
+        )
+    elif competing_project_drift:
+        lines.append(
+            "Project-target proof: continuity or execution evidence is drifting toward a competing project, so target selection should stay conservative."
+        )
+
+    if split_preference_evidence:
+        lines.append(
+            "Interaction-style proof: live and procedural preference evidence disagree, so delivery style should be treated as unsettled."
+        )
+
+    if ambiguous_referent:
+        lines.append(
+            "Referent proof: the user message contains an unresolved referent, so clarification is safer than a confident action."
+        )
+
+    if observer_uncertain:
+        lines.append(
+            f"Observer proof: live observer confidence is {observer_context.observer_confidence}, weakening the evidence for a confident judgment."
+        )
+
+    return tuple(lines)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -818,6 +884,11 @@ async def build_guardian_state(
             world_model=world_model,
         )
     )
+    judgment_proof_lines = _judgment_proof_lines(
+        observer_context=observer_context,
+        world_model=world_model,
+        intent_uncertainty_diagnostics=intent_uncertainty_diagnostics,
+    )
 
     return GuardianState(
         soul_context=soul_context,
@@ -851,5 +922,6 @@ async def build_guardian_state(
         intent_uncertainty_level=intent_uncertainty_level,
         intent_resolution=intent_resolution,
         intent_uncertainty_diagnostics=intent_uncertainty_diagnostics,
+        judgment_proof_lines=judgment_proof_lines,
         confidence=confidence,
     )

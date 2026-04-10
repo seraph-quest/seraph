@@ -215,6 +215,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "background_session_handoff_behavior" in captured.out
     assert "workflow_context_condenser_behavior" in captured.out
+    assert "workflow_operating_layer_behavior" in captured.out
     assert "engineering_memory_bundle_behavior" in captured.out
     assert "operator_continuity_graph_behavior" in captured.out
     assert "operator_guardian_state_surface_behavior" in captured.out
@@ -342,6 +343,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "threaded_operator_timeline_behavior",
                 "background_session_handoff_behavior",
                 "workflow_context_condenser_behavior",
+                "workflow_operating_layer_behavior",
                 "engineering_memory_bundle_behavior",
                 "operator_continuity_graph_behavior",
                 "workflow_boundary_blocked_surface_behavior",
@@ -1758,6 +1760,41 @@ def test_workflow_context_condenser_runtime_eval_exposes_expected_details():
     assert details["second_workflow_preserves_repair"] is True
     assert details["second_workflow_boundary_receipt_visible"] is True
     assert details["second_workflow_approval_not_hallucinated"] is True
+
+
+def test_workflow_operating_layer_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "workflow_operating_layer_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["workflow_operating_layer_behavior"]
+    assert details["attention_sessions_visible"] is True
+    assert details["repair_ready_summary_visible"] is True
+    assert details["branch_ready_summary_visible"] is True
+    assert details["debugger_ready_summary_visible"] is True
+    assert details["stalled_summary_visible"] is True
+    assert details["atlas_queue_state_visible"] is True
+    assert details["atlas_queue_reason_visible"] is True
+    assert details["atlas_queue_draft_visible"] is True
+    assert details["atlas_attention_summary_visible"] is True
+    assert details["brief_queue_state_visible"] is True
+    assert details["brief_handoff_draft_visible"] is True
+    assert details["brief_related_output_visible"] is True
+    assert details["brief_output_history_visible"] is True
+    assert details["brief_branch_reference_visible"] is True
+    assert details["approval_workflow_recovery_path_visible"] is True
+    assert details["approval_workflow_checkpoint_visible"] is True
+    assert details["approval_workflow_history_visible"] is True
+    assert details["brief_workflow_fresh_run_visible"] is True
+    assert details["brief_workflow_repair_action_visible"] is True
+    assert details["brief_workflow_compare_ready"] is True
+    assert details["cleanup_workflow_stalled_visible"] is True
 
 
 def test_operator_continuity_graph_runtime_eval_exposes_expected_details():

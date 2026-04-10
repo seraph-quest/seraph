@@ -1289,6 +1289,222 @@ def _workflow_state_compaction(run: dict[str, Any], *, preview_steps: int = 3) -
     }
 
 
+def _workflow_latest_failure_record(run: dict[str, Any]) -> dict[str, Any] | None:
+    failure_statuses = {"failed", "degraded", "continued_error"}
+    for record in reversed(_workflow_step_records(run)):
+        if str(record.get("status") or "") in failure_statuses:
+            return record
+    return None
+
+
+def _workflow_stalled(run: dict[str, Any], *, stalled_minutes: int = 90) -> bool:
+    status = str(run.get("status") or "")
+    if _workflow_terminal_status(status):
+        return False
+    updated_at = _parse_iso(str(run.get("updated_at") or run.get("started_at") or ""))
+    age_minutes = max(int((datetime.now(timezone.utc) - updated_at).total_seconds() // 60), 0)
+    return age_minutes >= stalled_minutes
+
+
+def _workflow_family_runs(
+    run: dict[str, Any],
+    workflow_runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    root_identity = run.get("root_run_identity")
+    run_identity = run.get("run_identity")
+    thread_id = run.get("thread_id")
+    workflow_name = run.get("workflow_name")
+
+    if isinstance(root_identity, str) and root_identity:
+        return [
+            candidate
+            for candidate in workflow_runs
+            if isinstance(candidate, dict)
+            and (
+                candidate.get("root_run_identity") == root_identity
+                or candidate.get("run_identity") == root_identity
+            )
+        ]
+    if isinstance(run_identity, str) and run_identity:
+        return [
+            candidate
+            for candidate in workflow_runs
+            if isinstance(candidate, dict)
+            and (
+                candidate.get("run_identity") == run_identity
+                or candidate.get("parent_run_identity") == run_identity
+                or candidate.get("root_run_identity") == run_identity
+            )
+        ]
+    if isinstance(thread_id, str) and thread_id and isinstance(workflow_name, str) and workflow_name:
+        return [
+            candidate
+            for candidate in workflow_runs
+            if isinstance(candidate, dict)
+            and candidate.get("thread_id") == thread_id
+            and candidate.get("workflow_name") == workflow_name
+        ]
+    return [run]
+
+
+def _workflow_output_debugger(
+    run: dict[str, Any],
+    workflow_runs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    family_runs = sorted(
+        _workflow_family_runs(run, workflow_runs),
+        key=_workflow_orchestration_priority,
+        reverse=True,
+    )
+    self_key = run.get("run_identity") or run.get("id")
+    primary_output_path = (_workflow_artifact_paths(run) or [None])[-1]
+    checkpoint_labels = [
+        str(item.get("label") or item.get("step_id") or "").strip()
+        for item in (run.get("checkpoint_candidates") if isinstance(run.get("checkpoint_candidates"), list) else [])
+        if isinstance(item, dict) and str(item.get("label") or item.get("step_id") or "").strip()
+    ]
+    related_output_entries: list[tuple[datetime, dict[str, Any]]] = []
+    branch_runs: list[dict[str, Any]] = []
+    for candidate in family_runs:
+        candidate_key = candidate.get("run_identity") or candidate.get("id")
+        if candidate_key != self_key and (
+            candidate.get("branch_kind") is not None or candidate.get("parent_run_identity") is not None
+        ):
+            branch_runs.append(candidate)
+        updated_at = _parse_iso(str(candidate.get("updated_at") or candidate.get("started_at") or ""))
+        for path in _workflow_artifact_paths(candidate):
+            related_output_entries.append((
+                updated_at,
+                {
+                    "path": path,
+                    "run_identity": candidate.get("run_identity"),
+                    "summary": candidate.get("summary"),
+                    "status": candidate.get("status"),
+                    "branch_kind": candidate.get("branch_kind"),
+                    "updated_at": updated_at.isoformat(),
+                    "is_primary": candidate_key == self_key,
+                },
+            ))
+    history_outputs: list[dict[str, Any]] = []
+    seen_output_paths: set[str] = set()
+    for _, entry in sorted(related_output_entries, key=lambda item: item[0], reverse=True):
+        path = str(entry.get("path") or "").strip()
+        if not path or path in seen_output_paths:
+            continue
+        seen_output_paths.add(path)
+        history_outputs.append(entry)
+    related_output_paths = [
+        str(entry.get("path") or "")
+        for entry in history_outputs
+        if str(entry.get("path") or "") != primary_output_path
+    ][:3]
+    branch_runs = sorted(
+        branch_runs,
+        key=lambda candidate: (
+            _parse_iso(str(candidate.get("updated_at") or candidate.get("started_at") or "")),
+            _workflow_orchestration_priority(candidate),
+        ),
+        reverse=True,
+    )
+    latest_branch = branch_runs[0] if branch_runs else None
+    latest_branch_output_path = (
+        (_workflow_artifact_paths(latest_branch) or [None])[-1]
+        if isinstance(latest_branch, dict)
+        else None
+    )
+    return {
+        "family_run_count": len(family_runs),
+        "branch_run_count": len(branch_runs),
+        "history_output_count": len(history_outputs),
+        "primary_output_path": primary_output_path,
+        "related_output_paths": related_output_paths,
+        "history_outputs": history_outputs[:4],
+        "latest_branch_run_identity": latest_branch.get("run_identity") if isinstance(latest_branch, dict) else None,
+        "latest_branch_summary": latest_branch.get("summary") if isinstance(latest_branch, dict) else None,
+        "latest_branch_status": latest_branch.get("status") if isinstance(latest_branch, dict) else None,
+        "latest_branch_output_path": latest_branch_output_path,
+        "comparison_ready": bool(
+            primary_output_path
+            and latest_branch_output_path
+            and latest_branch_output_path != primary_output_path
+        ),
+        "checkpoint_labels": checkpoint_labels,
+    }
+
+
+def _workflow_recovery_density(run: dict[str, Any]) -> dict[str, Any]:
+    checkpoint_candidates = run.get("checkpoint_candidates")
+    latest_failure = _workflow_latest_failure_record(run)
+    replay_actions = (
+        run.get("replay_recommended_actions")
+        if isinstance(run.get("replay_recommended_actions"), list)
+        else []
+    )
+    repair_actions = (
+        latest_failure.get("recovery_actions")
+        if isinstance(latest_failure, dict) and isinstance(latest_failure.get("recovery_actions"), list)
+        else []
+    )
+    repair_action_types = [
+        str(action.get("type") or "").strip()
+        for action in repair_actions
+        if isinstance(action, dict) and str(action.get("type") or "").strip()
+    ]
+    approval_pending = (
+        int(run.get("pending_approval_count") or 0) > 0
+        or str(run.get("status") or "") == "awaiting_approval"
+    )
+    boundary_blocked = isinstance(run.get("replay_block_reason"), str) and bool(run.get("replay_block_reason"))
+    retry_ready = bool(run.get("retry_from_step_draft"))
+    checkpoint_ready = isinstance(checkpoint_candidates, list) and len(checkpoint_candidates) > 0
+    repair_ready = bool(repair_actions) or bool(latest_failure and latest_failure.get("is_recoverable"))
+    branch_ready = bool(
+        run.get("branch_kind") is not None
+        or run.get("parent_run_identity") is not None
+        or checkpoint_ready
+    )
+    replay_ready = bool(run.get("replay_allowed", True)) and not approval_pending and not boundary_blocked
+    stalled = _workflow_stalled(run)
+    recommended_path = "observe"
+    if approval_pending:
+        recommended_path = "approval_gate"
+    elif boundary_blocked:
+        recommended_path = "fresh_run"
+    elif repair_ready:
+        recommended_path = "step_repair"
+    elif retry_ready:
+        recommended_path = "retry_from_step"
+    elif checkpoint_ready:
+        recommended_path = "checkpoint_branch"
+    elif branch_ready:
+        recommended_path = "branch_continue"
+    elif replay_ready:
+        recommended_path = "replay"
+    elif not _workflow_terminal_status(str(run.get("status") or "")):
+        recommended_path = "continue_thread"
+    return {
+        "recommended_path": recommended_path,
+        "approval_pending": approval_pending,
+        "boundary_blocked": boundary_blocked,
+        "retry_ready": retry_ready,
+        "checkpoint_ready": checkpoint_ready,
+        "repair_ready": repair_ready,
+        "branch_ready": branch_ready,
+        "replay_ready": replay_ready,
+        "stalled": stalled,
+        "checkpoint_candidate_count": len(checkpoint_candidates) if isinstance(checkpoint_candidates, list) else 0,
+        "recovery_action_count": len(repair_actions) + len(replay_actions),
+        "repair_action_types": repair_action_types,
+        "repair_hint": (
+            latest_failure.get("recovery_hint")
+            if isinstance(latest_failure, dict) and isinstance(latest_failure.get("recovery_hint"), str)
+            else None
+        ),
+        "failure_step_id": latest_failure.get("id") if isinstance(latest_failure, dict) else None,
+        "failure_step_tool": latest_failure.get("tool") if isinstance(latest_failure, dict) else None,
+    }
+
+
 def _workflow_visible_step_records(
     step_records: list[dict[str, Any]],
     *,
@@ -1400,6 +1616,8 @@ def _workflow_orchestration_entries(
         artifact_paths = _workflow_artifact_paths(run)
         output_path = artifact_paths[-1] if artifact_paths else None
         compaction = _workflow_state_compaction(run)
+        recovery_density = _workflow_recovery_density(run)
+        output_debugger = _workflow_output_debugger(run, workflow_runs)
         visible_step_records = _workflow_visible_step_records(
             _workflow_step_records(run),
             visible_step_count=int(compaction["visible_step_count"]),
@@ -1453,15 +1671,151 @@ def _workflow_orchestration_entries(
             "preserved_recovery_paths": compaction["preserved_recovery_paths"],
             "recent_step_labels": compaction["recent_step_labels"],
             "state_capsule": compaction["state_capsule"],
+            "recovery_density": recovery_density,
+            "output_debugger": output_debugger,
         })
     return entries
+
+
+def _workflow_session_queue_state(
+    *,
+    awaiting_approval_workflows: int,
+    boundary_blocked_workflows: int,
+    repair_ready_workflows: int,
+    stalled_workflows: int,
+    branch_ready_workflows: int,
+    active_workflows: int,
+) -> str:
+    if awaiting_approval_workflows > 0:
+        return "approval_gate"
+    if boundary_blocked_workflows > 0:
+        return "boundary_blocked"
+    if repair_ready_workflows > 0:
+        return "repair_ready"
+    if stalled_workflows > 0:
+        return "stalled"
+    if branch_ready_workflows > 0:
+        return "branch_ready"
+    if active_workflows > 0:
+        return "active"
+    return "idle"
+
+
+def _workflow_session_queue_reason(
+    *,
+    queue_state: str,
+    awaiting_approval_workflows: int,
+    boundary_blocked_workflows: int,
+    repair_ready_workflows: int,
+    stalled_workflows: int,
+    branch_ready_workflows: int,
+    output_debugger_ready_workflows: int,
+) -> str | None:
+    if queue_state == "approval_gate" and awaiting_approval_workflows > 0:
+        return f"{awaiting_approval_workflows} workflow awaits approval before the session can advance."
+    if queue_state == "boundary_blocked" and boundary_blocked_workflows > 0:
+        return f"{boundary_blocked_workflows} workflow crossed a changed trust boundary and now needs repair or a fresh run."
+    if queue_state == "repair_ready" and repair_ready_workflows > 0:
+        return f"{repair_ready_workflows} workflow exposes a recoverable failed step that can be repaired now."
+    if queue_state == "stalled" and stalled_workflows > 0:
+        return f"{stalled_workflows} workflow has gone stale and needs explicit operator follow-through."
+    if queue_state == "branch_ready" and branch_ready_workflows > 0:
+        return f"{branch_ready_workflows} workflow already has branch or checkpoint context ready for continuation."
+    if output_debugger_ready_workflows > 0:
+        return f"{output_debugger_ready_workflows} workflow exposes enough history to compare outputs before continuing."
+    return None
+
+
+def _workflow_session_queue_draft(
+    *,
+    thread_label: str | None,
+    lead: dict[str, Any],
+    queue_state: str,
+    queue_reason: str | None,
+    state_capsule: str | None,
+    lead_density: dict[str, Any],
+    lead_debugger: dict[str, Any],
+) -> str | None:
+    label = thread_label or "Ambient workflows"
+    workflow_name = str(lead.get("workflow_name") or "workflow")
+    summary = str(lead.get("summary") or "").strip()
+    parts = [
+        f"Review the workflow queue for {label}.",
+        f'Lead workflow "{workflow_name}" is currently {queue_state.replace("_", " ")}.',
+        f'Status: {str(lead.get("status") or "unknown")}.',
+        f'Summary: "{summary}".' if summary else None,
+        queue_reason,
+        (
+            f'Next recommended path: {str(lead_density.get("recommended_path") or "observe").replace("_", " ")}.'
+            if lead_density.get("recommended_path")
+            else None
+        ),
+        f"State capsule: {state_capsule}." if state_capsule else None,
+        (
+            f'Latest output: "{lead_debugger.get("primary_output_path")}".'
+            if lead_debugger.get("primary_output_path")
+            else None
+        ),
+        (
+            "Compare the latest branch output before continuing."
+            if bool(lead_debugger.get("comparison_ready"))
+            else None
+        ),
+    ]
+    return " ".join(part for part in parts if isinstance(part, str) and part.strip())
+
+
+def _workflow_session_handoff_draft(
+    *,
+    thread_label: str | None,
+    lead: dict[str, Any],
+    queue_state: str,
+    attention_summary: str | None,
+    state_capsule: str | None,
+    lead_density: dict[str, Any],
+    lead_debugger: dict[str, Any],
+) -> str | None:
+    label = thread_label or "Ambient workflows"
+    workflow_name = str(lead.get("workflow_name") or "workflow")
+    summary = str(lead.get("summary") or "").strip()
+    latest_branch_summary = str(lead_debugger.get("latest_branch_summary") or "").strip()
+    parts = [
+        f"Prepare a workflow handoff for {label}.",
+        f'Lead workflow "{workflow_name}" is currently {queue_state.replace("_", " ")}.',
+        f'Summary: "{summary}".' if summary else None,
+        f"Attention summary: {attention_summary}." if attention_summary else None,
+        (
+            f'Next recommended path: {str(lead_density.get("recommended_path") or "observe").replace("_", " ")}.'
+            if lead_density.get("recommended_path")
+            else None
+        ),
+        f"State capsule: {state_capsule}." if state_capsule else None,
+        (
+            f'Primary output: "{lead_debugger.get("primary_output_path")}".'
+            if lead_debugger.get("primary_output_path")
+            else None
+        ),
+        (
+            f'Latest branch: "{latest_branch_summary}".'
+            if latest_branch_summary
+            else None
+        ),
+        (
+            "Related outputs: "
+            + ", ".join(f'"{path}"' for path in lead_debugger.get("related_output_paths") or [])
+            + "."
+            if isinstance(lead_debugger.get("related_output_paths"), list) and lead_debugger.get("related_output_paths")
+            else None
+        ),
+    ]
+    return " ".join(part for part in parts if isinstance(part, str) and part.strip())
 
 
 def _workflow_orchestration_sessions(
     workflow_runs: list[dict[str, Any]],
     *,
     session_titles: dict[str, str],
-    limit: int,
+    limit: int | None,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for run in workflow_runs:
@@ -1474,6 +1828,8 @@ def _workflow_orchestration_sessions(
         runs_sorted = sorted(runs, key=lambda run: _workflow_orchestration_priority(run), reverse=True)
         lead = runs_sorted[0]
         compactions = [_workflow_state_compaction(run) for run in runs]
+        recovery_densities = [_workflow_recovery_density(run) for run in runs]
+        output_debuggers = [_workflow_output_debugger(run, workflow_runs) for run in runs]
         active_workflows = sum(1 for run in runs if not _workflow_terminal_status(str(run.get("status") or "")))
         blocked_workflows = sum(1 for run in runs if str(run.get("availability") or "") == "blocked")
         awaiting_approval_workflows = sum(1 for run in runs if str(run.get("status") or "") == "awaiting_approval")
@@ -1486,10 +1842,50 @@ def _workflow_orchestration_sessions(
                 and int((_workflow_step_focus(run) or {}).get("recovery_action_count") or 0) > 0
             )
         )
+        boundary_blocked_workflows = sum(1 for item in recovery_densities if bool(item["boundary_blocked"]))
+        repair_ready_workflows = sum(1 for item in recovery_densities if bool(item["repair_ready"]))
+        branch_ready_workflows = sum(1 for item in recovery_densities if bool(item["branch_ready"]))
+        stalled_workflows = sum(1 for item in recovery_densities if bool(item["stalled"]))
+        output_debugger_ready_workflows = sum(
+            1
+            for item in output_debuggers
+            if bool(item["comparison_ready"]) or int(item["history_output_count"]) > 1
+        )
         latest_updated_at = max(
             _parse_iso(str(run.get("updated_at") or run.get("started_at") or "")) for run in runs
         ).isoformat()
         thread_id = lead.get("thread_id") if isinstance(lead.get("thread_id"), str) else None
+        queue_state = _workflow_session_queue_state(
+            awaiting_approval_workflows=awaiting_approval_workflows,
+            boundary_blocked_workflows=boundary_blocked_workflows,
+            repair_ready_workflows=repair_ready_workflows,
+            stalled_workflows=stalled_workflows,
+            branch_ready_workflows=branch_ready_workflows,
+            active_workflows=active_workflows,
+        )
+        lead_density = _workflow_recovery_density(lead)
+        lead_debugger = _workflow_output_debugger(lead, workflow_runs)
+        queue_reason = _workflow_session_queue_reason(
+            queue_state=queue_state,
+            awaiting_approval_workflows=awaiting_approval_workflows,
+            boundary_blocked_workflows=boundary_blocked_workflows,
+            repair_ready_workflows=repair_ready_workflows,
+            stalled_workflows=stalled_workflows,
+            branch_ready_workflows=branch_ready_workflows,
+            output_debugger_ready_workflows=output_debugger_ready_workflows,
+        )
+        attention_summary = " · ".join(
+            part
+            for part in [
+                f"{awaiting_approval_workflows} approval gate" if awaiting_approval_workflows else None,
+                f"{boundary_blocked_workflows} boundary blocked" if boundary_blocked_workflows else None,
+                f"{repair_ready_workflows} repair ready" if repair_ready_workflows else None,
+                f"{branch_ready_workflows} branch ready" if branch_ready_workflows else None,
+                f"{stalled_workflows} stalled" if stalled_workflows else None,
+                f"{output_debugger_ready_workflows} debugger ready" if output_debugger_ready_workflows else None,
+            ]
+            if part
+        )
         entries.append({
             "thread_id": thread_id,
             "thread_label": (
@@ -1515,17 +1911,64 @@ def _workflow_orchestration_sessions(
             "long_running_workflow_count": sum(1 for item in compactions if bool(item["is_long_running"])),
             "artifact_count": sum(int(item["artifact_count"]) for item in compactions),
             "lead_state_capsule": _workflow_state_compaction(lead).get("state_capsule"),
+            "boundary_blocked_workflows": boundary_blocked_workflows,
+            "repair_ready_workflows": repair_ready_workflows,
+            "branch_ready_workflows": branch_ready_workflows,
+            "stalled_workflows": stalled_workflows,
+            "output_debugger_ready_workflows": output_debugger_ready_workflows,
+            "queue_state": queue_state,
+            "queue_reason": queue_reason,
+            "attention_summary": attention_summary or None,
+            "queue_draft": _workflow_session_queue_draft(
+                thread_label=(
+                    lead.get("thread_label")
+                    if isinstance(lead.get("thread_label"), str) and lead.get("thread_label")
+                    else (session_titles.get(thread_id) if thread_id else "Ambient workflows")
+                ),
+                lead=lead,
+                queue_state=queue_state,
+                queue_reason=queue_reason,
+                state_capsule=_workflow_state_compaction(lead).get("state_capsule"),
+                lead_density=lead_density,
+                lead_debugger=lead_debugger,
+            ),
+            "handoff_draft": _workflow_session_handoff_draft(
+                thread_label=(
+                    lead.get("thread_label")
+                    if isinstance(lead.get("thread_label"), str) and lead.get("thread_label")
+                    else (session_titles.get(thread_id) if thread_id else "Ambient workflows")
+                ),
+                lead=lead,
+                queue_state=queue_state,
+                attention_summary=attention_summary or None,
+                state_capsule=_workflow_state_compaction(lead).get("state_capsule"),
+                lead_density=lead_density,
+                lead_debugger=lead_debugger,
+            ),
+            "lead_recommended_recovery_path": lead_density.get("recommended_path"),
+            "lead_output_path": lead_debugger.get("primary_output_path"),
+            "lead_related_output_paths": lead_debugger.get("related_output_paths"),
+            "lead_output_history": lead_debugger.get("history_outputs"),
+            "lead_latest_branch_run_identity": lead_debugger.get("latest_branch_run_identity"),
+            "lead_latest_branch_summary": lead_debugger.get("latest_branch_summary"),
         })
-    return sorted(
+    ordered = sorted(
         entries,
         key=lambda entry: (
+            int(entry.get("boundary_blocked_workflows") or 0),
+            int(entry.get("repair_ready_workflows") or 0),
             int(entry["blocked_workflows"]),
             int(entry["awaiting_approval_workflows"]),
             int(entry["active_workflows"]),
             _parse_iso(str(entry["latest_updated_at"])),
         ),
         reverse=True,
-    )[:limit]
+    )
+    if isinstance(limit, int):
+        ordered = ordered[:limit]
+    for index, entry in enumerate(ordered, start=1):
+        entry["queue_position"] = index
+    return ordered
 
 
 def _background_session_priority(entry: dict[str, Any]) -> tuple[int, int, int, int, datetime]:
@@ -1998,6 +2441,8 @@ async def get_operator_workflow_orchestration(
         1 for run in workflow_runs if str(run.get("status") or "") == "awaiting_approval"
     )
     compactions = [_workflow_state_compaction(run) for run in workflow_runs]
+    recovery_densities = [_workflow_recovery_density(run) for run in workflow_runs]
+    output_debuggers = [_workflow_output_debugger(run, workflow_runs) for run in workflow_runs]
     recoverable_workflows = sum(
         1
         for run in workflow_runs
@@ -2024,6 +2469,24 @@ async def get_operator_workflow_orchestration(
             "compacted_workflows": sum(1 for item in compactions if bool(item["is_compacted"])),
             "total_step_count": sum(int(item["total_step_count"]) for item in compactions),
             "compacted_step_count": sum(int(item["compacted_step_count"]) for item in compactions),
+            "boundary_blocked_workflows": sum(1 for item in recovery_densities if bool(item["boundary_blocked"])),
+            "repair_ready_workflows": sum(1 for item in recovery_densities if bool(item["repair_ready"])),
+            "branch_ready_workflows": sum(1 for item in recovery_densities if bool(item["branch_ready"])),
+            "stalled_workflows": sum(1 for item in recovery_densities if bool(item["stalled"])),
+            "output_debugger_ready_workflows": sum(
+                1
+                for item in output_debuggers
+                if bool(item["comparison_ready"]) or int(item["history_output_count"]) > 1
+            ),
+            "attention_sessions": sum(
+                1
+                for session in _workflow_orchestration_sessions(
+                    workflow_runs,
+                    session_titles=session_titles,
+                    limit=None,
+                )
+                if str(session.get("queue_state") or "") not in {"idle", "active"}
+            ),
         },
         "sessions": _workflow_orchestration_sessions(
             workflow_runs,

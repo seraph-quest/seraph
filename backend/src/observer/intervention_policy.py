@@ -70,6 +70,10 @@ def decide_intervention(
     learning_blocked_state_bias: str = "neutral",
     learning_suppression_bias: str = "neutral",
     learning_thread_preference_bias: str = "neutral",
+    learning_multi_day_positive_days: int = 0,
+    learning_multi_day_negative_days: int = 0,
+    learning_scheduled_positive_days: int = 0,
+    learning_scheduled_negative_days: int = 0,
 ) -> InterventionDecision:
     """Make the explicit policy decision for a proactive intervention candidate."""
     should_cost_budget = user_state_machine.should_cost_budget(
@@ -140,11 +144,58 @@ def decide_intervention(
             should_cost_budget=should_cost_budget,
         )
 
+    has_long_horizon_negative_trend = (
+        learning_multi_day_negative_days >= 3
+        and learning_multi_day_negative_days > learning_multi_day_positive_days
+    )
+    has_scheduled_outcome_instability = (
+        learning_scheduled_negative_days >= 2
+        and learning_scheduled_negative_days > learning_scheduled_positive_days
+    )
+
+    if (
+        is_scheduled
+        and has_scheduled_outcome_instability
+        and urgency < 5
+        and intervention_type != "alert"
+    ):
+        return InterventionDecision(
+            action=InterventionAction.defer,
+            reason="scheduled_outcome_instability",
+            delivery_decision=None,
+            should_cost_budget=should_cost_budget,
+        )
+
     if is_scheduled:
         return InterventionDecision(
             action=InterventionAction.act,
             reason="scheduled",
             delivery_decision=DeliveryDecision.deliver,
+            should_cost_budget=should_cost_budget,
+        )
+
+    if (
+        has_long_horizon_negative_trend
+        and urgency < 4
+        and intervention_type != "alert"
+    ):
+        if (
+            learning_suppression_bias == "extend_suppression"
+            or user_state in {UserState.deep_work.value, UserState.in_meeting.value, UserState.away.value}
+            or interruption_mode == InterruptionMode.focus.value
+            or interruption_cost == "high"
+            or attention_budget_remaining <= 1
+        ):
+            return InterventionDecision(
+                action=InterventionAction.defer,
+                reason="long_horizon_negative_trend",
+                delivery_decision=None,
+                should_cost_budget=should_cost_budget,
+            )
+        return InterventionDecision(
+            action=InterventionAction.bundle,
+            reason="long_horizon_negative_trend",
+            delivery_decision=DeliveryDecision.queue,
             should_cost_budget=should_cost_budget,
         )
 

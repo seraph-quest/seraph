@@ -314,6 +314,20 @@ def _learning_diagnostics_lines(
             f"multi-day +{signal.multi_day_positive_days}/-{signal.multi_day_negative_days}, "
             f"scheduled +{signal.scheduled_positive_days}/-{signal.scheduled_negative_days}."
         )
+    if (
+        signal.multi_day_negative_days >= 3
+        and signal.multi_day_negative_days > signal.multi_day_positive_days
+    ):
+        lines.append(
+            "Long-horizon policy currently favors abstaining from low-urgency guidance until outcomes recover."
+        )
+    if (
+        signal.scheduled_negative_days >= 2
+        and signal.scheduled_negative_days > signal.scheduled_positive_days
+    ):
+        lines.append(
+            "Scheduled policy currently favors deferring routine guidance until review outcomes stabilize."
+        )
     selected_biases = [
         f"{decision.axis}={decision.selected_bias}"
         for decision in live_learning_resolution.decisions

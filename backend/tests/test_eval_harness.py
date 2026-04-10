@@ -214,6 +214,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_approval_threading_behavior" in captured.out
     assert "threaded_operator_timeline_behavior" in captured.out
     assert "background_session_handoff_behavior" in captured.out
+    assert "workflow_context_condenser_behavior" in captured.out
     assert "engineering_memory_bundle_behavior" in captured.out
     assert "operator_continuity_graph_behavior" in captured.out
     assert "operator_guardian_state_surface_behavior" in captured.out
@@ -340,6 +341,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "workflow_approval_threading_behavior",
                 "threaded_operator_timeline_behavior",
                 "background_session_handoff_behavior",
+                "workflow_context_condenser_behavior",
                 "engineering_memory_bundle_behavior",
                 "operator_continuity_graph_behavior",
                 "workflow_boundary_blocked_surface_behavior",
@@ -1728,6 +1730,34 @@ def test_engineering_memory_runtime_eval_exposes_expected_details():
     assert details["second_bundle_is_repository"] is True
     assert details["second_bundle_has_session_match"] is True
     assert details["summary_totals_match_all_bundles"] is True
+
+
+def test_workflow_context_condenser_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "workflow_context_condenser_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["workflow_context_condenser_behavior"]
+    assert details["long_running_summary_visible"] is True
+    assert details["compacted_summary_visible"] is True
+    assert details["total_step_count_visible"] is True
+    assert details["compacted_step_count_visible"] is True
+    assert details["session_capsule_mentions_steps"] is True
+    assert details["session_compaction_count_visible"] is True
+    assert details["first_workflow_compacted"] is True
+    assert details["first_workflow_steps_trimmed"] is True
+    assert details["first_workflow_preserves_checkpoint"] is True
+    assert details["first_workflow_preserves_approval"] is True
+    assert details["first_workflow_recent_steps_trimmed"] is True
+    assert details["second_workflow_preserves_repair"] is True
+    assert details["second_workflow_boundary_receipt_visible"] is True
+    assert details["second_workflow_approval_not_hallucinated"] is True
 
 
 def test_operator_continuity_graph_runtime_eval_exposes_expected_details():

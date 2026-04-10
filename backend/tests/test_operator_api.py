@@ -736,14 +736,36 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                         "artifact_paths": ["notes/repo-review.md"],
                         "step_records": [
                             {
-                                "id": "collect",
+                                "id": "scope",
                                 "index": 0,
+                                "tool": "session_search",
+                                "status": "succeeded",
+                                "result_summary": "Scoped prior review context",
+                            },
+                            {
+                                "id": "collect",
+                                "index": 1,
                                 "tool": "web_search",
                                 "status": "succeeded",
+                                "result_summary": "Collected repository evidence",
+                            },
+                            {
+                                "id": "compare",
+                                "index": 2,
+                                "tool": "diff_compare",
+                                "status": "succeeded",
+                                "result_summary": "Compared current branch artifacts",
+                            },
+                            {
+                                "id": "draft",
+                                "index": 3,
+                                "tool": "write_file",
+                                "status": "succeeded",
+                                "result_summary": "Drafted review receipt",
                             },
                             {
                                 "id": "approve",
-                                "index": 1,
+                                "index": 4,
                                 "tool": "write_file",
                                 "status": "awaiting_approval",
                                 "result_summary": "Awaiting approval",
@@ -758,7 +780,7 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                         "workflow_name": "daily-brief",
                         "summary": "Failed while drafting follow-up",
                         "status": "failed",
-                        "availability": "ready",
+                        "availability": "blocked",
                         "thread_id": "session-2",
                         "thread_label": "Session 2",
                         "started_at": "2026-04-08T09:00:00Z",
@@ -766,10 +788,32 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                         "thread_continue_message": "Retry the daily brief.",
                         "retry_from_step_draft": "Retry daily brief from draft step.",
                         "artifact_paths": ["notes/daily-brief.md"],
+                        "replay_block_reason": "approval_context_changed",
                         "step_records": [
                             {
-                                "id": "draft",
+                                "id": "gather",
                                 "index": 0,
+                                "tool": "session_search",
+                                "status": "succeeded",
+                                "result_summary": "Gathered yesterday's brief",
+                            },
+                            {
+                                "id": "outline",
+                                "index": 1,
+                                "tool": "llm_plan",
+                                "status": "succeeded",
+                                "result_summary": "Outlined follow-up summary",
+                            },
+                            {
+                                "id": "draft",
+                                "index": 2,
+                                "tool": "write_file",
+                                "status": "succeeded",
+                                "result_summary": "Drafted daily brief",
+                            },
+                            {
+                                "id": "publish",
+                                "index": 3,
                                 "tool": "write_file",
                                 "status": "failed",
                                 "error_summary": "write_file denied",
@@ -824,9 +868,13 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert payload["summary"]["tracked_sessions"] == 2
     assert payload["summary"]["workflow_count"] == 3
     assert payload["summary"]["active_workflows"] == 2
-    assert payload["summary"]["blocked_workflows"] == 1
+    assert payload["summary"]["blocked_workflows"] == 2
     assert payload["summary"]["awaiting_approval_workflows"] == 1
     assert payload["summary"]["recoverable_workflows"] == 1
+    assert payload["summary"]["long_running_workflows"] == 2
+    assert payload["summary"]["compacted_workflows"] == 2
+    assert payload["summary"]["total_step_count"] == 10
+    assert payload["summary"]["compacted_step_count"] == 3
 
     sessions = payload["sessions"]
     assert sessions[0]["thread_id"] == "session-1"
@@ -834,23 +882,44 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert sessions[0]["blocked_workflows"] == 1
     assert sessions[0]["continue_message"] == "Resume repo review."
     assert sessions[0]["lead_step_focus"]["kind"] == "active"
-    assert sessions[1]["thread_id"] is None
-    assert sessions[1]["thread_label"] == "Ambient workflows"
-    assert sessions[1]["lead_step_focus"]["kind"] == "active"
-    assert sessions[2]["thread_id"] == "session-2"
-    assert sessions[2]["recoverable_workflows"] == 1
-    assert sessions[2]["lead_step_focus"]["kind"] == "failure"
+    assert sessions[0]["long_running_workflow_count"] == 1
+    assert sessions[0]["compacted_workflow_count"] == 1
+    assert sessions[0]["total_step_count"] == 5
+    assert sessions[0]["compacted_step_count"] == 2
+    assert sessions[0]["lead_state_capsule"].startswith("5 steps")
+    assert sessions[1]["thread_id"] == "session-2"
+    assert sessions[1]["recoverable_workflows"] == 1
+    assert sessions[1]["lead_step_focus"]["kind"] == "failure"
+    assert sessions[1]["compacted_workflow_count"] == 1
+    assert sessions[2]["thread_id"] is None
+    assert sessions[2]["thread_label"] == "Ambient workflows"
+    assert sessions[2]["lead_step_focus"]["kind"] == "active"
 
     workflows = payload["workflows"]
     assert workflows[0]["workflow_name"] == "repo-review"
     assert workflows[0]["step_focus"]["kind"] == "active"
     assert workflows[0]["checkpoint_candidate_count"] == 1
-    assert workflows[1]["workflow_name"] == "cleanup"
-    assert workflows[1]["step_focus"]["kind"] == "active"
-    assert workflows[2]["workflow_name"] == "daily-brief"
-    assert workflows[2]["retry_from_step_available"] is True
-    assert workflows[2]["step_focus"]["kind"] == "failure"
-    assert workflows[2]["step_focus"]["recovery_action_count"] == 1
+    assert workflows[0]["is_long_running"] is True
+    assert workflows[0]["is_compacted"] is True
+    assert workflows[0]["step_count"] == 5
+    assert workflows[0]["compacted_step_count"] == 2
+    assert len(workflows[0]["step_records"]) == 3
+    assert workflows[0]["step_records"][0]["id"] == "compare"
+    assert "checkpoint_branch" in workflows[0]["preserved_recovery_paths"]
+    assert "approval_gate" in workflows[0]["preserved_recovery_paths"]
+    assert workflows[1]["workflow_name"] == "daily-brief"
+    assert workflows[1]["retry_from_step_available"] is True
+    assert workflows[1]["step_focus"]["kind"] == "failure"
+    assert workflows[1]["step_focus"]["recovery_action_count"] == 1
+    assert workflows[1]["is_compacted"] is True
+    assert len(workflows[1]["step_records"]) == 3
+    assert workflows[1]["step_records"][0]["id"] == "outline"
+    assert workflows[1]["state_capsule"].startswith("4 steps")
+    assert "step_repair" in workflows[1]["preserved_recovery_paths"]
+    assert "boundary_receipt" in workflows[1]["preserved_recovery_paths"]
+    assert "approval_gate" not in workflows[1]["preserved_recovery_paths"]
+    assert workflows[2]["workflow_name"] == "cleanup"
+    assert workflows[2]["step_focus"]["kind"] == "active"
 
 
 @pytest.mark.asyncio

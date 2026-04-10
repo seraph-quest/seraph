@@ -239,6 +239,12 @@ interface WorkflowOrchestrationSessionEntry {
   lead_summary?: string | null;
   continue_message?: string | null;
   lead_step_focus?: WorkflowOrchestrationStepFocus | null;
+  total_step_count: number;
+  compacted_step_count: number;
+  compacted_workflow_count: number;
+  long_running_workflow_count: number;
+  artifact_count: number;
+  lead_state_capsule?: string | null;
 }
 
 interface WorkflowOrchestrationWorkflowEntry {
@@ -271,6 +277,16 @@ interface WorkflowOrchestrationWorkflowEntry {
   replay_block_reason?: string | null;
   replay_recommended_actions?: Array<Record<string, unknown>>;
   step_focus?: WorkflowOrchestrationStepFocus | null;
+  is_long_running: boolean;
+  is_compacted: boolean;
+  duration_minutes: number;
+  step_count: number;
+  visible_step_count: number;
+  compacted_step_count: number;
+  artifact_count: number;
+  preserved_recovery_paths: string[];
+  recent_step_labels: string[];
+  state_capsule?: string | null;
 }
 
 interface OperatorWorkflowOrchestration {
@@ -281,6 +297,10 @@ interface OperatorWorkflowOrchestration {
     blocked_workflows: number;
     awaiting_approval_workflows: number;
     recoverable_workflows: number;
+    long_running_workflows: number;
+    compacted_workflows: number;
+    total_step_count: number;
+    compacted_step_count: number;
   };
   sessions: WorkflowOrchestrationSessionEntry[];
   workflows: WorkflowOrchestrationWorkflowEntry[];
@@ -1332,6 +1352,14 @@ interface OperatorWorkflowOrchestrationEntry {
   leadStatus: string | null;
   leadSummary: string | null;
   leadStepFocus: WorkflowOrchestrationStepFocus | null;
+  leadStateCapsule: string | null;
+  totalStepCount: number;
+  visibleStepCount: number;
+  compactedStepCount: number;
+  compactedWorkflowCount: number;
+  longRunningWorkflowCount: number;
+  artifactCount: number;
+  recentStepLabels: string[];
   workflow: WorkflowRunRecord | null;
   latestFailure: { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null;
   outputPath: string | null;
@@ -1927,6 +1955,10 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
       blocked_workflows: typeof summaryRecord.blocked_workflows === "number" ? summaryRecord.blocked_workflows : 0,
       awaiting_approval_workflows: typeof summaryRecord.awaiting_approval_workflows === "number" ? summaryRecord.awaiting_approval_workflows : 0,
       recoverable_workflows: typeof summaryRecord.recoverable_workflows === "number" ? summaryRecord.recoverable_workflows : 0,
+      long_running_workflows: typeof summaryRecord.long_running_workflows === "number" ? summaryRecord.long_running_workflows : 0,
+      compacted_workflows: typeof summaryRecord.compacted_workflows === "number" ? summaryRecord.compacted_workflows : 0,
+      total_step_count: typeof summaryRecord.total_step_count === "number" ? summaryRecord.total_step_count : 0,
+      compacted_step_count: typeof summaryRecord.compacted_step_count === "number" ? summaryRecord.compacted_step_count : 0,
     },
     sessions: Array.isArray(record.sessions)
       ? record.sessions.flatMap((entry) => {
@@ -1947,6 +1979,12 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
             lead_summary: typeof session.lead_summary === "string" ? session.lead_summary : null,
             continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
             lead_step_focus: normalizeStepFocus(session.lead_step_focus),
+            total_step_count: typeof session.total_step_count === "number" ? session.total_step_count : 0,
+            compacted_step_count: typeof session.compacted_step_count === "number" ? session.compacted_step_count : 0,
+            compacted_workflow_count: typeof session.compacted_workflow_count === "number" ? session.compacted_workflow_count : 0,
+            long_running_workflow_count: typeof session.long_running_workflow_count === "number" ? session.long_running_workflow_count : 0,
+            artifact_count: typeof session.artifact_count === "number" ? session.artifact_count : 0,
+            lead_state_capsule: typeof session.lead_state_capsule === "string" ? session.lead_state_capsule : null,
           }];
         })
       : [],
@@ -2000,6 +2038,20 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
               ))
               : [],
             step_focus: normalizeStepFocus(workflow.step_focus),
+            is_long_running: Boolean(workflow.is_long_running),
+            is_compacted: Boolean(workflow.is_compacted),
+            duration_minutes: typeof workflow.duration_minutes === "number" ? workflow.duration_minutes : 0,
+            step_count: typeof workflow.step_count === "number" ? workflow.step_count : 0,
+            visible_step_count: typeof workflow.visible_step_count === "number" ? workflow.visible_step_count : 0,
+            compacted_step_count: typeof workflow.compacted_step_count === "number" ? workflow.compacted_step_count : 0,
+            artifact_count: typeof workflow.artifact_count === "number" ? workflow.artifact_count : 0,
+            preserved_recovery_paths: Array.isArray(workflow.preserved_recovery_paths)
+              ? workflow.preserved_recovery_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            recent_step_labels: Array.isArray(workflow.recent_step_labels)
+              ? workflow.recent_step_labels.filter((item): item is string => typeof item === "string")
+              : [],
+            state_capsule: typeof workflow.state_capsule === "string" ? workflow.state_capsule : null,
           }];
         })
       : [],
@@ -5346,6 +5398,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const operatorWorkflowOrchestrationEntries = useMemo<OperatorWorkflowOrchestrationEntry[]>(() => {
     if (!operatorWorkflowOrchestration) return [];
     return operatorWorkflowOrchestration.sessions.map((entry) => {
+      const orchestrationWorkflow = entry.lead_run_identity
+        ? operatorWorkflowOrchestration.workflows.find((workflowEntry) => workflowEntry.run_identity === entry.lead_run_identity) ?? null
+        : null;
       const workflow = entry.lead_run_identity
         ? workflowRunByIdentity.get(entry.lead_run_identity)
           ?? orchestrationWorkflowRunByIdentity.get(entry.lead_run_identity)
@@ -5366,6 +5421,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         leadStatus: entry.lead_status ?? workflow?.status ?? null,
         leadSummary: entry.lead_summary ?? workflow?.summary ?? null,
         leadStepFocus: entry.lead_step_focus ?? null,
+        leadStateCapsule: entry.lead_state_capsule ?? orchestrationWorkflow?.state_capsule ?? null,
+        totalStepCount: entry.total_step_count || orchestrationWorkflow?.step_count || 0,
+        visibleStepCount: orchestrationWorkflow?.visible_step_count ?? 0,
+        compactedStepCount: entry.compacted_step_count || orchestrationWorkflow?.compacted_step_count || 0,
+        compactedWorkflowCount: entry.compacted_workflow_count,
+        longRunningWorkflowCount: entry.long_running_workflow_count || (orchestrationWorkflow?.is_long_running ? 1 : 0),
+        artifactCount: entry.artifact_count || orchestrationWorkflow?.artifact_count || 0,
+        recentStepLabels: orchestrationWorkflow?.recent_step_labels ?? [],
         workflow,
         latestFailure: workflow ? workflowLatestFailureContext(workflow) : null,
         outputPath: workflow ? workflowPrimaryOutputPath(workflow) : null,
@@ -11431,7 +11494,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-key">workflow orchestration</span>
                       <span className="cockpit-operator-link">
                         {operatorWorkflowOrchestration
-                          ? `${operatorWorkflowOrchestration.summary.workflow_count} workflows · ${operatorWorkflowOrchestration.summary.tracked_sessions} sessions`
+                          ? `${operatorWorkflowOrchestration.summary.workflow_count} workflows · ${operatorWorkflowOrchestration.summary.tracked_sessions} sessions · ${operatorWorkflowOrchestration.summary.compacted_workflows} compacted`
                           : "summary unavailable"}
                       </span>
                     </div>
@@ -11443,7 +11506,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             `${operatorWorkflowOrchestration.summary.awaiting_approval_workflows} awaiting approval`,
                             `${operatorWorkflowOrchestration.summary.blocked_workflows} blocked`,
                             `${operatorWorkflowOrchestration.summary.recoverable_workflows} recoverable`,
-                          ].join(" · ")}
+                            `${operatorWorkflowOrchestration.summary.long_running_workflows} long-running`,
+                            `${operatorWorkflowOrchestration.summary.total_step_count} steps`,
+                            operatorWorkflowOrchestration.summary.compacted_step_count > 0
+                              ? `${operatorWorkflowOrchestration.summary.compacted_step_count} compacted`
+                              : null,
+                          ].filter(Boolean).join(" · ")}
                         </div>
                         {operatorWorkflowOrchestrationEntries.map((entry) => {
                           const stepFocusSummary = [
@@ -11474,9 +11542,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     entry.awaitingApprovalWorkflows > 0 ? `${entry.awaitingApprovalWorkflows} awaiting approval` : null,
                                     entry.blockedWorkflows > 0 ? `${entry.blockedWorkflows} blocked` : null,
                                     entry.recoverableWorkflows > 0 ? `${entry.recoverableWorkflows} recoverable` : null,
+                                    entry.longRunningWorkflowCount > 0 ? `${entry.longRunningWorkflowCount} long-running` : null,
+                                    entry.totalStepCount > 0 ? `${entry.totalStepCount} steps` : null,
+                                    entry.compactedStepCount > 0 ? `${entry.compactedStepCount} compacted` : null,
+                                    entry.artifactCount > 0 ? `${entry.artifactCount} artifacts` : null,
                                     entry.latestUpdatedAt ? formatAge(entry.latestUpdatedAt) : null,
                                   ].filter(Boolean).join(" · ")}
                                 </div>
+                                <div className="cockpit-operator-note">
+                                  {entry.leadStateCapsule || "No workflow compaction capsule surfaced yet."}
+                                </div>
+                                {entry.recentStepLabels.length > 0 ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.visibleStepCount > 0 && entry.totalStepCount > 0
+                                        ? `visible steps ${entry.visibleStepCount}/${entry.totalStepCount}`
+                                        : null,
+                                      entry.recentStepLabels.join(" · "),
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
                                 <div className="cockpit-operator-note">
                                   {stepFocusSummary || "No step-level workflow focus surfaced yet."}
                                 </div>

@@ -1176,19 +1176,136 @@ def _workflow_terminal_status(status: str) -> bool:
     return status in {"completed", "succeeded", "failed", "cancelled"}
 
 
-def _workflow_step_focus(run: dict[str, Any]) -> dict[str, Any] | None:
+def _workflow_step_records(run: dict[str, Any]) -> list[dict[str, Any]]:
     step_records = run.get("step_records")
     if not isinstance(step_records, list):
-        return None
+        return []
     records = [entry for entry in step_records if isinstance(entry, dict)]
     if not records:
-        return None
+        return []
 
     def _record_index(record: dict[str, Any]) -> int:
         value = record.get("index")
         return int(value) if isinstance(value, int | float) else -1
 
-    records = sorted(records, key=_record_index)
+    return sorted(records, key=_record_index)
+
+
+def _workflow_artifact_paths(run: dict[str, Any]) -> list[str]:
+    artifact_paths = run.get("artifact_paths")
+    if not isinstance(artifact_paths, list):
+        return []
+    return [path for path in artifact_paths if isinstance(path, str) and path]
+
+
+def _workflow_visible_artifact_paths(
+    artifact_paths: list[str],
+    *,
+    is_compacted: bool,
+    preview_artifacts: int = 1,
+) -> list[str]:
+    if not is_compacted:
+        return list(artifact_paths)
+    if preview_artifacts <= 0:
+        return []
+    return artifact_paths[-preview_artifacts:]
+
+
+def _workflow_preserved_recovery_paths(run: dict[str, Any], *, step_records: list[dict[str, Any]]) -> list[str]:
+    preserved: list[str] = []
+    if bool(run.get("retry_from_step_draft")):
+        preserved.append("retry_from_step")
+    checkpoint_candidates = run.get("checkpoint_candidates")
+    if isinstance(checkpoint_candidates, list) and checkpoint_candidates:
+        preserved.append("checkpoint_branch")
+    if (
+        int(run.get("pending_approval_count") or 0) > 0
+        or str(run.get("status") or "") == "awaiting_approval"
+    ):
+        preserved.append("approval_gate")
+    if any(
+        bool(record.get("is_recoverable"))
+        or (
+            isinstance(record.get("recovery_actions"), list)
+            and len(record.get("recovery_actions") or []) > 0
+        )
+        for record in step_records
+    ):
+        preserved.append("step_repair")
+    if isinstance(run.get("replay_block_reason"), str) and run.get("replay_block_reason"):
+        preserved.append("boundary_receipt")
+    return preserved
+
+
+def _workflow_state_compaction(run: dict[str, Any], *, preview_steps: int = 3) -> dict[str, Any]:
+    step_records = _workflow_step_records(run)
+    artifact_paths = _workflow_artifact_paths(run)
+    total_step_count = len(step_records)
+    visible_steps = step_records[-preview_steps:] if preview_steps > 0 else []
+    compacted_step_count = max(total_step_count - len(visible_steps), 0)
+    preserved_recovery_paths = _workflow_preserved_recovery_paths(run, step_records=step_records)
+    started_at = _parse_iso(str(run.get("started_at") or ""))
+    updated_at = _parse_iso(str(run.get("updated_at") or run.get("started_at") or ""))
+    duration_minutes = max(int((updated_at - started_at).total_seconds() // 60), 0)
+    is_long_running = total_step_count >= 4 or duration_minutes >= 60
+    is_compacted = compacted_step_count > 0
+    recent_step_labels = [
+        " / ".join(
+            value
+            for value in [
+                str(record.get("id") or "").strip() or None,
+                str(record.get("tool") or "").strip() or None,
+                str(record.get("status") or "").strip() or None,
+            ]
+            if value
+        )
+        for record in visible_steps
+    ]
+    capsule_parts = [
+        f"{total_step_count} steps" if total_step_count else "0 steps",
+        f"{compacted_step_count} compacted" if is_compacted else None,
+        (
+            f"{len(artifact_paths)} artifact"
+            if len(artifact_paths) == 1
+            else f"{len(artifact_paths)} artifacts"
+        ) if artifact_paths else None,
+        (
+            "preserves " + ", ".join(path.replace("_", " ") for path in preserved_recovery_paths[:3])
+            if preserved_recovery_paths
+            else None
+        ),
+    ]
+    return {
+        "is_long_running": is_long_running,
+        "is_compacted": is_compacted,
+        "duration_minutes": duration_minutes,
+        "total_step_count": total_step_count,
+        "visible_step_count": len(visible_steps),
+        "compacted_step_count": compacted_step_count,
+        "artifact_count": len(artifact_paths),
+        "preserved_recovery_paths": preserved_recovery_paths,
+        "recent_step_labels": recent_step_labels,
+        "state_capsule": " · ".join(part for part in capsule_parts if part),
+    }
+
+
+def _workflow_visible_step_records(
+    step_records: list[dict[str, Any]],
+    *,
+    visible_step_count: int,
+    is_compacted: bool,
+) -> list[dict[str, Any]]:
+    if not is_compacted:
+        return list(step_records)
+    if visible_step_count <= 0:
+        return []
+    return step_records[-visible_step_count:]
+
+
+def _workflow_step_focus(run: dict[str, Any]) -> dict[str, Any] | None:
+    records = _workflow_step_records(run)
+    if not records:
+        return None
     active_statuses = {"running", "pending", "awaiting_approval"}
     failure_statuses = {"failed", "degraded"}
 
@@ -1280,9 +1397,18 @@ def _workflow_orchestration_entries(
     for run in sorted_runs[:limit]:
         step_focus = _workflow_step_focus(run)
         checkpoint_candidates = run.get("checkpoint_candidates")
-        output_path = None
-        if isinstance(run.get("artifact_paths"), list) and run["artifact_paths"]:
-            output_path = run["artifact_paths"][-1]
+        artifact_paths = _workflow_artifact_paths(run)
+        output_path = artifact_paths[-1] if artifact_paths else None
+        compaction = _workflow_state_compaction(run)
+        visible_step_records = _workflow_visible_step_records(
+            _workflow_step_records(run),
+            visible_step_count=int(compaction["visible_step_count"]),
+            is_compacted=bool(compaction["is_compacted"]),
+        )
+        visible_artifact_paths = _workflow_visible_artifact_paths(
+            artifact_paths,
+            is_compacted=bool(compaction["is_compacted"]),
+        )
         entries.append({
             "id": run.get("id"),
             "tool_name": run.get("tool_name"),
@@ -1301,8 +1427,8 @@ def _workflow_orchestration_entries(
             "continue_message": workflow_surface_continue_message(run),
             "thread_continue_message": workflow_surface_continue_message(run),
             "output_path": output_path,
-            "artifact_paths": run.get("artifact_paths") if isinstance(run.get("artifact_paths"), list) else [],
-            "step_records": run.get("step_records") if isinstance(run.get("step_records"), list) else [],
+            "artifact_paths": visible_artifact_paths,
+            "step_records": visible_step_records,
             "pending_approval_count": int(run.get("pending_approval_count") or 0),
             "pending_approval_ids": run.get("pending_approval_ids") if isinstance(run.get("pending_approval_ids"), list) else [],
             "checkpoint_candidate_count": len(checkpoint_candidates) if isinstance(checkpoint_candidates, list) else 0,
@@ -1317,6 +1443,16 @@ def _workflow_orchestration_entries(
                 else []
             ),
             "step_focus": step_focus,
+            "is_long_running": compaction["is_long_running"],
+            "is_compacted": compaction["is_compacted"],
+            "duration_minutes": compaction["duration_minutes"],
+            "step_count": compaction["total_step_count"],
+            "visible_step_count": compaction["visible_step_count"],
+            "compacted_step_count": compaction["compacted_step_count"],
+            "artifact_count": compaction["artifact_count"],
+            "preserved_recovery_paths": compaction["preserved_recovery_paths"],
+            "recent_step_labels": compaction["recent_step_labels"],
+            "state_capsule": compaction["state_capsule"],
         })
     return entries
 
@@ -1337,6 +1473,7 @@ def _workflow_orchestration_sessions(
     for key, runs in grouped.items():
         runs_sorted = sorted(runs, key=lambda run: _workflow_orchestration_priority(run), reverse=True)
         lead = runs_sorted[0]
+        compactions = [_workflow_state_compaction(run) for run in runs]
         active_workflows = sum(1 for run in runs if not _workflow_terminal_status(str(run.get("status") or "")))
         blocked_workflows = sum(1 for run in runs if str(run.get("availability") or "") == "blocked")
         awaiting_approval_workflows = sum(1 for run in runs if str(run.get("status") or "") == "awaiting_approval")
@@ -1372,6 +1509,12 @@ def _workflow_orchestration_sessions(
             "lead_summary": lead.get("summary"),
             "continue_message": workflow_surface_continue_message(lead),
             "lead_step_focus": _workflow_step_focus(lead),
+            "total_step_count": sum(int(item["total_step_count"]) for item in compactions),
+            "compacted_step_count": sum(int(item["compacted_step_count"]) for item in compactions),
+            "compacted_workflow_count": sum(1 for item in compactions if bool(item["is_compacted"])),
+            "long_running_workflow_count": sum(1 for item in compactions if bool(item["is_long_running"])),
+            "artifact_count": sum(int(item["artifact_count"]) for item in compactions),
+            "lead_state_capsule": _workflow_state_compaction(lead).get("state_capsule"),
         })
     return sorted(
         entries,
@@ -1854,6 +1997,7 @@ async def get_operator_workflow_orchestration(
     awaiting_approval_workflows = sum(
         1 for run in workflow_runs if str(run.get("status") or "") == "awaiting_approval"
     )
+    compactions = [_workflow_state_compaction(run) for run in workflow_runs]
     recoverable_workflows = sum(
         1
         for run in workflow_runs
@@ -1876,6 +2020,10 @@ async def get_operator_workflow_orchestration(
             "blocked_workflows": blocked_workflows,
             "awaiting_approval_workflows": awaiting_approval_workflows,
             "recoverable_workflows": recoverable_workflows,
+            "long_running_workflows": sum(1 for item in compactions if bool(item["is_long_running"])),
+            "compacted_workflows": sum(1 for item in compactions if bool(item["is_compacted"])),
+            "total_step_count": sum(int(item["total_step_count"]) for item in compactions),
+            "compacted_step_count": sum(int(item["compacted_step_count"]) for item in compactions),
         },
         "sessions": _workflow_orchestration_sessions(
             workflow_runs,

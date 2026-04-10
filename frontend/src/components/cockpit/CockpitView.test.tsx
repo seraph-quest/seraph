@@ -1674,8 +1674,10 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const orchestration = await screen.findByLabelText("Workflow orchestration");
-    expect(orchestration).toHaveTextContent(/1 workflows · 1 sessions · 1 compacted/i);
-    expect(orchestration).toHaveTextContent(/1 active · 0 awaiting approval · 0 blocked · 1 recoverable · 1 long-running · 5 steps · 2 compacted/i);
+    await waitFor(() => {
+      expect(orchestration).toHaveTextContent(/1 workflows · 1 sessions · 1 compacted/i);
+      expect(orchestration).toHaveTextContent(/1 active · 0 awaiting approval · 0 blocked · 1 recoverable · 1 long-running · 5 steps · 2 compacted/i);
+    });
     const row = (await within(orchestration).findByText("Atlas thread")).closest(".cockpit-operator-row--entry");
     expect(row).not.toBeNull();
     expect(row as HTMLElement).toHaveTextContent(/1 long-running · 5 steps · 2 compacted · 1 artifacts?/i);

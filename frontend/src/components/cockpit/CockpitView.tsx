@@ -224,6 +224,47 @@ interface WorkflowOrchestrationStepFocus {
   is_recoverable: boolean;
 }
 
+interface WorkflowOrchestrationRecoveryDensity {
+  recommended_path: string;
+  approval_pending: boolean;
+  boundary_blocked: boolean;
+  retry_ready: boolean;
+  checkpoint_ready: boolean;
+  repair_ready: boolean;
+  branch_ready: boolean;
+  replay_ready: boolean;
+  stalled: boolean;
+  checkpoint_candidate_count: number;
+  recovery_action_count: number;
+  repair_action_types: string[];
+  repair_hint?: string | null;
+  failure_step_id?: string | null;
+  failure_step_tool?: string | null;
+}
+
+interface WorkflowOrchestrationOutputDebugger {
+  family_run_count: number;
+  branch_run_count: number;
+  history_output_count: number;
+  primary_output_path?: string | null;
+  related_output_paths: string[];
+  history_outputs: Array<{
+    path: string;
+    run_identity?: string | null;
+    summary?: string | null;
+    status?: string | null;
+    branch_kind?: string | null;
+    updated_at?: string | null;
+    is_primary: boolean;
+  }>;
+  latest_branch_run_identity?: string | null;
+  latest_branch_summary?: string | null;
+  latest_branch_status?: string | null;
+  latest_branch_output_path?: string | null;
+  comparison_ready: boolean;
+  checkpoint_labels: string[];
+}
+
 interface WorkflowOrchestrationSessionEntry {
   thread_id?: string | null;
   thread_label?: string | null;
@@ -245,6 +286,23 @@ interface WorkflowOrchestrationSessionEntry {
   long_running_workflow_count: number;
   artifact_count: number;
   lead_state_capsule?: string | null;
+  boundary_blocked_workflows: number;
+  repair_ready_workflows: number;
+  branch_ready_workflows: number;
+  stalled_workflows: number;
+  output_debugger_ready_workflows: number;
+  queue_state?: string | null;
+  queue_position?: number;
+  queue_reason?: string | null;
+  attention_summary?: string | null;
+  queue_draft?: string | null;
+  handoff_draft?: string | null;
+  lead_recommended_recovery_path?: string | null;
+  lead_output_path?: string | null;
+  lead_related_output_paths?: string[];
+  lead_output_history?: WorkflowOrchestrationOutputDebugger["history_outputs"];
+  lead_latest_branch_run_identity?: string | null;
+  lead_latest_branch_summary?: string | null;
 }
 
 interface WorkflowOrchestrationWorkflowEntry {
@@ -287,6 +345,8 @@ interface WorkflowOrchestrationWorkflowEntry {
   preserved_recovery_paths: string[];
   recent_step_labels: string[];
   state_capsule?: string | null;
+  recovery_density?: WorkflowOrchestrationRecoveryDensity | null;
+  output_debugger?: WorkflowOrchestrationOutputDebugger | null;
 }
 
 interface OperatorWorkflowOrchestration {
@@ -301,6 +361,12 @@ interface OperatorWorkflowOrchestration {
     compacted_workflows: number;
     total_step_count: number;
     compacted_step_count: number;
+    boundary_blocked_workflows: number;
+    repair_ready_workflows: number;
+    branch_ready_workflows: number;
+    stalled_workflows: number;
+    output_debugger_ready_workflows: number;
+    attention_sessions: number;
   };
   sessions: WorkflowOrchestrationSessionEntry[];
   workflows: WorkflowOrchestrationWorkflowEntry[];
@@ -1360,9 +1426,25 @@ interface OperatorWorkflowOrchestrationEntry {
   longRunningWorkflowCount: number;
   artifactCount: number;
   recentStepLabels: string[];
+  queueState: string | null;
+  attentionSummary: string | null;
+  queuePosition: number;
+  queueReason: string | null;
+  repairReadyWorkflows: number;
+  branchReadyWorkflows: number;
+  stalledWorkflows: number;
+  outputDebuggerReadyWorkflows: number;
+  queueDraft: string | null;
+  handoffDraft: string | null;
+  leadRecommendedRecoveryPath: string | null;
+  leadRelatedOutputPaths: string[];
+  leadOutputHistory: WorkflowOrchestrationOutputDebugger["history_outputs"];
+  leadLatestBranchSummary: string | null;
   workflow: WorkflowRunRecord | null;
+  latestBranchWorkflow: WorkflowRunRecord | null;
   latestFailure: { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null;
   outputPath: string | null;
+  compareOutputPath: string | null;
 }
 
 interface OperatorBackgroundSupervisionEntry {
@@ -1947,6 +2029,75 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
       is_recoverable: Boolean(step.is_recoverable),
     };
   };
+  const normalizeRecoveryDensity = (entry: unknown): WorkflowOrchestrationRecoveryDensity | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    return {
+      recommended_path: typeof record.recommended_path === "string" ? record.recommended_path : "observe",
+      approval_pending: Boolean(record.approval_pending),
+      boundary_blocked: Boolean(record.boundary_blocked),
+      retry_ready: Boolean(record.retry_ready),
+      checkpoint_ready: Boolean(record.checkpoint_ready),
+      repair_ready: Boolean(record.repair_ready),
+      branch_ready: Boolean(record.branch_ready),
+      replay_ready: Boolean(record.replay_ready),
+      stalled: Boolean(record.stalled),
+      checkpoint_candidate_count: typeof record.checkpoint_candidate_count === "number" ? record.checkpoint_candidate_count : 0,
+      recovery_action_count: typeof record.recovery_action_count === "number" ? record.recovery_action_count : 0,
+      repair_action_types: Array.isArray(record.repair_action_types)
+        ? record.repair_action_types.filter((item): item is string => typeof item === "string")
+        : [],
+      repair_hint: typeof record.repair_hint === "string" ? record.repair_hint : null,
+      failure_step_id: typeof record.failure_step_id === "string" ? record.failure_step_id : null,
+      failure_step_tool: typeof record.failure_step_tool === "string" ? record.failure_step_tool : null,
+    };
+  };
+  const normalizeOutputDebugger = (entry: unknown): WorkflowOrchestrationOutputDebugger | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    return {
+      family_run_count: typeof record.family_run_count === "number" ? record.family_run_count : 0,
+      branch_run_count: typeof record.branch_run_count === "number" ? record.branch_run_count : 0,
+      history_output_count: typeof record.history_output_count === "number" ? record.history_output_count : 0,
+      primary_output_path: typeof record.primary_output_path === "string" ? record.primary_output_path : null,
+      related_output_paths: Array.isArray(record.related_output_paths)
+        ? record.related_output_paths.filter((item): item is string => typeof item === "string")
+        : [],
+      history_outputs: Array.isArray(record.history_outputs)
+        ? record.history_outputs.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return [];
+          }
+          const item = entry as Record<string, unknown>;
+          const path = typeof item.path === "string" ? item.path : null;
+          if (!path) {
+            return [];
+          }
+          return [{
+            path,
+            run_identity: typeof item.run_identity === "string" ? item.run_identity : null,
+            summary: typeof item.summary === "string" ? item.summary : null,
+            status: typeof item.status === "string" ? item.status : null,
+            branch_kind: typeof item.branch_kind === "string" ? item.branch_kind : null,
+            updated_at: typeof item.updated_at === "string" ? item.updated_at : null,
+            is_primary: Boolean(item.is_primary),
+          }];
+        })
+        : [],
+      latest_branch_run_identity: typeof record.latest_branch_run_identity === "string" ? record.latest_branch_run_identity : null,
+      latest_branch_summary: typeof record.latest_branch_summary === "string" ? record.latest_branch_summary : null,
+      latest_branch_status: typeof record.latest_branch_status === "string" ? record.latest_branch_status : null,
+      latest_branch_output_path: typeof record.latest_branch_output_path === "string" ? record.latest_branch_output_path : null,
+      comparison_ready: Boolean(record.comparison_ready),
+      checkpoint_labels: Array.isArray(record.checkpoint_labels)
+        ? record.checkpoint_labels.filter((item): item is string => typeof item === "string")
+        : [],
+    };
+  };
   return {
     summary: {
       tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
@@ -1959,6 +2110,12 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
       compacted_workflows: typeof summaryRecord.compacted_workflows === "number" ? summaryRecord.compacted_workflows : 0,
       total_step_count: typeof summaryRecord.total_step_count === "number" ? summaryRecord.total_step_count : 0,
       compacted_step_count: typeof summaryRecord.compacted_step_count === "number" ? summaryRecord.compacted_step_count : 0,
+      boundary_blocked_workflows: typeof summaryRecord.boundary_blocked_workflows === "number" ? summaryRecord.boundary_blocked_workflows : 0,
+      repair_ready_workflows: typeof summaryRecord.repair_ready_workflows === "number" ? summaryRecord.repair_ready_workflows : 0,
+      branch_ready_workflows: typeof summaryRecord.branch_ready_workflows === "number" ? summaryRecord.branch_ready_workflows : 0,
+      stalled_workflows: typeof summaryRecord.stalled_workflows === "number" ? summaryRecord.stalled_workflows : 0,
+      output_debugger_ready_workflows: typeof summaryRecord.output_debugger_ready_workflows === "number" ? summaryRecord.output_debugger_ready_workflows : 0,
+      attention_sessions: typeof summaryRecord.attention_sessions === "number" ? summaryRecord.attention_sessions : 0,
     },
     sessions: Array.isArray(record.sessions)
       ? record.sessions.flatMap((entry) => {
@@ -1985,6 +2142,25 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
             long_running_workflow_count: typeof session.long_running_workflow_count === "number" ? session.long_running_workflow_count : 0,
             artifact_count: typeof session.artifact_count === "number" ? session.artifact_count : 0,
             lead_state_capsule: typeof session.lead_state_capsule === "string" ? session.lead_state_capsule : null,
+            boundary_blocked_workflows: typeof session.boundary_blocked_workflows === "number" ? session.boundary_blocked_workflows : 0,
+            repair_ready_workflows: typeof session.repair_ready_workflows === "number" ? session.repair_ready_workflows : 0,
+            branch_ready_workflows: typeof session.branch_ready_workflows === "number" ? session.branch_ready_workflows : 0,
+            stalled_workflows: typeof session.stalled_workflows === "number" ? session.stalled_workflows : 0,
+            output_debugger_ready_workflows: typeof session.output_debugger_ready_workflows === "number" ? session.output_debugger_ready_workflows : 0,
+            queue_state: typeof session.queue_state === "string" ? session.queue_state : null,
+            queue_position: typeof session.queue_position === "number" ? session.queue_position : 0,
+            queue_reason: typeof session.queue_reason === "string" ? session.queue_reason : null,
+            attention_summary: typeof session.attention_summary === "string" ? session.attention_summary : null,
+            queue_draft: typeof session.queue_draft === "string" ? session.queue_draft : null,
+            handoff_draft: typeof session.handoff_draft === "string" ? session.handoff_draft : null,
+            lead_recommended_recovery_path: typeof session.lead_recommended_recovery_path === "string" ? session.lead_recommended_recovery_path : null,
+            lead_output_path: typeof session.lead_output_path === "string" ? session.lead_output_path : null,
+            lead_related_output_paths: Array.isArray(session.lead_related_output_paths)
+              ? session.lead_related_output_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            lead_output_history: normalizeOutputDebugger({ history_outputs: session.lead_output_history })?.history_outputs ?? [],
+            lead_latest_branch_run_identity: typeof session.lead_latest_branch_run_identity === "string" ? session.lead_latest_branch_run_identity : null,
+            lead_latest_branch_summary: typeof session.lead_latest_branch_summary === "string" ? session.lead_latest_branch_summary : null,
           }];
         })
       : [],
@@ -2052,6 +2228,8 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
               ? workflow.recent_step_labels.filter((item): item is string => typeof item === "string")
               : [],
             state_capsule: typeof workflow.state_capsule === "string" ? workflow.state_capsule : null,
+            recovery_density: normalizeRecoveryDensity(workflow.recovery_density),
+            output_debugger: normalizeOutputDebugger(workflow.output_debugger),
           }];
         })
       : [],
@@ -5406,6 +5584,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           ?? orchestrationWorkflowRunByIdentity.get(entry.lead_run_identity)
           ?? null
         : null;
+      const latestBranchWorkflow = entry.lead_latest_branch_run_identity
+        ? workflowRunByIdentity.get(entry.lead_latest_branch_run_identity)
+          ?? orchestrationWorkflowRunByIdentity.get(entry.lead_latest_branch_run_identity)
+          ?? null
+        : workflow
+          ? workflowLatestBranchRun(workflow)
+          : null;
+      const compareOutputPath = orchestrationWorkflow?.output_debugger?.comparison_ready
+        ? orchestrationWorkflow.output_debugger.latest_branch_output_path ?? null
+        : null;
       return {
         id: `orchestration:${entry.thread_id ?? "ambient"}:${entry.lead_run_identity ?? entry.lead_workflow_name ?? "workflow"}`,
         threadId: entry.thread_id ?? null,
@@ -5429,9 +5617,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         longRunningWorkflowCount: entry.long_running_workflow_count || (orchestrationWorkflow?.is_long_running ? 1 : 0),
         artifactCount: entry.artifact_count || orchestrationWorkflow?.artifact_count || 0,
         recentStepLabels: orchestrationWorkflow?.recent_step_labels ?? [],
+        queueState: entry.queue_state ?? null,
+        queuePosition: entry.queue_position ?? 0,
+        queueReason: entry.queue_reason ?? null,
+        attentionSummary: entry.attention_summary ?? null,
+        repairReadyWorkflows: entry.repair_ready_workflows,
+        branchReadyWorkflows: entry.branch_ready_workflows,
+        stalledWorkflows: entry.stalled_workflows,
+        outputDebuggerReadyWorkflows: entry.output_debugger_ready_workflows,
+        queueDraft: entry.queue_draft ?? null,
+        handoffDraft: entry.handoff_draft ?? null,
+        leadRecommendedRecoveryPath: entry.lead_recommended_recovery_path ?? null,
+        leadRelatedOutputPaths: entry.lead_related_output_paths ?? [],
+        leadOutputHistory: entry.lead_output_history ?? [],
+        leadLatestBranchSummary: entry.lead_latest_branch_summary ?? null,
         workflow,
+        latestBranchWorkflow,
         latestFailure: workflow ? workflowLatestFailureContext(workflow) : null,
         outputPath: workflow ? workflowPrimaryOutputPath(workflow) : null,
+        compareOutputPath,
       };
     });
   }, [operatorWorkflowOrchestration, orchestrationWorkflowRunByIdentity, workflowRunByIdentity]);
@@ -5598,6 +5802,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function openOperatorWorkflowOrchestrationThread(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
     if (!entry?.threadId) return;
     void openThread(entry.threadId);
+  }
+  function queueOperatorWorkflowOrchestrationFocus(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.queueDraft) return;
+    queueComposerDraft(entry.queueDraft);
+  }
+  function queueOperatorWorkflowOrchestrationHandoff(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.handoffDraft) return;
+    queueComposerDraft(entry.handoffDraft);
+  }
+  function redirectOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    queueComposerDraft(buildWorkflowRedirectDraft(entry.workflow));
   }
   function inspectOperatorBackgroundSupervisionEntry(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
     if (!entry?.workflow) return;
@@ -11511,6 +11727,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             operatorWorkflowOrchestration.summary.compacted_step_count > 0
                               ? `${operatorWorkflowOrchestration.summary.compacted_step_count} compacted`
                               : null,
+                            operatorWorkflowOrchestration.summary.repair_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.repair_ready_workflows} repair-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.branch_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.branch_ready_workflows} branch-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.output_debugger_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.output_debugger_ready_workflows} debugger-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.stalled_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.stalled_workflows} stalled`
+                              : null,
+                            operatorWorkflowOrchestration.summary.attention_sessions > 0
+                              ? `${operatorWorkflowOrchestration.summary.attention_sessions} attention sessions`
+                              : null,
                           ].filter(Boolean).join(" · ")}
                         </div>
                         {operatorWorkflowOrchestrationEntries.map((entry) => {
@@ -11552,6 +11783,29 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 <div className="cockpit-operator-note">
                                   {entry.leadStateCapsule || "No workflow compaction capsule surfaced yet."}
                                 </div>
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    entry.queuePosition > 0 ? `queue #${entry.queuePosition}` : null,
+                                    entry.queueState ? `queue ${formatContinuityLabel(entry.queueState)}` : null,
+                                    entry.leadRecommendedRecoveryPath
+                                      ? `next ${formatContinuityLabel(entry.leadRecommendedRecoveryPath)}`
+                                      : null,
+                                    entry.repairReadyWorkflows > 0 ? `${entry.repairReadyWorkflows} repair-ready` : null,
+                                    entry.branchReadyWorkflows > 0 ? `${entry.branchReadyWorkflows} branch-ready` : null,
+                                    entry.outputDebuggerReadyWorkflows > 0 ? `${entry.outputDebuggerReadyWorkflows} debugger-ready` : null,
+                                    entry.stalledWorkflows > 0 ? `${entry.stalledWorkflows} stalled` : null,
+                                  ].filter(Boolean).join(" · ") || "No queue-state workflow recovery surfaced yet."}
+                                </div>
+                                {entry.attentionSummary ? (
+                                  <div className="cockpit-operator-note">
+                                    {entry.attentionSummary}
+                                  </div>
+                                ) : null}
+                                {entry.queueReason ? (
+                                  <div className="cockpit-operator-note">
+                                    {entry.queueReason}
+                                  </div>
+                                ) : null}
                                 {entry.recentStepLabels.length > 0 ? (
                                   <div className="cockpit-operator-note">
                                     {[
@@ -11565,6 +11819,28 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 <div className="cockpit-operator-note">
                                   {stepFocusSummary || "No step-level workflow focus surfaced yet."}
                                 </div>
+                                {(entry.outputPath || entry.leadRelatedOutputPaths.length > 0) ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.outputPath ? `output ${entry.outputPath}` : null,
+                                      entry.leadRelatedOutputPaths.length > 0
+                                        ? `related ${entry.leadRelatedOutputPaths.join(" · ")}`
+                                        : null,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
+                                {(entry.leadOutputHistory.length > 0 || entry.leadLatestBranchSummary) ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.leadOutputHistory.length > 0
+                                        ? `${entry.leadOutputHistory.length} history outputs`
+                                        : null,
+                                      entry.leadLatestBranchSummary
+                                        ? `latest branch ${entry.leadLatestBranchSummary}`
+                                        : null,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
                               </button>
                               <div className="cockpit-operator-actions">
                                 {entry.workflow && (
@@ -11607,6 +11883,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     use failure
                                   </button>
                                 )}
+                                {entry.latestFailure?.step.recoveryActions?.length ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Repair workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => void runCapabilityActions(
+                                      readActionList(entry.latestFailure?.step.recoveryActions),
+                                      `${entry.leadWorkflowName ?? "workflow"} ${entry.latestFailure?.step.id ?? "repair"}`,
+                                    )}
+                                  >
+                                    repair
+                                  </button>
+                                ) : null}
                                 {entry.workflow?.retryFromStepDraft && (
                                   <button
                                     type="button"
@@ -11617,6 +11906,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     retry step
                                   </button>
                                 )}
+                                {entry.latestBranchWorkflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Open latest branch for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => inspectWorkflowRun(entry.latestBranchWorkflow)}
+                                  >
+                                    open branch
+                                  </button>
+                                )}
+                                {entry.workflow && entry.latestBranchWorkflow && entry.compareOutputPath && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Compare branch output for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowOutputComparison(entry.workflow, entry.latestBranchWorkflow, entry.compareOutputPath)}
+                                  >
+                                    compare output
+                                  </button>
+                                )}
+                                {entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Redirect workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => redirectOperatorWorkflowOrchestrationEntry(entry)}
+                                  >
+                                    redirect
+                                  </button>
+                                )}
+                                {entry.queueDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Plan queue focus for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationFocus(entry)}
+                                  >
+                                    queue focus
+                                  </button>
+                                ) : null}
+                                {entry.handoffDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft handoff for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationHandoff(entry)}
+                                  >
+                                    handoff
+                                  </button>
+                                ) : null}
                                 {entry.workflow && (
                                   <button
                                     type="button"

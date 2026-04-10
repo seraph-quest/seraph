@@ -1525,7 +1525,7 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           summary: {
             tracked_sessions: 1,
-            workflow_count: 1,
+            workflow_count: 2,
             active_workflows: 1,
             blocked_workflows: 0,
             awaiting_approval_workflows: 0,
@@ -1534,12 +1534,18 @@ describe("CockpitView", () => {
             compacted_workflows: 1,
             total_step_count: 5,
             compacted_step_count: 2,
+            boundary_blocked_workflows: 0,
+            repair_ready_workflows: 1,
+            branch_ready_workflows: 2,
+            stalled_workflows: 0,
+            output_debugger_ready_workflows: 2,
+            attention_sessions: 1,
           },
           sessions: [
             {
               thread_id: "session-2",
               thread_label: "Atlas thread",
-              workflow_count: 1,
+              workflow_count: 2,
               active_workflows: 1,
               blocked_workflows: 0,
               awaiting_approval_workflows: 0,
@@ -1556,6 +1562,42 @@ describe("CockpitView", () => {
               long_running_workflow_count: 0,
               artifact_count: 0,
               lead_state_capsule: null,
+              boundary_blocked_workflows: 0,
+              repair_ready_workflows: 1,
+              branch_ready_workflows: 2,
+              stalled_workflows: 0,
+              output_debugger_ready_workflows: 2,
+              queue_state: "repair_ready",
+              queue_position: 1,
+              queue_reason: "1 workflow exposes a recoverable failed step that can be repaired now.",
+              attention_summary: "1 repair ready · 2 branch ready · 2 debugger ready",
+              queue_draft: "Review the workflow queue for Atlas thread. Lead workflow \"web-brief-to-file\" is currently repair ready.",
+              handoff_draft: "Prepare a workflow handoff for Atlas thread. Lead workflow \"web-brief-to-file\" is currently repair ready.",
+              lead_recommended_recovery_path: "step_repair",
+              lead_output_path: "notes/brief.md",
+              lead_related_output_paths: ["notes/brief-branch.md"],
+              lead_output_history: [
+                {
+                  path: "notes/brief-branch.md",
+                  run_identity: "root-1:branch-1",
+                  summary: "Branched repair completed",
+                  status: "succeeded",
+                  branch_kind: "branch_from_checkpoint",
+                  updated_at: "2026-03-18T12:06:00Z",
+                  is_primary: false,
+                },
+                {
+                  path: "notes/brief.md",
+                  run_identity: "root-1",
+                  summary: "workflow_web_brief_to_file failed at write_file",
+                  status: "degraded",
+                  branch_kind: null,
+                  updated_at: "2026-03-18T12:04:00Z",
+                  is_primary: true,
+                },
+              ],
+              lead_latest_branch_run_identity: "root-1:branch-1",
+              lead_latest_branch_summary: "Branched repair completed",
               lead_step_focus: {
                 kind: "failure",
                 step_id: "write_file",
@@ -1661,6 +1703,163 @@ describe("CockpitView", () => {
                 "notify / notify_user / pending",
               ],
               state_capsule: "5 steps · 2 compacted · 1 artifact · preserves retry from step, checkpoint branch, step repair",
+              recovery_density: {
+                recommended_path: "step_repair",
+                approval_pending: false,
+                boundary_blocked: false,
+                retry_ready: true,
+                checkpoint_ready: true,
+                repair_ready: true,
+                branch_ready: true,
+                replay_ready: true,
+                stalled: false,
+                checkpoint_candidate_count: 1,
+                recovery_action_count: 1,
+                repair_action_types: ["set_tool_policy"],
+                repair_hint: "Approve the pending write step and continue the workflow.",
+                failure_step_id: "write_file",
+                failure_step_tool: "write_file",
+              },
+              output_debugger: {
+                family_run_count: 2,
+                branch_run_count: 1,
+                history_output_count: 2,
+                primary_output_path: "notes/brief.md",
+                related_output_paths: ["notes/brief-branch.md"],
+                history_outputs: [
+                  {
+                    path: "notes/brief-branch.md",
+                    run_identity: "root-1:branch-1",
+                    summary: "Branched repair completed",
+                    status: "succeeded",
+                    branch_kind: "branch_from_checkpoint",
+                    updated_at: "2026-03-18T12:06:00Z",
+                    is_primary: false,
+                  },
+                  {
+                    path: "notes/brief.md",
+                    run_identity: "root-1",
+                    summary: "workflow_web_brief_to_file failed at write_file",
+                    status: "degraded",
+                    branch_kind: null,
+                    updated_at: "2026-03-18T12:04:00Z",
+                    is_primary: true,
+                  },
+                ],
+                latest_branch_run_identity: "root-1:branch-1",
+                latest_branch_summary: "Branched repair completed",
+                latest_branch_status: "succeeded",
+                latest_branch_output_path: "notes/brief-branch.md",
+                comparison_ready: true,
+                checkpoint_labels: ["collect"],
+              },
+            },
+            {
+              id: "run-branch",
+              tool_name: "workflow_web_brief_to_file",
+              run_identity: "root-1:branch-1",
+              root_run_identity: "root-1",
+              parent_run_identity: "root-1",
+              workflow_name: "web-brief-to-file",
+              summary: "Branched repair completed",
+              status: "succeeded",
+              availability: "ready",
+              session_id: "session-2",
+              started_at: "2026-03-18T12:05:00Z",
+              updated_at: "2026-03-18T12:06:00Z",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continue_message: "Continue Atlas workflow branch",
+              thread_continue_message: "Continue Atlas workflow branch",
+              output_path: "notes/brief-branch.md",
+              artifact_paths: ["notes/brief-branch.md"],
+              step_records: [
+                {
+                  id: "repair",
+                  index: 0,
+                  tool: "write_file",
+                  status: "succeeded",
+                  result_summary: "Published repaired branch draft",
+                },
+              ],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 0,
+              checkpoint_candidates: [],
+              retry_from_step_available: false,
+              retry_from_step_draft: null,
+              replay_allowed: true,
+              replay_block_reason: null,
+              replay_recommended_actions: [],
+              step_focus: {
+                kind: "latest",
+                step_id: "repair",
+                tool: "write_file",
+                status: "succeeded",
+                summary: "Published repaired branch draft",
+                recovery_action_count: 0,
+                is_recoverable: false,
+              },
+              is_long_running: false,
+              is_compacted: false,
+              duration_minutes: 1,
+              step_count: 1,
+              visible_step_count: 1,
+              compacted_step_count: 0,
+              artifact_count: 1,
+              preserved_recovery_paths: [],
+              recent_step_labels: ["repair / write_file / succeeded"],
+              state_capsule: "1 steps · 1 artifact",
+              recovery_density: {
+                recommended_path: "branch_continue",
+                approval_pending: false,
+                boundary_blocked: false,
+                retry_ready: false,
+                checkpoint_ready: false,
+                repair_ready: false,
+                branch_ready: true,
+                replay_ready: true,
+                stalled: false,
+                checkpoint_candidate_count: 0,
+                recovery_action_count: 0,
+                repair_action_types: [],
+                repair_hint: null,
+                failure_step_id: null,
+                failure_step_tool: null,
+              },
+              output_debugger: {
+                family_run_count: 2,
+                branch_run_count: 1,
+                history_output_count: 2,
+                primary_output_path: "notes/brief-branch.md",
+                related_output_paths: ["notes/brief.md"],
+                history_outputs: [
+                  {
+                    path: "notes/brief-branch.md",
+                    run_identity: "root-1:branch-1",
+                    summary: "Branched repair completed",
+                    status: "succeeded",
+                    branch_kind: "branch_from_checkpoint",
+                    updated_at: "2026-03-18T12:06:00Z",
+                    is_primary: true,
+                  },
+                  {
+                    path: "notes/brief.md",
+                    run_identity: "root-1",
+                    summary: "workflow_web_brief_to_file failed at write_file",
+                    status: "degraded",
+                    branch_kind: null,
+                    updated_at: "2026-03-18T12:04:00Z",
+                    is_primary: false,
+                  },
+                ],
+                latest_branch_run_identity: null,
+                latest_branch_summary: null,
+                latest_branch_status: null,
+                latest_branch_output_path: null,
+                comparison_ready: false,
+                checkpoint_labels: [],
+              },
             },
           ],
         }));
@@ -1675,22 +1874,34 @@ describe("CockpitView", () => {
 
     const orchestration = await screen.findByLabelText("Workflow orchestration");
     await waitFor(() => {
-      expect(orchestration).toHaveTextContent(/1 workflows · 1 sessions · 1 compacted/i);
-      expect(orchestration).toHaveTextContent(/1 active · 0 awaiting approval · 0 blocked · 1 recoverable · 1 long-running · 5 steps · 2 compacted/i);
+      expect(orchestration).toHaveTextContent(/2 workflows · 1 sessions · 1 compacted/i);
+      expect(orchestration).toHaveTextContent(/1 active · 0 awaiting approval · 0 blocked · 1 recoverable · 1 long-running · 5 steps · 2 compacted · 1 repair-ready · 2 branch-ready · 2 debugger-ready · 1 attention sessions/i);
     });
     const row = (await within(orchestration).findByText("Atlas thread")).closest(".cockpit-operator-row--entry");
     expect(row).not.toBeNull();
+    expect(row as HTMLElement).toHaveTextContent(/2 workflows · 1 active · 1 recoverable/i);
+    expect(row as HTMLElement).toHaveTextContent(/queue #1 · queue repair ready · next step repair · 1 repair-ready · 2 branch-ready · 2 debugger-ready/i);
+    expect(row as HTMLElement).toHaveTextContent(/1 repair ready · 2 branch ready · 2 debugger ready/i);
+    expect(row as HTMLElement).toHaveTextContent(/1 workflow exposes a recoverable failed step that can be repaired now\./i);
     expect(row as HTMLElement).toHaveTextContent(/1 long-running · 5 steps · 2 compacted · 1 artifacts?/i);
     expect(row as HTMLElement).toHaveTextContent(/5 steps · 2 compacted · 1 artifact · preserves retry from step, checkpoint branch, step repair/i);
     expect(row as HTMLElement).toHaveTextContent(/visible steps 3\/5/i);
     expect(row as HTMLElement).toHaveTextContent(/outline \/ llm_plan \/ succeeded/i);
     expect(row as HTMLElement).toHaveTextContent(/notify \/ notify_user \/ pending/i);
+    expect(row as HTMLElement).toHaveTextContent(/output notes\/brief\.md · related notes\/brief-branch\.md/i);
+    expect(row as HTMLElement).toHaveTextContent(/2 history outputs · latest branch Branched repair completed/i);
     expect(
       within(row as HTMLElement).getAllByRole("button", { name: "Inspect workflow orchestration for Atlas thread" }),
     ).toHaveLength(2);
     expect(within(row as HTMLElement).getByRole("button", { name: "Use latest output for workflow orchestration Atlas thread" })).toBeInTheDocument();
     expect(within(row as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Repair workflow orchestration for Atlas thread" })).toBeInTheDocument();
     expect(within(row as HTMLElement).getByRole("button", { name: "Retry step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Open latest branch for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Compare branch output for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Redirect workflow orchestration for Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Plan queue focus for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft handoff for workflow orchestration Atlas thread" })).toBeInTheDocument();
     expect(within(row as HTMLElement).getByRole("button", { name: "Draft next step for workflow orchestration Atlas thread" })).toBeInTheDocument();
 
     fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use latest output for workflow orchestration Atlas thread" }));
@@ -1700,6 +1911,27 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(
         screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Compare branch output for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Compare the workspace files "notes\/brief\.md" and "notes\/brief-branch\.md"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Plan queue focus for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review the workflow queue for Atlas thread\./),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Draft handoff for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Prepare a workflow handoff for Atlas thread\./),
       ).toBeInTheDocument(),
     );
   });

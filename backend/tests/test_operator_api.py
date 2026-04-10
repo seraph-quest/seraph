@@ -777,6 +777,7 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                     {
                         "id": "run-2",
                         "run_identity": "session-2:workflow_daily_brief:1",
+                        "root_run_identity": "session-2:workflow_daily_brief:1",
                         "workflow_name": "daily-brief",
                         "summary": "Failed while drafting follow-up",
                         "status": "failed",
@@ -824,6 +825,32 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
                         ],
                     },
                     {
+                        "id": "run-4",
+                        "run_identity": "session-2:workflow_daily_brief:branch-1",
+                        "root_run_identity": "session-2:workflow_daily_brief:1",
+                        "parent_run_identity": "session-2:workflow_daily_brief:1",
+                        "branch_kind": "branch_from_checkpoint",
+                        "workflow_name": "daily-brief",
+                        "summary": "Branched repair draft completed",
+                        "status": "succeeded",
+                        "availability": "ready",
+                        "thread_id": "session-2",
+                        "thread_label": "Session 2",
+                        "started_at": "2026-04-08T09:10:00Z",
+                        "updated_at": "2026-04-08T09:15:00Z",
+                        "thread_continue_message": "Continue branched brief.",
+                        "artifact_paths": ["notes/daily-brief-v2.md"],
+                        "step_records": [
+                            {
+                                "id": "repair",
+                                "index": 0,
+                                "tool": "write_file",
+                                "status": "succeeded",
+                                "result_summary": "Published repaired brief",
+                            },
+                        ],
+                    },
+                    {
                         "id": "run-3",
                         "run_identity": "ambient:workflow_cleanup:1",
                         "workflow_name": "cleanup",
@@ -866,34 +893,60 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["summary"]["tracked_sessions"] == 2
-    assert payload["summary"]["workflow_count"] == 3
+    assert payload["summary"]["workflow_count"] == 4
     assert payload["summary"]["active_workflows"] == 2
     assert payload["summary"]["blocked_workflows"] == 2
     assert payload["summary"]["awaiting_approval_workflows"] == 1
     assert payload["summary"]["recoverable_workflows"] == 1
     assert payload["summary"]["long_running_workflows"] == 2
     assert payload["summary"]["compacted_workflows"] == 2
-    assert payload["summary"]["total_step_count"] == 10
+    assert payload["summary"]["total_step_count"] == 11
     assert payload["summary"]["compacted_step_count"] == 3
+    assert payload["summary"]["boundary_blocked_workflows"] == 1
+    assert payload["summary"]["repair_ready_workflows"] == 1
+    assert payload["summary"]["branch_ready_workflows"] == 2
+    assert payload["summary"]["stalled_workflows"] == 2
+    assert payload["summary"]["output_debugger_ready_workflows"] == 2
+    assert payload["summary"]["attention_sessions"] == 3
 
     sessions = payload["sessions"]
-    assert sessions[0]["thread_id"] == "session-1"
-    assert sessions[0]["lead_workflow_name"] == "repo-review"
+    assert sessions[0]["thread_id"] == "session-2"
+    assert sessions[0]["lead_workflow_name"] == "daily-brief"
     assert sessions[0]["blocked_workflows"] == 1
-    assert sessions[0]["continue_message"] == "Resume repo review."
-    assert sessions[0]["lead_step_focus"]["kind"] == "active"
+    assert sessions[0]["continue_message"] is None
+    assert sessions[0]["lead_step_focus"]["kind"] == "failure"
     assert sessions[0]["long_running_workflow_count"] == 1
     assert sessions[0]["compacted_workflow_count"] == 1
     assert sessions[0]["total_step_count"] == 5
-    assert sessions[0]["compacted_step_count"] == 2
-    assert sessions[0]["lead_state_capsule"].startswith("5 steps")
-    assert sessions[1]["thread_id"] == "session-2"
-    assert sessions[1]["recoverable_workflows"] == 1
-    assert sessions[1]["lead_step_focus"]["kind"] == "failure"
-    assert sessions[1]["compacted_workflow_count"] == 1
+    assert sessions[0]["compacted_step_count"] == 1
+    assert sessions[0]["lead_state_capsule"].startswith("4 steps")
+    assert sessions[0]["queue_position"] == 1
+    assert sessions[0]["queue_state"] == "boundary_blocked"
+    assert sessions[0]["queue_reason"] == "1 workflow crossed a changed trust boundary and now needs repair or a fresh run."
+    assert sessions[0]["attention_summary"] == "1 boundary blocked · 1 repair ready · 1 branch ready · 2 debugger ready"
+    assert sessions[0]["queue_draft"].startswith("Review the workflow queue for Session 2.")
+    assert sessions[0]["handoff_draft"].startswith("Prepare a workflow handoff for Session 2.")
+    assert sessions[0]["boundary_blocked_workflows"] == 1
+    assert sessions[0]["repair_ready_workflows"] == 1
+    assert sessions[0]["branch_ready_workflows"] == 1
+    assert sessions[0]["output_debugger_ready_workflows"] == 2
+    assert sessions[0]["lead_output_path"] == "notes/daily-brief.md"
+    assert sessions[0]["lead_related_output_paths"] == ["notes/daily-brief-v2.md"]
+    assert sessions[0]["lead_output_history"][0]["path"] == "notes/daily-brief-v2.md"
+    assert sessions[0]["lead_latest_branch_run_identity"] == "session-2:workflow_daily_brief:branch-1"
+    assert sessions[0]["lead_latest_branch_summary"] == "Branched repair draft completed"
+    assert sessions[1]["thread_id"] == "session-1"
+    assert sessions[1]["continue_message"] == "Resume repo review."
+    assert sessions[1]["lead_step_focus"]["kind"] == "active"
+    assert sessions[1]["queue_position"] == 2
+    assert sessions[1]["queue_state"] == "approval_gate"
+    assert sessions[1]["queue_reason"] == "1 workflow awaits approval before the session can advance."
+    assert sessions[1]["attention_summary"] == "1 approval gate · 1 branch ready · 1 stalled"
     assert sessions[2]["thread_id"] is None
     assert sessions[2]["thread_label"] == "Ambient workflows"
     assert sessions[2]["lead_step_focus"]["kind"] == "active"
+    assert sessions[2]["queue_position"] == 3
+    assert sessions[2]["queue_state"] == "stalled"
 
     workflows = payload["workflows"]
     assert workflows[0]["workflow_name"] == "repo-review"
@@ -907,6 +960,11 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert workflows[0]["step_records"][0]["id"] == "compare"
     assert "checkpoint_branch" in workflows[0]["preserved_recovery_paths"]
     assert "approval_gate" in workflows[0]["preserved_recovery_paths"]
+    assert workflows[0]["recovery_density"]["recommended_path"] == "approval_gate"
+    assert workflows[0]["recovery_density"]["branch_ready"] is True
+    assert workflows[0]["output_debugger"]["primary_output_path"] == "notes/repo-review.md"
+    assert workflows[0]["output_debugger"]["history_outputs"][0]["path"] == "notes/repo-review.md"
+    assert workflows[0]["output_debugger"]["checkpoint_labels"] == ["collect"]
     assert workflows[1]["workflow_name"] == "daily-brief"
     assert workflows[1]["retry_from_step_available"] is True
     assert workflows[1]["step_focus"]["kind"] == "failure"
@@ -918,8 +976,17 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert "step_repair" in workflows[1]["preserved_recovery_paths"]
     assert "boundary_receipt" in workflows[1]["preserved_recovery_paths"]
     assert "approval_gate" not in workflows[1]["preserved_recovery_paths"]
+    assert workflows[1]["recovery_density"]["recommended_path"] == "fresh_run"
+    assert workflows[1]["recovery_density"]["repair_ready"] is True
+    assert workflows[1]["recovery_density"]["repair_action_types"] == ["set_tool_policy"]
+    assert workflows[1]["output_debugger"]["comparison_ready"] is True
+    assert workflows[1]["output_debugger"]["related_output_paths"] == ["notes/daily-brief-v2.md"]
+    assert workflows[1]["output_debugger"]["history_outputs"][0]["path"] == "notes/daily-brief-v2.md"
+    assert workflows[1]["output_debugger"]["latest_branch_status"] == "succeeded"
+    assert workflows[1]["output_debugger"]["latest_branch_run_identity"] == "session-2:workflow_daily_brief:branch-1"
     assert workflows[2]["workflow_name"] == "cleanup"
     assert workflows[2]["step_focus"]["kind"] == "active"
+    assert workflows[2]["recovery_density"]["stalled"] is True
 
 
 @pytest.mark.asyncio
@@ -1075,6 +1142,179 @@ async def test_operator_background_sessions_surface_managed_processes_and_branch
     assert second["blocked_workflows"] == 1
     assert second["branch_handoff"]["target_type"] == "workflow_run"
     assert second["continue_message"] == "Resume cleanup after approval."
+
+
+@pytest.mark.asyncio
+async def test_operator_workflow_orchestration_uses_most_recent_branch_for_debugger(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-root",
+                        "run_identity": "session-1:workflow_repo_review:1",
+                        "root_run_identity": "session-1:workflow_repo_review:1",
+                        "workflow_name": "repo-review",
+                        "summary": "Root review failed",
+                        "status": "failed",
+                        "availability": "blocked",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "started_at": "2026-04-08T10:00:00Z",
+                        "updated_at": "2026-04-08T10:05:00Z",
+                        "artifact_paths": ["notes/repo-review.md"],
+                        "step_records": [
+                            {
+                                "id": "draft",
+                                "index": 0,
+                                "tool": "write_file",
+                                "status": "failed",
+                                "recovery_actions": [{"type": "set_tool_policy"}],
+                                "is_recoverable": True,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "run-branch-old",
+                        "run_identity": "session-1:workflow_repo_review:branch-old",
+                        "root_run_identity": "session-1:workflow_repo_review:1",
+                        "parent_run_identity": "session-1:workflow_repo_review:1",
+                        "branch_kind": "branch_from_checkpoint",
+                        "workflow_name": "repo-review",
+                        "summary": "Older blocked branch",
+                        "status": "failed",
+                        "availability": "blocked",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "started_at": "2026-04-08T10:06:00Z",
+                        "updated_at": "2026-04-08T10:07:00Z",
+                        "artifact_paths": ["notes/repo-review-old-branch.md"],
+                        "step_records": [
+                            {"id": "repair", "index": 0, "tool": "write_file", "status": "failed"},
+                        ],
+                    },
+                    {
+                        "id": "run-branch-new",
+                        "run_identity": "session-1:workflow_repo_review:branch-new",
+                        "root_run_identity": "session-1:workflow_repo_review:1",
+                        "parent_run_identity": "session-1:workflow_repo_review:1",
+                        "branch_kind": "branch_from_checkpoint",
+                        "workflow_name": "repo-review",
+                        "summary": "Newest successful branch",
+                        "status": "succeeded",
+                        "availability": "ready",
+                        "thread_id": "session-1",
+                        "thread_label": "Session 1",
+                        "started_at": "2026-04-08T10:08:00Z",
+                        "updated_at": "2026-04-08T10:09:00Z",
+                        "artifact_paths": ["notes/repo-review-new-branch.md"],
+                        "step_records": [
+                            {"id": "publish", "index": 0, "tool": "write_file", "status": "succeeded"},
+                        ],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Session 1"}]),
+        ),
+    ):
+        resp = await client.get(
+            "/api/operator/workflow-orchestration",
+            params={"limit_sessions": 4, "limit_workflows": 4},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    root_workflow = payload["workflows"][0]
+    assert root_workflow["output_debugger"]["latest_branch_run_identity"] == "session-1:workflow_repo_review:branch-new"
+    assert root_workflow["output_debugger"]["latest_branch_summary"] == "Newest successful branch"
+    assert root_workflow["output_debugger"]["latest_branch_output_path"] == "notes/repo-review-new-branch.md"
+
+
+@pytest.mark.asyncio
+async def test_operator_workflow_orchestration_attention_sessions_counts_full_population(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-a",
+                        "run_identity": "session-a:workflow_a:1",
+                        "workflow_name": "workflow-a",
+                        "summary": "Awaiting approval",
+                        "status": "awaiting_approval",
+                        "availability": "blocked",
+                        "thread_id": "session-a",
+                        "thread_label": "Session A",
+                        "started_at": "2026-04-08T10:00:00Z",
+                        "updated_at": "2026-04-08T10:05:00Z",
+                        "pending_approval_count": 1,
+                        "step_records": [],
+                    },
+                    {
+                        "id": "run-b",
+                        "run_identity": "session-b:workflow_b:1",
+                        "workflow_name": "workflow-b",
+                        "summary": "Repair ready",
+                        "status": "failed",
+                        "availability": "blocked",
+                        "thread_id": "session-b",
+                        "thread_label": "Session B",
+                        "started_at": "2026-04-08T09:00:00Z",
+                        "updated_at": "2026-04-08T09:05:00Z",
+                        "step_records": [
+                            {
+                                "id": "publish",
+                                "index": 0,
+                                "tool": "write_file",
+                                "status": "failed",
+                                "recovery_actions": [{"type": "set_tool_policy"}],
+                                "is_recoverable": True,
+                            }
+                        ],
+                    },
+                    {
+                        "id": "run-c",
+                        "run_identity": "session-c:workflow_c:1",
+                        "workflow_name": "workflow-c",
+                        "summary": "Stalled run",
+                        "status": "running",
+                        "availability": "ready",
+                        "thread_id": "session-c",
+                        "thread_label": "Session C",
+                        "started_at": "2026-04-08T07:00:00Z",
+                        "updated_at": "2026-04-08T07:05:00Z",
+                        "step_records": [
+                            {"id": "scan", "index": 0, "tool": "filesystem_read", "status": "running"},
+                        ],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(
+                return_value=[
+                    {"id": "session-a", "title": "Session A"},
+                    {"id": "session-b", "title": "Session B"},
+                    {"id": "session-c", "title": "Session C"},
+                ]
+            ),
+        ),
+    ):
+        resp = await client.get(
+            "/api/operator/workflow-orchestration",
+            params={"limit_sessions": 1, "limit_workflows": 4},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["attention_sessions"] == 3
+    assert len(payload["sessions"]) == 1
 
 
 @pytest.mark.asyncio

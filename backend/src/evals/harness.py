@@ -7401,6 +7401,165 @@ async def _eval_workflow_context_condenser_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_orchestration
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[
+                {"id": "session-1", "title": "Atlas thread"},
+                {"id": "session-2", "title": "Daily brief thread"},
+            ],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-1",
+                    "run_identity": "session-1:workflow_repo_review:1",
+                    "workflow_name": "repo-review",
+                    "summary": "Waiting on guarded approval",
+                    "status": "awaiting_approval",
+                    "availability": "blocked",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "started_at": "2026-04-10T10:00:00Z",
+                    "updated_at": "2026-04-10T10:45:00Z",
+                    "thread_continue_message": "Resume repo review.",
+                    "pending_approval_count": 1,
+                    "artifact_paths": ["notes/repo-review.md", "notes/repo-review-followup.md"],
+                    "checkpoint_candidates": [{"step_id": "collect", "label": "collect"}],
+                    "step_records": [
+                        {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                        {"id": "compare", "index": 2, "tool": "diff_compare", "status": "succeeded"},
+                        {"id": "draft", "index": 3, "tool": "write_file", "status": "succeeded"},
+                        {"id": "approve", "index": 4, "tool": "write_file", "status": "awaiting_approval"},
+                    ],
+                },
+                {
+                    "id": "run-2",
+                    "run_identity": "session-2:workflow_daily_brief:1",
+                    "root_run_identity": "session-2:workflow_daily_brief:1",
+                    "workflow_name": "daily-brief",
+                    "summary": "Failed while drafting follow-up",
+                    "status": "failed",
+                    "availability": "blocked",
+                    "thread_id": "session-2",
+                    "thread_label": "Daily brief thread",
+                    "started_at": "2026-04-10T09:00:00Z",
+                    "updated_at": "2026-04-10T09:40:00Z",
+                    "thread_continue_message": "Retry the daily brief.",
+                    "retry_from_step_draft": "Retry daily brief from publish step.",
+                    "artifact_paths": ["notes/daily-brief.md"],
+                    "replay_block_reason": "approval_context_changed",
+                    "step_records": [
+                        {"id": "gather", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "outline", "index": 1, "tool": "llm_plan", "status": "succeeded"},
+                        {"id": "draft", "index": 2, "tool": "write_file", "status": "succeeded"},
+                        {
+                            "id": "publish",
+                            "index": 3,
+                            "tool": "write_file",
+                            "status": "failed",
+                            "recovery_hint": "Repair or reroute the publish step.",
+                            "recovery_actions": [{"type": "set_tool_policy"}],
+                            "is_recoverable": True,
+                        },
+                    ],
+                },
+                {
+                    "id": "run-3",
+                    "run_identity": "session-2:workflow_daily_brief:branch-1",
+                    "root_run_identity": "session-2:workflow_daily_brief:1",
+                    "parent_run_identity": "session-2:workflow_daily_brief:1",
+                    "branch_kind": "branch_from_checkpoint",
+                    "workflow_name": "daily-brief",
+                    "summary": "Branched repair draft completed",
+                    "status": "succeeded",
+                    "availability": "ready",
+                    "thread_id": "session-2",
+                    "thread_label": "Daily brief thread",
+                    "started_at": "2026-04-10T09:10:00Z",
+                    "updated_at": "2026-04-10T09:15:00Z",
+                    "thread_continue_message": "Continue branched brief.",
+                    "artifact_paths": ["notes/daily-brief-v2.md"],
+                    "step_records": [
+                        {"id": "repair", "index": 0, "tool": "write_file", "status": "succeeded"},
+                    ],
+                },
+                {
+                    "id": "run-4",
+                    "run_identity": "ambient:workflow_cleanup:1",
+                    "workflow_name": "cleanup",
+                    "summary": "Cleanup still needs follow-through.",
+                    "status": "running",
+                    "availability": "ready",
+                    "thread_id": None,
+                    "thread_label": None,
+                    "started_at": "2026-04-10T07:00:00Z",
+                    "updated_at": "2026-04-10T07:10:00Z",
+                    "thread_continue_message": "Continue cleanup.",
+                    "artifact_paths": [],
+                    "step_records": [
+                        {"id": "scan", "index": 0, "tool": "filesystem_read", "status": "running"},
+                    ],
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+
+    sessions_by_thread = {
+        session.get("thread_id") or "__ambient__": session
+        for session in payload["sessions"]
+    }
+    atlas_session = sessions_by_thread["session-1"]
+    brief_session = sessions_by_thread["session-2"]
+    approval_workflow = payload["workflows"][0]
+    brief_workflow = payload["workflows"][1]
+    cleanup_workflow = payload["workflows"][2]
+    return {
+        "attention_sessions_visible": payload["summary"]["attention_sessions"] == 3,
+        "repair_ready_summary_visible": payload["summary"]["repair_ready_workflows"] == 1,
+        "branch_ready_summary_visible": payload["summary"]["branch_ready_workflows"] == 2,
+        "debugger_ready_summary_visible": payload["summary"]["output_debugger_ready_workflows"] == 3,
+        "stalled_summary_visible": payload["summary"]["stalled_workflows"] == 2,
+        "atlas_queue_state_visible": atlas_session["queue_state"] == "approval_gate",
+        "atlas_queue_reason_visible": (
+            atlas_session["queue_reason"] == "1 workflow awaits approval before the session can advance."
+        ),
+        "atlas_queue_draft_visible": atlas_session["queue_draft"].startswith("Review the workflow queue for Atlas thread."),
+        "atlas_attention_summary_visible": atlas_session["attention_summary"] == "1 approval gate · 1 branch ready · 1 debugger ready · 1 stalled",
+        "brief_queue_state_visible": brief_session["queue_state"] == "boundary_blocked",
+        "brief_handoff_draft_visible": brief_session["handoff_draft"].startswith("Prepare a workflow handoff for Daily brief thread."),
+        "brief_related_output_visible": brief_session["lead_related_output_paths"] == ["notes/daily-brief-v2.md"],
+        "brief_output_history_visible": brief_session["lead_output_history"][0]["path"] == "notes/daily-brief-v2.md",
+        "brief_branch_reference_visible": (
+            brief_session["lead_latest_branch_run_identity"]
+            == "session-2:workflow_daily_brief:branch-1"
+        ),
+        "approval_workflow_recovery_path_visible": (
+            approval_workflow["recovery_density"]["recommended_path"] == "approval_gate"
+        ),
+        "approval_workflow_checkpoint_visible": (
+            approval_workflow["output_debugger"]["checkpoint_labels"] == ["collect"]
+        ),
+        "approval_workflow_history_visible": (
+            approval_workflow["output_debugger"]["history_outputs"][0]["path"] == "notes/repo-review.md"
+        ),
+        "brief_workflow_fresh_run_visible": (
+            brief_workflow["recovery_density"]["recommended_path"] == "fresh_run"
+        ),
+        "brief_workflow_repair_action_visible": (
+            brief_workflow["recovery_density"]["repair_action_types"] == ["set_tool_policy"]
+        ),
+        "brief_workflow_compare_ready": brief_workflow["output_debugger"]["comparison_ready"] is True,
+        "cleanup_workflow_stalled_visible": cleanup_workflow["recovery_density"]["stalled"] is True,
+    }
+
+
 async def _eval_engineering_memory_bundle_behavior() -> dict[str, Any]:
     from src.api.operator import get_operator_engineering_memory
 
@@ -9829,6 +9988,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Workflow orchestration exposes compacted long-run state capsules without dropping checkpoint, approval, or repair recovery facts.",
         runner=_eval_workflow_context_condenser_behavior,
+    ),
+    EvalScenario(
+        name="workflow_operating_layer_behavior",
+        category="behavior",
+        description="Workflow orchestration exposes queue state, denser repair paths, branch debugger context, and output comparison readiness for long-running work.",
+        runner=_eval_workflow_operating_layer_behavior,
     ),
     EvalScenario(
         name="engineering_memory_bundle_behavior",

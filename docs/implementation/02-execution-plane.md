@@ -63,12 +63,12 @@
 - [x] this workstream now also ships the first Batch AU aggregate for operator control-plane governance, usage/runtime posture synthesis, and collaboration-safe handoff receipts across approvals, workflows, audit, continuity, and extension state
 - [x] this workstream now also ships the first Batch AW aggregate for broader authenticated adapter operations, PR-native `code_activity.write` create or review actions, fixed-argument bounded external execution, and report-publication contract selection that stays truthful across work-item versus pull-request publication paths
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy, richer managed-process trust receipts, and deterministic eval proof that the process-runtime boundary stays both session-partitioned and operator-visible
-- [x] this workstream now also ships the first Batch BD slice for workflow context condensation and long-run state compaction across the operator API, cockpit orchestration lane, and runtime eval harness
+- [x] this workstream now also ships the first Batch BD aggregate for long-running workflow operating-layer density across the operator API, cockpit orchestration lane, and runtime eval harness, including long-run state compaction, queue-state supervision, denser repair paths, branch/output debugger context, and explicit long-horizon workflow proof
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
+- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, queue-state recovery supervision, branch/output debugger density, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
 - [ ] broader external system leverage without weakening trust boundaries
 
 ## Current Slice Record

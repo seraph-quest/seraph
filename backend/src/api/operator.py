@@ -27,6 +27,7 @@ from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
+from src.guardian.state import build_guardian_state
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
 from src.tools.process_tools import process_runtime_manager
@@ -1671,6 +1672,67 @@ def _handoff_entries(
     }
 
 
+def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> dict[str, Any]:
+    world_model = getattr(state, "world_model", None)
+    confidence = getattr(state, "confidence", None)
+    observer_context = getattr(state, "observer_context", None)
+    return {
+        "summary": {
+            "session_id": session_id,
+            "overall_confidence": getattr(confidence, "overall", "unknown"),
+            "observer_confidence": getattr(confidence, "observer", "unknown"),
+            "world_model_confidence": getattr(confidence, "world_model", "unknown"),
+            "memory_confidence": getattr(confidence, "memory", "unknown"),
+            "current_session_confidence": getattr(confidence, "current_session", "unknown"),
+            "recent_sessions_confidence": getattr(confidence, "recent_sessions", "unknown"),
+            "intent_uncertainty_level": getattr(state, "intent_uncertainty_level", "clear"),
+            "intent_resolution": getattr(state, "intent_resolution", "proceed"),
+            "current_focus": getattr(world_model, "current_focus", "No clear focus signal"),
+            "focus_source": getattr(world_model, "focus_source", "unknown"),
+            "focus_alignment": getattr(world_model, "focus_alignment", "unknown"),
+            "intervention_receptivity": getattr(world_model, "intervention_receptivity", "unknown"),
+            "dominant_thread": getattr(world_model, "dominant_thread", "No dominant thread"),
+            "user_model_confidence": getattr(world_model, "user_model_confidence", "empty"),
+        },
+        "explanation": {
+            "judgment_proof_lines": list(getattr(state, "judgment_proof_lines", ()) or ()),
+            "intent_uncertainty_diagnostics": list(
+                getattr(state, "intent_uncertainty_diagnostics", ()) or ()
+            ),
+            "judgment_risks": list(getattr(world_model, "judgment_risks", ()) or ()),
+            "corroboration_sources": list(getattr(world_model, "corroboration_sources", ()) or ()),
+            "preference_inference_diagnostics": list(
+                getattr(world_model, "preference_inference_diagnostics", ()) or ()
+            ),
+            "learning_diagnostics": list(getattr(state, "learning_diagnostics", ()) or ()),
+            "memory_provider_diagnostics": list(
+                getattr(state, "memory_provider_diagnostics", ()) or ()
+            ),
+            "memory_reconciliation_diagnostics": list(
+                getattr(state, "memory_reconciliation_diagnostics", ()) or ()
+            ),
+        },
+        "operator_guidance": {
+            "active_projects": list(getattr(world_model, "active_projects", ()) or ()),
+            "active_commitments": list(getattr(world_model, "active_commitments", ()) or ()),
+            "active_blockers": list(getattr(world_model, "active_blockers", ()) or ()),
+            "next_up": list(getattr(world_model, "next_up", ()) or ()),
+            "learning_guidance": getattr(state, "learning_guidance", ""),
+            "recent_execution_summary": getattr(state, "recent_execution_summary", ""),
+        },
+        "observer": {
+            "user_state": getattr(observer_context, "user_state", None),
+            "interruption_mode": getattr(observer_context, "interruption_mode", None),
+            "active_window": getattr(observer_context, "active_window", None),
+            "active_project": getattr(observer_context, "active_project", None),
+            "active_goals_summary": getattr(observer_context, "active_goals_summary", None),
+            "screen_context": getattr(observer_context, "screen_context", None),
+            "data_quality": getattr(observer_context, "data_quality", None),
+            "is_working_hours": getattr(observer_context, "is_working_hours", None),
+        },
+    }
+
+
 @router.get("/operator/control-plane")
 async def get_operator_control_plane(
     session_id: str | None = Query(default=None),
@@ -1762,6 +1824,14 @@ async def get_operator_control_plane(
             "review_receipts": _review_receipts(audit_events, session_titles),
         },
     }
+
+
+@router.get("/operator/guardian-state")
+async def get_operator_guardian_state(
+    session_id: str | None = Query(default=None),
+):
+    state = await build_guardian_state(session_id=session_id)
+    return _operator_guardian_state_payload(state, session_id=session_id)
 
 
 @router.get("/operator/workflow-orchestration")

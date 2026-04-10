@@ -216,6 +216,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "background_session_handoff_behavior" in captured.out
     assert "engineering_memory_bundle_behavior" in captured.out
     assert "operator_continuity_graph_behavior" in captured.out
+    assert "operator_guardian_state_surface_behavior" in captured.out
     assert "workflow_boundary_blocked_surface_behavior" in captured.out
     assert "approval_explainability_surface_behavior" in captured.out
     assert "source_report_action_workflow_behavior" in captured.out
@@ -1756,3 +1757,29 @@ def test_operator_continuity_graph_runtime_eval_exposes_expected_details():
     assert details["has_queued_intervention_edge"] is True
     assert details["has_inferred_notification_intervention_edge"] is True
     assert details["inferred_intervention_marks_missing_recent_context"] is True
+
+
+def test_operator_guardian_state_surface_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "operator_guardian_state_surface_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}[
+        "operator_guardian_state_surface_behavior"
+    ]
+    assert details["session_id_matches"] is True
+    assert details["overall_confidence"] == "partial"
+    assert details["intent_resolution"] == "clarify_first"
+    assert details["focus_source"] == "observer_goal_window"
+    assert details["user_model_confidence"] == "grounded"
+    assert details["has_project_target_proof"] is True
+    assert details["has_judgment_risk"] is True
+    assert details["has_learning_diagnostic"] is True
+    assert details["next_up_mentions_clarify"] is True
+    assert details["observer_project"] == "Atlas"

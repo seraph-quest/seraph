@@ -635,6 +635,85 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
 
 
 @pytest.mark.asyncio
+async def test_operator_guardian_state_surfaces_confidence_and_explanation(client):
+    guardian_state = SimpleNamespace(
+        confidence=SimpleNamespace(
+            overall="partial",
+            observer="grounded",
+            world_model="partial",
+            memory="grounded",
+            current_session="grounded",
+            recent_sessions="partial",
+        ),
+        intent_uncertainty_level="high",
+        intent_resolution="clarify_first",
+        judgment_proof_lines=(
+            "Project-target proof: Atlas remains the strongest active project anchor.",
+            "Referent proof: the user message contains an unresolved referent.",
+        ),
+        intent_uncertainty_diagnostics=(
+            "Ambiguous referent detected in the latest user message.",
+        ),
+        learning_diagnostics=(
+            "Fresh live outcomes are overruling older procedural guidance.",
+        ),
+        memory_provider_diagnostics=(
+            "Provider evidence: canonical memory remains authoritative.",
+        ),
+        memory_reconciliation_diagnostics=(
+            "Conflict policy: archive superseded project hints after reconciliation.",
+        ),
+        learning_guidance="Prefer clarification before interrupting.",
+        recent_execution_summary="- Atlas deploy failed recently",
+        world_model=SimpleNamespace(
+            current_focus="Atlas release planning",
+            focus_source="observer_goal_window",
+            focus_alignment="aligned",
+            intervention_receptivity="guarded",
+            dominant_thread="Atlas launch thread",
+            user_model_confidence="grounded",
+            judgment_risks=("Competing project anchors still require conservative judgment.",),
+            corroboration_sources=("observer", "memory", "recent_sessions"),
+            preference_inference_diagnostics=("User-model evidence sources: observer, memory",),
+            active_projects=("Atlas",),
+            active_commitments=("Ship Atlas release notes",),
+            active_blockers=("Pending release approval",),
+            next_up=("Clarify whether the user meant Atlas or Hermes",),
+        ),
+        observer_context=SimpleNamespace(
+            user_state="focused",
+            interruption_mode="minimal",
+            active_window="VS Code",
+            active_project="Atlas",
+            active_goals_summary="Ship Atlas safely",
+            screen_context="Reviewing Atlas release notes",
+            data_quality="good",
+            is_working_hours=True,
+        ),
+    )
+
+    with patch(
+        "src.api.operator.build_guardian_state",
+        AsyncMock(return_value=guardian_state),
+    ):
+        resp = await client.get("/api/operator/guardian-state", params={"session_id": "session-1"})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["session_id"] == "session-1"
+    assert payload["summary"]["overall_confidence"] == "partial"
+    assert payload["summary"]["intent_resolution"] == "clarify_first"
+    assert payload["summary"]["current_focus"] == "Atlas release planning"
+    assert payload["summary"]["user_model_confidence"] == "grounded"
+    assert payload["explanation"]["judgment_proof_lines"][0].startswith("Project-target proof:")
+    assert payload["explanation"]["judgment_risks"][0].startswith("Competing project anchors")
+    assert payload["explanation"]["learning_diagnostics"][0].startswith("Fresh live outcomes")
+    assert payload["operator_guidance"]["next_up"][0].startswith("Clarify whether the user meant")
+    assert payload["observer"]["active_project"] == "Atlas"
+    assert payload["observer"]["is_working_hours"] is True
+
+
+@pytest.mark.asyncio
 async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(client):
     with (
         patch(

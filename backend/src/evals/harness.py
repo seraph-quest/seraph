@@ -7625,6 +7625,96 @@ async def _eval_operator_continuity_graph_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_guardian_state
+
+    guardian_state = MagicMock()
+    guardian_state.confidence = types.SimpleNamespace(
+        overall="partial",
+        observer="grounded",
+        world_model="partial",
+        memory="grounded",
+        current_session="grounded",
+        recent_sessions="partial",
+    )
+    guardian_state.intent_uncertainty_level = "high"
+    guardian_state.intent_resolution = "clarify_first"
+    guardian_state.judgment_proof_lines = (
+        "Project-target proof: Atlas remains the strongest active project anchor.",
+        "Referent proof: the user message contains an unresolved referent.",
+    )
+    guardian_state.intent_uncertainty_diagnostics = (
+        "Ambiguous referent detected in the latest user message.",
+    )
+    guardian_state.learning_diagnostics = (
+        "Fresh live outcomes are overruling older procedural guidance.",
+    )
+    guardian_state.memory_provider_diagnostics = (
+        "Provider evidence: canonical memory remains authoritative.",
+    )
+    guardian_state.memory_reconciliation_diagnostics = (
+        "Conflict policy: archive superseded project hints after reconciliation.",
+    )
+    guardian_state.learning_guidance = "Prefer clarification before interrupting."
+    guardian_state.recent_execution_summary = "- Atlas deploy failed recently"
+    guardian_state.world_model = types.SimpleNamespace(
+        current_focus="Atlas release planning",
+        focus_source="observer_goal_window",
+        focus_alignment="aligned",
+        intervention_receptivity="guarded",
+        dominant_thread="Atlas launch thread",
+        user_model_confidence="grounded",
+        judgment_risks=("Competing project anchors still require conservative judgment.",),
+        corroboration_sources=("observer", "memory", "recent_sessions"),
+        preference_inference_diagnostics=("User-model evidence sources: observer, memory",),
+        active_projects=("Atlas",),
+        active_commitments=("Ship Atlas release notes",),
+        active_blockers=("Pending release approval",),
+        next_up=("Clarify whether the user meant Atlas or Hermes",),
+    )
+    guardian_state.observer_context = types.SimpleNamespace(
+        user_state="focused",
+        interruption_mode="minimal",
+        active_window="VS Code",
+        active_project="Atlas",
+        active_goals_summary="Ship Atlas safely",
+        screen_context="Reviewing Atlas release notes",
+        data_quality="good",
+        is_working_hours=True,
+    )
+
+    with patch(
+        "src.api.operator.build_guardian_state",
+        AsyncMock(return_value=guardian_state),
+    ):
+        payload = await get_operator_guardian_state(session_id="session-1")
+
+    return {
+        "session_id_matches": payload["summary"]["session_id"] == "session-1",
+        "overall_confidence": payload["summary"]["overall_confidence"],
+        "intent_resolution": payload["summary"]["intent_resolution"],
+        "focus_source": payload["summary"]["focus_source"],
+        "user_model_confidence": payload["summary"]["user_model_confidence"],
+        "has_project_target_proof": any(
+            item.startswith("Project-target proof:")
+            for item in payload["explanation"]["judgment_proof_lines"]
+        ),
+        "has_judgment_risk": any(
+            "conservative judgment" in item.lower()
+            for item in payload["explanation"]["judgment_risks"]
+        ),
+        "has_learning_diagnostic": any(
+            "procedural guidance" in item.lower()
+            for item in payload["explanation"]["learning_diagnostics"]
+        ),
+        "next_up_mentions_clarify": any(
+            "clarify" in item.lower()
+            for item in payload["operator_guidance"]["next_up"]
+        ),
+        "observer_project": payload["observer"]["active_project"],
+    }
+
+
 async def _eval_workflow_boundary_blocked_surface_behavior() -> dict[str, Any]:
     from src.api.activity import get_activity_ledger
     from src.api.operator import get_operator_timeline
@@ -9653,6 +9743,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Operator continuity graph links sessions, workflows, approvals, artifacts, notifications, and deferred guardian items through one explicit continuity contract.",
         runner=_eval_operator_continuity_graph_behavior,
+    ),
+    EvalScenario(
+        name="operator_guardian_state_surface_behavior",
+        category="behavior",
+        description="Operator guardian-state surface exposes confidence, explanation, and judgment proof instead of leaving the cockpit on raw observer state alone.",
+        runner=_eval_operator_guardian_state_surface_behavior,
     ),
     EvalScenario(
         name="workflow_boundary_blocked_surface_behavior",

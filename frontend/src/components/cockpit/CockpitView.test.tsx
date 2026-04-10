@@ -4494,6 +4494,153 @@ describe("CockpitView", () => {
     expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" });
   });
 
+  it("surfaces guardian confidence and judgment proof in the guardian pane", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) {
+        return Promise.resolve(mockResponse({
+          user_state: "focused",
+          interruption_mode: "minimal",
+          active_window: "VS Code",
+          is_working_hours: true,
+          screen_context: "Reviewing Atlas release notes",
+          active_goals_summary: "Ship Atlas safely",
+          upcoming_events: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: { workspace_mode: "single_operator_guarded_workspace", review_posture: "", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: true, roles: [] },
+          usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 0, blocked_workflows: 0 },
+          runtime_posture: {
+            runtime: { version: "2026.4.10", build_id: "SERAPH_TEST", provider: "openrouter", model: "openrouter/openai/gpt-4.1-mini", model_label: "gpt-4.1-mini" },
+            extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 },
+            continuity: { continuity_health: "ready", primary_surface: "presence", recommended_focus: null, actionable_thread_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 },
+          },
+          handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/guardian-state")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            overall_confidence: "partial",
+            observer_confidence: "grounded",
+            world_model_confidence: "partial",
+            memory_confidence: "grounded",
+            current_session_confidence: "grounded",
+            recent_sessions_confidence: "partial",
+            intent_uncertainty_level: "high",
+            intent_resolution: "clarify_first",
+            current_focus: "Atlas release planning",
+            focus_source: "observer_goal_window",
+            focus_alignment: "aligned",
+            intervention_receptivity: "guarded",
+            dominant_thread: "Atlas launch thread",
+            user_model_confidence: "grounded",
+          },
+          explanation: {
+            judgment_proof_lines: [
+              "Project-target proof: Atlas remains the strongest active project anchor.",
+              "Referent proof: the user message contains an unresolved referent.",
+            ],
+            intent_uncertainty_diagnostics: [],
+            judgment_risks: ["Competing project anchors still require conservative judgment."],
+            corroboration_sources: ["observer", "memory"],
+            preference_inference_diagnostics: [],
+            learning_diagnostics: ["Fresh live outcomes are overruling older procedural guidance."],
+            memory_provider_diagnostics: [],
+            memory_reconciliation_diagnostics: [],
+          },
+          operator_guidance: {
+            active_projects: ["Atlas"],
+            active_commitments: ["Ship Atlas release notes"],
+            active_blockers: ["Pending release approval"],
+            next_up: ["Clarify whether the user meant Atlas or Hermes"],
+            learning_guidance: "Prefer clarification before interrupting.",
+            recent_execution_summary: "- Atlas deploy failed recently",
+          },
+          observer: {
+            user_state: "focused",
+            interruption_mode: "minimal",
+            active_window: "VS Code",
+            active_project: "Atlas",
+            active_goals_summary: "Ship Atlas safely",
+            screen_context: "Reviewing Atlas release notes",
+            data_quality: "good",
+            is_working_hours: true,
+          },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, workflow_count: 0, active_workflows: 0, blocked_workflows: 0, awaiting_approval_workflows: 0, recoverable_workflows: 0 }, sessions: [], workflows: [] }));
+      }
+      if (url.includes("/api/operator/background-sessions")) {
+        return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, background_process_count: 0, running_background_process_count: 0, sessions_with_branch_handoff: 0, sessions_with_active_workflows: 0 }, sessions: [] }));
+      }
+      if (url.includes("/api/operator/engineering-memory")) {
+        return Promise.resolve(mockResponse({ summary: { query: null, tracked_bundles: 0, repository_bundle_count: 0, pull_request_bundle_count: 0, work_item_bundle_count: 0, search_match_count: 0 }, bundles: [] }));
+      }
+      if (url.includes("/api/operator/continuity-graph")) {
+        return Promise.resolve(mockResponse({ summary: { continuity_health: null, primary_surface: null, recommended_focus: null, tracked_sessions: 0, workflow_count: 0, approval_count: 0, notification_count: 0, queued_insight_count: 0, intervention_count: 0, artifact_count: 0, edge_count: 0 }, sessions: [], nodes: [], edges: [] }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
+    const guardianWindow = guardianTitle.closest(".cockpit-window") as HTMLElement;
+
+    expect(within(guardianWindow).getByText("overall confidence")).toBeInTheDocument();
+    expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
+    expect(within(guardianWindow).getByText("clarify first")).toBeInTheDocument();
+    expect(within(guardianWindow).getByText("Atlas release planning")).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText("Prefer clarification before interrupting.")).toBeInTheDocument();
+  });
+
   it("hides a pane from its window close control", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -9666,7 +9813,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 15 }, () => {
+    const deferredResponses = Array.from({ length: 16 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -9691,7 +9838,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(18));
+    await waitFor(() => expect(cockpitFetchCount).toBe(19));
     view.unmount();
 
     await act(async () => {

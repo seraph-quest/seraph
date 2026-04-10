@@ -27,6 +27,7 @@
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for guardian, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, workflow composition behavior, threaded workflow recovery, capability repair, observer, storage, and integration seam checks
 - [x] runtime audit coverage across chat, WebSocket, scheduler jobs including daily-briefing, activity-digest, and evening-review degraded-input fallbacks, strategist helpers, proactive delivery transport, MCP lifecycle and manual test API paths, skills toggle/reload paths, observer lifecycle plus screen observation summary/cleanup boundaries, embedding, vector store, soul file, vault repository, filesystem, browser, sandbox, and web search paths
+- [x] a first benchmark-proof reporting layer now groups the deterministic runtime harness into explicit benchmark suites for memory/workflow continuity, browser or desktop execution, planning or retrieval reporting, and governed improvement gates, with the same suite contract visible through the operator API and governed self-evolution receipts
 
 ## Working On Now
 

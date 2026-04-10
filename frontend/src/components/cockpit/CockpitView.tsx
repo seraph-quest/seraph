@@ -156,6 +156,44 @@ interface OperatorControlPlane {
   };
 }
 
+interface OperatorBenchmarkProofSummary {
+  suite_count: number;
+  scenario_count: number;
+  benchmark_posture: string;
+  operator_status: string;
+  remaining_gap: string;
+  governed_improvement_status: string;
+}
+
+interface OperatorBenchmarkProofSuite {
+  name: string;
+  label: string;
+  description: string;
+  benchmark_axis: string;
+  operator_summary: string;
+  remaining_gap: string;
+  scenario_count: number;
+  scenario_names: string[];
+}
+
+interface OperatorBenchmarkProof {
+  summary: OperatorBenchmarkProofSummary;
+  suites: OperatorBenchmarkProofSuite[];
+  governed_improvement: {
+    target_count: number;
+    target_types: string[];
+    required_suite_count: number;
+    gate_policy: {
+      min_review_ready_score: number;
+      min_strong_score: number;
+      requires_human_review: boolean;
+      blocks_on_constraint_failure: boolean;
+      required_benchmark_suites: string[];
+      proof_contract: string;
+    };
+  };
+}
+
 interface OperatorGuardianStateSummary {
   session_id?: string | null;
   overall_confidence: string;
@@ -1998,6 +2036,71 @@ function normalizeOperatorControlPlane(value: unknown): OperatorControlPlane | n
       review_receipts: Array.isArray(handoffRecord.review_receipts)
         ? handoffRecord.review_receipts as OperatorControlPlaneReviewReceipt[]
         : [],
+    },
+  };
+}
+
+function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  const governedImprovement = record.governed_improvement;
+  if (
+    !summary || typeof summary !== "object" || Array.isArray(summary)
+    || !governedImprovement || typeof governedImprovement !== "object" || Array.isArray(governedImprovement)
+  ) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const governedRecord = governedImprovement as Record<string, unknown>;
+  const gatePolicy = governedRecord.gate_policy;
+  if (!gatePolicy || typeof gatePolicy !== "object" || Array.isArray(gatePolicy)) {
+    return null;
+  }
+  const gatePolicyRecord = gatePolicy as Record<string, unknown>;
+  return {
+    summary: {
+      suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
+      scenario_count: typeof summaryRecord.scenario_count === "number" ? summaryRecord.scenario_count : 0,
+      benchmark_posture: typeof summaryRecord.benchmark_posture === "string" ? summaryRecord.benchmark_posture : "unknown",
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      remaining_gap: typeof summaryRecord.remaining_gap === "string" ? summaryRecord.remaining_gap : "unknown",
+      governed_improvement_status: typeof summaryRecord.governed_improvement_status === "string" ? summaryRecord.governed_improvement_status : "unknown",
+    },
+    suites: Array.isArray(record.suites)
+      ? record.suites.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const suite = entry as Record<string, unknown>;
+        return [{
+          name: typeof suite.name === "string" ? suite.name : "suite",
+          label: typeof suite.label === "string" ? suite.label : "Suite",
+          description: typeof suite.description === "string" ? suite.description : "",
+          benchmark_axis: typeof suite.benchmark_axis === "string" ? suite.benchmark_axis : "unknown",
+          operator_summary: typeof suite.operator_summary === "string" ? suite.operator_summary : "",
+          remaining_gap: typeof suite.remaining_gap === "string" ? suite.remaining_gap : "",
+          scenario_count: typeof suite.scenario_count === "number" ? suite.scenario_count : 0,
+          scenario_names: Array.isArray(suite.scenario_names)
+            ? suite.scenario_names.filter((item): item is string => typeof item === "string")
+            : [],
+        }];
+      })
+      : [],
+    governed_improvement: {
+      target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
+      target_types: Array.isArray(governedRecord.target_types)
+        ? governedRecord.target_types.filter((item): item is string => typeof item === "string")
+        : [],
+      required_suite_count: typeof governedRecord.required_suite_count === "number" ? governedRecord.required_suite_count : 0,
+      gate_policy: {
+        min_review_ready_score: typeof gatePolicyRecord.min_review_ready_score === "number" ? gatePolicyRecord.min_review_ready_score : 0.7,
+        min_strong_score: typeof gatePolicyRecord.min_strong_score === "number" ? gatePolicyRecord.min_strong_score : 0.9,
+        requires_human_review: Boolean(gatePolicyRecord.requires_human_review),
+        blocks_on_constraint_failure: Boolean(gatePolicyRecord.blocks_on_constraint_failure),
+        required_benchmark_suites: Array.isArray(gatePolicyRecord.required_benchmark_suites)
+          ? gatePolicyRecord.required_benchmark_suites.filter((item): item is string => typeof item === "string")
+          : [],
+        proof_contract: typeof gatePolicyRecord.proof_contract === "string" ? gatePolicyRecord.proof_contract : "unknown",
+      },
     },
   };
 }
@@ -3904,6 +4007,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
   const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
+  const [operatorBenchmarkProof, setOperatorBenchmarkProof] = useState<OperatorBenchmarkProof | null>(null);
   const [operatorGuardianState, setOperatorGuardianState] = useState<OperatorGuardianState | null>(null);
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
@@ -4084,6 +4188,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       extensionsResult,
       activityLedgerResult,
       controlPlaneResult,
+      benchmarkProofResult,
       guardianStateResult,
       workflowOrchestrationResult,
       backgroundSessionsResult,
@@ -4104,6 +4209,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/control-plane`),
+      fetchJson(`${API_URL}/api/operator/benchmark-proof`),
       fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       fetchJson(`${API_URL}/api/operator/background-sessions`),
@@ -4167,6 +4273,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setExtensionPackages([]);
     }
     setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
     setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
     setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
@@ -5086,6 +5193,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       `${formatUsd(operatorControlPlane.usage.llm_cost_usd) ?? "$0.0000"} spend`,
       `${operatorControlPlane.usage.pending_approvals} approvals`,
       `${operatorControlPlane.usage.blocked_workflows} blocked workflows`,
+    ].join(" · ")
+    : null;
+  const benchmarkProofSummary = operatorBenchmarkProof
+    ? [
+      `${operatorBenchmarkProof.summary.suite_count} suites`,
+      `${operatorBenchmarkProof.summary.scenario_count} scenarios`,
+      operatorBenchmarkProof.summary.benchmark_posture.replace(/_/g, " "),
+      `${operatorBenchmarkProof.governed_improvement.target_count} evolution targets`,
     ].join(" · ")
     : null;
   const backgroundContinuitySummary = (
@@ -11491,6 +11606,46 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </>
                     ) : (
                       <div className="cockpit-empty">Team control plane summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Benchmark proof">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">benchmark proof</span>
+                      <span className="cockpit-operator-link">{benchmarkProofSummary ?? "summary unavailable"}</span>
+                    </div>
+                    {operatorBenchmarkProof ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorBenchmarkProof.summary.operator_status.replace(/_/g, " "),
+                            operatorBenchmarkProof.summary.governed_improvement_status.replace(/_/g, " "),
+                            `review gate >= ${operatorBenchmarkProof.governed_improvement.gate_policy.min_review_ready_score.toFixed(1)}`,
+                            `strong >= ${operatorBenchmarkProof.governed_improvement.gate_policy.min_strong_score.toFixed(1)}`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${operatorBenchmarkProof.governed_improvement.required_suite_count} required suites`,
+                            `${operatorBenchmarkProof.governed_improvement.target_types.join(", ") || "no evolution targets"}`,
+                            operatorBenchmarkProof.governed_improvement.gate_policy.proof_contract.replace(/_/g, " "),
+                          ].join(" · ")}
+                        </div>
+                        {operatorBenchmarkProof.suites.slice(0, 4).map((suite) => (
+                          <div key={suite.name} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{suite.label}</div>
+                              <div className="cockpit-operator-note">
+                                {[suite.benchmark_axis.replace(/_/g, " "), `${suite.scenario_count} scenarios`].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{suite.operator_summary}</div>
+                              <div className="cockpit-operator-note">{suite.remaining_gap}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Benchmark proof summary unavailable.</div>
                     )}
                   </section>
 

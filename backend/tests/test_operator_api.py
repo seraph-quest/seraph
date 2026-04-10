@@ -635,6 +635,35 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
 
 
 @pytest.mark.asyncio
+async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
+    with patch(
+        "src.api.operator.list_evolution_targets",
+        return_value=[
+            {"target_type": "skill", "source_path": "/tmp/skills/web-briefing.md"},
+            {"target_type": "prompt_pack", "source_path": "/tmp/extensions/review-pack/prompts/review.md"},
+        ],
+    ):
+        resp = await client.get("/api/operator/benchmark-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_count"] == 4
+    assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
+    assert payload["summary"]["governed_improvement_status"] == "review_gated"
+    assert payload["governed_improvement"]["target_count"] == 2
+    assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
+    assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
+    assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+
+    memory_suite = next(item for item in payload["suites"] if item["name"] == "memory_continuity_workflows")
+    assert "workflow_operating_layer_behavior" in memory_suite["scenario_names"]
+    assert memory_suite["scenario_count"] >= 10
+
+    computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
+    assert "browser_runtime_audit" in computer_suite["scenario_names"]
+
+
+@pytest.mark.asyncio
 async def test_operator_guardian_state_surfaces_confidence_and_explanation(client):
     guardian_state = SimpleNamespace(
         confidence=SimpleNamespace(

@@ -140,6 +140,9 @@ async def test_evolution_proposal_saves_skill_review_candidate(client, tmp_path,
     )
     assert payload["receipt"]["receipt_path"].endswith("web-briefing-review-candidate.json")
     assert payload["receipt"]["blocked"] is False
+    assert payload["receipt"]["benchmark_gate"]["rollout_state"] in {"guarded_review", "review_ready"}
+    assert payload["receipt"]["benchmark_gate"]["regression_gate"] in {"warn", "pass"}
+    assert "governed_improvement" in payload["receipt"]["benchmark_gate"]["required_benchmark_suites"]
     assert "Required tool scope is unchanged." in payload["receipt"]["change_summary"]
     assert payload["receipt"]["review_risks"]
 
@@ -180,6 +183,9 @@ async def test_evolution_validate_blocks_skill_tool_scope_expansion(client, tmp_
     constraint = next(item for item in receipt["constraints"] if item["name"] == "tool_scope_expansion")
     assert constraint["status"] == "blocked"
     assert constraint["details"]["added_tools"] == ["write_file"]
+    assert receipt["benchmark_gate"]["rollout_state"] == "blocked"
+    assert receipt["benchmark_gate"]["regression_gate"] == "blocked"
+    assert receipt["benchmark_gate"]["blocked_constraints"] == ["tool_scope_expansion"]
     assert "Required tools added: write_file." in receipt["change_summary"]
     assert any("tool_scope_expansion is blocked" in item for item in receipt["review_risks"])
 

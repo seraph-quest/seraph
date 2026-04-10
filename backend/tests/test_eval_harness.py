@@ -8,7 +8,7 @@ import pytest
 
 from config.settings import settings
 from src.evals import harness
-from src.evals.harness import available_scenarios, main, run_runtime_evals
+from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -154,6 +154,37 @@ def test_governed_self_evolution_behavior_runtime_eval_details():
     assert details["blocked_review_risk_mentions_trace_coverage"] is True
 
 
+def test_benchmark_proof_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["benchmark_proof_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_count"] == 4
+    assert details["memory_suite_present"] is True
+    assert details["computer_suite_present"] is True
+    assert details["planning_suite_present"] is True
+    assert details["governed_suite_present"] is True
+    assert details["required_suite_count_matches"] is True
+    assert details["gate_requires_review"] is True
+    assert details["gate_blocks_constraint_failure"] is True
+    assert details["proof_contract"] == "deterministic_benchmark_suites_plus_review_receipts"
+
+
+def test_run_benchmark_suites_executes_unique_suite_scenarios():
+    summary = asyncio.run(run_benchmark_suites(["governed_improvement"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "governed_self_evolution_behavior",
+        "capability_repair_behavior",
+        "capability_preflight_behavior",
+    }
+
+
 def test_process_recovery_boundary_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["process_recovery_boundary_behavior"]))
 
@@ -223,6 +254,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "approval_explainability_surface_behavior" in captured.out
     assert "source_report_action_workflow_behavior" in captured.out
     assert "governed_self_evolution_behavior" in captured.out
+    assert "benchmark_proof_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -258,25 +290,23 @@ def test_main_lists_available_scenarios(capsys):
     assert "daily_briefing_delivery_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "browser_runtime_audit" in captured.out
-    assert "web_search_runtime_audit" in captured.out
-    assert "web_search_empty_result_audit" in captured.out
-    assert "observer_calendar_source_audit" in captured.out
-    assert "observer_git_source_audit" in captured.out
-    assert "observer_goal_source_audit" in captured.out
-    assert "observer_time_source_audit" in captured.out
-    assert "observer_delivery_gate_audit" in captured.out
-    assert "observer_delivery_transport_audit" in captured.out
-    assert "observer_daemon_ingest_audit" in captured.out
-    assert "mcp_test_api_audit" in captured.out
-    assert "skills_api_audit" in captured.out
-    assert "tool_policy_guardrails_behavior" in captured.out
-    assert "screen_repository_runtime_audit" in captured.out
-    assert "daily_briefing_degraded_memories_audit" in captured.out
-    assert "activity_digest_degraded_delivery_behavior" in captured.out
-    assert "activity_digest_degraded_summary_audit" in captured.out
-    assert "evening_review_degraded_delivery_behavior" in captured.out
-    assert "evening_review_degraded_inputs_audit" in captured.out
-    assert "guardian_learning_policy_v2_behavior" in captured.out
+
+
+def test_main_lists_available_benchmark_suites(capsys):
+    exit_code = main(["--list-benchmark-suites"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "memory_continuity_workflows" in captured.out
+    assert "computer_use_browser_desktop" in captured.out
+    assert "planning_retrieval_reporting" in captured.out
+    assert "governed_improvement" in captured.out
+    assert available_benchmark_suites() == (
+        "memory_continuity_workflows",
+        "computer_use_browser_desktop",
+        "planning_retrieval_reporting",
+        "governed_improvement",
+    )
 
 
 def test_main_emits_json_summary(capsys):

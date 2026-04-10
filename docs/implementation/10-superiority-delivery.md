@@ -27,6 +27,7 @@ This file explains:
 4. how active execution should be tracked without duplicating this translation layer
 
 - [x] post-import hardening on `develop` now includes bounded capability bootstrap, risk-based catalog install approval reuse, and a step-by-step gate for generated privileged repair bundles instead of one-click mutation chains
+- [x] benchmark proof on `develop` now also has an operator-visible suite/report layer plus explicit governed-improvement gate policy instead of leaving deterministic proof distributed across raw eval-scenario names
 
 ## Docs Contract
 

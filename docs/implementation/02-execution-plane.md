@@ -43,6 +43,7 @@
 - [x] process-runtime tool metadata and approval receipts now expose explicit session-partition plus background-execution trust context, and `start_process` now requires confirmation even when global approval mode is off so persistent runtime work no longer inherits the generic high-risk tool path
 - [x] the operator API now also exposes a workspace-level background-session substrate that joins session-owned managed processes, workflow branch-handoff bundles, and session continuity snippets instead of leaving long-running background work split between process handles, workflow rows, and ad hoc session recovery
 - [x] the operator API now also exposes searchable engineering-memory bundles for repositories and pull requests, grouping workflow continuity, approval targets, audit receipts, artifact follow-through, and matched session snippets by shared reference instead of leaving repo context fragmented across threads and operator surfaces
+- [x] the operator API now also exposes an explicit continuity graph that links sessions, workflows, approvals, artifacts, notifications, deferred guardian items, and interventions through one evidence-backed graph instead of forcing operators to infer those relationships from separate background-session, timeline, and observer surfaces
 
 ## Working On Now
 

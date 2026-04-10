@@ -24,6 +24,7 @@
 - [x] broader reach continuity now also propagates into the operator timeline and Activity Ledger, so typed source-adapter and imported-reach recovery is not stranded in the observer endpoint or cockpit-only surfaces
 - [x] observer continuity now also carries explicit presence-surface inventory across channel adapters, messaging connectors, node adapters, and observer definitions, with ready versus attention summaries, follow-up prompts, repair hints, and the same presence recovery surfaced into cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger
 - [x] observer continuity now also carries inventory-backed browser-provider and node-adapter reach surfaces with selected-versus-fallback state, network or daemon prerequisites, and the same repair or follow-up recovery contract propagated into cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger
+- [x] cross-surface continuity now also lands in an explicit operator continuity graph that ties notification and deferred-guardian follow-through back to session, workflow, approval, artifact, and intervention state instead of leaving the thread graph implicit across APIs
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 
 ## Working On Now

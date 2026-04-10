@@ -1643,6 +1643,346 @@ describe("CockpitView", () => {
     );
   });
 
+  it("surfaces background continuity supervision and handoff in the operator terminal", async () => {
+    let backgroundSessionsUrl = "";
+    let engineeringMemoryUrl = "";
+    let continuityGraphUrl = "";
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas background thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "2026.4.10",
+          build_id: "SERAPH_PRIME_v2026.4.10",
+          provider: "openrouter",
+          model: "openrouter/openai/gpt-4.1-mini",
+          model_label: "gpt-4.1-mini",
+          llm_logging_enabled: true,
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: true, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "healthy",
+            primary_surface: "workspace",
+            recommended_focus: "Atlas background thread",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 0,
+            attention_presence_surface_count: 0,
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: {
+            workspace_mode: "single_operator_guarded_workspace",
+            review_posture: "guarded",
+            approval_mode: "high_risk",
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            delegation_enabled: false,
+            roles: [],
+          },
+          usage: {
+            window_hours: 24,
+            llm_call_count: 0,
+            llm_cost_usd: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            user_triggered_llm_calls: 0,
+            autonomous_llm_calls: 0,
+            failure_count: 0,
+            pending_approvals: 0,
+            active_workflows: 1,
+            blocked_workflows: 0,
+          },
+          runtime_posture: {
+            runtime: {
+              version: "2026.4.10",
+              build_id: "SERAPH_PRIME_v2026.4.10",
+              provider: "openrouter",
+              model: "openrouter/openai/gpt-4.1-mini",
+              model_label: "gpt-4.1-mini",
+            },
+            extensions: {
+              total: 0,
+              ready: 0,
+              degraded: 0,
+              governed: 0,
+              issue_count: 0,
+              degraded_connector_count: 0,
+            },
+            continuity: {
+              continuity_health: "healthy",
+              primary_surface: "workspace",
+              recommended_focus: "Atlas background thread",
+              actionable_thread_count: 1,
+              degraded_route_count: 0,
+              degraded_source_adapter_count: 0,
+              attention_presence_surface_count: 0,
+            },
+          },
+          handoff: {
+            pending_approvals: [],
+            blocked_workflows: [],
+            follow_ups: [],
+            review_receipts: [],
+          },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 0,
+            workflow_count: 0,
+            active_workflows: 0,
+            blocked_workflows: 0,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 0,
+          },
+          sessions: [],
+          workflows: [],
+        }));
+      }
+      if (url.includes("/api/operator/background-sessions")) {
+        backgroundSessionsUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 1,
+            background_process_count: 1,
+            running_background_process_count: 1,
+            sessions_with_branch_handoff: 1,
+            sessions_with_active_workflows: 1,
+          },
+          sessions: [
+            {
+              session_id: "session-1",
+              title: "Atlas background thread",
+              latest_updated_at: "2026-04-10T11:05:00Z",
+              last_message: "Review Atlas branch output.",
+              workflow_count: 1,
+              active_workflows: 1,
+              blocked_workflows: 0,
+              background_process_count: 1,
+              running_background_process_count: 1,
+              lead_workflow_name: "repo-review",
+              lead_workflow_status: "running",
+              continue_message: "Continue Atlas branch review.",
+              branch_handoff_available: true,
+              branch_handoff: {
+                available: true,
+                target_type: "workflow_branch",
+                continue_message: "Continue Atlas branch review.",
+                workflow_name: "repo-review",
+                run_identity: "root-1",
+                branch_kind: "branch_from_checkpoint",
+                branch_depth: 1,
+                artifact_paths: ["notes/atlas-review.md"],
+                resume_checkpoint_label: "Draft review",
+                summary: "Branch handoff is ready for review publishing.",
+              },
+              lead_process: {
+                process_id: "proc-1",
+                pid: 1234,
+                command: "python3",
+                args: ["worker.py"],
+                cwd: "/workspace",
+                status: "running",
+                started_at: "2026-04-10T11:03:00Z",
+                session_id: "session-1",
+              },
+              background_processes: [],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/engineering-memory")) {
+        engineeringMemoryUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            query: null,
+            tracked_bundles: 1,
+            repository_bundle_count: 0,
+            pull_request_bundle_count: 1,
+            work_item_bundle_count: 0,
+            search_match_count: 1,
+          },
+          bundles: [
+            {
+              reference: "seraph-quest/seraph/pull/390",
+              target_kind: "pull_request",
+              repository_reference: "seraph-quest/seraph",
+              latest_updated_at: "2026-04-10T11:04:00Z",
+              workflow_count: 1,
+              approval_count: 0,
+              audit_event_count: 1,
+              session_match_count: 1,
+              thread_ids: ["session-1"],
+              thread_labels: ["Atlas background thread"],
+              artifact_paths: ["notes/atlas-review.md"],
+              continue_message: "Continue review for seraph-quest/seraph/pull/390.",
+              session_matches: [
+                {
+                  session_id: "session-1",
+                  title: "Atlas background thread",
+                  matched_at: "2026-04-10T11:03:00Z",
+                  snippet: "Need to finish seraph-quest/seraph/pull/390 review.",
+                  source: "message",
+                },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/continuity-graph")) {
+        continuityGraphUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            continuity_health: "attention",
+            primary_surface: "workspace",
+            recommended_focus: "Atlas background thread",
+            tracked_sessions: 1,
+            workflow_count: 1,
+            approval_count: 0,
+            notification_count: 1,
+            queued_insight_count: 0,
+            intervention_count: 1,
+            artifact_count: 1,
+            edge_count: 4,
+          },
+          sessions: [
+            {
+              id: "session:session-1",
+              kind: "session",
+              title: "Atlas background thread",
+              summary: "Atlas branch review is waiting.",
+              updated_at: "2026-04-10T11:05:00Z",
+              thread_id: "session-1",
+              continue_message: "Continue Atlas branch review.",
+              metadata: {
+                pending_notification_count: 1,
+                queued_insight_count: 0,
+                recent_intervention_count: 1,
+                item_count: 3,
+                primary_surface: "native_notification",
+                continuity_surface: "native_notification",
+                workflow_count: 1,
+                approval_count: 0,
+                notification_count: 1,
+                intervention_count: 1,
+                artifact_count: 1,
+                linked_item_count: 3,
+              },
+            },
+          ],
+          nodes: [],
+          edges: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_repo_review",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              parent_run_identity: null,
+              workflow_name: "repo-review",
+              summary: "Review Atlas branch output before publish.",
+              status: "running",
+              availability: "ready",
+              session_id: "session-1",
+              started_at: "2026-04-10T11:00:00Z",
+              updated_at: "2026-04-10T11:05:00Z",
+              thread_id: "session-1",
+              thread_label: "Atlas background thread",
+              continue_message: "Continue Atlas branch review.",
+              thread_continue_message: "Continue Atlas branch review.",
+              output_path: "notes/atlas-review.md",
+              artifact_paths: ["notes/atlas-review.md"],
+              step_records: [],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 1,
+              checkpoint_candidates: [],
+              retry_from_step_available: false,
+              replay_allowed: true,
+              replay_recommended_actions: [],
+              step_focus: null,
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const continuity = await screen.findByRole("region", { name: /background continuity/i });
+    await waitFor(() => expect(continuity).toHaveTextContent(/1 sessions · 1\/1 running procs · 1 bundles · 4 edges/i));
+    expect(continuity).toHaveTextContent(/1 handoff-ready · 1 active sessions · 0 repos · 1 prs · 0 work items · focus Atlas background thread/i);
+    expect(continuity).toHaveTextContent(/Atlas background thread/);
+    expect(continuity).toHaveTextContent(/repo-review · running/i);
+    expect(continuity).toHaveTextContent(/seraph-quest\/seraph\/pull\/390/);
+    expect(backgroundSessionsUrl).not.toContain("session_id=");
+    expect(engineeringMemoryUrl).not.toContain("session_id=");
+    expect(continuityGraphUrl).not.toContain("session_id=");
+
+    fireEvent.click(within(continuity).getByRole("button", { name: /Continue background continuity for Atlas background thread/i }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Continue Atlas branch review\./i)).toBeInTheDocument(),
+    );
+  }, 30000);
+
   it("surfaces evidence shortcuts and keyboard-first triage control", async () => {
     useChatStore.setState({
       messages: [{
@@ -9351,7 +9691,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(15));
+    await waitFor(() => expect(cockpitFetchCount).toBe(18));
     view.unmount();
 
     await act(async () => {

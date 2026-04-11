@@ -163,7 +163,9 @@ interface OperatorBenchmarkProofSummary {
   operator_status: string;
   remaining_gap: string;
   governed_improvement_status: string;
+  memory_benchmark_posture?: string;
   user_model_benchmark_posture?: string;
+  workflow_endurance_benchmark_posture?: string;
 }
 
 interface OperatorBenchmarkProofSuite {
@@ -207,6 +209,7 @@ interface OperatorBenchmarkProof {
   suites: OperatorBenchmarkProofSuite[];
   memory_benchmark: OperatorMemoryBenchmark | null;
   user_model_benchmark: OperatorUserModelBenchmark | null;
+  workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
   governed_improvement: {
     target_count: number;
     target_types: string[];
@@ -245,6 +248,35 @@ interface OperatorUserModelBenchmark {
     canonical_authority: string;
     clarify_before_action_policy: string;
     personalization_override_policy: string;
+    operator_visibility: string;
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorWorkflowEnduranceBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorWorkflowEnduranceBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    anticipatory_repair_state: string;
+    condensation_fidelity_state: string;
+    branch_continuity_state: string;
+  };
+  failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
+  policy: {
+    anticipatory_repair_policy: string;
+    backup_branch_policy: string;
+    condensation_fidelity_policy: string;
     operator_visibility: string;
     ci_gate_mode: string;
   };
@@ -382,6 +414,31 @@ interface WorkflowOrchestrationOutputDebugger {
   checkpoint_labels: string[];
 }
 
+interface WorkflowOrchestrationCondensationFidelity {
+  state: string;
+  watch_required: boolean;
+  visible_step_count: number;
+  total_step_count: number;
+  preserved_path_count: number;
+  history_output_count: number;
+  branch_run_count: number;
+  summary?: string | null;
+}
+
+interface WorkflowOrchestrationAnticipatoryPlan {
+  risk_level: string;
+  anticipatory_ready: boolean;
+  signal_count: number;
+  signals: string[];
+  summary?: string | null;
+  backup_branch_ready: boolean;
+  backup_branch_step_id?: string | null;
+  backup_branch_label?: string | null;
+  backup_branch_draft?: string | null;
+  anticipatory_repair_draft?: string | null;
+  family_failure_count: number;
+}
+
 interface WorkflowOrchestrationSessionEntry {
   thread_id?: string | null;
   thread_label?: string | null;
@@ -406,6 +463,9 @@ interface WorkflowOrchestrationSessionEntry {
   boundary_blocked_workflows: number;
   repair_ready_workflows: number;
   branch_ready_workflows: number;
+  anticipatory_ready_workflows: number;
+  backup_branch_ready_workflows: number;
+  fidelity_watch_workflows: number;
   stalled_workflows: number;
   output_debugger_ready_workflows: number;
   queue_state?: string | null;
@@ -415,6 +475,13 @@ interface WorkflowOrchestrationSessionEntry {
   queue_draft?: string | null;
   handoff_draft?: string | null;
   lead_recommended_recovery_path?: string | null;
+  lead_anticipatory_risk_level?: string | null;
+  lead_anticipatory_summary?: string | null;
+  lead_backup_branch_label?: string | null;
+  lead_backup_branch_draft?: string | null;
+  lead_anticipatory_repair_draft?: string | null;
+  lead_condensation_fidelity_state?: string | null;
+  lead_condensation_fidelity_summary?: string | null;
   lead_output_path?: string | null;
   lead_related_output_paths?: string[];
   lead_output_history?: WorkflowOrchestrationOutputDebugger["history_outputs"];
@@ -464,6 +531,8 @@ interface WorkflowOrchestrationWorkflowEntry {
   state_capsule?: string | null;
   recovery_density?: WorkflowOrchestrationRecoveryDensity | null;
   output_debugger?: WorkflowOrchestrationOutputDebugger | null;
+  condensation_fidelity?: WorkflowOrchestrationCondensationFidelity | null;
+  anticipatory_plan?: WorkflowOrchestrationAnticipatoryPlan | null;
 }
 
 interface OperatorWorkflowOrchestration {
@@ -481,6 +550,9 @@ interface OperatorWorkflowOrchestration {
     boundary_blocked_workflows: number;
     repair_ready_workflows: number;
     branch_ready_workflows: number;
+    anticipatory_ready_workflows: number;
+    backup_branch_ready_workflows: number;
+    fidelity_watch_workflows: number;
     stalled_workflows: number;
     output_debugger_ready_workflows: number;
     attention_sessions: number;
@@ -1549,10 +1621,20 @@ interface OperatorWorkflowOrchestrationEntry {
   queueReason: string | null;
   repairReadyWorkflows: number;
   branchReadyWorkflows: number;
+  anticipatoryReadyWorkflows: number;
+  backupBranchReadyWorkflows: number;
+  fidelityWatchWorkflows: number;
   stalledWorkflows: number;
   outputDebuggerReadyWorkflows: number;
   queueDraft: string | null;
   handoffDraft: string | null;
+  backupBranchDraft: string | null;
+  backupBranchLabel: string | null;
+  anticipatoryRepairDraft: string | null;
+  anticipatoryRiskLevel: string | null;
+  anticipatorySummary: string | null;
+  condensationFidelityState: string | null;
+  condensationFidelitySummary: string | null;
   leadRecommendedRecoveryPath: string | null;
   leadRelatedOutputPaths: string[];
   leadOutputHistory: WorkflowOrchestrationOutputDebugger["history_outputs"];
@@ -2139,8 +2221,10 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const gatePolicyRecord = gatePolicy as Record<string, unknown>;
   const memoryBenchmark = record.memory_benchmark;
   const userModelBenchmark = record.user_model_benchmark;
+  const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
   let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
+  let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
   if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
     const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
     const memorySummary = memoryBenchmarkRecord.summary;
@@ -2230,6 +2314,66 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       };
     }
   }
+  if (workflowEnduranceBenchmark && typeof workflowEnduranceBenchmark === "object" && !Array.isArray(workflowEnduranceBenchmark)) {
+    const workflowBenchmarkRecord = workflowEnduranceBenchmark as Record<string, unknown>;
+    const workflowSummary = workflowBenchmarkRecord.summary;
+    const workflowPolicy = workflowBenchmarkRecord.policy;
+    if (
+      workflowSummary && typeof workflowSummary === "object" && !Array.isArray(workflowSummary)
+      && workflowPolicy && typeof workflowPolicy === "object" && !Array.isArray(workflowPolicy)
+    ) {
+      const workflowSummaryRecord = workflowSummary as Record<string, unknown>;
+      const workflowPolicyRecord = workflowPolicy as Record<string, unknown>;
+      normalizedWorkflowEnduranceBenchmark = {
+        summary: {
+          suite_name: typeof workflowSummaryRecord.suite_name === "string" ? workflowSummaryRecord.suite_name : "workflow_endurance_and_repair",
+          benchmark_posture: typeof workflowSummaryRecord.benchmark_posture === "string" ? workflowSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof workflowSummaryRecord.operator_status === "string" ? workflowSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof workflowSummaryRecord.scenario_count === "number" ? workflowSummaryRecord.scenario_count : 0,
+          dimension_count: typeof workflowSummaryRecord.dimension_count === "number" ? workflowSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof workflowSummaryRecord.failure_mode_count === "number" ? workflowSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof workflowSummaryRecord.active_failure_count === "number" ? workflowSummaryRecord.active_failure_count : 0,
+          anticipatory_repair_state: typeof workflowSummaryRecord.anticipatory_repair_state === "string"
+            ? workflowSummaryRecord.anticipatory_repair_state
+            : "unknown",
+          condensation_fidelity_state: typeof workflowSummaryRecord.condensation_fidelity_state === "string"
+            ? workflowSummaryRecord.condensation_fidelity_state
+            : "unknown",
+          branch_continuity_state: typeof workflowSummaryRecord.branch_continuity_state === "string"
+            ? workflowSummaryRecord.branch_continuity_state
+            : "unknown",
+        },
+        failure_report: Array.isArray(workflowBenchmarkRecord.failure_report)
+          ? workflowBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          anticipatory_repair_policy: typeof workflowPolicyRecord.anticipatory_repair_policy === "string"
+            ? workflowPolicyRecord.anticipatory_repair_policy
+            : "unknown",
+          backup_branch_policy: typeof workflowPolicyRecord.backup_branch_policy === "string"
+            ? workflowPolicyRecord.backup_branch_policy
+            : "unknown",
+          condensation_fidelity_policy: typeof workflowPolicyRecord.condensation_fidelity_policy === "string"
+            ? workflowPolicyRecord.condensation_fidelity_policy
+            : "unknown",
+          operator_visibility: typeof workflowPolicyRecord.operator_visibility === "string"
+            ? workflowPolicyRecord.operator_visibility
+            : "unknown",
+          ci_gate_mode: typeof workflowPolicyRecord.ci_gate_mode === "string"
+            ? workflowPolicyRecord.ci_gate_mode
+            : "unknown",
+        },
+      };
+    }
+  }
   return {
     summary: {
       suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
@@ -2238,8 +2382,14 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
       remaining_gap: typeof summaryRecord.remaining_gap === "string" ? summaryRecord.remaining_gap : "unknown",
       governed_improvement_status: typeof summaryRecord.governed_improvement_status === "string" ? summaryRecord.governed_improvement_status : "unknown",
+      memory_benchmark_posture: typeof summaryRecord.memory_benchmark_posture === "string"
+        ? summaryRecord.memory_benchmark_posture
+        : "unknown",
       user_model_benchmark_posture: typeof summaryRecord.user_model_benchmark_posture === "string"
         ? summaryRecord.user_model_benchmark_posture
+        : "unknown",
+      workflow_endurance_benchmark_posture: typeof summaryRecord.workflow_endurance_benchmark_posture === "string"
+        ? summaryRecord.workflow_endurance_benchmark_posture
         : "unknown",
     },
     suites: Array.isArray(record.suites)
@@ -2262,6 +2412,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       : [],
     memory_benchmark: normalizedMemoryBenchmark,
     user_model_benchmark: normalizedUserModelBenchmark,
+    workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
     governed_improvement: {
       target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
       target_types: Array.isArray(governedRecord.target_types)
@@ -2378,6 +2529,43 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
         : [],
     };
   };
+  const normalizeCondensationFidelity = (entry: unknown): WorkflowOrchestrationCondensationFidelity | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const fidelity = entry as Record<string, unknown>;
+    return {
+      state: typeof fidelity.state === "string" ? fidelity.state : "unknown",
+      watch_required: Boolean(fidelity.watch_required),
+      visible_step_count: typeof fidelity.visible_step_count === "number" ? fidelity.visible_step_count : 0,
+      total_step_count: typeof fidelity.total_step_count === "number" ? fidelity.total_step_count : 0,
+      preserved_path_count: typeof fidelity.preserved_path_count === "number" ? fidelity.preserved_path_count : 0,
+      history_output_count: typeof fidelity.history_output_count === "number" ? fidelity.history_output_count : 0,
+      branch_run_count: typeof fidelity.branch_run_count === "number" ? fidelity.branch_run_count : 0,
+      summary: typeof fidelity.summary === "string" ? fidelity.summary : null,
+    };
+  };
+  const normalizeAnticipatoryPlan = (entry: unknown): WorkflowOrchestrationAnticipatoryPlan | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const plan = entry as Record<string, unknown>;
+    return {
+      risk_level: typeof plan.risk_level === "string" ? plan.risk_level : "unknown",
+      anticipatory_ready: Boolean(plan.anticipatory_ready),
+      signal_count: typeof plan.signal_count === "number" ? plan.signal_count : 0,
+      signals: Array.isArray(plan.signals)
+        ? plan.signals.filter((item): item is string => typeof item === "string")
+        : [],
+      summary: typeof plan.summary === "string" ? plan.summary : null,
+      backup_branch_ready: Boolean(plan.backup_branch_ready),
+      backup_branch_step_id: typeof plan.backup_branch_step_id === "string" ? plan.backup_branch_step_id : null,
+      backup_branch_label: typeof plan.backup_branch_label === "string" ? plan.backup_branch_label : null,
+      backup_branch_draft: typeof plan.backup_branch_draft === "string" ? plan.backup_branch_draft : null,
+      anticipatory_repair_draft: typeof plan.anticipatory_repair_draft === "string" ? plan.anticipatory_repair_draft : null,
+      family_failure_count: typeof plan.family_failure_count === "number" ? plan.family_failure_count : 0,
+    };
+  };
   return {
     summary: {
       tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
@@ -2393,6 +2581,9 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
       boundary_blocked_workflows: typeof summaryRecord.boundary_blocked_workflows === "number" ? summaryRecord.boundary_blocked_workflows : 0,
       repair_ready_workflows: typeof summaryRecord.repair_ready_workflows === "number" ? summaryRecord.repair_ready_workflows : 0,
       branch_ready_workflows: typeof summaryRecord.branch_ready_workflows === "number" ? summaryRecord.branch_ready_workflows : 0,
+      anticipatory_ready_workflows: typeof summaryRecord.anticipatory_ready_workflows === "number" ? summaryRecord.anticipatory_ready_workflows : 0,
+      backup_branch_ready_workflows: typeof summaryRecord.backup_branch_ready_workflows === "number" ? summaryRecord.backup_branch_ready_workflows : 0,
+      fidelity_watch_workflows: typeof summaryRecord.fidelity_watch_workflows === "number" ? summaryRecord.fidelity_watch_workflows : 0,
       stalled_workflows: typeof summaryRecord.stalled_workflows === "number" ? summaryRecord.stalled_workflows : 0,
       output_debugger_ready_workflows: typeof summaryRecord.output_debugger_ready_workflows === "number" ? summaryRecord.output_debugger_ready_workflows : 0,
       attention_sessions: typeof summaryRecord.attention_sessions === "number" ? summaryRecord.attention_sessions : 0,
@@ -2425,6 +2616,9 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
             boundary_blocked_workflows: typeof session.boundary_blocked_workflows === "number" ? session.boundary_blocked_workflows : 0,
             repair_ready_workflows: typeof session.repair_ready_workflows === "number" ? session.repair_ready_workflows : 0,
             branch_ready_workflows: typeof session.branch_ready_workflows === "number" ? session.branch_ready_workflows : 0,
+            anticipatory_ready_workflows: typeof session.anticipatory_ready_workflows === "number" ? session.anticipatory_ready_workflows : 0,
+            backup_branch_ready_workflows: typeof session.backup_branch_ready_workflows === "number" ? session.backup_branch_ready_workflows : 0,
+            fidelity_watch_workflows: typeof session.fidelity_watch_workflows === "number" ? session.fidelity_watch_workflows : 0,
             stalled_workflows: typeof session.stalled_workflows === "number" ? session.stalled_workflows : 0,
             output_debugger_ready_workflows: typeof session.output_debugger_ready_workflows === "number" ? session.output_debugger_ready_workflows : 0,
             queue_state: typeof session.queue_state === "string" ? session.queue_state : null,
@@ -2434,6 +2628,13 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
             queue_draft: typeof session.queue_draft === "string" ? session.queue_draft : null,
             handoff_draft: typeof session.handoff_draft === "string" ? session.handoff_draft : null,
             lead_recommended_recovery_path: typeof session.lead_recommended_recovery_path === "string" ? session.lead_recommended_recovery_path : null,
+            lead_anticipatory_risk_level: typeof session.lead_anticipatory_risk_level === "string" ? session.lead_anticipatory_risk_level : null,
+            lead_anticipatory_summary: typeof session.lead_anticipatory_summary === "string" ? session.lead_anticipatory_summary : null,
+            lead_backup_branch_label: typeof session.lead_backup_branch_label === "string" ? session.lead_backup_branch_label : null,
+            lead_backup_branch_draft: typeof session.lead_backup_branch_draft === "string" ? session.lead_backup_branch_draft : null,
+            lead_anticipatory_repair_draft: typeof session.lead_anticipatory_repair_draft === "string" ? session.lead_anticipatory_repair_draft : null,
+            lead_condensation_fidelity_state: typeof session.lead_condensation_fidelity_state === "string" ? session.lead_condensation_fidelity_state : null,
+            lead_condensation_fidelity_summary: typeof session.lead_condensation_fidelity_summary === "string" ? session.lead_condensation_fidelity_summary : null,
             lead_output_path: typeof session.lead_output_path === "string" ? session.lead_output_path : null,
             lead_related_output_paths: Array.isArray(session.lead_related_output_paths)
               ? session.lead_related_output_paths.filter((item): item is string => typeof item === "string")
@@ -2510,6 +2711,8 @@ function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchest
             state_capsule: typeof workflow.state_capsule === "string" ? workflow.state_capsule : null,
             recovery_density: normalizeRecoveryDensity(workflow.recovery_density),
             output_debugger: normalizeOutputDebugger(workflow.output_debugger),
+            condensation_fidelity: normalizeCondensationFidelity(workflow.condensation_fidelity),
+            anticipatory_plan: normalizeAnticipatoryPlan(workflow.anticipatory_plan),
           }];
         })
       : [],
@@ -5957,10 +6160,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         attentionSummary: entry.attention_summary ?? null,
         repairReadyWorkflows: entry.repair_ready_workflows,
         branchReadyWorkflows: entry.branch_ready_workflows,
+        anticipatoryReadyWorkflows: entry.anticipatory_ready_workflows,
+        backupBranchReadyWorkflows: entry.backup_branch_ready_workflows,
+        fidelityWatchWorkflows: entry.fidelity_watch_workflows,
         stalledWorkflows: entry.stalled_workflows,
         outputDebuggerReadyWorkflows: entry.output_debugger_ready_workflows,
         queueDraft: entry.queue_draft ?? null,
         handoffDraft: entry.handoff_draft ?? null,
+        backupBranchDraft: entry.lead_backup_branch_draft ?? workflow?.anticipatory_plan?.backup_branch_draft ?? null,
+        backupBranchLabel: entry.lead_backup_branch_label ?? workflow?.anticipatory_plan?.backup_branch_label ?? null,
+        anticipatoryRepairDraft: entry.lead_anticipatory_repair_draft ?? workflow?.anticipatory_plan?.anticipatory_repair_draft ?? null,
+        anticipatoryRiskLevel: entry.lead_anticipatory_risk_level ?? workflow?.anticipatory_plan?.risk_level ?? null,
+        anticipatorySummary: entry.lead_anticipatory_summary ?? workflow?.anticipatory_plan?.summary ?? null,
+        condensationFidelityState: entry.lead_condensation_fidelity_state ?? workflow?.condensation_fidelity?.state ?? null,
+        condensationFidelitySummary: entry.lead_condensation_fidelity_summary ?? workflow?.condensation_fidelity?.summary ?? null,
         leadRecommendedRecoveryPath: entry.lead_recommended_recovery_path ?? null,
         leadRelatedOutputPaths: entry.lead_related_output_paths ?? [],
         leadOutputHistory: entry.lead_output_history ?? [],
@@ -6144,6 +6357,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function queueOperatorWorkflowOrchestrationHandoff(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
     if (!entry?.handoffDraft) return;
     queueComposerDraft(entry.handoffDraft);
+  }
+  function queueOperatorWorkflowOrchestrationBackupBranch(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.backupBranchDraft) return;
+    queueComposerDraft(entry.backupBranchDraft);
+  }
+  function queueOperatorWorkflowOrchestrationPreRepair(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.anticipatoryRepairDraft) return;
+    queueComposerDraft(entry.anticipatoryRepairDraft);
   }
   function redirectOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
     if (!entry?.workflow) return;
@@ -11964,6 +12185,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             </div>
                           </div>
                         ) : null}
+                        {operatorBenchmarkProof.workflow_endurance_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Workflow endurance benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.workflow_endurance_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.workflow_endurance_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.anticipatory_repair_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.condensation_fidelity_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.branch_continuity_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
                         {operatorBenchmarkProof.suites.map((suite) => (
                           <div key={suite.name} className="cockpit-operator-row cockpit-operator-row--entry">
                             <div className="cockpit-operator-details">
@@ -12221,6 +12463,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             operatorWorkflowOrchestration.summary.branch_ready_workflows > 0
                               ? `${operatorWorkflowOrchestration.summary.branch_ready_workflows} branch-ready`
                               : null,
+                            operatorWorkflowOrchestration.summary.anticipatory_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.anticipatory_ready_workflows} anticipatory-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.backup_branch_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.backup_branch_ready_workflows} backup-branch ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.fidelity_watch_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.fidelity_watch_workflows} fidelity-watch`
+                              : null,
                             operatorWorkflowOrchestration.summary.output_debugger_ready_workflows > 0
                               ? `${operatorWorkflowOrchestration.summary.output_debugger_ready_workflows} debugger-ready`
                               : null,
@@ -12280,6 +12531,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                       : null,
                                     entry.repairReadyWorkflows > 0 ? `${entry.repairReadyWorkflows} repair-ready` : null,
                                     entry.branchReadyWorkflows > 0 ? `${entry.branchReadyWorkflows} branch-ready` : null,
+                                    entry.anticipatoryReadyWorkflows > 0 ? `${entry.anticipatoryReadyWorkflows} anticipatory-ready` : null,
+                                    entry.backupBranchReadyWorkflows > 0 ? `${entry.backupBranchReadyWorkflows} backup-branch ready` : null,
+                                    entry.fidelityWatchWorkflows > 0 ? `${entry.fidelityWatchWorkflows} fidelity-watch` : null,
                                     entry.outputDebuggerReadyWorkflows > 0 ? `${entry.outputDebuggerReadyWorkflows} debugger-ready` : null,
                                     entry.stalledWorkflows > 0 ? `${entry.stalledWorkflows} stalled` : null,
                                   ].filter(Boolean).join(" · ") || "No queue-state workflow recovery surfaced yet."}
@@ -12287,6 +12541,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 {entry.attentionSummary ? (
                                   <div className="cockpit-operator-note">
                                     {entry.attentionSummary}
+                                  </div>
+                                ) : null}
+                                {entry.anticipatorySummary ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.anticipatoryRiskLevel ? `anticipatory ${formatContinuityLabel(entry.anticipatoryRiskLevel)}` : null,
+                                      entry.anticipatorySummary,
+                                    ].filter(Boolean).join(" · ")}
                                   </div>
                                 ) : null}
                                 {entry.queueReason ? (
@@ -12307,6 +12569,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 <div className="cockpit-operator-note">
                                   {stepFocusSummary || "No step-level workflow focus surfaced yet."}
                                 </div>
+                                {entry.condensationFidelitySummary ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.condensationFidelityState ? `fidelity ${formatContinuityLabel(entry.condensationFidelityState)}` : null,
+                                      entry.condensationFidelitySummary,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
                                 {(entry.outputPath || entry.leadRelatedOutputPaths.length > 0) ? (
                                   <div className="cockpit-operator-note">
                                     {[
@@ -12442,6 +12712,26 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     onClick={() => queueOperatorWorkflowOrchestrationHandoff(entry)}
                                   >
                                     handoff
+                                  </button>
+                                ) : null}
+                                {entry.backupBranchDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft backup branch for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationBackupBranch(entry)}
+                                  >
+                                    backup branch
+                                  </button>
+                                ) : null}
+                                {entry.anticipatoryRepairDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft anticipatory repair for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationPreRepair(entry)}
+                                  >
+                                    pre-repair
                                   </button>
                                 ) : null}
                                 {entry.workflow && (

@@ -35,6 +35,7 @@ from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
 from src.tools.process_tools import process_runtime_manager
+from src.workflows.benchmark import build_workflow_endurance_benchmark_report
 
 router = APIRouter()
 
@@ -1509,6 +1510,190 @@ def _workflow_recovery_density(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _workflow_backup_branch_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
+    checkpoint_candidates = run.get("checkpoint_candidates")
+    if not isinstance(checkpoint_candidates, list):
+        return None
+    step_focus = _workflow_step_focus(run)
+    focus_step_id = (
+        str(step_focus.get("step_id") or "").strip()
+        if isinstance(step_focus, dict)
+        else ""
+    )
+    latest_succeeded: dict[str, Any] | None = None
+    fallback: dict[str, Any] | None = None
+    for checkpoint in checkpoint_candidates:
+        if not isinstance(checkpoint, dict):
+            continue
+        step_id = str(checkpoint.get("step_id") or "").strip()
+        if not step_id or step_id == "approval_gate" or checkpoint.get("resume_supported") is False:
+            continue
+        if fallback is None:
+            fallback = checkpoint
+        if focus_step_id and step_id == focus_step_id:
+            break
+        if str(checkpoint.get("status") or "") in {"succeeded", "completed"}:
+            latest_succeeded = checkpoint
+    return latest_succeeded or fallback
+
+
+def _workflow_condensation_fidelity(
+    run: dict[str, Any],
+    *,
+    compaction: dict[str, Any],
+    output_debugger: dict[str, Any],
+) -> dict[str, Any]:
+    preserved_paths = [
+        str(item).strip()
+        for item in (compaction.get("preserved_recovery_paths") if isinstance(compaction.get("preserved_recovery_paths"), list) else [])
+        if str(item).strip()
+    ]
+    history_output_count = int(output_debugger.get("history_output_count") or 0)
+    branch_run_count = int(output_debugger.get("branch_run_count") or 0)
+    is_compacted = bool(compaction.get("is_compacted"))
+    if not is_compacted:
+        state = "strong"
+    elif len(preserved_paths) >= 2 and (history_output_count > 0 or branch_run_count > 0):
+        state = "strong"
+    elif preserved_paths:
+        state = "partial"
+    else:
+        state = "weak"
+    total_step_count = int(compaction.get("total_step_count") or 0)
+    visible_step_count = int(compaction.get("visible_step_count") or 0)
+    summary_parts = [
+        f"visible {visible_step_count}/{total_step_count} steps" if total_step_count > 0 else None,
+        (
+            "preserves " + ", ".join(path.replace("_", " ") for path in preserved_paths[:3])
+            if preserved_paths
+            else "preserves no recovery path receipts"
+        ),
+        f"{history_output_count} output histories" if history_output_count > 0 else None,
+        "branch continuity retained" if branch_run_count > 0 else None,
+    ]
+    return {
+        "state": state,
+        "watch_required": state != "strong",
+        "visible_step_count": visible_step_count,
+        "total_step_count": total_step_count,
+        "preserved_path_count": len(preserved_paths),
+        "history_output_count": history_output_count,
+        "branch_run_count": branch_run_count,
+        "summary": " · ".join(part for part in summary_parts if part),
+    }
+
+
+def _workflow_anticipatory_plan(
+    run: dict[str, Any],
+    workflow_runs: list[dict[str, Any]],
+    *,
+    compaction: dict[str, Any],
+    recovery_density: dict[str, Any],
+    output_debugger: dict[str, Any],
+    condensation_fidelity: dict[str, Any],
+) -> dict[str, Any]:
+    backup_checkpoint = _workflow_backup_branch_candidate(run)
+    family_failures = [
+        candidate
+        for candidate in _workflow_family_runs(run, workflow_runs)
+        if isinstance(candidate, dict)
+        and (candidate.get("run_identity") or candidate.get("id")) != (run.get("run_identity") or run.get("id"))
+        and (
+            str(candidate.get("status") or "") in {"failed", "degraded"}
+            or _workflow_latest_failure_record(candidate) is not None
+        )
+    ]
+    step_focus = _workflow_step_focus(run)
+    anticipatory_ready = bool(
+        compaction.get("is_long_running")
+        and not recovery_density.get("approval_pending")
+        and not recovery_density.get("boundary_blocked")
+        and not recovery_density.get("repair_ready")
+        and not _workflow_terminal_status(str(run.get("status") or ""))
+        and isinstance(step_focus, dict)
+        and str(step_focus.get("kind") or "") in {"active", "latest"}
+        and isinstance(backup_checkpoint, dict)
+        and backup_checkpoint.get("resume_draft")
+    )
+    signals: list[str] = []
+    if bool(compaction.get("is_long_running")):
+        signals.append("long_running")
+    if isinstance(step_focus, dict) and str(step_focus.get("kind") or "") in {"active", "latest"}:
+        signals.append("active_step")
+    if isinstance(backup_checkpoint, dict):
+        signals.append("checkpoint_branch_available")
+    if family_failures:
+        signals.append("family_failure_history")
+    if bool(output_debugger.get("comparison_ready")):
+        signals.append("output_divergence_visible")
+    if bool(condensation_fidelity.get("watch_required")):
+        signals.append("condensation_watch")
+    risk_level = "steady"
+    if bool(recovery_density.get("repair_ready")) or bool(recovery_density.get("boundary_blocked")):
+        risk_level = "realized"
+    elif anticipatory_ready and family_failures:
+        risk_level = "high"
+    elif anticipatory_ready:
+        risk_level = "elevated"
+    workflow_name = str(run.get("workflow_name") or "workflow")
+    summary_parts = [
+        "anticipatory repair ready" if anticipatory_ready else None,
+        (
+            f'backup branch from {str(backup_checkpoint.get("label") or backup_checkpoint.get("step_id") or "").strip()}'
+            if anticipatory_ready and isinstance(backup_checkpoint, dict)
+            else None
+        ),
+        "family failure already observed" if family_failures else None,
+        "branch output comparison available" if bool(output_debugger.get("comparison_ready")) else None,
+    ]
+    anticipatory_repair_draft = None
+    if anticipatory_ready:
+        draft_parts = [
+            f'Before continuing workflow "{workflow_name}", review the next risky step and prepare a safer continuation path.',
+            (
+                f'Current focus: {str(step_focus.get("step_id") or "").strip()}'
+                f' ({str(step_focus.get("tool") or "tool").strip()}).'
+                if isinstance(step_focus, dict)
+                else None
+            ),
+            (
+                f'Open a backup branch from checkpoint "{str(backup_checkpoint.get("label") or backup_checkpoint.get("step_id") or "").strip()}".'
+                if isinstance(backup_checkpoint, dict)
+                else None
+            ),
+            (
+                f'Previous family failure: "{str(family_failures[0].get("summary") or "").strip()}".'
+                if family_failures
+                else None
+            ),
+            f'Compaction fidelity: {str(condensation_fidelity.get("summary") or "").strip()}.' if condensation_fidelity.get("summary") else None,
+        ]
+        anticipatory_repair_draft = " ".join(
+            part for part in draft_parts if isinstance(part, str) and part.strip()
+        )
+    return {
+        "risk_level": risk_level,
+        "anticipatory_ready": anticipatory_ready,
+        "signal_count": len(signals),
+        "signals": signals,
+        "summary": " · ".join(part for part in summary_parts if part) or None,
+        "backup_branch_ready": bool(anticipatory_ready and isinstance(backup_checkpoint, dict)),
+        "backup_branch_step_id": (
+            backup_checkpoint.get("step_id") if isinstance(backup_checkpoint, dict) else None
+        ),
+        "backup_branch_label": (
+            backup_checkpoint.get("label") if isinstance(backup_checkpoint, dict) else None
+        ),
+        "backup_branch_draft": (
+            backup_checkpoint.get("resume_draft")
+            if anticipatory_ready and isinstance(backup_checkpoint, dict)
+            else None
+        ),
+        "anticipatory_repair_draft": anticipatory_repair_draft,
+        "family_failure_count": len(family_failures),
+    }
+
+
 def _workflow_visible_step_records(
     step_records: list[dict[str, Any]],
     *,
@@ -1622,6 +1807,19 @@ def _workflow_orchestration_entries(
         compaction = _workflow_state_compaction(run)
         recovery_density = _workflow_recovery_density(run)
         output_debugger = _workflow_output_debugger(run, workflow_runs)
+        condensation_fidelity = _workflow_condensation_fidelity(
+            run,
+            compaction=compaction,
+            output_debugger=output_debugger,
+        )
+        anticipatory_plan = _workflow_anticipatory_plan(
+            run,
+            workflow_runs,
+            compaction=compaction,
+            recovery_density=recovery_density,
+            output_debugger=output_debugger,
+            condensation_fidelity=condensation_fidelity,
+        )
         visible_step_records = _workflow_visible_step_records(
             _workflow_step_records(run),
             visible_step_count=int(compaction["visible_step_count"]),
@@ -1677,6 +1875,8 @@ def _workflow_orchestration_entries(
             "state_capsule": compaction["state_capsule"],
             "recovery_density": recovery_density,
             "output_debugger": output_debugger,
+            "condensation_fidelity": condensation_fidelity,
+            "anticipatory_plan": anticipatory_plan,
         })
     return entries
 
@@ -1834,6 +2034,28 @@ def _workflow_orchestration_sessions(
         compactions = [_workflow_state_compaction(run) for run in runs]
         recovery_densities = [_workflow_recovery_density(run) for run in runs]
         output_debuggers = [_workflow_output_debugger(run, workflow_runs) for run in runs]
+        condensation_fidelities = [
+            _workflow_condensation_fidelity(run, compaction=compaction, output_debugger=output_debugger)
+            for run, compaction, output_debugger in zip(runs, compactions, output_debuggers, strict=False)
+        ]
+        anticipatory_plans = [
+            _workflow_anticipatory_plan(
+                run,
+                workflow_runs,
+                compaction=compaction,
+                recovery_density=recovery_density,
+                output_debugger=output_debugger,
+                condensation_fidelity=condensation_fidelity,
+            )
+            for run, compaction, recovery_density, output_debugger, condensation_fidelity in zip(
+                runs,
+                compactions,
+                recovery_densities,
+                output_debuggers,
+                condensation_fidelities,
+                strict=False,
+            )
+        ]
         active_workflows = sum(1 for run in runs if not _workflow_terminal_status(str(run.get("status") or "")))
         blocked_workflows = sum(1 for run in runs if str(run.get("availability") or "") == "blocked")
         awaiting_approval_workflows = sum(1 for run in runs if str(run.get("status") or "") == "awaiting_approval")
@@ -1850,6 +2072,9 @@ def _workflow_orchestration_sessions(
         repair_ready_workflows = sum(1 for item in recovery_densities if bool(item["repair_ready"]))
         branch_ready_workflows = sum(1 for item in recovery_densities if bool(item["branch_ready"]))
         stalled_workflows = sum(1 for item in recovery_densities if bool(item["stalled"]))
+        anticipatory_ready_workflows = sum(1 for item in anticipatory_plans if bool(item["anticipatory_ready"]))
+        backup_branch_ready_workflows = sum(1 for item in anticipatory_plans if bool(item["backup_branch_ready"]))
+        fidelity_watch_workflows = sum(1 for item in condensation_fidelities if bool(item["watch_required"]))
         output_debugger_ready_workflows = sum(
             1
             for item in output_debuggers
@@ -1869,6 +2094,19 @@ def _workflow_orchestration_sessions(
         )
         lead_density = _workflow_recovery_density(lead)
         lead_debugger = _workflow_output_debugger(lead, workflow_runs)
+        lead_fidelity = _workflow_condensation_fidelity(
+            lead,
+            compaction=_workflow_state_compaction(lead),
+            output_debugger=lead_debugger,
+        )
+        lead_anticipatory = _workflow_anticipatory_plan(
+            lead,
+            workflow_runs,
+            compaction=_workflow_state_compaction(lead),
+            recovery_density=lead_density,
+            output_debugger=lead_debugger,
+            condensation_fidelity=lead_fidelity,
+        )
         queue_reason = _workflow_session_queue_reason(
             queue_state=queue_state,
             awaiting_approval_workflows=awaiting_approval_workflows,
@@ -1885,7 +2123,10 @@ def _workflow_orchestration_sessions(
                 f"{boundary_blocked_workflows} boundary blocked" if boundary_blocked_workflows else None,
                 f"{repair_ready_workflows} repair ready" if repair_ready_workflows else None,
                 f"{branch_ready_workflows} branch ready" if branch_ready_workflows else None,
+                f"{anticipatory_ready_workflows} anticipatory ready" if anticipatory_ready_workflows else None,
+                f"{backup_branch_ready_workflows} backup branch ready" if backup_branch_ready_workflows else None,
                 f"{stalled_workflows} stalled" if stalled_workflows else None,
+                f"{fidelity_watch_workflows} fidelity watch" if fidelity_watch_workflows else None,
                 f"{output_debugger_ready_workflows} debugger ready" if output_debugger_ready_workflows else None,
             ]
             if part
@@ -1918,6 +2159,9 @@ def _workflow_orchestration_sessions(
             "boundary_blocked_workflows": boundary_blocked_workflows,
             "repair_ready_workflows": repair_ready_workflows,
             "branch_ready_workflows": branch_ready_workflows,
+            "anticipatory_ready_workflows": anticipatory_ready_workflows,
+            "backup_branch_ready_workflows": backup_branch_ready_workflows,
+            "fidelity_watch_workflows": fidelity_watch_workflows,
             "stalled_workflows": stalled_workflows,
             "output_debugger_ready_workflows": output_debugger_ready_workflows,
             "queue_state": queue_state,
@@ -1950,6 +2194,13 @@ def _workflow_orchestration_sessions(
                 lead_debugger=lead_debugger,
             ),
             "lead_recommended_recovery_path": lead_density.get("recommended_path"),
+            "lead_anticipatory_risk_level": lead_anticipatory.get("risk_level"),
+            "lead_anticipatory_summary": lead_anticipatory.get("summary"),
+            "lead_backup_branch_label": lead_anticipatory.get("backup_branch_label"),
+            "lead_backup_branch_draft": lead_anticipatory.get("backup_branch_draft"),
+            "lead_anticipatory_repair_draft": lead_anticipatory.get("anticipatory_repair_draft"),
+            "lead_condensation_fidelity_state": lead_fidelity.get("state"),
+            "lead_condensation_fidelity_summary": lead_fidelity.get("summary"),
             "lead_output_path": lead_debugger.get("primary_output_path"),
             "lead_related_output_paths": lead_debugger.get("related_output_paths"),
             "lead_output_history": lead_debugger.get("history_outputs"),
@@ -2477,8 +2728,11 @@ async def get_operator_control_plane(
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
-    memory_benchmark = await build_guardian_memory_benchmark_report()
-    user_model_benchmark = await build_guardian_user_model_benchmark_report()
+    memory_benchmark, user_model_benchmark, workflow_endurance_benchmark = await asyncio.gather(
+        build_guardian_memory_benchmark_report(),
+        build_guardian_user_model_benchmark_report(),
+        build_workflow_endurance_benchmark_report(),
+    )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
         str(name)
@@ -2508,10 +2762,12 @@ async def get_operator_benchmark_proof():
             "governed_improvement_status": "review_gated",
             "memory_benchmark_posture": memory_benchmark["summary"]["benchmark_posture"],
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
+            "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
         "user_model_benchmark": user_model_benchmark,
+        "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -2524,6 +2780,11 @@ async def get_operator_benchmark_proof():
 @router.get("/operator/memory-benchmark")
 async def get_operator_memory_benchmark():
     return await build_guardian_memory_benchmark_report()
+
+
+@router.get("/operator/workflow-endurance-benchmark")
+async def get_operator_workflow_endurance_benchmark():
+    return await build_workflow_endurance_benchmark_report()
 
 
 @router.get("/operator/guardian-state")
@@ -2557,6 +2818,28 @@ async def get_operator_workflow_orchestration(
     compactions = [_workflow_state_compaction(run) for run in workflow_runs]
     recovery_densities = [_workflow_recovery_density(run) for run in workflow_runs]
     output_debuggers = [_workflow_output_debugger(run, workflow_runs) for run in workflow_runs]
+    condensation_fidelities = [
+        _workflow_condensation_fidelity(run, compaction=compaction, output_debugger=output_debugger)
+        for run, compaction, output_debugger in zip(workflow_runs, compactions, output_debuggers, strict=False)
+    ]
+    anticipatory_plans = [
+        _workflow_anticipatory_plan(
+            run,
+            workflow_runs,
+            compaction=compaction,
+            recovery_density=recovery_density,
+            output_debugger=output_debugger,
+            condensation_fidelity=condensation_fidelity,
+        )
+        for run, compaction, recovery_density, output_debugger, condensation_fidelity in zip(
+            workflow_runs,
+            compactions,
+            recovery_densities,
+            output_debuggers,
+            condensation_fidelities,
+            strict=False,
+        )
+    ]
     recoverable_workflows = sum(
         1
         for run in workflow_runs
@@ -2586,6 +2869,9 @@ async def get_operator_workflow_orchestration(
             "boundary_blocked_workflows": sum(1 for item in recovery_densities if bool(item["boundary_blocked"])),
             "repair_ready_workflows": sum(1 for item in recovery_densities if bool(item["repair_ready"])),
             "branch_ready_workflows": sum(1 for item in recovery_densities if bool(item["branch_ready"])),
+            "anticipatory_ready_workflows": sum(1 for item in anticipatory_plans if bool(item["anticipatory_ready"])),
+            "backup_branch_ready_workflows": sum(1 for item in anticipatory_plans if bool(item["backup_branch_ready"])),
+            "fidelity_watch_workflows": sum(1 for item in condensation_fidelities if bool(item["watch_required"])),
             "stalled_workflows": sum(1 for item in recovery_densities if bool(item["stalled"])),
             "output_debugger_ready_workflows": sum(
                 1

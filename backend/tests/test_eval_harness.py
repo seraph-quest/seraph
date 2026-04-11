@@ -161,10 +161,11 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 6
+    assert details["suite_count"] == 7
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
+    assert details["workflow_suite_present"] is True
     assert details["computer_suite_present"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
@@ -216,6 +217,34 @@ def test_run_benchmark_suites_executes_guardian_user_model_restraint_suite():
         "guardian_clarification_restraint_behavior",
         "guardian_judgment_behavior",
         "operator_guardian_state_surface_behavior",
+    }
+
+
+def test_workflow_endurance_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_workflow_endurance_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["fidelity_state_visible"] is True
+    assert details["backup_branch_policy_visible"] is True
+
+
+def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
+    summary = asyncio.run(run_benchmark_suites(["workflow_endurance_and_repair"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "workflow_anticipatory_repair_behavior",
+        "workflow_condensation_fidelity_behavior",
+        "workflow_backup_branch_surface_behavior",
+        "workflow_multi_session_endurance_behavior",
     }
 
 
@@ -283,6 +312,10 @@ def test_main_lists_available_scenarios(capsys):
     assert "background_session_handoff_behavior" in captured.out
     assert "workflow_context_condenser_behavior" in captured.out
     assert "workflow_operating_layer_behavior" in captured.out
+    assert "workflow_anticipatory_repair_behavior" in captured.out
+    assert "workflow_condensation_fidelity_behavior" in captured.out
+    assert "workflow_backup_branch_surface_behavior" in captured.out
+    assert "workflow_multi_session_endurance_behavior" in captured.out
     assert "engineering_memory_bundle_behavior" in captured.out
     assert "operator_continuity_graph_behavior" in captured.out
     assert "operator_guardian_state_surface_behavior" in captured.out
@@ -291,6 +324,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "source_report_action_workflow_behavior" in captured.out
     assert "governed_self_evolution_behavior" in captured.out
     assert "benchmark_proof_surface_behavior" in captured.out
+    assert "operator_workflow_endurance_benchmark_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -340,6 +374,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "guardian_memory_quality" in captured.out
     assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
+    assert "workflow_endurance_and_repair" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -347,6 +382,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_memory_quality",
         "guardian_user_model_restraint",
         "memory_continuity_workflows",
+        "workflow_endurance_and_repair",
         "computer_use_browser_desktop",
         "planning_retrieval_reporting",
         "governed_improvement",

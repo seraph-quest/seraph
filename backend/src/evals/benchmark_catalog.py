@@ -10,6 +10,10 @@ from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
 )
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
+from src.workflows.benchmark import (
+    WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
+    WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,20 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "engineering_memory_bundle_behavior",
             "operator_continuity_graph_behavior",
         ),
+    ),
+    BenchmarkSuiteDefinition(
+        name=WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
+        label="Workflow endurance, anticipatory repair, and backup branches",
+        description=(
+            "Pins anticipatory repair planning, checkpoint-backed backup branching, "
+            "compaction fidelity, and multi-session workflow endurance into one deterministic proof lane."
+        ),
+        benchmark_axis="workflow_endurance_and_repair",
+        operator_summary=(
+            "Long-running workflows now surface backup branches, pre-action repair choices, and compaction-fidelity receipts instead of only exposing post-failure recovery."
+        ),
+        remaining_gap="Broader live workload replay and external long-context benchmark parity still remain for future work.",
+        scenario_names=WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="computer_use_browser_desktop",

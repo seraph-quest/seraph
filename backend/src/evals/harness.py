@@ -7995,6 +7995,318 @@ async def _eval_workflow_operating_layer_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_workflow_anticipatory_repair_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_orchestration
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Release thread"}],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-anticipatory",
+                    "run_identity": "session-1:workflow_release_brief:1",
+                    "root_run_identity": "session-1:workflow_release_brief:1",
+                    "workflow_name": "release-brief",
+                    "summary": "Preparing release publication.",
+                    "status": "running",
+                    "availability": "ready",
+                    "thread_id": "session-1",
+                    "thread_label": "Release thread",
+                    "started_at": "2026-04-11T08:00:00Z",
+                    "updated_at": "2026-04-11T08:45:00Z",
+                    "thread_continue_message": "Continue release brief.",
+                    "artifact_paths": ["notes/release-brief.md"],
+                    "checkpoint_candidates": [
+                        {
+                            "step_id": "draft",
+                            "label": "draft (write_file)",
+                            "kind": "branch_from_checkpoint",
+                            "status": "succeeded",
+                            "resume_draft": 'Run workflow "release-brief" with _seraph_resume_from_step="draft".',
+                            "resume_supported": True,
+                        },
+                    ],
+                    "step_records": [
+                        {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                        {"id": "draft", "index": 2, "tool": "write_file", "status": "succeeded"},
+                        {"id": "review", "index": 3, "tool": "diff_compare", "status": "running"},
+                    ],
+                },
+                {
+                    "id": "run-history",
+                    "run_identity": "session-1:workflow_release_brief:branch-1",
+                    "root_run_identity": "session-1:workflow_release_brief:1",
+                    "parent_run_identity": "session-1:workflow_release_brief:1",
+                    "branch_kind": "branch_from_checkpoint",
+                    "workflow_name": "release-brief",
+                    "summary": "Earlier branch comparison completed.",
+                    "status": "succeeded",
+                    "availability": "ready",
+                    "thread_id": "session-1",
+                    "thread_label": "Release thread",
+                    "started_at": "2026-04-11T08:10:00Z",
+                    "updated_at": "2026-04-11T08:15:00Z",
+                    "artifact_paths": ["notes/release-brief-branch.md"],
+                    "step_records": [
+                        {"id": "publish", "index": 0, "tool": "write_file", "status": "succeeded"},
+                    ],
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+
+    session = payload["sessions"][0]
+    workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_release_brief:1")
+    return {
+        "summary_counts_anticipatory_ready": payload["summary"]["anticipatory_ready_workflows"] == 1,
+        "summary_counts_backup_branch_ready": payload["summary"]["backup_branch_ready_workflows"] == 1,
+        "session_anticipatory_summary_visible": "anticipatory ready" in str(session["attention_summary"] or ""),
+        "workflow_risk_level_elevated": workflow["anticipatory_plan"]["risk_level"] in {"elevated", "high"},
+        "workflow_backup_branch_ready": workflow["anticipatory_plan"]["backup_branch_ready"] is True,
+        "workflow_backup_branch_draft_visible": '_seraph_resume_from_step="draft"' in workflow["anticipatory_plan"]["backup_branch_draft"],
+        "workflow_pre_repair_draft_visible": str(workflow["anticipatory_plan"]["anticipatory_repair_draft"]).startswith("Before continuing workflow"),
+    }
+
+
+async def _eval_workflow_condensation_fidelity_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_orchestration
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Atlas thread"}],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-root",
+                    "run_identity": "session-1:workflow_repo_review:1",
+                    "root_run_identity": "session-1:workflow_repo_review:1",
+                    "workflow_name": "repo-review",
+                    "summary": "Review handoff is still active.",
+                    "status": "running",
+                    "availability": "ready",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "started_at": "2026-04-11T07:00:00Z",
+                    "updated_at": "2026-04-11T08:35:00Z",
+                    "thread_continue_message": "Continue review handoff.",
+                    "artifact_paths": ["notes/repo-review.md"],
+                    "checkpoint_candidates": [
+                        {"step_id": "collect", "label": "collect (web_search)", "kind": "branch_from_checkpoint", "status": "succeeded"},
+                    ],
+                    "step_records": [
+                        {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                        {"id": "compare", "index": 2, "tool": "diff_compare", "status": "succeeded"},
+                        {"id": "draft", "index": 3, "tool": "write_file", "status": "succeeded"},
+                        {
+                            "id": "notify",
+                            "index": 4,
+                            "tool": "notify_user",
+                            "status": "running",
+                            "recovery_actions": [{"type": "notify_retry"}],
+                            "is_recoverable": True,
+                        },
+                    ],
+                },
+                {
+                    "id": "run-branch",
+                    "run_identity": "session-1:workflow_repo_review:branch-1",
+                    "root_run_identity": "session-1:workflow_repo_review:1",
+                    "parent_run_identity": "session-1:workflow_repo_review:1",
+                    "branch_kind": "branch_from_checkpoint",
+                    "workflow_name": "repo-review",
+                    "summary": "Branch comparison ready.",
+                    "status": "succeeded",
+                    "availability": "ready",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "started_at": "2026-04-11T07:30:00Z",
+                    "updated_at": "2026-04-11T07:40:00Z",
+                    "artifact_paths": ["notes/repo-review-branch.md"],
+                    "step_records": [
+                        {"id": "repair", "index": 0, "tool": "write_file", "status": "succeeded"},
+                    ],
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+
+    workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_repo_review:1")
+    return {
+        "fidelity_state_strong": workflow["condensation_fidelity"]["state"] == "strong",
+        "fidelity_summary_mentions_visible_steps": "visible 3/5 steps" in workflow["condensation_fidelity"]["summary"],
+        "fidelity_summary_mentions_recovery_paths": "preserves checkpoint branch" in workflow["condensation_fidelity"]["summary"],
+        "fidelity_summary_mentions_branch_history": "branch continuity retained" in workflow["condensation_fidelity"]["summary"],
+    }
+
+
+async def _eval_workflow_backup_branch_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_orchestration
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Atlas thread"}],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-1",
+                    "run_identity": "session-1:workflow_repo_review:1",
+                    "root_run_identity": "session-1:workflow_repo_review:1",
+                    "workflow_name": "repo-review",
+                    "summary": "Comparison is running before publish.",
+                    "status": "running",
+                    "availability": "ready",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "started_at": "2026-04-11T09:00:00Z",
+                    "updated_at": "2026-04-11T09:35:00Z",
+                    "thread_continue_message": "Continue comparison.",
+                    "artifact_paths": ["notes/repo-review.md"],
+                    "checkpoint_candidates": [
+                        {
+                            "step_id": "compare",
+                            "label": "compare (diff_compare)",
+                            "kind": "branch_from_checkpoint",
+                            "status": "succeeded",
+                            "resume_draft": 'Run workflow "repo-review" with _seraph_resume_from_step="compare".',
+                            "resume_supported": True,
+                        },
+                    ],
+                    "step_records": [
+                        {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                        {"id": "compare", "index": 2, "tool": "diff_compare", "status": "succeeded"},
+                        {"id": "publish", "index": 3, "tool": "write_file", "status": "running"},
+                    ],
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+
+    session = payload["sessions"][0]
+    workflow = payload["workflows"][0]
+    return {
+        "session_backup_branch_label_visible": session["lead_backup_branch_label"] == "compare (diff_compare)",
+        "session_backup_branch_draft_visible": '_seraph_resume_from_step="compare"' in session["lead_backup_branch_draft"],
+        "workflow_backup_branch_label_visible": workflow["anticipatory_plan"]["backup_branch_label"] == "compare (diff_compare)",
+        "workflow_backup_branch_ready": workflow["anticipatory_plan"]["backup_branch_ready"] is True,
+    }
+
+
+async def _eval_workflow_multi_session_endurance_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_orchestration
+
+    with (
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            return_value=[
+                {"id": "session-1", "title": "Atlas thread"},
+                {"id": "session-2", "title": "Research thread"},
+            ],
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            return_value=[
+                {
+                    "id": "run-1",
+                    "run_identity": "session-1:workflow_repo_review:1",
+                    "root_run_identity": "session-1:workflow_repo_review:1",
+                    "workflow_name": "repo-review",
+                    "summary": "Ready for anticipatory backup branch.",
+                    "status": "running",
+                    "availability": "ready",
+                    "thread_id": "session-1",
+                    "thread_label": "Atlas thread",
+                    "started_at": "2026-04-11T07:00:00Z",
+                    "updated_at": "2026-04-11T07:50:00Z",
+                    "checkpoint_candidates": [
+                        {
+                            "step_id": "draft",
+                            "label": "draft (write_file)",
+                            "kind": "branch_from_checkpoint",
+                            "status": "succeeded",
+                            "resume_draft": 'Run workflow "repo-review" with _seraph_resume_from_step="draft".',
+                            "resume_supported": True,
+                        },
+                    ],
+                    "step_records": [
+                        {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                        {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                        {"id": "draft", "index": 2, "tool": "write_file", "status": "succeeded"},
+                        {"id": "publish", "index": 3, "tool": "write_file", "status": "running"},
+                    ],
+                },
+                {
+                    "id": "run-2",
+                    "run_identity": "session-2:workflow_research_followup:1",
+                    "root_run_identity": "session-2:workflow_research_followup:1",
+                    "workflow_name": "research-followup",
+                    "summary": "Blocked after trust boundary drift.",
+                    "status": "failed",
+                    "availability": "blocked",
+                    "thread_id": "session-2",
+                    "thread_label": "Research thread",
+                    "started_at": "2026-04-11T06:00:00Z",
+                    "updated_at": "2026-04-11T06:45:00Z",
+                    "replay_block_reason": "approval_context_changed",
+                    "retry_from_step_draft": "Retry research follow-up from publish.",
+                    "step_records": [
+                        {"id": "collect", "index": 0, "tool": "web_search", "status": "succeeded"},
+                        {
+                            "id": "publish",
+                            "index": 1,
+                            "tool": "write_file",
+                            "status": "failed",
+                            "recovery_actions": [{"type": "set_tool_policy"}],
+                            "is_recoverable": True,
+                        },
+                    ],
+                },
+            ],
+        ),
+    ):
+        payload = await get_operator_workflow_orchestration(limit_sessions=6, limit_workflows=8)
+
+    sessions = {item["thread_id"]: item for item in payload["sessions"]}
+    return {
+        "tracked_sessions_visible": payload["summary"]["tracked_sessions"] == 2,
+        "attention_sessions_visible": payload["summary"]["attention_sessions"] == 2,
+        "anticipatory_and_repair_counts_visible": (
+            payload["summary"]["anticipatory_ready_workflows"] == 1
+            and payload["summary"]["repair_ready_workflows"] == 1
+        ),
+        "atlas_session_tracks_backup_branch": sessions["session-1"]["backup_branch_ready_workflows"] == 1,
+        "research_session_tracks_boundary_block": sessions["session-2"]["queue_state"] == "boundary_blocked",
+    }
+
+
+async def _eval_operator_workflow_endurance_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_workflow_endurance_benchmark
+
+    payload = await get_operator_workflow_endurance_benchmark()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == "workflow_endurance_and_repair",
+        "operator_status_visible": payload["summary"]["operator_status"] == "workflow_orchestration_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(payload["scenario_names"]),
+        "fidelity_state_visible": payload["summary"]["condensation_fidelity_state"] == "recovery_paths_and_output_history_retained",
+        "backup_branch_policy_visible": payload["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable",
+    }
+
+
 async def _eval_engineering_memory_bundle_behavior() -> dict[str, Any]:
     from src.api.operator import get_operator_engineering_memory
 
@@ -9258,6 +9570,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     guardian_memory_suite = next(item for item in suites if item["name"] == "guardian_memory_quality")
     guardian_user_model_suite = next(item for item in suites if item["name"] == "guardian_user_model_restraint")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
+    workflow_suite = next(item for item in suites if item["name"] == "workflow_endurance_and_repair")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
@@ -9266,6 +9579,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "guardian_memory_suite_present": "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"],
         "guardian_user_model_suite_present": "guardian_clarification_restraint_behavior" in guardian_user_model_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
+        "workflow_suite_present": "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"],
         "computer_suite_present": "browser_runtime_audit" in computer_suite["scenario_names"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_self_evolution_behavior" in governed_suite["scenario_names"],
@@ -10498,6 +10812,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_workflow_operating_layer_behavior,
     ),
     EvalScenario(
+        name="workflow_anticipatory_repair_behavior",
+        category="behavior",
+        description="Long-running workflows surface anticipatory repair drafts and backup-branch choices before obvious failure points.",
+        runner=_eval_workflow_anticipatory_repair_behavior,
+    ),
+    EvalScenario(
+        name="workflow_condensation_fidelity_behavior",
+        category="behavior",
+        description="Compacted workflow state retains enough recovery paths, output history, and branch lineage to keep continuation trustworthy.",
+        runner=_eval_workflow_condensation_fidelity_behavior,
+    ),
+    EvalScenario(
+        name="workflow_backup_branch_surface_behavior",
+        category="behavior",
+        description="Workflow orchestration exposes checkpoint-backed backup branch drafts explicitly instead of hiding branch continuity behind raw lineage fields.",
+        runner=_eval_workflow_backup_branch_surface_behavior,
+    ),
+    EvalScenario(
+        name="workflow_multi_session_endurance_behavior",
+        category="behavior",
+        description="Multi-session workflow orchestration preserves distinct queue posture, repair state, and backup-branch readiness across active threads.",
+        runner=_eval_workflow_multi_session_endurance_behavior,
+    ),
+    EvalScenario(
         name="engineering_memory_bundle_behavior",
         category="behavior",
         description="Operator engineering memory groups repository and pull-request continuity into searchable bundles instead of scattering the context across sessions, approvals, and audit rows.",
@@ -10562,6 +10900,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Benchmark proof surfaces group deterministic eval coverage into explicit suites and expose governed-improvement gate policy instead of relying on informal batch memory.",
         runner=_eval_benchmark_proof_surface_behavior,
+    ),
+    EvalScenario(
+        name="operator_workflow_endurance_benchmark_surface_behavior",
+        category="observability",
+        description="Operator workflow-endurance benchmark surface exposes anticipatory repair, condensation fidelity, and backup-branch policy directly.",
+        runner=_eval_operator_workflow_endurance_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="capability_repair_behavior",

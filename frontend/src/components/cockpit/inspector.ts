@@ -104,6 +104,17 @@ export interface WorkflowRunRecord {
   checkpointContextAvailable?: boolean;
   checkpointCandidates?: Array<Record<string, unknown>>;
   resumePlan?: Record<string, unknown> | null;
+  anticipatory_plan?: {
+    risk_level?: string | null;
+    summary?: string | null;
+    anticipatory_repair_draft?: string | null;
+    backup_branch_label?: string | null;
+    backup_branch_draft?: string | null;
+  } | null;
+  condensation_fidelity?: {
+    state?: string | null;
+    summary?: string | null;
+  } | null;
   timeline?: WorkflowTimelineEntry[];
 }
 

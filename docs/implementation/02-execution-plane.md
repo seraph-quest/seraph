@@ -47,6 +47,7 @@
 - [x] the operator API now also exposes an explicit continuity graph that links sessions, workflows, approvals, artifacts, notifications, deferred guardian items, and interventions through one evidence-backed graph instead of forcing operators to infer those relationships from separate background-session, timeline, and observer surfaces
 - [x] the cockpit operator surface now composes background sessions, engineering-memory bundles, and the continuity graph into one background-supervision lane with direct continue/open-thread/latest-output/latest-branch/next-step control instead of making operators pivot across three separate continuity endpoints to resume long-running work
 - [x] the operator workflow-orchestration surface now also compacts long-running runs into explicit state capsules with visible-versus-compacted step counts, artifact totals, recent-step labels, and preserved retry/checkpoint/repair paths instead of forcing operators to reconstruct durable recovery state from raw step lists alone
+- [x] the operator workflow-orchestration surface now also exposes anticipatory repair drafts, backup-branch candidates, condensation-fidelity state, and thread-level endurance summaries, and the operator benchmark-proof surface now includes a dedicated `workflow_endurance_and_repair` suite instead of leaving long-horizon workflow quality buried inside generic runtime scenario output
 
 ## Working On Now
 
@@ -66,11 +67,12 @@
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy, richer managed-process trust receipts, and deterministic eval proof that the process-runtime boundary stays both session-partitioned and operator-visible
 - [x] this workstream now also ships the second Batch BA aggregate for disposable worker lifecycle isolation, explicit credential-egress policy surfaced across tool/workflow/operator APIs, and preserved trust-partition receipts for delegated plus background-handoff execution
 - [x] this workstream now also ships the first Batch BD aggregate for long-running workflow operating-layer density across the operator API, cockpit orchestration lane, and runtime eval harness, including long-run state compaction, queue-state supervision, denser repair paths, branch/output debugger context, and explicit long-horizon workflow proof
+- [x] this workstream now also ships the first Batch BJ aggregate for anticipatory workflow repair, backup-branch planning, condensation-fidelity visibility, a named workflow-endurance benchmark suite, operator-readable failure taxonomy, and cockpit pre-repair plus backup-branch control
 
 ## Still To Do On `develop`
 
 - [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, queue-state recovery supervision, branch/output debugger density, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
+- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, queue-state recovery supervision, anticipatory repair drafts, backup-branch candidates, condensation-fidelity state, branch/output debugger density, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
 - [ ] broader external system leverage without weakening trust boundaries or the new credential-egress contract
 
 ## Current Slice Record

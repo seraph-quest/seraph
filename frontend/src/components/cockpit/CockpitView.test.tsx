@@ -2823,6 +2823,200 @@ describe("CockpitView", () => {
     );
   });
 
+  it("surfaces anticipatory repair and backup branch choices in workflow orchestration", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({ daemon: {}, notifications: [], queued_insights: [], recent_interventions: [] }));
+      }
+      if (url.includes("/api/workflows") && !url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: { workspace_mode: "governed", review_posture: "required", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: true, roles: [] },
+          usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 1, blocked_workflows: 0 },
+          runtime_posture: { runtime: { provider: "openrouter", model: "test", model_label: "test", build_id: "test" }, extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 }, continuity: { continuity_health: "healthy", primary_surface: "workspace", recommended_focus: "workflow orchestration", actionable_thread_count: 1, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 } },
+          handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/benchmark-proof")) {
+        return Promise.resolve(mockResponse({
+          summary: { suite_count: 7, scenario_count: 40, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible" },
+          suites: [],
+          memory_benchmark: null,
+          user_model_benchmark: null,
+          workflow_endurance_benchmark: null,
+          governed_improvement: { target_count: 0, target_types: [], required_suite_count: 7, gate_policy: { min_review_ready_score: 0.7, min_strong_score: 0.9, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" } },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 1,
+            workflow_count: 1,
+            active_workflows: 1,
+            blocked_workflows: 0,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 0,
+            long_running_workflows: 1,
+            compacted_workflows: 1,
+            total_step_count: 4,
+            compacted_step_count: 1,
+            boundary_blocked_workflows: 0,
+            repair_ready_workflows: 0,
+            branch_ready_workflows: 1,
+            anticipatory_ready_workflows: 1,
+            backup_branch_ready_workflows: 1,
+            fidelity_watch_workflows: 0,
+            stalled_workflows: 0,
+            output_debugger_ready_workflows: 1,
+            attention_sessions: 1,
+          },
+          sessions: [
+            {
+              thread_id: "session-1",
+              thread_label: "Release thread",
+              workflow_count: 1,
+              active_workflows: 1,
+              blocked_workflows: 0,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 0,
+              latest_updated_at: "2026-04-11T08:45:00Z",
+              lead_run_identity: "release-root",
+              lead_workflow_name: "release-brief",
+              lead_status: "running",
+              lead_summary: "Preparing release publication.",
+              continue_message: "Continue release brief.",
+              total_step_count: 4,
+              compacted_step_count: 1,
+              compacted_workflow_count: 1,
+              long_running_workflow_count: 1,
+              artifact_count: 1,
+              lead_state_capsule: "4 steps · 1 compacted · 1 artifact · preserves checkpoint branch",
+              boundary_blocked_workflows: 0,
+              repair_ready_workflows: 0,
+              branch_ready_workflows: 1,
+              anticipatory_ready_workflows: 1,
+              backup_branch_ready_workflows: 1,
+              fidelity_watch_workflows: 0,
+              stalled_workflows: 0,
+              output_debugger_ready_workflows: 1,
+              queue_state: "active",
+              queue_position: 1,
+              queue_reason: "1 workflow is actively progressing.",
+              attention_summary: "1 anticipatory ready · 1 backup branch ready · 1 debugger ready",
+              queue_draft: "Review the workflow queue for Release thread.",
+              handoff_draft: "Prepare a workflow handoff for Release thread.",
+              lead_recommended_recovery_path: "continue_thread",
+              lead_anticipatory_risk_level: "elevated",
+              lead_anticipatory_summary: "anticipatory repair ready · backup branch from draft (write_file)",
+              lead_backup_branch_label: "draft (write_file)",
+              lead_backup_branch_draft: 'Run workflow "release-brief" with _seraph_resume_from_step="draft".',
+              lead_anticipatory_repair_draft: 'Before continuing workflow "release-brief", review the next risky step and prepare a safer continuation path.',
+              lead_condensation_fidelity_state: "strong",
+              lead_condensation_fidelity_summary: "visible 3/4 steps · preserves checkpoint branch · 1 output histories",
+              lead_output_path: "notes/release-brief.md",
+              lead_related_output_paths: [],
+              lead_output_history: [{ path: "notes/release-brief.md", run_identity: "release-root", summary: "Preparing release publication.", status: "running", branch_kind: null, updated_at: "2026-04-11T08:45:00Z", is_primary: true }],
+              lead_latest_branch_run_identity: null,
+              lead_latest_branch_summary: null,
+              lead_step_focus: { kind: "active", step_id: "review", tool: "diff_compare", status: "running", summary: "Comparing candidate release notes", recovery_action_count: 0, is_recoverable: false },
+            },
+          ],
+          workflows: [
+            {
+              id: "run-1",
+              tool_name: "workflow_release_brief",
+              run_identity: "release-root",
+              root_run_identity: "release-root",
+              parent_run_identity: null,
+              workflow_name: "release-brief",
+              summary: "Preparing release publication.",
+              status: "running",
+              availability: "ready",
+              session_id: "session-1",
+              started_at: "2026-04-11T08:00:00Z",
+              updated_at: "2026-04-11T08:45:00Z",
+              thread_id: "session-1",
+              thread_label: "Release thread",
+              continue_message: "Continue release brief.",
+              thread_continue_message: "Continue release brief.",
+              output_path: "notes/release-brief.md",
+              artifact_paths: ["notes/release-brief.md"],
+              step_records: [
+                { id: "collect", index: 1, tool: "web_search", status: "succeeded", result_summary: "Collected release notes" },
+                { id: "draft", index: 2, tool: "write_file", status: "succeeded", result_summary: "Drafted release brief" },
+                { id: "review", index: 3, tool: "diff_compare", status: "running", result_summary: "Comparing candidate release notes" },
+              ],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 1,
+              checkpoint_candidates: [{ step_id: "draft", label: "draft (write_file)", status: "succeeded", resume_draft: 'Run workflow "release-brief" with _seraph_resume_from_step="draft".', resume_supported: true }],
+              retry_from_step_available: false,
+              retry_from_step_draft: null,
+              replay_allowed: true,
+              replay_block_reason: null,
+              replay_recommended_actions: [],
+              step_focus: { kind: "active", step_id: "review", tool: "diff_compare", status: "running", summary: "Comparing candidate release notes", recovery_action_count: 0, is_recoverable: false },
+              is_long_running: true,
+              is_compacted: true,
+              duration_minutes: 45,
+              step_count: 4,
+              visible_step_count: 3,
+              compacted_step_count: 1,
+              artifact_count: 1,
+              preserved_recovery_paths: ["checkpoint_branch"],
+              recent_step_labels: ["collect / web_search / succeeded", "draft / write_file / succeeded", "review / diff_compare / running"],
+              state_capsule: "4 steps · 1 compacted · 1 artifact · preserves checkpoint branch",
+              recovery_density: { recommended_path: "continue_thread", approval_pending: false, boundary_blocked: false, retry_ready: false, checkpoint_ready: true, repair_ready: false, branch_ready: true, replay_ready: true, stalled: false, checkpoint_candidate_count: 1, recovery_action_count: 0, repair_action_types: [], repair_hint: null, failure_step_id: null, failure_step_tool: null },
+              output_debugger: { family_run_count: 1, branch_run_count: 0, history_output_count: 1, primary_output_path: "notes/release-brief.md", related_output_paths: [], history_outputs: [{ path: "notes/release-brief.md", run_identity: "release-root", summary: "Preparing release publication.", status: "running", branch_kind: null, updated_at: "2026-04-11T08:45:00Z", is_primary: true }], latest_branch_run_identity: null, latest_branch_summary: null, latest_branch_status: null, latest_branch_output_path: null, comparison_ready: false, checkpoint_labels: ["draft (write_file)"] },
+              condensation_fidelity: { state: "strong", watch_required: false, visible_step_count: 3, total_step_count: 4, preserved_path_count: 1, history_output_count: 1, branch_run_count: 0, summary: "visible 3/4 steps · preserves checkpoint branch · 1 output histories" },
+              anticipatory_plan: { risk_level: "elevated", anticipatory_ready: true, signal_count: 3, signals: ["long_running", "active_step", "checkpoint_branch_available"], summary: "anticipatory repair ready · backup branch from draft (write_file)", backup_branch_ready: true, backup_branch_step_id: "draft", backup_branch_label: "draft (write_file)", backup_branch_draft: 'Run workflow "release-brief" with _seraph_resume_from_step="draft".', anticipatory_repair_draft: 'Before continuing workflow "release-brief", review the next risky step and prepare a safer continuation path.', family_failure_count: 0 },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/background-sessions")) return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, background_process_count: 0, running_background_process_count: 0, sessions_with_branch_handoff: 0, sessions_with_active_workflows: 0 }, sessions: [] }));
+      if (url.includes("/api/operator/engineering-memory")) return Promise.resolve(mockResponse({ summary: { query: null, tracked_bundles: 0, repository_bundle_count: 0, pull_request_bundle_count: 0, work_item_bundle_count: 0, search_match_count: 0 }, bundles: [] }));
+      if (url.includes("/api/operator/continuity-graph")) return Promise.resolve(mockResponse({ summary: { continuity_health: null, primary_surface: null, recommended_focus: null, tracked_sessions: 0, workflow_count: 0, approval_count: 0, notification_count: 0, queued_insight_count: 0, intervention_count: 0, artifact_count: 0, edge_count: 0 }, sessions: [], nodes: [], edges: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const orchestration = await screen.findByLabelText("Workflow orchestration");
+    const row = (await within(orchestration).findByText("Release thread")).closest(".cockpit-operator-row--entry");
+    expect(row).not.toBeNull();
+    expect(row as HTMLElement).toHaveTextContent(/1 anticipatory-ready · 1 backup-branch ready/i);
+    expect(row as HTMLElement).toHaveTextContent(/anticipatory elevated · anticipatory repair ready · backup branch from draft \(write_file\)/i);
+    expect(row as HTMLElement).toHaveTextContent(/fidelity strong · visible 3\/4 steps · preserves checkpoint branch/i);
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft backup branch for workflow orchestration Release thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft anticipatory repair for workflow orchestration Release thread" })).toBeInTheDocument();
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Draft backup branch for workflow orchestration Release thread" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Run workflow "release-brief" with _seraph_resume_from_step="draft".')).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Draft anticipatory repair for workflow orchestration Release thread" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Before continuing workflow "release-brief"/)).toBeInTheDocument(),
+    );
+  });
+
   it("drafts the starter-pack command after a successful bootstrap", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -4853,14 +5047,15 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 6,
-            scenario_count: 36,
+            suite_count: 7,
+            scenario_count: 40,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
             governed_improvement_status: "review_gated",
             memory_benchmark_posture: "ci_gated_operator_visible",
             user_model_benchmark_posture: "ci_gated_operator_visible",
+            workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
           },
           memory_benchmark: {
             summary: {
@@ -4912,6 +5107,28 @@ describe("CockpitView", () => {
               ci_gate_mode: "required_benchmark_suite",
             },
           },
+          workflow_endurance_benchmark: {
+            summary: {
+              suite_name: "workflow_endurance_and_repair",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "workflow_orchestration_visible",
+              scenario_count: 4,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 0,
+              anticipatory_repair_state: "checkpoint_and_pre_repair_visible",
+              condensation_fidelity_state: "recovery_paths_and_output_history_retained",
+              branch_continuity_state: "backup_branch_operator_selectable",
+            },
+            failure_report: [],
+            policy: {
+              anticipatory_repair_policy: "prepare_repair_and_backup_branch_before_obvious_failure_points",
+              backup_branch_policy: "checkpoint_backed_branch_receipts_must_remain_operator_selectable",
+              condensation_fidelity_policy: "compaction_must_preserve_recovery_paths_and_output_lineage",
+              operator_visibility: "workflow_orchestration_and_benchmark_visible",
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
           suites: [
             {
               name: "guardian_memory_quality",
@@ -4942,6 +5159,16 @@ describe("CockpitView", () => {
               remaining_gap: "Broader live-provider and production-like replay is still missing.",
               scenario_count: 14,
               scenario_names: ["workflow_operating_layer_behavior"],
+            },
+            {
+              name: "workflow_endurance_and_repair",
+              label: "Workflow endurance, anticipatory repair, and backup branches",
+              description: "Workflow endurance and anticipatory repair suite",
+              benchmark_axis: "workflow_endurance_and_repair",
+              operator_summary: "Long-running workflows surface backup branches and pre-action repair choices.",
+              remaining_gap: "Broader live workload replay still remains.",
+              scenario_count: 4,
+              scenario_names: ["workflow_anticipatory_repair_behavior"],
             },
             {
               name: "computer_use_browser_desktop",
@@ -4977,7 +5204,7 @@ describe("CockpitView", () => {
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 6,
+            required_suite_count: 7,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
@@ -4987,6 +5214,7 @@ describe("CockpitView", () => {
                 "guardian_memory_quality",
                 "guardian_user_model_restraint",
                 "memory_continuity_workflows",
+                "workflow_endurance_and_repair",
                 "computer_use_browser_desktop",
                 "planning_retrieval_reporting",
                 "governed_improvement",
@@ -5107,13 +5335,16 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/6 suites · 36 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/7 suites · 40 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/checkpoint and pre repair visible · recovery paths and output history retained · backup branch operator selectable/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Workflow endurance, anticipatory repair, and backup branches/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Planning, retrieval, and reporting/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Governed self-improvement/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();

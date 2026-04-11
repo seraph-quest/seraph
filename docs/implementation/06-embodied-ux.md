@@ -537,8 +537,9 @@
 - [x] the cockpit now exposes first-class operator visibility for approval-thread recovery and cross-surface continue/open-thread actions
 - [x] the cockpit now exposes first-class operator visibility for bounded capability bootstrap, richer workflow step diagnostics, and routing-summary timeline rows
 - [x] the cockpit now exposes a first-class Activity Ledger window instead of leaving workflow, approval, notification, intervention, failure, and LLM-spend continuity split across separate panes
+- [x] the cockpit now also exposes anticipatory workflow repair, backup-branch control, condensation-fidelity state, and operator-visible workflow-endurance benchmark reporting inside the workflow-orchestration and benchmark-proof lanes
 - [x] settings and priorities now present as workspace-styled modal overlays instead of legacy shell overlays
 - [x] the docs and active repo now treat the village/editor line as removed history rather than as a fallback product branch
 - [ ] the cockpit still needs richer install/recommend/repair guidance beyond the first "what can I do now?" capability surface, blocked-state explanation, starter-pack view, preflight/autorepair, and bounded bootstrap layer
-- [ ] the cockpit still needs broader multi-session workflow orchestration, deeper cross-pane command density, and more flexible workspace ergonomics beyond the shipped output-history, checkpoint-history, and lineage-event workflow debugger
+- [ ] the cockpit still needs broader multi-session workflow orchestration, deeper cross-pane command density, and more flexible workspace ergonomics beyond the shipped output-history, checkpoint-history, lineage-event workflow debugger, anticipatory repair lane, backup-branch controls, and workflow-endurance benchmark surface
 - [ ] the environment reflects the human’s life state and Seraph’s guidance with much higher fidelity

@@ -644,6 +644,38 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             {"target_type": "prompt_pack", "source_path": "/tmp/extensions/review-pack/prompts/review.md"},
         ],
     ), patch(
+        "src.api.operator.build_workflow_endurance_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "workflow_endurance_and_repair",
+                    "benchmark_posture": "ci_gated_operator_visible",
+                    "operator_status": "workflow_orchestration_visible",
+                    "scenario_count": 4,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "anticipatory_repair_state": "checkpoint_and_pre_repair_visible",
+                    "condensation_fidelity_state": "recovery_paths_and_output_history_retained",
+                    "branch_continuity_state": "backup_branch_operator_selectable",
+                },
+                "scenario_names": [
+                    "workflow_anticipatory_repair_behavior",
+                    "workflow_condensation_fidelity_behavior",
+                    "workflow_backup_branch_surface_behavior",
+                    "workflow_multi_session_endurance_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "backup_branch_policy": "checkpoint_backed_branch_receipts_must_remain_operator_selectable",
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -679,11 +711,12 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 6
+    assert payload["summary"]["suite_count"] == 7
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -700,6 +733,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     memory_suite = next(item for item in payload["suites"] if item["name"] == "memory_continuity_workflows")
     assert "workflow_operating_layer_behavior" in memory_suite["scenario_names"]
     assert memory_suite["scenario_count"] >= 10
+    workflow_suite = next(item for item in payload["suites"] if item["name"] == "workflow_endurance_and_repair")
+    assert "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"]
+    assert workflow_suite["scenario_count"] >= 4
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_runtime_audit" in computer_suite["scenario_names"]
@@ -708,6 +744,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["user_model_benchmark"]["summary"]["suite_name"] == "guardian_user_model_restraint"
     assert payload["user_model_benchmark"]["policy"]["clarify_before_action_policy"] == "required_on_high_ambiguity"
+    assert payload["workflow_endurance_benchmark"]["summary"]["suite_name"] == "workflow_endurance_and_repair"
+    assert payload["workflow_endurance_benchmark"]["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
 
 
 @pytest.mark.asyncio
@@ -723,6 +761,19 @@ async def test_operator_memory_benchmark_surface_reports_failure_taxonomy_and_po
     assert len(payload["failure_taxonomy"]) >= 5
     assert payload["policy"]["retrieval_ranking_policy"] == "contradiction_aware_query_and_project_weighted"
     assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_workflow_endurance_benchmark_surface_reports_policy_and_state(client):
+    resp = await client.get("/api/operator/workflow-endurance-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "workflow_endurance_and_repair"
+    assert payload["summary"]["operator_status"] == "workflow_orchestration_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["policy"]["anticipatory_repair_policy"] == "prepare_repair_and_backup_branch_before_obvious_failure_points"
+    assert payload["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
 
 
 @pytest.mark.asyncio
@@ -1108,6 +1159,89 @@ async def test_operator_workflow_orchestration_groups_sessions_and_step_focus(cl
     assert workflows[2]["workflow_name"] == "cleanup"
     assert workflows[2]["step_focus"]["kind"] == "active"
     assert workflows[2]["recovery_density"]["stalled"] is True
+
+
+@pytest.mark.asyncio
+async def test_operator_workflow_orchestration_surfaces_anticipatory_repair_and_backup_branch_choices(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-1",
+                        "run_identity": "session-1:workflow_release_brief:1",
+                        "root_run_identity": "session-1:workflow_release_brief:1",
+                        "workflow_name": "release-brief",
+                        "summary": "Preparing release publication.",
+                        "status": "running",
+                        "availability": "ready",
+                        "thread_id": "session-1",
+                        "thread_label": "Release thread",
+                        "started_at": "2026-04-11T08:00:00Z",
+                        "updated_at": "2026-04-11T08:45:00Z",
+                        "thread_continue_message": "Continue release brief.",
+                        "artifact_paths": ["notes/release-brief.md"],
+                        "checkpoint_candidates": [
+                            {
+                                "step_id": "draft",
+                                "label": "draft (write_file)",
+                                "kind": "branch_from_checkpoint",
+                                "status": "succeeded",
+                                "resume_draft": 'Run workflow "release-brief" with _seraph_resume_from_step="draft".',
+                                "resume_supported": True,
+                            },
+                        ],
+                        "step_records": [
+                            {"id": "scope", "index": 0, "tool": "session_search", "status": "succeeded"},
+                            {"id": "collect", "index": 1, "tool": "web_search", "status": "succeeded"},
+                            {"id": "draft", "index": 2, "tool": "write_file", "status": "succeeded"},
+                            {"id": "review", "index": 3, "tool": "diff_compare", "status": "running"},
+                        ],
+                    },
+                    {
+                        "id": "run-2",
+                        "run_identity": "session-1:workflow_release_brief:branch-1",
+                        "root_run_identity": "session-1:workflow_release_brief:1",
+                        "parent_run_identity": "session-1:workflow_release_brief:1",
+                        "branch_kind": "branch_from_checkpoint",
+                        "workflow_name": "release-brief",
+                        "summary": "Earlier branch comparison completed.",
+                        "status": "succeeded",
+                        "availability": "ready",
+                        "thread_id": "session-1",
+                        "thread_label": "Release thread",
+                        "started_at": "2026-04-11T08:10:00Z",
+                        "updated_at": "2026-04-11T08:15:00Z",
+                        "artifact_paths": ["notes/release-brief-branch.md"],
+                        "step_records": [
+                            {"id": "publish", "index": 0, "tool": "write_file", "status": "succeeded"},
+                        ],
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Release thread"}]),
+        ),
+    ):
+        resp = await client.get("/api/operator/workflow-orchestration", params={"limit_sessions": 6, "limit_workflows": 8})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["anticipatory_ready_workflows"] == 1
+    assert payload["summary"]["backup_branch_ready_workflows"] == 1
+    session = payload["sessions"][0]
+    assert session["lead_anticipatory_risk_level"] in {"elevated", "high"}
+    assert "backup branch" in session["lead_anticipatory_summary"]
+    assert session["lead_backup_branch_label"] == "draft (write_file)"
+    assert '_seraph_resume_from_step="draft"' in session["lead_backup_branch_draft"]
+    assert session["lead_anticipatory_repair_draft"].startswith("Before continuing workflow")
+    workflow = next(item for item in payload["workflows"] if item["run_identity"] == "session-1:workflow_release_brief:1")
+    assert workflow["anticipatory_plan"]["backup_branch_ready"] is True
+    assert workflow["anticipatory_plan"]["risk_level"] in {"elevated", "high"}
+    assert workflow["condensation_fidelity"]["state"] == "partial"
 
 
 @pytest.mark.asyncio

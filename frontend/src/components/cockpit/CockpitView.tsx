@@ -166,6 +166,7 @@ interface OperatorBenchmarkProofSummary {
   memory_benchmark_posture?: string;
   user_model_benchmark_posture?: string;
   workflow_endurance_benchmark_posture?: string;
+  trust_boundary_benchmark_posture?: string;
 }
 
 interface OperatorBenchmarkProofSuite {
@@ -210,6 +211,7 @@ interface OperatorBenchmarkProof {
   memory_benchmark: OperatorMemoryBenchmark | null;
   user_model_benchmark: OperatorUserModelBenchmark | null;
   workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
+  trust_boundary_benchmark: OperatorTrustBoundaryBenchmark | null;
   governed_improvement: {
     target_count: number;
     target_types: string[];
@@ -259,6 +261,12 @@ interface OperatorWorkflowEnduranceBenchmarkFailure {
   reason: string;
 }
 
+interface OperatorTrustBoundaryBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
 interface OperatorWorkflowEnduranceBenchmark {
   summary: {
     suite_name: string;
@@ -278,6 +286,32 @@ interface OperatorWorkflowEnduranceBenchmark {
     backup_branch_policy: string;
     condensation_fidelity_policy: string;
     operator_visibility: string;
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorTrustBoundaryBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    secret_egress_state: string;
+    delegation_partition_state: string;
+    workflow_replay_state: string;
+    operator_receipt_state: string;
+  };
+  failure_report: OperatorTrustBoundaryBenchmarkFailure[];
+  policy: {
+    secret_egress_policy: string;
+    delegation_partition_policy: string;
+    background_execution_policy: string;
+    workflow_replay_policy: string;
+    operator_visibility: string;
+    receipt_surfaces: string[];
     ci_gate_mode: string;
   };
 }
@@ -2222,9 +2256,11 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const memoryBenchmark = record.memory_benchmark;
   const userModelBenchmark = record.user_model_benchmark;
   const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
+  const trustBoundaryBenchmark = record.trust_boundary_benchmark;
   let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
+  let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
   if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
     const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
     const memorySummary = memoryBenchmarkRecord.summary;
@@ -2374,6 +2410,55 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       };
     }
   }
+  if (trustBoundaryBenchmark && typeof trustBoundaryBenchmark === "object" && !Array.isArray(trustBoundaryBenchmark)) {
+    const trustBenchmarkRecord = trustBoundaryBenchmark as Record<string, unknown>;
+    const trustSummary = trustBenchmarkRecord.summary;
+    const trustPolicy = trustBenchmarkRecord.policy;
+    if (
+      trustSummary && typeof trustSummary === "object" && !Array.isArray(trustSummary)
+      && trustPolicy && typeof trustPolicy === "object" && !Array.isArray(trustPolicy)
+    ) {
+      const trustSummaryRecord = trustSummary as Record<string, unknown>;
+      const trustPolicyRecord = trustPolicy as Record<string, unknown>;
+      normalizedTrustBoundaryBenchmark = {
+        summary: {
+          suite_name: typeof trustSummaryRecord.suite_name === "string" ? trustSummaryRecord.suite_name : "trust_boundary_and_safety_receipts",
+          benchmark_posture: typeof trustSummaryRecord.benchmark_posture === "string" ? trustSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof trustSummaryRecord.operator_status === "string" ? trustSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof trustSummaryRecord.scenario_count === "number" ? trustSummaryRecord.scenario_count : 0,
+          dimension_count: typeof trustSummaryRecord.dimension_count === "number" ? trustSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof trustSummaryRecord.failure_mode_count === "number" ? trustSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof trustSummaryRecord.active_failure_count === "number" ? trustSummaryRecord.active_failure_count : 0,
+          secret_egress_state: typeof trustSummaryRecord.secret_egress_state === "string" ? trustSummaryRecord.secret_egress_state : "unknown",
+          delegation_partition_state: typeof trustSummaryRecord.delegation_partition_state === "string" ? trustSummaryRecord.delegation_partition_state : "unknown",
+          workflow_replay_state: typeof trustSummaryRecord.workflow_replay_state === "string" ? trustSummaryRecord.workflow_replay_state : "unknown",
+          operator_receipt_state: typeof trustSummaryRecord.operator_receipt_state === "string" ? trustSummaryRecord.operator_receipt_state : "unknown",
+        },
+        failure_report: Array.isArray(trustBenchmarkRecord.failure_report)
+          ? trustBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          secret_egress_policy: typeof trustPolicyRecord.secret_egress_policy === "string" ? trustPolicyRecord.secret_egress_policy : "unknown",
+          delegation_partition_policy: typeof trustPolicyRecord.delegation_partition_policy === "string" ? trustPolicyRecord.delegation_partition_policy : "unknown",
+          background_execution_policy: typeof trustPolicyRecord.background_execution_policy === "string" ? trustPolicyRecord.background_execution_policy : "unknown",
+          workflow_replay_policy: typeof trustPolicyRecord.workflow_replay_policy === "string" ? trustPolicyRecord.workflow_replay_policy : "unknown",
+          operator_visibility: typeof trustPolicyRecord.operator_visibility === "string" ? trustPolicyRecord.operator_visibility : "unknown",
+          receipt_surfaces: Array.isArray(trustPolicyRecord.receipt_surfaces)
+            ? trustPolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          ci_gate_mode: typeof trustPolicyRecord.ci_gate_mode === "string" ? trustPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
   return {
     summary: {
       suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
@@ -2390,6 +2475,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
         : "unknown",
       workflow_endurance_benchmark_posture: typeof summaryRecord.workflow_endurance_benchmark_posture === "string"
         ? summaryRecord.workflow_endurance_benchmark_posture
+        : "unknown",
+      trust_boundary_benchmark_posture: typeof summaryRecord.trust_boundary_benchmark_posture === "string"
+        ? summaryRecord.trust_boundary_benchmark_posture
         : "unknown",
     },
     suites: Array.isArray(record.suites)
@@ -2413,6 +2501,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
     memory_benchmark: normalizedMemoryBenchmark,
     user_model_benchmark: normalizedUserModelBenchmark,
     workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
+    trust_boundary_benchmark: normalizedTrustBoundaryBenchmark,
     governed_improvement: {
       target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
       target_types: Array.isArray(governedRecord.target_types)
@@ -12203,6 +12292,40 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                   operatorBenchmarkProof.workflow_endurance_benchmark.summary.branch_continuity_state.replace(/_/g, " "),
                                 ].join(" · ")}
                               </div>
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.trust_boundary_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Trust-boundary benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.trust_boundary_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.trust_boundary_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.secret_egress_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.delegation_partition_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.workflow_replay_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.operator_receipt_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.trust_boundary_benchmark.policy.secret_egress_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.policy.workflow_replay_policy.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.trust_boundary_benchmark.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.trust_boundary_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
                             </div>
                           </div>
                         ) : null}

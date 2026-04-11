@@ -161,11 +161,12 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 7
+    assert details["suite_count"] == 8
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["workflow_suite_present"] is True
+    assert details["trust_suite_present"] is True
     assert details["computer_suite_present"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
@@ -232,6 +233,38 @@ def test_workflow_endurance_benchmark_surface_behavior_runtime_eval_details():
     assert details["scenario_count_matches"] is True
     assert details["fidelity_state_visible"] is True
     assert details["backup_branch_policy_visible"] is True
+
+
+def test_trust_boundary_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_trust_boundary_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["secret_egress_state_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["ci_gate_mode_visible"] is True
+
+
+def test_run_benchmark_suites_executes_trust_boundary_and_safety_receipts_suite():
+    summary = asyncio.run(run_benchmark_suites(["trust_boundary_and_safety_receipts"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "secret_ref_egress_boundary_behavior",
+        "tool_policy_guardrails_behavior",
+        "delegation_secret_boundary_behavior",
+        "process_recovery_boundary_behavior",
+        "background_session_handoff_behavior",
+        "workflow_boundary_blocked_surface_behavior",
+        "source_mutation_boundary_behavior",
+    }
 
 
 def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
@@ -304,6 +337,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "agent_local_runtime_profile" in captured.out
     assert "delegation_local_runtime_profile" in captured.out
     assert "delegation_secret_boundary_behavior" in captured.out
+    assert "secret_ref_egress_boundary_behavior" in captured.out
     assert "delegated_tool_workflow_behavior" in captured.out
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
     assert "workflow_composition_behavior" in captured.out
@@ -325,6 +359,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "governed_self_evolution_behavior" in captured.out
     assert "benchmark_proof_surface_behavior" in captured.out
     assert "operator_workflow_endurance_benchmark_surface_behavior" in captured.out
+    assert "operator_trust_boundary_benchmark_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -375,6 +410,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
+    assert "trust_boundary_and_safety_receipts" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -383,6 +419,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_user_model_restraint",
         "memory_continuity_workflows",
         "workflow_endurance_and_repair",
+        "trust_boundary_and_safety_receipts",
         "computer_use_browser_desktop",
         "planning_retrieval_reporting",
         "governed_improvement",

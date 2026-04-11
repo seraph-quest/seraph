@@ -32,6 +32,7 @@ from src.guardian.benchmark import build_guardian_user_model_benchmark_report
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
+from src.security.benchmark import build_trust_boundary_benchmark_report
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
 from src.tools.process_tools import process_runtime_manager
@@ -2728,10 +2729,11 @@ async def get_operator_control_plane(
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
-    memory_benchmark, user_model_benchmark, workflow_endurance_benchmark = await asyncio.gather(
+    memory_benchmark, user_model_benchmark, workflow_endurance_benchmark, trust_boundary_benchmark = await asyncio.gather(
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
+        build_trust_boundary_benchmark_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -2763,11 +2765,13 @@ async def get_operator_benchmark_proof():
             "memory_benchmark_posture": memory_benchmark["summary"]["benchmark_posture"],
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
+            "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
+        "trust_boundary_benchmark": trust_boundary_benchmark,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -2785,6 +2789,11 @@ async def get_operator_memory_benchmark():
 @router.get("/operator/workflow-endurance-benchmark")
 async def get_operator_workflow_endurance_benchmark():
     return await build_workflow_endurance_benchmark_report()
+
+
+@router.get("/operator/trust-boundary-benchmark")
+async def get_operator_trust_boundary_benchmark():
+    return await build_trust_boundary_benchmark_report()
 
 
 @router.get("/operator/guardian-state")

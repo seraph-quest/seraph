@@ -2851,12 +2851,13 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
-          summary: { suite_count: 7, scenario_count: 40, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible" },
+          summary: { suite_count: 8, scenario_count: 45, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible", trust_boundary_benchmark_posture: "ci_gated_operator_visible" },
           suites: [],
           memory_benchmark: null,
           user_model_benchmark: null,
           workflow_endurance_benchmark: null,
-          governed_improvement: { target_count: 0, target_types: [], required_suite_count: 7, gate_policy: { min_review_ready_score: 0.7, min_strong_score: 0.9, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" } },
+          trust_boundary_benchmark: null,
+          governed_improvement: { target_count: 0, target_types: [], required_suite_count: 8, gate_policy: { min_review_ready_score: 0.7, min_strong_score: 0.9, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" } },
         }));
       }
       if (url.includes("/api/operator/workflow-orchestration")) {
@@ -5047,8 +5048,8 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 7,
-            scenario_count: 40,
+            suite_count: 8,
+            scenario_count: 45,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
@@ -5056,6 +5057,7 @@ describe("CockpitView", () => {
             memory_benchmark_posture: "ci_gated_operator_visible",
             user_model_benchmark_posture: "ci_gated_operator_visible",
             workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
+            trust_boundary_benchmark_posture: "ci_gated_operator_visible",
           },
           memory_benchmark: {
             summary: {
@@ -5129,6 +5131,43 @@ describe("CockpitView", () => {
               ci_gate_mode: "required_benchmark_suite",
             },
           },
+          trust_boundary_benchmark: {
+            summary: {
+              suite_name: "trust_boundary_and_safety_receipts",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "safety_receipts_visible",
+              scenario_count: 7,
+              dimension_count: 5,
+              failure_mode_count: 6,
+              active_failure_count: 1,
+              secret_egress_state: "field_scoped_egress_allowlist_required",
+              delegation_partition_state: "vault_and_background_partitioned",
+              workflow_replay_state: "boundary_drift_blocks_replay",
+              operator_receipt_state: "benchmark_and_runtime_visible",
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "secret ref egress regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              secret_egress_policy: "field_scoped_secret_refs_plus_required_credential_egress_allowlist",
+              delegation_partition_policy: "vault_operations_route_to_vault_keeper",
+              background_execution_policy: "session_partitioned_managed_process_recovery",
+              workflow_replay_policy: "trust_boundary_drift_blocks_replay_and_resume",
+              operator_visibility: "benchmark_proof_plus_runtime_receipts_visible",
+              receipt_surfaces: [
+                "/api/operator/benchmark-proof",
+                "/api/operator/trust-boundary-benchmark",
+                "/api/operator/workflow-orchestration",
+                "/api/operator/background-sessions",
+                "/api/activity/ledger",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
           suites: [
             {
               name: "guardian_memory_quality",
@@ -5171,6 +5210,16 @@ describe("CockpitView", () => {
               scenario_names: ["workflow_anticipatory_repair_behavior"],
             },
             {
+              name: "trust_boundary_and_safety_receipts",
+              label: "Trust boundaries and safety receipts",
+              description: "Trust-boundary and safety-receipt suite",
+              benchmark_axis: "trust_boundary_and_safety_receipts",
+              operator_summary: "Trust posture now has one explicit benchmark lane for secret egress, replay drift, delegation boundaries, and operator safety receipts.",
+              remaining_gap: "Broader live hostile-environment replay still remains.",
+              scenario_count: 7,
+              scenario_names: ["secret_ref_egress_boundary_behavior"],
+            },
+            {
               name: "computer_use_browser_desktop",
               label: "Computer-use, browser, and desktop execution",
               description: "Browser and desktop suite",
@@ -5204,7 +5253,7 @@ describe("CockpitView", () => {
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 7,
+            required_suite_count: 8,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
@@ -5215,6 +5264,7 @@ describe("CockpitView", () => {
                 "guardian_user_model_restraint",
                 "memory_continuity_workflows",
                 "workflow_endurance_and_repair",
+                "trust_boundary_and_safety_receipts",
                 "computer_use_browser_desktop",
                 "planning_retrieval_reporting",
                 "governed_improvement",
@@ -5335,16 +5385,21 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/7 suites · 40 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/8 suites · 45 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/checkpoint and pre repair visible · recovery paths and output history retained · backup branch operator selectable/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Workflow endurance, anticipatory repair, and backup branches/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Trust boundaries and safety receipts/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Planning, retrieval, and reporting/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Governed self-improvement/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();

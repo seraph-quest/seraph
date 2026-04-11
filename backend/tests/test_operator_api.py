@@ -647,13 +647,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 4
+    assert payload["summary"]["suite_count"] == 5
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated"
+    assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
+    assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+
+    guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
+    assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
+    assert guardian_memory_suite["scenario_count"] >= 8
 
     memory_suite = next(item for item in payload["suites"] if item["name"] == "memory_continuity_workflows")
     assert "workflow_operating_layer_behavior" in memory_suite["scenario_names"]
@@ -661,6 +667,24 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_runtime_audit" in computer_suite["scenario_names"]
+    assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
+    assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
+    assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_memory_benchmark_surface_reports_failure_taxonomy_and_policy(client):
+    resp = await client.get("/api/operator/memory-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "guardian_memory_quality"
+    assert payload["summary"]["operator_status"] == "memory_proof_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert len(payload["dimensions"]) >= 5
+    assert len(payload["failure_taxonomy"]) >= 5
+    assert payload["policy"]["retrieval_ranking_policy"] == "contradiction_aware_query_and_project_weighted"
+    assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
 
 
 @pytest.mark.asyncio

@@ -176,9 +176,35 @@ interface OperatorBenchmarkProofSuite {
   scenario_names: string[];
 }
 
+interface OperatorMemoryBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorMemoryBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    contradiction_state: string;
+    selective_forgetting_state: string;
+  };
+  failure_report: OperatorMemoryBenchmarkFailure[];
+  policy: {
+    retrieval_ranking_policy: string;
+    ci_gate_mode: string;
+  };
+}
+
 interface OperatorBenchmarkProof {
   summary: OperatorBenchmarkProofSummary;
   suites: OperatorBenchmarkProofSuite[];
+  memory_benchmark: OperatorMemoryBenchmark | null;
   governed_improvement: {
     target_count: number;
     target_types: string[];
@@ -2058,6 +2084,50 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
     return null;
   }
   const gatePolicyRecord = gatePolicy as Record<string, unknown>;
+  const memoryBenchmark = record.memory_benchmark;
+  let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
+  if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
+    const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
+    const memorySummary = memoryBenchmarkRecord.summary;
+    const memoryPolicy = memoryBenchmarkRecord.policy;
+    if (
+      memorySummary && typeof memorySummary === "object" && !Array.isArray(memorySummary)
+      && memoryPolicy && typeof memoryPolicy === "object" && !Array.isArray(memoryPolicy)
+    ) {
+      const memorySummaryRecord = memorySummary as Record<string, unknown>;
+      const memoryPolicyRecord = memoryPolicy as Record<string, unknown>;
+      normalizedMemoryBenchmark = {
+        summary: {
+          suite_name: typeof memorySummaryRecord.suite_name === "string" ? memorySummaryRecord.suite_name : "guardian_memory_quality",
+          benchmark_posture: typeof memorySummaryRecord.benchmark_posture === "string" ? memorySummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof memorySummaryRecord.operator_status === "string" ? memorySummaryRecord.operator_status : "unknown",
+          scenario_count: typeof memorySummaryRecord.scenario_count === "number" ? memorySummaryRecord.scenario_count : 0,
+          dimension_count: typeof memorySummaryRecord.dimension_count === "number" ? memorySummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof memorySummaryRecord.failure_mode_count === "number" ? memorySummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof memorySummaryRecord.active_failure_count === "number" ? memorySummaryRecord.active_failure_count : 0,
+          contradiction_state: typeof memorySummaryRecord.contradiction_state === "string" ? memorySummaryRecord.contradiction_state : "unknown",
+          selective_forgetting_state: typeof memorySummaryRecord.selective_forgetting_state === "string" ? memorySummaryRecord.selective_forgetting_state : "unknown",
+        },
+        failure_report: Array.isArray(memoryBenchmarkRecord.failure_report)
+          ? memoryBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          retrieval_ranking_policy: typeof memoryPolicyRecord.retrieval_ranking_policy === "string"
+            ? memoryPolicyRecord.retrieval_ranking_policy
+            : "unknown",
+          ci_gate_mode: typeof memoryPolicyRecord.ci_gate_mode === "string" ? memoryPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
   return {
     summary: {
       suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
@@ -2085,6 +2155,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
         }];
       })
       : [],
+    memory_benchmark: normalizedMemoryBenchmark,
     governed_improvement: {
       target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
       target_types: Array.isArray(governedRecord.target_types)
@@ -11631,7 +11702,33 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             operatorBenchmarkProof.governed_improvement.gate_policy.proof_contract.replace(/_/g, " "),
                           ].join(" · ")}
                         </div>
-                        {operatorBenchmarkProof.suites.slice(0, 4).map((suite) => (
+                        {operatorBenchmarkProof.memory_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Guardian memory benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.memory_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.memory_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.memory_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `contradiction ${operatorBenchmarkProof.memory_benchmark.summary.contradiction_state.replace(/_/g, " ")}`,
+                                  `forgetting ${operatorBenchmarkProof.memory_benchmark.summary.selective_forgetting_state.replace(/_/g, " ")}`,
+                                  operatorBenchmarkProof.memory_benchmark.policy.retrieval_ranking_policy.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.memory_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.suites.slice(0, 5).map((suite) => (
                           <div key={suite.name} className="cockpit-operator-row cockpit-operator-row--entry">
                             <div className="cockpit-operator-details">
                               <div className="cockpit-value">{suite.label}</div>

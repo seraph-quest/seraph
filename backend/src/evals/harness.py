@@ -4673,6 +4673,220 @@ async def _eval_memory_reconciliation_policy_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_memory_engineering_retrieval_benchmark_behavior() -> dict[str, Any]:
+    from src.memory.benchmark import build_guardian_memory_benchmark_report
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("memory-engineering-current")
+        await session_manager.add_message(
+            "memory-engineering-current",
+            "user",
+            "What unblocks issue 399 after PR 405 lands?",
+        )
+        await session_manager.add_message(
+            "memory-engineering-current",
+            "assistant",
+            "Let me recover the engineering memory bundle.",
+        )
+        await memory_repository.create_memory(
+            content="Atlas release remains the active engineering project.",
+            kind="project",
+            summary="Atlas release",
+            importance=0.95,
+            confidence=0.93,
+        )
+        await memory_repository.create_memory(
+            content="Issue #399 is the guardian-memory batch that follows PR #405.",
+            kind="commitment",
+            summary="Issue #399 follows PR #405",
+            importance=0.91,
+            confidence=0.88,
+        )
+        await memory_repository.create_memory(
+            content="Workflow repo-review is paused on a write_file approval receipt before the follow-up can continue.",
+            kind="timeline",
+            summary="repo-review paused on write_file approval",
+            importance=0.89,
+            confidence=0.9,
+        )
+        await memory_repository.create_memory(
+            content="Artifact handoff bundle tracks the repo-review output and release evidence for PR #405.",
+            kind="procedural",
+            summary="Artifact handoff bundle for PR #405",
+            importance=0.82,
+            confidence=0.86,
+        )
+
+        ctx = _make_context(
+            active_goals_summary="Advance the guardian-memory batch after the release lands",
+            active_project="Atlas",
+            active_window="VS Code",
+            screen_context="Reviewing issue 399 follow-up notes after PR 405",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="low",
+        )
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(
+                    return_value=MagicMock(
+                        effective_signal=GuardianLearningSignal.neutral("advisory"),
+                        dominant_scope="global",
+                        decisions=tuple(),
+                    )
+                ),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+                AsyncMock(return_value=""),
+            ),
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            state = await build_guardian_state(
+                session_id="memory-engineering-current",
+                user_message="What unblocks issue 399 after PR 405 lands?",
+            )
+            report = await build_guardian_memory_benchmark_report()
+
+    return {
+        "engineering_memory_has_issue_reference": "Issue #399" in state.memory_context,
+        "engineering_memory_has_pr_reference": "PR #405" in state.memory_context,
+        "engineering_memory_has_approval_reference": "write_file approval" in state.memory_context,
+        "engineering_memory_has_artifact_reference": "Artifact handoff bundle" in state.memory_context,
+        "benchmark_suite_named": report["summary"]["suite_name"] == "guardian_memory_quality",
+        "benchmark_dimensions_visible": len(report["dimensions"]) >= 5,
+    }
+
+
+async def _eval_memory_contradiction_ranking_behavior() -> dict[str, Any]:
+    from src.memory.hybrid_retrieval import retrieve_hybrid_memory
+
+    async with _patched_async_db():
+        await memory_repository.create_memory(
+            content="Atlas release is on track.",
+            kind="project",
+            summary="Atlas release on track",
+            importance=0.94,
+            confidence=0.92,
+        )
+
+        with patch(
+            "src.memory.hybrid_retrieval.search_with_status",
+            return_value=(
+                [
+                    {
+                        "id": "",
+                        "text": "Atlas release is delayed.",
+                        "category": "project",
+                        "score": 0.39,
+                        "created_at": "2026-04-08T10:00:00+00:00",
+                    }
+                ],
+                False,
+            ),
+        ):
+            hybrid = await retrieve_hybrid_memory(
+                query="Atlas release status",
+                active_projects=("Atlas",),
+                limit=6,
+            )
+
+    diagnostics = hybrid.diagnostics[0]
+    suppressed_example = diagnostics["suppressed_examples"][0]
+    return {
+        "keeps_current_truth": "Atlas release on track" in hybrid.context,
+        "suppresses_lower_ranked_contradiction": "Atlas release is delayed." not in hybrid.context,
+        "suppressed_contradiction_count": diagnostics["suppressed_contradiction_count"] == 1,
+        "ranking_policy_visible": diagnostics["ranking_policy"] == "contradiction_aware_active_only",
+        "suppressed_example_reports_winner": suppressed_example["winner_text"] == "Atlas release on track",
+    }
+
+
+async def _eval_memory_selective_forgetting_surface_behavior() -> dict[str, Any]:
+    from src.db.models import MemoryEdgeType
+    from src.memory.benchmark import build_guardian_memory_benchmark_report
+
+    async with _patched_async_db("src.memory.decay.get_session"):
+        current = await memory_repository.create_memory(
+            content="Atlas launch is on track.",
+            kind="project",
+            summary="Atlas launch on track",
+            importance=0.93,
+            confidence=0.91,
+        )
+        superseded = await memory_repository.create_memory(
+            content="Atlas launch is delayed.",
+            kind="project",
+            summary="Atlas launch delayed",
+            importance=0.7,
+            confidence=0.62,
+            status="superseded",
+            metadata={
+                "superseded_reason": "contradiction",
+                "superseded_by_memory_id": current.memory_id,
+            },
+        )
+        await memory_repository.create_memory(
+            content="User prefers redundant weekly recap messages.",
+            kind="communication_preference",
+            summary="Weekly recap preference",
+            importance=0.2,
+            confidence=0.2,
+            reinforcement=0.1,
+            status="archived",
+            metadata={"archived_reason": "stale_decay_archive"},
+        )
+        await memory_repository.create_edge(
+            from_memory_id=current.memory_id,
+            to_memory_id=superseded.memory_id,
+            edge_type=MemoryEdgeType.contradicts,
+        )
+        report = await build_guardian_memory_benchmark_report()
+
+    failure_types = {item["type"] for item in report["failure_report"]}
+    return {
+        "selective_forgetting_state_active": report["summary"]["selective_forgetting_state"] == "active",
+        "policy_declares_lower_ranked_contradiction": "lower_ranked_contradiction" in report["policy"]["suppression_reasons"],
+        "policy_declares_stale_provider_suppression": "stale_provider_evidence" in report["policy"]["suppression_reasons"],
+        "failure_report_has_conflict": "contradiction_reconciled" in failure_types,
+        "failure_report_has_archive": "selective_forgetting_archive" in failure_types,
+    }
+
+
+async def _eval_operator_memory_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_memory_benchmark
+
+    payload = await get_operator_memory_benchmark()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == "guardian_memory_quality",
+        "operator_status_visible": payload["summary"]["operator_status"] == "memory_proof_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(payload["scenario_names"]),
+        "failure_taxonomy_visible": len(payload["failure_taxonomy"]) >= 5,
+        "ci_gate_mode_visible": payload["policy"]["ci_gate_mode"] == "required_benchmark_suite",
+    }
+
+
 async def _eval_procedural_memory_adaptation_behavior() -> dict[str, Any]:
     from src.db.models import MemoryKind
     from src.guardian.feedback import guardian_feedback_repository
@@ -8818,12 +9032,14 @@ async def _eval_governed_self_evolution_behavior() -> dict[str, Any]:
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
+    guardian_memory_suite = next(item for item in suites if item["name"] == "guardian_memory_quality")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
     return {
         "suite_count": len(suites),
+        "guardian_memory_suite_present": "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "computer_suite_present": "browser_runtime_audit" in computer_suite["scenario_names"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
@@ -10481,6 +10697,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Session consolidation stores long-term memories and soul updates from the modeled guardian conversation summary.",
         runner=_eval_session_consolidation_behavior,
+    ),
+    EvalScenario(
+        name="memory_engineering_retrieval_benchmark_behavior",
+        category="behavior",
+        description="Guardian memory benchmark covers reasoning-heavy engineering continuity recall instead of only shallow snippet retrieval.",
+        runner=_eval_memory_engineering_retrieval_benchmark_behavior,
+    ),
+    EvalScenario(
+        name="memory_contradiction_ranking_behavior",
+        category="behavior",
+        description="Contradictory lower-ranked memory is suppressed so guardian retrieval surfaces the current engineering truth.",
+        runner=_eval_memory_contradiction_ranking_behavior,
+    ),
+    EvalScenario(
+        name="memory_selective_forgetting_surface_behavior",
+        category="behavior",
+        description="Selective forgetting and suppression policy are benchmark-visible instead of implicit background decay behavior.",
+        runner=_eval_memory_selective_forgetting_surface_behavior,
+    ),
+    EvalScenario(
+        name="operator_memory_benchmark_surface_behavior",
+        category="behavior",
+        description="Operator surfaces expose the guardian memory benchmark, failure taxonomy, and CI-gated policy contract.",
+        runner=_eval_operator_memory_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="memory_commitment_continuity_behavior",

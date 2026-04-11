@@ -30,6 +30,7 @@ from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
+from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
 from src.tools.process_tools import process_runtime_manager
@@ -2320,6 +2321,9 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
                 getattr(world_model, "preference_inference_diagnostics", ()) or ()
             ),
             "learning_diagnostics": list(getattr(state, "learning_diagnostics", ()) or ()),
+            "memory_benchmark_diagnostics": list(
+                getattr(state, "memory_benchmark_diagnostics", ()) or ()
+            ),
             "memory_provider_diagnostics": list(
                 getattr(state, "memory_provider_diagnostics", ()) or ()
             ),
@@ -2444,6 +2448,7 @@ async def get_operator_control_plane(
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
+    memory_benchmark = await build_guardian_memory_benchmark_report()
     evolution_targets = list_evolution_targets()
     required_suite_names = {
         str(name)
@@ -2471,8 +2476,10 @@ async def get_operator_benchmark_proof():
             "operator_status": "operator_visible",
             "remaining_gap": "live_provider_and_real_computer_use_depth",
             "governed_improvement_status": "review_gated",
+            "memory_benchmark_posture": memory_benchmark["summary"]["benchmark_posture"],
         },
         "suites": suites,
+        "memory_benchmark": memory_benchmark,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -2480,6 +2487,11 @@ async def get_operator_benchmark_proof():
             "required_suite_count": len(required_suite_names),
         },
     }
+
+
+@router.get("/operator/memory-benchmark")
+async def get_operator_memory_benchmark():
+    return await build_guardian_memory_benchmark_report()
 
 
 @router.get("/operator/guardian-state")

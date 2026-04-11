@@ -161,7 +161,8 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 4
+    assert details["suite_count"] == 5
+    assert details["guardian_memory_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["computer_suite_present"] is True
     assert details["planning_suite_present"] is True
@@ -182,6 +183,24 @@ def test_run_benchmark_suites_executes_unique_suite_scenarios():
         "governed_self_evolution_behavior",
         "capability_repair_behavior",
         "capability_preflight_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_memory_quality"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "memory_engineering_retrieval_benchmark_behavior",
+        "memory_contradiction_ranking_behavior",
+        "memory_selective_forgetting_surface_behavior",
+        "operator_memory_benchmark_surface_behavior",
+        "memory_provider_user_model_behavior",
+        "memory_provider_stale_evidence_behavior",
+        "memory_provider_writeback_behavior",
+        "memory_reconciliation_policy_behavior",
     }
 
 
@@ -273,6 +292,10 @@ def test_main_lists_available_scenarios(capsys):
     assert "provider_policy_scoring" in captured.out
     assert "provider_policy_safeguards" in captured.out
     assert "provider_routing_decision_audit" in captured.out
+    assert "memory_engineering_retrieval_benchmark_behavior" in captured.out
+    assert "memory_contradiction_ranking_behavior" in captured.out
+    assert "memory_selective_forgetting_surface_behavior" in captured.out
+    assert "operator_memory_benchmark_surface_behavior" in captured.out
     assert "session_bound_llm_trace" in captured.out
     assert "session_consolidation_behavior" in captured.out
     assert "memory_commitment_continuity_behavior" in captured.out
@@ -297,11 +320,13 @@ def test_main_lists_available_benchmark_suites(capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 0
+    assert "guardian_memory_quality" in captured.out
     assert "memory_continuity_workflows" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert available_benchmark_suites() == (
+        "guardian_memory_quality",
         "memory_continuity_workflows",
         "computer_use_browser_desktop",
         "planning_retrieval_reporting",
@@ -1387,6 +1412,27 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["session_consolidation_behavior"]["updated_soul_section"] == "Goals"
     assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_workspace"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_issue_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_pr_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_approval_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_artifact_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["benchmark_suite_named"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["benchmark_dimensions_visible"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["keeps_current_truth"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["suppresses_lower_ranked_contradiction"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["suppressed_contradiction_count"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["ranking_policy_visible"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["suppressed_example_reports_winner"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["selective_forgetting_state_active"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["policy_declares_lower_ranked_contradiction"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["policy_declares_stale_provider_suppression"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["failure_report_has_conflict"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["failure_report_has_archive"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["suite_name_visible"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["operator_status_visible"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["scenario_count_matches"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["failure_taxonomy_visible"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["ci_gate_mode_visible"] is True
     assert details_by_name["memory_commitment_continuity_behavior"]["baseline_bucket_excludes_linked_commitment"] is True
     assert details_by_name["memory_commitment_continuity_behavior"]["baseline_context_excludes_linked_commitment"] is True
     assert details_by_name["memory_commitment_continuity_behavior"]["linked_project_present"] is True

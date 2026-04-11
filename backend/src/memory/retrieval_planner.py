@@ -30,6 +30,7 @@ class MemoryRetrievalPlanResult:
     degraded: bool
     lane: str
     provider_diagnostics: tuple[dict[str, object], ...] = ()
+    retrieval_diagnostics: tuple[dict[str, object], ...] = ()
 
 
 def _normalize_topic(value: str | None) -> str:
@@ -290,6 +291,7 @@ async def plan_memory_retrieval(
             degraded=False,
             lane="structured_plus_provider_model" if _provider_uses_user_model(provider_retrieval.diagnostics) else "structured_only",
             provider_diagnostics=provider_retrieval.diagnostics,
+            retrieval_diagnostics=(),
         )
 
     hybrid = await retrieve_hybrid_memory(
@@ -318,4 +320,5 @@ async def plan_memory_retrieval(
         degraded=hybrid.degraded or provider_retrieval.degraded,
         lane=lane,
         provider_diagnostics=provider_retrieval.diagnostics,
+        retrieval_diagnostics=hybrid.diagnostics,
     )

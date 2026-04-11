@@ -39,6 +39,7 @@ class GuardianState:
     learning_guidance: str = ""
     learning_diagnostics: tuple[str, ...] = ()
     bounded_memory_context: str = ""
+    memory_benchmark_diagnostics: tuple[str, ...] = ()
     memory_provider_diagnostics: tuple[str, ...] = ()
     memory_reconciliation_diagnostics: tuple[str, ...] = ()
     intent_uncertainty_level: str = "clear"
@@ -92,6 +93,11 @@ class GuardianState:
             lines.append("")
             lines.append("Learning diagnostics:")
             lines.extend(f"- {item}" for item in self.learning_diagnostics)
+
+        if self.memory_benchmark_diagnostics:
+            lines.append("")
+            lines.append("Memory benchmark diagnostics:")
+            lines.extend(f"- {item}" for item in self.memory_benchmark_diagnostics)
 
         if self.memory_provider_diagnostics:
             lines.append("")
@@ -478,6 +484,44 @@ def _memory_provider_diagnostic_lines(
     return tuple(lines)
 
 
+def _memory_benchmark_diagnostic_lines(
+    diagnostics: tuple[dict[str, object], ...],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        ranking_policy = str(item.get("ranking_policy") or "").strip()
+        suppressed_contradictions = int(item.get("suppressed_contradiction_count") or 0)
+        status_filter = str(item.get("status_filter") or "").strip()
+        suppression_reasons = [
+            str(reason)
+            for reason in item.get("suppression_reasons", [])
+            if isinstance(reason, str) and reason.strip()
+        ]
+        line = (
+            f"ranking={ranking_policy or 'unknown'}, "
+            f"contradictions_suppressed={suppressed_contradictions}, "
+            f"{f'status_filter={status_filter}, ' if status_filter else ''}"
+            f"reasons={', '.join(suppression_reasons) if suppression_reasons else 'none'}"
+        )
+        example = next(
+            (
+                candidate
+                for candidate in item.get("suppressed_examples", [])
+                if isinstance(candidate, dict)
+            ),
+            None,
+        )
+        if example:
+            line += (
+                f", example={str(example.get('suppressed_text') or '').strip()} -> "
+                f"{str(example.get('winner_text') or '').strip()}"
+            )
+        lines.append(line)
+    return tuple(lines)
+
+
 def _memory_reconciliation_diagnostic_lines(summary: dict[str, object]) -> tuple[str, ...]:
     if not isinstance(summary, dict):
         return ()
@@ -804,6 +848,7 @@ async def build_guardian_state(
     memory_context = retrieval.semantic_context
     episodic_memory_context = retrieval.episodic_context
     memory_buckets = retrieval.memory_buckets
+    memory_benchmark_diagnostics = _memory_benchmark_diagnostic_lines(retrieval.retrieval_diagnostics)
     memory_provider_diagnostics = _memory_provider_diagnostic_lines(retrieval.provider_diagnostics)
     try:
         memory_reconciliation_summary = await summarize_memory_reconciliation_state()
@@ -917,6 +962,7 @@ async def build_guardian_state(
             arbitration=learning_arbitration,
             active_project=observer_context.active_project,
         ),
+        memory_benchmark_diagnostics=memory_benchmark_diagnostics,
         memory_provider_diagnostics=memory_provider_diagnostics,
         memory_reconciliation_diagnostics=memory_reconciliation_diagnostics,
         intent_uncertainty_level=intent_uncertainty_level,

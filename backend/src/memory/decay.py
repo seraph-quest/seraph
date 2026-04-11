@@ -112,6 +112,14 @@ def memory_reconciliation_policy_payload() -> dict[str, object]:
         "reconciliation_policy": "canonical_first",
         "conflict_resolution": "supersede_lower_priority_contradictions",
         "forgetting_policy": "selective_decay_then_archive",
+        "retrieval_ranking_policy": "contradiction_aware_active_only",
+        "suppression_reasons": [
+            "superseded_status",
+            "archived_status",
+            "lower_ranked_contradiction",
+            "stale_provider_evidence",
+            "irrelevant_provider_evidence",
+        ],
         "stale_windows_days": {
             kind.value if hasattr(kind, "value") else str(kind): days
             for kind, days in _STALE_WINDOWS_DAYS.items()
@@ -125,6 +133,7 @@ def memory_reconciliation_policy_payload() -> dict[str, object]:
             "Canonical guardian memory remains authoritative when contradictory memories compete.",
             "Lower-priority contradictory memories are superseded instead of silently coexisting as current truth.",
             "Stale memories decay progressively and archive only after confidence or reinforcement falls below the terminal threshold.",
+            "Active retrieval suppresses archived, superseded, stale, and lower-ranked contradictory evidence before it reaches guardian recall.",
         ],
     }
 

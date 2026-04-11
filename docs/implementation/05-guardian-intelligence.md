@@ -39,6 +39,7 @@
 - [x] guardian state now also exposes explicit intent-uncertainty diagnostics with `clarify`, `proceed_with_caution`, or `defer_or_clarify` recommendations when ambiguous referents, split project anchors, split preference evidence, or degraded observer confidence make a confident intervention unsafe
 - [x] guardian state now also emits explicit judgment-proof lines for split project evidence, split interaction-style evidence, ambiguous referents, and degraded observer grounding so the canonical guardian prompt carries compact proof of why a judgment is conservative
 - [x] the operator guardian-state surface now exposes that same confidence, intent-resolution, judgment-proof, judgment-risk, and next-step contract directly in the cockpit instead of leaving operators on raw observer fields while the canonical guardian state stays internal
+- [x] guardian memory now also ships a named `guardian_memory_quality` benchmark suite with reasoning-heavy engineering-memory retrieval checks, contradiction-aware recall ranking, explicit selective-forgetting diagnostics, operator-visible memory benchmark and failure-report surfaces, and CI-gated regression proof instead of leaving memory quality implied by flat runtime scenario lists
 - [x] governed self-evolution can now turn explicit objectives and trace observations into eval-scored review candidates for declarative capability assets while keeping the resulting changes bounded, reviewable, and outside live guardian self-modification, with explicit change-summary and review-risk receipts carried into the saved proposal and PR draft
 
 ## Working On Now
@@ -54,7 +55,7 @@
 - [ ] stronger learning loops based on intervention outcomes beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, first global-thread-project live-signal resolution pass, first live-versus-durable arbitration pass, the new live-versus-procedural conflict diagnostics, the new negative-trend-plus-execution-and-anchor ambiguity guardrail, the new multi-day and scheduled-outcome watchpoint pass, the new cross-thread commitment carryover pass, and the first multi-project arbitration pass
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
-- [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale/usefulness-ranked provider diagnostics, guarded post-canonical writeback, and inventory/governance layer, especially broader ecosystem coverage, richer provider-specific quality tuning, and stronger long-horizon usefulness diagnostics
+- [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale/usefulness-ranked provider diagnostics, guarded post-canonical writeback, inventory/governance layer, and the new guardian-memory benchmark plus contradiction-aware selective-forgetting proof, especially broader ecosystem coverage, richer provider-specific quality tuning, and stronger long-horizon usefulness diagnostics
 
 ## Memory Upgrade Program Record
 

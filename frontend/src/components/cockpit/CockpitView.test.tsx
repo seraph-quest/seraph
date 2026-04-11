@@ -4853,12 +4853,14 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 5,
-            scenario_count: 32,
+            suite_count: 6,
+            scenario_count: 36,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
             governed_improvement_status: "review_gated",
+            memory_benchmark_posture: "ci_gated_operator_visible",
+            user_model_benchmark_posture: "ci_gated_operator_visible",
           },
           memory_benchmark: {
             summary: {
@@ -4889,6 +4891,27 @@ describe("CockpitView", () => {
               ci_gate_mode: "required_benchmark_suite",
             },
           },
+          user_model_benchmark: {
+            summary: {
+              suite_name: "guardian_user_model_restraint",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "guardian_state_visible",
+              scenario_count: 4,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 0,
+              clarification_policy_state: "required_on_high_ambiguity",
+              restraint_policy_state: "clarify_or_wait_before_unverified_personalization",
+            },
+            failure_report: [],
+            policy: {
+              canonical_authority: "guardian_world_model",
+              clarify_before_action_policy: "required_on_high_ambiguity",
+              personalization_override_policy: "forbidden_without_canonical_receipt",
+              operator_visibility: "facet_evidence_watchpoints_and_restraint_receipts",
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
           suites: [
             {
               name: "guardian_memory_quality",
@@ -4899,6 +4922,16 @@ describe("CockpitView", () => {
               remaining_gap: "Broader live-provider and computer-use proof still remains.",
               scenario_count: 8,
               scenario_names: ["memory_contradiction_ranking_behavior"],
+            },
+            {
+              name: "guardian_user_model_restraint",
+              label: "Guardian user-model and restraint benchmark",
+              description: "Clarification and restraint benchmark",
+              benchmark_axis: "guardian_judgment_and_restraint",
+              operator_summary: "User modeling now tightens clarification and restraint behavior through explicit receipts.",
+              remaining_gap: "Longer-horizon live replay remains.",
+              scenario_count: 4,
+              scenario_names: ["guardian_clarification_restraint_behavior"],
             },
             {
               name: "memory_continuity_workflows",
@@ -4920,17 +4953,44 @@ describe("CockpitView", () => {
               scenario_count: 6,
               scenario_names: ["browser_runtime_audit"],
             },
+            {
+              name: "planning_retrieval_reporting",
+              label: "Planning, retrieval, and reporting",
+              description: "Planning and reporting suite",
+              benchmark_axis: "planning_and_reporting",
+              operator_summary: "Planning and report publication paths stay explicit and reviewable.",
+              remaining_gap: "Broader live integration proof still remains.",
+              scenario_count: 4,
+              scenario_names: ["source_report_action_workflow_behavior"],
+            },
+            {
+              name: "governed_improvement",
+              label: "Governed self-improvement",
+              description: "Governed self-improvement suite",
+              benchmark_axis: "governed_improvement",
+              operator_summary: "Self-improvement stays review-gated and benchmark-scored.",
+              remaining_gap: "Broader candidate classes still remain.",
+              scenario_count: 3,
+              scenario_names: ["governed_self_evolution_behavior"],
+            },
           ],
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 5,
+            required_suite_count: 6,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
               requires_human_review: true,
               blocks_on_constraint_failure: true,
-              required_benchmark_suites: ["guardian_memory_quality", "memory_continuity_workflows", "computer_use_browser_desktop"],
+              required_benchmark_suites: [
+                "guardian_memory_quality",
+                "guardian_user_model_restraint",
+                "memory_continuity_workflows",
+                "computer_use_browser_desktop",
+                "planning_retrieval_reporting",
+                "governed_improvement",
+              ],
               proof_contract: "deterministic_benchmark_suites_plus_review_receipts",
             },
           },
@@ -4947,6 +5007,7 @@ describe("CockpitView", () => {
             recent_sessions_confidence: "partial",
             intent_uncertainty_level: "high",
             intent_resolution: "clarify_first",
+            action_posture: "clarify_first",
             current_focus: "Atlas release planning",
             focus_source: "observer_goal_window",
             focus_alignment: "aligned",
@@ -4964,8 +5025,28 @@ describe("CockpitView", () => {
             corroboration_sources: ["observer", "memory"],
             preference_inference_diagnostics: [],
             learning_diagnostics: ["Fresh live outcomes are overruling older procedural guidance."],
+            restraint_reasons: ["Intent remains weakly grounded, so clarification is safer than taking a confident action."],
+            user_model_benchmark_diagnostics: ["User-model benchmark state: confidence=grounded, restraint_posture=clarify_before_personalizing, action_posture=clarify_first."],
             memory_provider_diagnostics: [],
             memory_reconciliation_diagnostics: [],
+          },
+          user_model: {
+            confidence: "grounded",
+            restraint_posture: "clarify_before_personalizing",
+            continuity_strategy: "prefer_existing_thread",
+            clarification_watchpoints: ["Clarify interaction style when live and procedural preference evidence disagree."],
+            restraint_reasons: ["Preference evidence is split, so Seraph should explain uncertainty first."],
+            evidence_store: ["Prefers concise updates during Atlas launch work."],
+            facets: [
+              {
+                key: "communication_style",
+                label: "Communication preference",
+                value: "brief literal",
+                confidence: "grounded",
+                evidence_sources: ["preference_memory", "live_learning"],
+                evidence_lines: ["Prefers concise updates during Atlas launch work."],
+              },
+            ],
           },
           operator_guidance: {
             active_projects: ["Atlas"],
@@ -5014,18 +5095,27 @@ describe("CockpitView", () => {
     const operatorWindow = operatorTitle.closest(".cockpit-window") as HTMLElement;
 
     expect(within(guardianWindow).getByText("overall confidence")).toBeInTheDocument();
-    await within(guardianWindow).findByText("clarify first");
+    expect(within(guardianWindow).getAllByText("clarify first").length).toBeGreaterThan(0);
     await within(guardianWindow).findByText("Atlas release planning");
     await within(guardianWindow).findByText("Prefer clarification before interrupting.");
     expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
     expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/clarify before personalizing/)).toBeInTheDocument();
+    expect(
+      within(guardianWindow).getAllByText(/Prefers concise updates during Atlas launch work\./).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/5 suites · 32 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/6 suites · 36 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Planning, retrieval, and reporting/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Governed self-improvement/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();
   });
 

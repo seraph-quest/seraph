@@ -5785,6 +5785,197 @@ async def _eval_guardian_judgment_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_guardian_user_model_continuity_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import GuardianLearningSignal
+    from src.guardian.world_model import build_guardian_world_model
+
+    model = build_guardian_world_model(
+        observer_context=_make_context(
+            active_goals_summary="Protect Atlas focus time",
+            active_project="Atlas",
+            active_window="Calendar",
+            screen_context="Heads-down Atlas launch work",
+            data_quality="good",
+            observer_confidence="grounded",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="high",
+            user_state="deep_work",
+        ),
+        memory_context="",
+        current_session_history="",
+        recent_sessions_summary="- Atlas launch thread: prior follow-up stayed in the same thread.",
+        recent_intervention_feedback="",
+        active_projects=("Atlas",),
+        memory_buckets={
+            "preference": ("Prefers concise updates during Atlas launch work.",),
+            "procedural": (
+                "For advisory interventions, avoid direct interruption during deep-work windows.",
+                "For advisory interventions, prefer async native continuation when the user is blocked.",
+                "For advisory interventions, bundle lower-urgency check-ins instead of interrupting immediately.",
+                "For advisory interventions, prefer the existing thread for follow-up.",
+            ),
+        },
+        learning_signal=GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=0,
+            not_helpful_count=2,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="reduce_interruptions",
+            phrasing_bias="be_brief_and_literal",
+            cadence_bias="bundle_more",
+            channel_bias="prefer_native_notification",
+            escalation_bias="prefer_async_native",
+            timing_bias="avoid_focus_windows",
+            blocked_state_bias="prefer_async_for_blocked_state",
+            suppression_bias="extend_suppression",
+            thread_preference_bias="prefer_existing_thread",
+            blocked_direct_failure_count=2,
+            blocked_native_success_count=1,
+            available_direct_success_count=0,
+        ),
+    )
+    profile = model.user_model_profile
+    assert profile is not None
+    return {
+        "confidence": profile.confidence,
+        "facet_count": len(profile.facets),
+        "evidence_store_count": len(profile.evidence_store),
+        "restraint_posture": profile.restraint_posture,
+        "continuity_strategy": profile.continuity_strategy,
+        "has_clarification_watchpoint": len(profile.clarification_watchpoints) >= 1,
+        "has_existing_thread_facet": any(
+            facet.key == "thread_strategy" and "existing" in facet.value
+            for facet in profile.facets
+        ),
+        "has_brief_literal_facet": any(
+            facet.key == "communication_style" and "brief" in facet.value
+            for facet in profile.facets
+        ),
+        "prompt_includes_user_model_profile": "User-model evidence store:" in model.to_prompt_block(),
+    }
+
+
+async def _eval_guardian_clarification_restraint_behavior() -> dict[str, Any]:
+    from src.guardian.feedback import GuardianLearningSignal
+    from src.memory.procedural_guidance import ProceduralMemoryGuidance
+    from src.memory.retrieval_planner import MemoryRetrievalPlanResult
+
+    async with _patched_async_db(
+        "src.agent.session.get_session",
+        "src.guardian.feedback.get_session",
+    ):
+        await session_manager.get_or_create("current")
+        await session_manager.add_message("current", "user", "Can you finish this today?")
+        await session_manager.add_message("current", "assistant", "Let me reconcile the active project signals first.")
+
+        ctx = _make_context(
+            active_goals_summary="Support Atlas launch",
+            active_project="Atlas",
+            active_window="VS Code",
+            screen_context="Reviewing Atlas release notes",
+            data_quality="good",
+            observer_confidence="partial",
+            salience_level="high",
+            salience_reason="active_goals",
+            interruption_cost="medium",
+            interruption_mode="focus",
+        )
+        split_preference_signal = GuardianLearningSignal(
+            intervention_type="advisory",
+            helpful_count=2,
+            not_helpful_count=0,
+            acknowledged_count=0,
+            failed_count=0,
+            bias="prefer_direct_delivery",
+            phrasing_bias="be_more_direct",
+            cadence_bias="check_in_sooner",
+            channel_bias="neutral",
+            escalation_bias="neutral",
+            timing_bias="prefer_available_windows",
+            blocked_state_bias="neutral",
+            suppression_bias="resume_faster",
+            thread_preference_bias="neutral",
+            blocked_direct_failure_count=0,
+            blocked_native_success_count=0,
+            available_direct_success_count=2,
+        )
+        split_preference_resolution = MagicMock(
+            effective_signal=split_preference_signal,
+            dominant_scope="thread_project",
+            decisions=tuple(),
+        )
+        split_preference_retrieval = MemoryRetrievalPlanResult(
+            semantic_context="",
+            episodic_context="",
+            memory_buckets={
+                "procedural": (
+                    "For advisory interventions, avoid direct interruption during deep-work windows.",
+                ),
+            },
+            degraded=False,
+            lane="semantic",
+        )
+        split_preference_arbitration = MagicMock(
+            effective_signal=split_preference_signal,
+            decisions=tuple(),
+        )
+        split_preference_arbitration.conflicting_decisions.return_value = []
+        split_preference_arbitration.procedural_override_conflicts.return_value = []
+        split_preference_arbitration.live_override_conflicts.return_value = []
+
+        with (
+            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+            patch(
+                "src.profile.service.sync_soul_file_to_profile",
+                AsyncMock(return_value={"Identity": "Builder"}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.plan_memory_retrieval",
+                AsyncMock(return_value=split_preference_retrieval),
+            ),
+            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+            patch(
+                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+                return_value=["Atlas", "Hermes migration"],
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+                AsyncMock(return_value=split_preference_resolution),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+                AsyncMock(return_value=""),
+            ),
+            patch(
+                "src.memory.procedural_guidance.load_procedural_memory_guidance",
+                AsyncMock(return_value=ProceduralMemoryGuidance(intervention_type="advisory")),
+            ),
+            patch(
+                "src.guardian.learning_arbitration.arbitrate_learning_signal",
+                return_value=split_preference_arbitration,
+            ),
+        ):
+            state = await build_guardian_state(
+                session_id="current",
+                user_message="Can you finish this today?",
+            )
+
+    return {
+        "intent_uncertainty_level": state.intent_uncertainty_level,
+        "intent_resolution": state.intent_resolution,
+        "action_posture": state.action_posture,
+        "restraint_reason_count": len(state.restraint_reasons),
+        "user_model_benchmark_diagnostic_count": len(state.user_model_benchmark_diagnostics),
+        "has_benchmark_state_line": any(
+            "User-model benchmark state:" in item for item in state.user_model_benchmark_diagnostics
+        ),
+        "prompt_includes_restraint_reasons": "Restraint reasons:" in state.to_prompt_block(),
+        "prompt_includes_user_model_benchmark": "User-model benchmark diagnostics:" in state.to_prompt_block(),
+    }
+
+
 async def _eval_guardian_long_horizon_learning_behavior() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
     from src.observer.intervention_policy import decide_intervention
@@ -8134,6 +8325,7 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
     )
     guardian_state.intent_uncertainty_level = "high"
     guardian_state.intent_resolution = "clarify_first"
+    guardian_state.action_posture = "clarify_first"
     guardian_state.judgment_proof_lines = (
         "Project-target proof: Atlas remains the strongest active project anchor.",
         "Referent proof: the user message contains an unresolved referent.",
@@ -8150,6 +8342,12 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
     guardian_state.memory_reconciliation_diagnostics = (
         "Conflict policy: archive superseded project hints after reconciliation.",
     )
+    guardian_state.restraint_reasons = (
+        "Intent remains weakly grounded, so clarification is safer than taking a confident action.",
+    )
+    guardian_state.user_model_benchmark_diagnostics = (
+        "User-model benchmark state: confidence=grounded, restraint_posture=clarify_before_personalizing, action_posture=clarify_first.",
+    )
     guardian_state.learning_guidance = "Prefer clarification before interrupting."
     guardian_state.recent_execution_summary = "- Atlas deploy failed recently"
     guardian_state.world_model = types.SimpleNamespace(
@@ -8159,6 +8357,24 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
         intervention_receptivity="guarded",
         dominant_thread="Atlas launch thread",
         user_model_confidence="grounded",
+        user_model_profile=types.SimpleNamespace(
+            confidence="grounded",
+            restraint_posture="clarify_before_personalizing",
+            continuity_strategy="prefer_existing_thread",
+            clarification_watchpoints=("Clarify interaction style when live and procedural preference evidence disagree.",),
+            restraint_reasons=("Preference evidence is split, so Seraph should explain uncertainty first.",),
+            evidence_store=("Prefers concise updates during Atlas launch work.",),
+            facets=(
+                types.SimpleNamespace(
+                    key="communication_style",
+                    label="Communication preference",
+                    value="brief literal",
+                    confidence="grounded",
+                    evidence_sources=("preference_memory", "live_learning"),
+                    evidence_lines=("Prefers concise updates during Atlas launch work.",),
+                ),
+            ),
+        ),
         judgment_risks=("Competing project anchors still require conservative judgment.",),
         corroboration_sources=("observer", "memory", "recent_sessions"),
         preference_inference_diagnostics=("User-model evidence sources: observer, memory",),
@@ -8188,6 +8404,7 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
         "session_id_matches": payload["summary"]["session_id"] == "session-1",
         "overall_confidence": payload["summary"]["overall_confidence"],
         "intent_resolution": payload["summary"]["intent_resolution"],
+        "action_posture": payload["summary"]["action_posture"],
         "focus_source": payload["summary"]["focus_source"],
         "user_model_confidence": payload["summary"]["user_model_confidence"],
         "has_project_target_proof": any(
@@ -8202,6 +8419,12 @@ async def _eval_operator_guardian_state_surface_behavior() -> dict[str, Any]:
             "procedural guidance" in item.lower()
             for item in payload["explanation"]["learning_diagnostics"]
         ),
+        "has_restraint_reason": any(
+            "Intent remains weakly grounded" in item
+            for item in payload["explanation"]["restraint_reasons"]
+        ),
+        "user_model_facets_visible": len(payload["user_model"]["facets"]) >= 1,
+        "user_model_restraint_posture": payload["user_model"]["restraint_posture"],
         "next_up_mentions_clarify": any(
             "clarify" in item.lower()
             for item in payload["operator_guidance"]["next_up"]
@@ -9033,6 +9256,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
     guardian_memory_suite = next(item for item in suites if item["name"] == "guardian_memory_quality")
+    guardian_user_model_suite = next(item for item in suites if item["name"] == "guardian_user_model_restraint")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -9040,6 +9264,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     return {
         "suite_count": len(suites),
         "guardian_memory_suite_present": "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"],
+        "guardian_user_model_suite_present": "guardian_clarification_restraint_behavior" in guardian_user_model_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "computer_suite_present": "browser_runtime_audit" in computer_suite["scenario_names"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
@@ -10493,6 +10718,18 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Conflicting or weakly corroborated world-model evidence lowers guardian confidence and suppresses medium-urgency nudges.",
         runner=_eval_guardian_judgment_behavior,
+    ),
+    EvalScenario(
+        name="guardian_user_model_continuity_behavior",
+        category="guardian",
+        description="Persistent user-model facets carry explicit evidence, continuity strategy, and restraint posture through the canonical guardian world model.",
+        runner=_eval_guardian_user_model_continuity_behavior,
+    ),
+    EvalScenario(
+        name="guardian_clarification_restraint_behavior",
+        category="guardian",
+        description="Ambiguous requests and split preference evidence surface clarify-or-wait posture with explicit restraint and benchmark receipts.",
+        runner=_eval_guardian_clarification_restraint_behavior,
     ),
     EvalScenario(
         name="guardian_long_horizon_learning_behavior",

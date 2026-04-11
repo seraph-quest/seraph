@@ -16,6 +16,54 @@ _ROLE_PREFIX_RE = re.compile(r"^(user|assistant|system):\s*", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
+class GuardianUserModelFacet:
+    key: str
+    label: str
+    value: str
+    confidence: str
+    evidence_sources: tuple[str, ...] = ()
+    evidence_lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GuardianUserModelProfile:
+    confidence: str = "empty"
+    restraint_posture: str = "act_when_grounded"
+    continuity_strategy: str = "preserve_current_context"
+    clarification_watchpoints: tuple[str, ...] = ()
+    restraint_reasons: tuple[str, ...] = ()
+    evidence_store: tuple[str, ...] = ()
+    facets: tuple[GuardianUserModelFacet, ...] = ()
+
+    def to_prompt_lines(self) -> list[str]:
+        lines = [
+            f"User-model restraint posture: {self.restraint_posture.replace('_', ' ')}",
+            f"User-model continuity strategy: {self.continuity_strategy.replace('_', ' ')}",
+        ]
+        if self.clarification_watchpoints:
+            lines.append("User-model clarification watchpoints:")
+            lines.extend(f"- {item}" for item in self.clarification_watchpoints)
+        if self.restraint_reasons:
+            lines.append("User-model restraint reasons:")
+            lines.extend(f"- {item}" for item in self.restraint_reasons)
+        if self.evidence_store:
+            lines.append("User-model evidence store:")
+            lines.extend(f"- {item}" for item in self.evidence_store)
+        if self.facets:
+            lines.append("User-model facets:")
+            for facet in self.facets:
+                facet_label = f"{facet.label}: {facet.value} ({facet.confidence})"
+                lines.append(f"- {facet_label}")
+                if facet.evidence_sources:
+                    lines.append(
+                        f"  sources: {', '.join(source.replace('_', ' ') for source in facet.evidence_sources)}"
+                    )
+                for evidence_line in facet.evidence_lines:
+                    lines.append(f"  evidence: {evidence_line}")
+        return lines
+
+
+@dataclass(frozen=True)
 class GuardianWorldModel:
     current_focus: str
     focus_source: str
@@ -44,6 +92,7 @@ class GuardianWorldModel:
     user_model_confidence: str = "empty"
     user_model_signals: tuple[str, ...] = ()
     preference_inference_diagnostics: tuple[str, ...] = ()
+    user_model_profile: GuardianUserModelProfile | None = None
     project_ranking_diagnostics: tuple[str, ...] = ()
     stale_signal_arbitration: tuple[str, ...] = ()
     judgment_risks: tuple[str, ...] = ()
@@ -63,6 +112,8 @@ class GuardianWorldModel:
         if self.preference_inference_diagnostics:
             lines.append("Preference inference diagnostics:")
             lines.extend(f"- {item}" for item in self.preference_inference_diagnostics)
+        if self.user_model_profile is not None and self.user_model_profile.confidence != "empty":
+            lines.extend(self.user_model_profile.to_prompt_lines())
         if self.corroboration_sources:
             lines.append(f"Corroboration sources: {', '.join(self.corroboration_sources)}")
         if self.project_ranking_diagnostics:
@@ -268,6 +319,16 @@ def _shares_topic_token(candidate: str, topic: str | None) -> bool:
     return bool(candidate_tokens & topic_tokens)
 
 
+@dataclass(frozen=True)
+class _ResolvedUserModelFacet:
+    key: str
+    label: str
+    value: str
+    confidence: str
+    sources: tuple[str, ...] = ()
+    evidence_lines: tuple[str, ...] = ()
+
+
 def _contains_any_phrase(items: list[str], phrases: tuple[str, ...]) -> bool:
     for item in items:
         normalized = _normalize_topic(item)
@@ -281,16 +342,29 @@ def _format_sources(sources: list[str]) -> str:
     return ", ".join(ordered)
 
 
+def _matching_constraint_evidence(
+    constraints: list[str],
+    phrases: tuple[str, ...],
+) -> list[str]:
+    evidence: list[str] = []
+    for item in constraints:
+        normalized = _normalize_topic(item)
+        if any(phrase in normalized for phrase in phrases):
+            evidence.append(item)
+    return evidence
+
+
 def _infer_user_model(
     *,
     observer_context: CurrentContext,
     preference_constraints: list[str],
     procedural_constraints: list[str],
     learning_signal: GuardianLearningSignal | None,
-) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[_ResolvedUserModelFacet, ...]]:
     diagnostics: list[str] = []
     signals: list[str] = []
     source_labels: set[str] = set()
+    resolved_facets: list[_ResolvedUserModelFacet] = []
     durable_constraints = list(_dedupe(preference_constraints + procedural_constraints))
 
     interruption_votes: list[tuple[str, str]] = []
@@ -409,6 +483,7 @@ def _infer_user_model(
 
     def _resolve_votes(
         *,
+        key: str,
         label: str,
         votes: list[tuple[str, str]],
         signal_map: dict[str, str],
@@ -421,6 +496,15 @@ def _infer_user_model(
             diagnostics.append(
                 f"{label} evidence is split between {', '.join(unique_values)}."
             )
+            resolved_facets.append(
+                _ResolvedUserModelFacet(
+                    key=key,
+                    label=label,
+                    value="split",
+                    confidence="partial",
+                    sources=_dedupe(vote_sources),
+                )
+            )
             return
         value = unique_values[0]
         rendered = signal_map.get(value)
@@ -430,8 +514,18 @@ def _infer_user_model(
         diagnostics.append(
             f"{label} inferred from {_format_sources(vote_sources).replace('_', ' ')}."
         )
+        resolved_facets.append(
+            _ResolvedUserModelFacet(
+                key=key,
+                label=label,
+                value=value,
+                confidence="grounded" if len(_dedupe(vote_sources)) >= 2 else "partial",
+                sources=_dedupe(vote_sources),
+            )
+        )
 
     _resolve_votes(
+        key="interruption_preference",
         label="Interruption preference",
         votes=interruption_votes,
         signal_map={
@@ -440,6 +534,7 @@ def _infer_user_model(
         },
     )
     _resolve_votes(
+        key="communication_style",
         label="Communication preference",
         votes=communication_votes,
         signal_map={
@@ -448,6 +543,7 @@ def _infer_user_model(
         },
     )
     _resolve_votes(
+        key="thread_strategy",
         label="Thread preference",
         votes=thread_votes,
         signal_map={
@@ -456,6 +552,7 @@ def _infer_user_model(
         },
     )
     _resolve_votes(
+        key="cadence_strategy",
         label="Cadence preference",
         votes=cadence_votes,
         signal_map={
@@ -465,7 +562,7 @@ def _infer_user_model(
     )
 
     if not signals and not diagnostics:
-        return "empty", (), ()
+        return "empty", (), (), ()
 
     grounded_sources = len(source_labels) >= 2
     has_conflict = any("is split between" in item for item in diagnostics)
@@ -474,7 +571,220 @@ def _infer_user_model(
         diagnostics.append(
             f"User-model evidence sources: {_format_sources(sorted(source_labels)).replace('_', ' ')}."
         )
-    return confidence, _dedupe(signals), _dedupe(diagnostics)
+    return confidence, _dedupe(signals), _dedupe(diagnostics), tuple(resolved_facets)
+
+
+def _user_model_facet_evidence(
+    *,
+    facet: _ResolvedUserModelFacet,
+    preference_constraints: list[str],
+    procedural_constraints: list[str],
+    observer_context: CurrentContext,
+    learning_signal: GuardianLearningSignal | None,
+) -> tuple[str, ...]:
+    evidence: list[str] = []
+    key = facet.key
+    value = facet.value
+    if key == "interruption_preference":
+        evidence.extend(
+            _matching_constraint_evidence(
+                preference_constraints + procedural_constraints,
+                (
+                    "avoid direct interruption",
+                    "prefer async native",
+                    "bundle lower urgency",
+                    "bundle lower urgency check ins",
+                    "blocked",
+                    "focus windows",
+                    "quiet periods",
+                ),
+            )
+        )
+        if value == "split" and learning_signal is not None and (
+            learning_signal.bias == "prefer_direct_delivery"
+            or learning_signal.timing_bias == "prefer_available_windows"
+        ):
+            evidence.append("Live interruption learning bias is prefer_direct_delivery.")
+        elif value == "direct_when_available" and learning_signal is not None and (
+            learning_signal.bias == "prefer_direct_delivery"
+            or learning_signal.timing_bias == "prefer_available_windows"
+        ):
+            evidence.append("Live interruption learning bias is prefer_direct_delivery.")
+        elif value in {"guarded_async", "split"} and observer_context.user_state in {"deep_work", "in_meeting", "away"}:
+            evidence.append(f"Live observer state is {observer_context.user_state}.")
+        if value in {"guarded_async", "split"} and learning_signal is not None and (
+            learning_signal.bias == "reduce_interruptions"
+            or learning_signal.channel_bias == "prefer_native_notification"
+            or learning_signal.escalation_bias == "prefer_async_native"
+            or learning_signal.timing_bias == "avoid_focus_windows"
+            or learning_signal.blocked_state_bias in {
+                "avoid_blocked_state_interruptions",
+                "prefer_async_for_blocked_state",
+            }
+        ):
+            evidence.append("Live interruption learning bias is reduce_interruptions.")
+    elif key == "communication_style":
+        if value in {"brief_literal", "split"}:
+            evidence.extend(
+                _matching_constraint_evidence(
+                    preference_constraints,
+                    ("brief", "literal", "concise"),
+                )
+            )
+        if value in {"direct", "split"}:
+            evidence.extend(
+                _matching_constraint_evidence(
+                    preference_constraints + procedural_constraints,
+                    ("direct wording", "be more direct"),
+                )
+            )
+        if learning_signal is not None:
+            if value in {"brief_literal", "split"} and learning_signal.phrasing_bias == "be_brief_and_literal":
+                evidence.append("Live phrasing bias is be_brief_and_literal.")
+            if value in {"direct", "split"} and learning_signal.phrasing_bias == "be_more_direct":
+                evidence.append("Live phrasing bias is be_more_direct.")
+    elif key == "thread_strategy":
+        if value in {"prefer_existing_thread", "split"}:
+            evidence.extend(
+                _matching_constraint_evidence(
+                    procedural_constraints,
+                    ("existing thread", "same thread"),
+                )
+            )
+        if value in {"prefer_clean_thread", "split"}:
+            evidence.extend(
+                _matching_constraint_evidence(
+                    procedural_constraints,
+                    ("clean thread", "explicit reset"),
+                )
+            )
+        if learning_signal is not None:
+            if value in {"prefer_existing_thread", "split"} and learning_signal.thread_preference_bias == "prefer_existing_thread":
+                evidence.append("Live thread preference bias is prefer_existing_thread.")
+            if value in {"prefer_clean_thread", "split"} and learning_signal.thread_preference_bias == "prefer_clean_thread":
+                evidence.append("Live thread preference bias is prefer_clean_thread.")
+    elif key == "cadence_strategy":
+        if value in {"bundle_more", "split"}:
+            evidence.extend(
+                _matching_constraint_evidence(
+                    procedural_constraints,
+                    ("bundle lower urgency", "quiet periods", "interrupting immediately"),
+                )
+            )
+        if learning_signal is not None:
+            if value in {"bundle_more", "split"} and (
+                learning_signal.cadence_bias == "bundle_more"
+                or learning_signal.suppression_bias == "extend_suppression"
+            ):
+                evidence.append("Live cadence posture is bundle_more/extend_suppression.")
+            if value in {"resume_faster", "split"} and (
+                learning_signal.cadence_bias == "check_in_sooner"
+                or learning_signal.suppression_bias == "resume_faster"
+            ):
+                evidence.append("Live cadence posture is check_in_sooner/resume_faster.")
+    return _dedupe(evidence)
+
+
+def _build_user_model_profile(
+    *,
+    confidence: str,
+    resolved_facets: tuple[_ResolvedUserModelFacet, ...],
+    preference_constraints: list[str],
+    procedural_constraints: list[str],
+    observer_context: CurrentContext,
+    learning_signal: GuardianLearningSignal | None,
+    recent_session_lines: list[str],
+    preference_inference_diagnostics: tuple[str, ...],
+) -> GuardianUserModelProfile:
+    if confidence == "empty" and not resolved_facets:
+        return GuardianUserModelProfile()
+
+    facets: list[GuardianUserModelFacet] = []
+    for facet in resolved_facets:
+        facets.append(
+            GuardianUserModelFacet(
+                key=facet.key,
+                label=facet.label,
+                value=facet.value.replace("_", " "),
+                confidence=facet.confidence,
+                evidence_sources=facet.sources,
+                evidence_lines=tuple(
+                    list(
+                        _user_model_facet_evidence(
+                            facet=facet,
+                            preference_constraints=preference_constraints,
+                            procedural_constraints=procedural_constraints,
+                            observer_context=observer_context,
+                            learning_signal=learning_signal,
+                        )
+                    )
+                    + (
+                        [f"Recent continuity thread: {recent_session_lines[0]}"]
+                        if facet.key == "thread_strategy"
+                        and facet.value == "prefer_existing_thread"
+                        and recent_session_lines
+                        else []
+                    )
+                ),
+            )
+        )
+
+    restraint_reasons: list[str] = []
+    clarification_watchpoints: list[str] = []
+    if any(facet.value == "split" for facet in resolved_facets):
+        restraint_reasons.append(
+            "Preference evidence is split, so Seraph should explain the uncertainty before personalizing action."
+        )
+        clarification_watchpoints.append(
+            "Clarify interaction style when live and procedural preference evidence disagree."
+        )
+    if observer_context.user_state in {"deep_work", "in_meeting", "away"}:
+        restraint_reasons.append(
+            f"Live observer state is {observer_context.user_state}, so interruption posture should stay conservative."
+        )
+    if learning_signal is not None and (
+        learning_signal.not_helpful_count + learning_signal.failed_count
+        > learning_signal.helpful_count + learning_signal.acknowledged_count
+    ):
+        restraint_reasons.append(
+            "Recent live outcomes are net-negative, so low-urgency action should prefer clarify-or-wait over interruption."
+        )
+    if any("User-model evidence sources:" in item for item in preference_inference_diagnostics):
+        clarification_watchpoints.append(
+            "Keep the canonical guardian world model authoritative even when additive personalization evidence is present."
+        )
+    if not clarification_watchpoints:
+        clarification_watchpoints.append(
+            "Clarify before acting when the intended target or user preference remains weakly grounded."
+        )
+
+    evidence_store = _dedupe(
+        preference_constraints[:2]
+        + procedural_constraints[:3]
+        + recent_session_lines[:2]
+        + list(preference_inference_diagnostics[:2])
+    )
+    continuity_strategy = "preserve_current_context"
+    if any(facet.key == "thread_strategy" and "existing" in facet.value for facet in resolved_facets):
+        continuity_strategy = "prefer_existing_thread"
+    elif any(facet.key == "thread_strategy" and "clean" in facet.value for facet in resolved_facets):
+        continuity_strategy = "prefer_clean_thread"
+
+    restraint_posture = "act_when_grounded"
+    if any(facet.value == "split" for facet in resolved_facets):
+        restraint_posture = "clarify_before_personalizing"
+    elif observer_context.user_state in {"deep_work", "in_meeting", "away"}:
+        restraint_posture = "guard_async_delivery"
+
+    return GuardianUserModelProfile(
+        confidence=confidence,
+        restraint_posture=restraint_posture,
+        continuity_strategy=continuity_strategy,
+        clarification_watchpoints=_dedupe(clarification_watchpoints),
+        restraint_reasons=_dedupe(restraint_reasons),
+        evidence_store=evidence_store,
+        facets=tuple(facets),
+    )
 
 
 @dataclass(frozen=True)
@@ -1429,11 +1739,26 @@ def build_guardian_world_model(
         stale_recent_threads=stale_anchor_threads_for_arbitration,
         distinct_ranked_projects=distinct_ranked_projects,
     )
-    user_model_confidence, user_model_signals, preference_inference_diagnostics = _infer_user_model(
+    (
+        user_model_confidence,
+        user_model_signals,
+        preference_inference_diagnostics,
+        resolved_user_model_facets,
+    ) = _infer_user_model(
         observer_context=observer_context,
         preference_constraints=preference_constraints,
         procedural_constraints=procedural_constraints,
         learning_signal=learning_signal,
+    )
+    user_model_profile = _build_user_model_profile(
+        confidence=user_model_confidence,
+        resolved_facets=resolved_user_model_facets,
+        preference_constraints=preference_constraints,
+        procedural_constraints=procedural_constraints,
+        observer_context=observer_context,
+        learning_signal=learning_signal,
+        recent_session_lines=recent_session_lines,
+        preference_inference_diagnostics=preference_inference_diagnostics,
     )
 
     return GuardianWorldModel(
@@ -1469,6 +1794,7 @@ def build_guardian_world_model(
         user_model_confidence=user_model_confidence,
         user_model_signals=user_model_signals,
         preference_inference_diagnostics=preference_inference_diagnostics,
+        user_model_profile=user_model_profile,
         project_ranking_diagnostics=project_ranking_diagnostics,
         stale_signal_arbitration=stale_signal_arbitration,
         judgment_risks=_dedupe(judgment_risks),

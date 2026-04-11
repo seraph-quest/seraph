@@ -26,6 +26,7 @@
 - [x] observer continuity now also carries inventory-backed browser-provider and node-adapter reach surfaces with selected-versus-fallback state, network or daemon prerequisites, and the same repair or follow-up recovery contract propagated into cockpit triage, the desktop shell, the threaded operator timeline, and the Activity Ledger
 - [x] cross-surface continuity now also lands in an explicit operator continuity graph that ties notification and deferred-guardian follow-through back to session, workflow, approval, artifact, and intervention state instead of leaving the thread graph implicit across APIs
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
+- [x] browser and desktop execution proof now also has a dedicated benchmark lane: replayable browser-task receipts, desktop notification-action replay, cross-surface continuity, and operator-visible computer-use failure taxonomy now live in the named `computer_use_browser_desktop` suite plus the operator computer-use benchmark surface instead of staying spread across isolated continuity or daemon seams
 
 ## Working On Now
 

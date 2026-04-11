@@ -250,6 +250,21 @@ def test_trust_boundary_benchmark_surface_behavior_runtime_eval_details():
     assert details["ci_gate_mode_visible"] is True
 
 
+def test_computer_use_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_computer_use_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["browser_replay_state_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["ci_gate_mode_visible"] is True
+
+
 def test_run_benchmark_suites_executes_trust_boundary_and_safety_receipts_suite():
     summary = asyncio.run(run_benchmark_suites(["trust_boundary_and_safety_receipts"]))
 
@@ -279,6 +294,54 @@ def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
         "workflow_backup_branch_surface_behavior",
         "workflow_multi_session_endurance_behavior",
     }
+
+
+def test_run_benchmark_suites_executes_computer_use_browser_desktop_suite():
+    summary = asyncio.run(run_benchmark_suites(["computer_use_browser_desktop"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "browser_execution_task_replay_behavior",
+        "browser_runtime_audit",
+        "native_desktop_shell_behavior",
+        "desktop_notification_action_replay_behavior",
+        "cross_surface_notification_controls_behavior",
+        "cross_surface_continuity_behavior",
+        "workflow_boundary_blocked_surface_behavior",
+    }
+
+
+def test_browser_execution_task_replay_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["browser_execution_task_replay_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["extract_contains_checklist"] is True
+    assert details["html_contains_button"] is True
+    assert details["screenshot_contains_base64"] is True
+    assert details["all_actions_logged"] is True
+    assert details["allowlist_rule_visible"] is True
+
+
+def test_desktop_notification_action_replay_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["desktop_notification_action_replay_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["listed_pending_count"] >= 1
+    assert details["dismissed"] is True
+    assert details["dismiss_event_source"] == "browser_controls"
+    assert details["polled_notification_matches"] is True
+    assert details["poll_pending_count_visible"] is True
+    assert details["acked"] is True
+    assert details["ack_event_matches"] is True
+    assert details["final_pending_count"] == 0
 
 
 def test_process_recovery_boundary_behavior_runtime_eval_details():
@@ -360,6 +423,7 @@ def test_main_lists_available_scenarios(capsys):
     assert "benchmark_proof_surface_behavior" in captured.out
     assert "operator_workflow_endurance_benchmark_surface_behavior" in captured.out
     assert "operator_trust_boundary_benchmark_surface_behavior" in captured.out
+    assert "operator_computer_use_benchmark_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
     assert "activity_ledger_attribution_behavior" in captured.out
@@ -397,6 +461,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "scheduled_local_runtime_profile" in captured.out
     assert "process_recovery_boundary_behavior" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
+    assert "browser_execution_task_replay_behavior" in captured.out
+    assert "desktop_notification_action_replay_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "browser_runtime_audit" in captured.out
 

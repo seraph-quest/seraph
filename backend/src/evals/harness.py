@@ -3209,6 +3209,69 @@ async def _eval_browser_runtime_audit() -> dict[str, Any]:
     }
 
 
+async def _eval_browser_execution_task_replay_behavior() -> dict[str, Any]:
+    from src.security.site_policy import SiteAccessDecision
+
+    class _ImmediateFuture:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def result(self) -> str:
+            return self._value
+
+    class _ImmediateExecutor:
+        def __enter__(self) -> "_ImmediateExecutor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def submit(self, _fn, url: str, action: str) -> _ImmediateFuture:
+            del url
+            outputs = {
+                "extract": "Atlas launch checklist\nOpen blockers\nOwner: Seraph",
+                "html": "<html><body><button>Ship</button></body></html>",
+                "screenshot": "Screenshot captured (32 bytes). Base64 data: QUJDREVGR0g=",
+            }
+            return _ImmediateFuture(outputs[action])
+
+    decision = SiteAccessDecision(
+        allowed=True,
+        hostname="example.com",
+        matched_rule="example.com",
+        allowlist_active=True,
+    )
+
+    with (
+        patch("src.tools.browser_tool.evaluate_site_access", return_value=decision),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
+        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
+    ):
+        extract_result = browse_webpage("https://example.com/task", action="extract")
+        html_result = browse_webpage("https://example.com/task", action="html")
+        screenshot_result = browse_webpage("https://example.com/task", action="screenshot")
+        await asyncio.sleep(0)
+
+    succeeded_calls = [
+        call.kwargs
+        for call in mock_log_event.call_args_list
+        if call.kwargs.get("event_type") == "integration_succeeded"
+        and call.kwargs.get("tool_name") == "browser:playwright"
+    ]
+    action_order = [str(item.get("details", {}).get("action") or "") for item in succeeded_calls]
+    return {
+        "extract_contains_checklist": "Atlas launch checklist" in extract_result,
+        "html_contains_button": "<button>Ship</button>" in html_result,
+        "screenshot_contains_base64": "Base64 data:" in screenshot_result,
+        "action_order": action_order,
+        "all_actions_logged": action_order == ["extract", "html", "screenshot"],
+        "allowlist_rule_visible": all(
+            str(item.get("details", {}).get("site_policy_rule") or "") == "example.com"
+            for item in succeeded_calls
+        ),
+    }
+
+
 async def _eval_observer_calendar_source_audit() -> dict[str, Any]:
     mock_path = MagicMock()
     mock_path.exists.return_value = True
@@ -6983,6 +7046,55 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_desktop_notification_action_replay_behavior() -> dict[str, Any]:
+    await native_notification_queue.clear()
+    mgr = ContextManager()
+    mgr.update_screen_context("Desktop shell", "Replaying notification actions across browser and daemon surfaces.")
+    mgr.update_capture_mode("balanced")
+    mock_log_event = AsyncMock()
+
+    with (
+        patch("src.api.observer.context_manager", mgr),
+        patch.object(audit_repository, "log_event", mock_log_event),
+    ):
+        first = await enqueue_test_native_notification()
+        listed = await list_native_notifications()
+        dismissed = await dismiss_native_notification(first["id"])
+        second = await enqueue_test_native_notification()
+        polled = await get_next_native_notification()
+        acked = await ack_native_notification(second["id"])
+        final_status = await daemon_status()
+
+    dismiss_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_dismissed",
+        tool_name="observer_daemon:notifications",
+    )
+    ack_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_acked",
+        tool_name="observer_daemon:notifications",
+    )
+    poll_event = _find_audit_call(
+        mock_log_event,
+        event_type="integration_succeeded",
+        tool_name="observer_daemon:notifications",
+    )
+    await native_notification_queue.clear()
+
+    notification = polled.get("notification") if isinstance(polled, dict) else None
+    return {
+        "listed_pending_count": listed["pending_count"],
+        "dismissed": dismissed["dismissed"],
+        "dismiss_event_source": dismiss_event["details"]["source"],
+        "polled_notification_matches": isinstance(notification, dict) and notification.get("id") == second["id"],
+        "poll_pending_count_visible": poll_event["details"]["pending_count"] >= 1,
+        "acked": acked["acked"],
+        "ack_event_matches": ack_event["details"]["notification_id"] == second["id"],
+        "final_pending_count": final_status["pending_notification_count"],
+    }
+
+
 async def _eval_guardian_feedback_loop() -> dict[str, Any]:
     from src.guardian.feedback import guardian_feedback_repository
 
@@ -8374,6 +8486,20 @@ async def _eval_operator_trust_boundary_benchmark_surface_behavior() -> dict[str
     }
 
 
+async def _eval_operator_computer_use_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_computer_use_benchmark
+
+    payload = await get_operator_computer_use_benchmark()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == "computer_use_browser_desktop",
+        "operator_status_visible": payload["summary"]["operator_status"] == "browser_desktop_receipts_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(payload["scenario_names"]),
+        "browser_replay_state_visible": payload["summary"]["browser_replay_state"] == "extract_html_and_screenshot_receipts_visible",
+        "receipt_surfaces_visible": "/api/operator/computer-use-benchmark" in payload["policy"]["receipt_surfaces"],
+        "ci_gate_mode_visible": payload["policy"]["ci_gate_mode"] == "required_benchmark_suite",
+    }
+
+
 async def _eval_engineering_memory_bundle_behavior() -> dict[str, Any]:
     from src.api.operator import get_operator_engineering_memory
 
@@ -9649,7 +9775,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "workflow_suite_present": "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"],
         "trust_suite_present": "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"],
-        "computer_suite_present": "browser_runtime_audit" in computer_suite["scenario_names"],
+        "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_self_evolution_behavior" in governed_suite["scenario_names"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -10989,6 +11115,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_operator_trust_boundary_benchmark_surface_behavior,
     ),
     EvalScenario(
+        name="operator_computer_use_benchmark_surface_behavior",
+        category="observability",
+        description="Operator computer-use benchmark surface exposes replay posture, failure taxonomy, and cross-surface receipt policy directly.",
+        runner=_eval_operator_computer_use_benchmark_surface_behavior,
+    ),
+    EvalScenario(
         name="capability_repair_behavior",
         category="behavior",
         description="Capability overview exposes actionable starter-pack and blocked-workflow repair sequences instead of only passive blocked states.",
@@ -11187,6 +11319,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_native_desktop_shell_behavior,
     ),
     EvalScenario(
+        name="desktop_notification_action_replay_behavior",
+        category="presence",
+        description="Desktop notification actions stay replayable across browser-side controls, daemon poll, and acknowledgement receipts.",
+        runner=_eval_desktop_notification_action_replay_behavior,
+    ),
+    EvalScenario(
         name="cross_surface_notification_controls_behavior",
         category="presence",
         description="Browser-side native notification controls can inspect, dismiss, and bulk-clear desktop notifications without losing continuity state.",
@@ -11317,6 +11455,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Browser timeouts record a distinct runtime audit outcome instead of collapsing into generic failures.",
         runner=_eval_browser_runtime_audit,
+    ),
+    EvalScenario(
+        name="browser_execution_task_replay_behavior",
+        category="observability",
+        description="Browser extract, html, and screenshot actions leave distinct replay receipts instead of one opaque browse result.",
+        runner=_eval_browser_execution_task_replay_behavior,
     ),
     EvalScenario(
         name="observer_calendar_source_audit",

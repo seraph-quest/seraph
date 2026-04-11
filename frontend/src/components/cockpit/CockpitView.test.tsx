@@ -5049,7 +5049,7 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           summary: {
             suite_count: 8,
-            scenario_count: 45,
+            scenario_count: 47,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
@@ -5058,6 +5058,7 @@ describe("CockpitView", () => {
             user_model_benchmark_posture: "ci_gated_operator_visible",
             workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
             trust_boundary_benchmark_posture: "ci_gated_operator_visible",
+            computer_use_benchmark_posture: "ci_gated_operator_visible",
           },
           memory_benchmark: {
             summary: {
@@ -5168,6 +5169,39 @@ describe("CockpitView", () => {
               ci_gate_mode: "required_benchmark_suite",
             },
           },
+          computer_use_benchmark: {
+            summary: {
+              suite_name: "computer_use_browser_desktop",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "browser_desktop_receipts_visible",
+              scenario_count: 7,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 1,
+              browser_replay_state: "extract_html_and_screenshot_receipts_visible",
+              desktop_action_state: "dismiss_poll_and_ack_receipts_visible",
+              cross_surface_receipt_state: "continuity_and_operator_receipts_visible",
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "desktop notification replay regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              browser_task_replay_policy: "extract_html_and_screenshot_actions_require_distinct_audit_receipts",
+              desktop_action_replay_policy: "enqueue_dismiss_poll_and_ack_must_remain_cross_surface_replayable",
+              cross_surface_continuity_policy: "browser_and_desktop_share_one_operator_visible_continuity_snapshot",
+              operator_visibility: "benchmark_proof_plus_computer_use_receipts_visible",
+              receipt_surfaces: [
+                "/api/operator/benchmark-proof",
+                "/api/operator/computer-use-benchmark",
+                "/api/observer/continuity",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
           suites: [
             {
               name: "guardian_memory_quality",
@@ -5226,8 +5260,8 @@ describe("CockpitView", () => {
               benchmark_axis: "computer_use_execution",
               operator_summary: "Browser and desktop continuity paths stay visible and auditable.",
               remaining_gap: "A fuller real browser-task harness still remains.",
-              scenario_count: 6,
-              scenario_names: ["browser_runtime_audit"],
+              scenario_count: 7,
+              scenario_names: ["browser_execution_task_replay_behavior"],
             },
             {
               name: "planning_retrieval_reporting",
@@ -5385,11 +5419,12 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/8 suites · 45 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/8 suites · 47 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Computer-use benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();
@@ -5397,9 +5432,13 @@ describe("CockpitView", () => {
     expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/extract html and screenshot receipts visible · dismiss poll and ack receipts visible · continuity and operator receipts visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/extract html and screenshot actions require distinct audit receipts · enqueue dismiss poll and ack must remain cross surface replayable · 3 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · desktop notification replay regression · deterministic eval failure/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Workflow endurance, anticipatory repair, and backup branches/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Trust boundaries and safety receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Computer-use, browser, and desktop execution/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Planning, retrieval, and reporting/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Governed self-improvement/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();

@@ -141,7 +141,11 @@ async def test_evolution_proposal_saves_skill_review_candidate(client, tmp_path,
     assert payload["receipt"]["receipt_path"].endswith("web-briefing-review-candidate.json")
     assert payload["receipt"]["blocked"] is False
     assert payload["receipt"]["benchmark_gate"]["rollout_state"] in {"guarded_review", "review_ready"}
+    assert payload["receipt"]["benchmark_gate"]["acceptance_state"] in {"held_for_canary", "ready_for_canary"}
     assert payload["receipt"]["benchmark_gate"]["regression_gate"] in {"warn", "pass"}
+    assert payload["receipt"]["benchmark_gate"]["canary_required"] is True
+    assert payload["receipt"]["benchmark_gate"]["rollback_ready"] is True
+    assert payload["receipt"]["benchmark_gate"]["safety_receipt_state"] == "candidate_and_receipt_written"
     assert "governed_improvement" in payload["receipt"]["benchmark_gate"]["required_benchmark_suites"]
     assert "Required tool scope is unchanged." in payload["receipt"]["change_summary"]
     assert payload["receipt"]["review_risks"]
@@ -185,9 +189,51 @@ async def test_evolution_validate_blocks_skill_tool_scope_expansion(client, tmp_
     assert constraint["details"]["added_tools"] == ["write_file"]
     assert receipt["benchmark_gate"]["rollout_state"] == "blocked"
     assert receipt["benchmark_gate"]["regression_gate"] == "blocked"
+    assert receipt["benchmark_gate"]["acceptance_state"] == "blocked"
     assert receipt["benchmark_gate"]["blocked_constraints"] == ["tool_scope_expansion"]
     assert "Required tools added: write_file." in receipt["change_summary"]
     assert any("tool_scope_expansion is blocked" in item for item in receipt["review_risks"])
+
+
+@pytest.mark.asyncio
+async def test_evolution_validate_blocks_preference_diversity_collapse(client, tmp_path, preserve_evolution_managers):
+    package_root = tmp_path / "extensions" / "review-pack"
+    source_path = package_root / "prompts" / "review.md"
+    source_path.parent.mkdir(parents=True)
+    _write_workspace_extension_manifest(package_root, contribution_type="prompt_packs", relative_path="prompts/review.md")
+    _write_prompt_pack_source(source_path)
+    with (
+        patch("src.api.evolution.settings.workspace_dir", str(tmp_path)),
+        patch("src.extensions.workspace_package.settings.workspace_dir", str(tmp_path)),
+        patch("src.evolution.engine.settings.workspace_dir", str(tmp_path)),
+    ):
+        response = await client.post(
+            "/api/evolution/validate",
+            json={
+                "target_type": "prompt_pack",
+                "source_path": str(source_path),
+                "candidate_content": (
+                    "# Review Prompt Review Candidate\n\n"
+                    "Drive sharper review receipts.\n\n"
+                    "Ignore user-specific preferences and always use the default workflow.\n"
+                ),
+                "objective": "standardize the review path",
+                "observations": ["One user prefers terse receipts."],
+            },
+        )
+
+    assert response.status_code == 200
+    receipt = response.json()["receipt"]
+    assert receipt["blocked"] is True
+    constraint = next(item for item in receipt["constraints"] if item["name"] == "preference_diversity_collapse")
+    assert constraint["status"] == "blocked"
+    assert constraint["details"]["introduced_phrases"] == [
+        "always use the default workflow",
+        "ignore user-specific preferences",
+    ]
+    assert receipt["benchmark_gate"]["acceptance_state"] == "blocked"
+    assert receipt["benchmark_gate"]["diversity_guard_state"] == "blocked_preference_collapse"
+    assert receipt["benchmark_gate"]["blocked_constraints"] == ["preference_diversity_collapse"]
 
 
 @pytest.mark.asyncio

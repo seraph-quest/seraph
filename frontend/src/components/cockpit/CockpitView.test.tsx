@@ -2851,13 +2851,22 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
-          summary: { suite_count: 8, scenario_count: 45, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible", trust_boundary_benchmark_posture: "ci_gated_operator_visible" },
+          summary: { suite_count: 8, scenario_count: 48, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated_canary_required", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible", trust_boundary_benchmark_posture: "ci_gated_operator_visible", governed_improvement_benchmark_posture: "ci_gated_operator_visible" },
           suites: [],
           memory_benchmark: null,
           user_model_benchmark: null,
           workflow_endurance_benchmark: null,
           trust_boundary_benchmark: null,
-          governed_improvement: { target_count: 0, target_types: [], required_suite_count: 8, gate_policy: { min_review_ready_score: 0.7, min_strong_score: 0.9, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" } },
+          governed_improvement: {
+            target_count: 0,
+            target_types: [],
+            required_suite_count: 8,
+            gate_policy: { min_review_ready_score: 0.7, min_strong_score: 0.9, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" },
+            summary: { suite_name: "governed_improvement", benchmark_posture: "ci_gated_operator_visible", operator_status: "saved_proposal_receipts_visible", scenario_count: 6, dimension_count: 5, failure_mode_count: 5, active_failure_count: 0, anti_misevolution_state: "preference_collapse_blocked", canary_rollout_state: "review_candidates_canary_only", rollback_state: "candidate_and_receipt_paths_required", operator_receipt_state: "saved_proposal_and_benchmark_receipts_visible", recent_receipt_count: 0, held_receipt_count: 0 },
+            failure_report: [],
+            policy: { preference_diversity_policy: "block_preference_collapse_and_watch_single_signal_edits", canary_rollout_policy: "saved_review_candidates_remain_canary_only_until_reviewed_promotion", rollback_policy: "candidate_receipt_and_source_baseline_required_before_promotion", acceptance_policy: "benchmark_gated_canary_then_reviewed_promotion", operator_visibility: "benchmark_proof_plus_recent_saved_receipts_visible", receipt_surfaces: ["/api/evolution/validate", "/api/evolution/proposals", "/api/operator/benchmark-proof", "/api/operator/governed-improvement-benchmark"], ci_gate_mode: "required_benchmark_suite" },
+            recent_receipts: [],
+          },
         }));
       }
       if (url.includes("/api/operator/workflow-orchestration")) {
@@ -5049,16 +5058,17 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           summary: {
             suite_count: 8,
-            scenario_count: 47,
+            scenario_count: 50,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
-            governed_improvement_status: "review_gated",
+            governed_improvement_status: "review_gated_canary_required",
             memory_benchmark_posture: "ci_gated_operator_visible",
             user_model_benchmark_posture: "ci_gated_operator_visible",
             workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
             trust_boundary_benchmark_posture: "ci_gated_operator_visible",
             computer_use_benchmark_posture: "ci_gated_operator_visible",
+            governed_improvement_benchmark_posture: "ci_gated_operator_visible",
           },
           memory_benchmark: {
             summary: {
@@ -5278,10 +5288,14 @@ describe("CockpitView", () => {
               label: "Governed self-improvement",
               description: "Governed self-improvement suite",
               benchmark_axis: "governed_improvement",
-              operator_summary: "Self-improvement stays review-gated and benchmark-scored.",
+              operator_summary: "Self-improvement stays anti-drift, canary-gated, and receipt-backed.",
               remaining_gap: "Broader candidate classes still remain.",
-              scenario_count: 3,
-              scenario_names: ["governed_self_evolution_behavior"],
+              scenario_count: 6,
+              scenario_names: [
+                "governed_self_evolution_behavior",
+                "governed_preference_diversity_behavior",
+                "governed_canary_rollout_behavior",
+              ],
             },
           ],
           governed_improvement: {
@@ -5305,6 +5319,74 @@ describe("CockpitView", () => {
               ],
               proof_contract: "deterministic_benchmark_suites_plus_review_receipts",
             },
+            summary: {
+              suite_name: "governed_improvement",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "saved_proposal_receipts_visible",
+              scenario_count: 6,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 1,
+              anti_misevolution_state: "preference_collapse_blocked",
+              canary_rollout_state: "review_candidates_canary_only",
+              rollback_state: "candidate_and_receipt_paths_required",
+              operator_receipt_state: "saved_proposal_and_benchmark_receipts_visible",
+              recent_receipt_count: 2,
+              held_receipt_count: 1,
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "governed canary rollout regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              preference_diversity_policy: "block_preference_collapse_and_watch_single_signal_edits",
+              canary_rollout_policy: "saved_review_candidates_remain_canary_only_until_reviewed_promotion",
+              rollback_policy: "candidate_receipt_and_source_baseline_required_before_promotion",
+              acceptance_policy: "benchmark_gated_canary_then_reviewed_promotion",
+              operator_visibility: "benchmark_proof_plus_recent_saved_receipts_visible",
+              receipt_surfaces: [
+                "/api/evolution/validate",
+                "/api/evolution/proposals",
+                "/api/operator/benchmark-proof",
+                "/api/operator/governed-improvement-benchmark",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+            recent_receipts: [
+              {
+                id: "web-briefing-review-candidate",
+                candidate_name: "Web Briefing Review Candidate",
+                target_type: "skill",
+                quality_state: "ready",
+                score: 1,
+                rollout_state: "review_ready",
+                acceptance_state: "ready_for_canary",
+                diversity_guard_state: "multi_signal_preserved",
+                rollback_ready: true,
+                blocked_constraints: [],
+                saved_candidate_path: "/tmp/extensions/workspace-capabilities/skills/web-briefing-review-candidate.md",
+                receipt_path: "/tmp/extensions/workspace-capabilities/evolution/receipts/web-briefing-review-candidate.json",
+                updated_at: "2026-04-11T08:00:00+00:00",
+              },
+              {
+                id: "review-prompt-held-candidate",
+                candidate_name: "Review Prompt Held Candidate",
+                target_type: "prompt_pack",
+                quality_state: "ready",
+                score: 0.74,
+                rollout_state: "review_ready",
+                acceptance_state: "held_for_canary",
+                diversity_guard_state: "single_signal_watch",
+                rollback_ready: true,
+                blocked_constraints: [],
+                saved_candidate_path: "/tmp/extensions/workspace-capabilities/prompts/review-prompt-held-candidate.yaml",
+                receipt_path: "/tmp/extensions/workspace-capabilities/evolution/receipts/review-prompt-held-candidate.json",
+                updated_at: "2026-04-11T08:05:00+00:00",
+              },
+            ],
           },
         }));
       }
@@ -5419,12 +5501,17 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/8 suites · 47 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/8 suites · 50 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Computer-use benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Governed improvement benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getByText(/preference collapse blocked · review candidates canary only · candidate and receipt paths required · saved proposal and benchmark receipts visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/block preference collapse and watch single signal edits · saved review candidates remain canary only until reviewed promotion · 4 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Web Briefing Review Candidate · ready for canary · multi signal preserved · rollback ready/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Review Prompt Held Candidate · held for canary · single signal watch · rollback ready/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();

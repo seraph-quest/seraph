@@ -50,6 +50,16 @@ _PRIVILEGED_PROMPT_BOUNDARIES = {
     "connector_mutation",
     "external_mcp",
 }
+_PREFERENCE_COLLAPSE_TOKENS = (
+    "ignore user preferences",
+    "ignore user-specific preferences",
+    "always use the default workflow",
+    "same response for every user",
+    "standardize across all users",
+    "do not personalize",
+    "one-size-fits-all",
+    "regardless of user preference",
+)
 
 
 @dataclass(frozen=True)
@@ -405,6 +415,22 @@ def _prompt_pack_constraints(base_content: str, candidate_content: str) -> tuple
     )
 
 
+def _preference_diversity_constraint(base_content: str, candidate_content: str) -> EvolutionConstraint:
+    lowered_base = base_content.lower()
+    lowered_candidate = candidate_content.lower()
+    introduced = sorted(
+        token for token in _PREFERENCE_COLLAPSE_TOKENS
+        if token in lowered_candidate and token not in lowered_base
+    )
+    return EvolutionConstraint(
+        name="preference_diversity_collapse",
+        status="blocked" if introduced else "pass",
+        blocked=bool(introduced),
+        summary="Candidates must not collapse user-specific or minority preferences into one generic behavior.",
+        details={"introduced_phrases": introduced},
+    )
+
+
 def _evaluate_constraints(
     target_type: EvolutionTargetType,
     *,
@@ -412,13 +438,14 @@ def _evaluate_constraints(
     candidate_content: str,
     source_path: str,
 ) -> tuple[EvolutionConstraint, ...]:
+    shared_constraints = (_preference_diversity_constraint(base_content, candidate_content),)
     if target_type == "skill":
-        return _skill_constraints(base_content, candidate_content, source_path=source_path)
+        return _skill_constraints(base_content, candidate_content, source_path=source_path) + shared_constraints
     if target_type == "runbook":
-        return _runbook_constraints(base_content, candidate_content, source_path=source_path)
+        return _runbook_constraints(base_content, candidate_content, source_path=source_path) + shared_constraints
     if target_type == "starter_pack":
-        return _starter_pack_constraints(base_content, candidate_content, source_path=source_path)
-    return _prompt_pack_constraints(base_content, candidate_content)
+        return _starter_pack_constraints(base_content, candidate_content, source_path=source_path) + shared_constraints
+    return _prompt_pack_constraints(base_content, candidate_content) + shared_constraints
 
 
 def _validate_target(target_type: EvolutionTargetType, *, content: str, path: str) -> dict[str, Any]:
@@ -468,6 +495,7 @@ def _review_lines_from_constraints(
     *,
     constraints: tuple[EvolutionConstraint, ...],
     score: float,
+    benchmark_gate: dict[str, Any],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     change_summary: list[str] = []
     review_risks: list[str] = []
@@ -514,6 +542,14 @@ def _review_lines_from_constraints(
                 )
             else:
                 change_summary.append(f"Prompt size growth stays bounded at {size_growth} chars.")
+        elif constraint.name == "preference_diversity_collapse":
+            introduced_phrases = [str(item) for item in details.get("introduced_phrases", [])]
+            if introduced_phrases:
+                change_summary.append(
+                    f"Preference-diversity collapse phrases introduced: {', '.join(introduced_phrases)}."
+                )
+            else:
+                change_summary.append("Preference-diversity guardrail is unchanged.")
 
         if constraint.blocked:
             review_risks.append(
@@ -523,6 +559,14 @@ def _review_lines_from_constraints(
     if score < 0.9:
         review_risks.append(
             "Trace coverage is partial, so human review should verify the variant actually addresses the stated objective."
+        )
+    if benchmark_gate.get("canary_required"):
+        change_summary.append("Canary rollout remains required before any adoption decision.")
+    if benchmark_gate.get("rollback_ready_required"):
+        change_summary.append("Rollback-ready receipts must remain attached before promotion.")
+    if benchmark_gate.get("diversity_guard_state") == "single_signal_watch":
+        review_risks.append(
+            "Preference-diversity signal is narrow, so review should check for overfitting to a single observation."
         )
     if not review_risks:
         review_risks.append(
@@ -569,8 +613,13 @@ def evolution_benchmark_gate_policy() -> dict[str, Any]:
     return {
         "min_review_ready_score": 0.7,
         "min_strong_score": 0.9,
+        "min_preference_signal_count": 2,
         "requires_human_review": True,
+        "requires_canary_rollout": True,
+        "requires_rollback_ready_receipt": True,
         "blocks_on_constraint_failure": True,
+        "adoption_policy": "saved_review_candidates_remain_canary_only_until_reviewed_promotion",
+        "rollback_policy": "candidate_receipt_and_source_baseline_required_before_promotion",
         "required_benchmark_suites": list(benchmark_suite_names()),
         "proof_contract": "deterministic_benchmark_suites_plus_review_receipts",
     }
@@ -581,28 +630,58 @@ def _benchmark_gate_payload(
     constraints: tuple[EvolutionConstraint, ...],
     blocked: bool,
     score: float,
+    observations: tuple[str, ...],
 ) -> dict[str, Any]:
     policy = evolution_benchmark_gate_policy()
     blocked_constraints = [item.name for item in constraints if item.blocked]
+    preference_collapse = "preference_diversity_collapse" in blocked_constraints
+    preference_signal_count = len(observations)
+    has_diverse_signal = preference_signal_count >= int(policy["min_preference_signal_count"])
     if blocked:
         rollout_state = "blocked"
         regression_gate = "blocked"
+        acceptance_state = "blocked"
     elif score >= float(policy["min_strong_score"]):
         rollout_state = "review_ready"
         regression_gate = "pass"
+        acceptance_state = "ready_for_canary" if has_diverse_signal else "held_for_canary"
     elif score >= float(policy["min_review_ready_score"]):
         rollout_state = "guarded_review"
         regression_gate = "warn"
+        acceptance_state = "held_for_canary"
     else:
         rollout_state = "weak"
         regression_gate = "warn"
+        acceptance_state = "held_back"
+    diversity_guard_state = (
+        "blocked_preference_collapse"
+        if preference_collapse
+        else "multi_signal_preserved"
+        if has_diverse_signal
+        else "single_signal_watch"
+    )
     return {
         "rollout_state": rollout_state,
         "regression_gate": regression_gate,
+        "acceptance_state": acceptance_state,
+        "diversity_guard_state": diversity_guard_state,
+        "preference_signal_count": preference_signal_count,
         "requires_human_review": bool(policy["requires_human_review"]),
+        "canary_required": not blocked and bool(policy["requires_canary_rollout"]),
+        "rollback_ready_required": bool(policy["requires_rollback_ready_receipt"]),
+        "rollback_ready": False,
+        "safety_receipt_state": "candidate_only",
+        "adoption_policy": str(policy["adoption_policy"]),
+        "rollback_policy": str(policy["rollback_policy"]),
         "required_benchmark_suites": list(policy["required_benchmark_suites"]),
         "blocked_constraints": blocked_constraints,
         "proof_contract": str(policy["proof_contract"]),
+        "receipt_surfaces": [
+            "/api/evolution/validate",
+            "/api/evolution/proposals",
+            "/api/operator/benchmark-proof",
+            "/api/operator/governed-improvement-benchmark",
+        ],
     }
 
 
@@ -653,10 +732,17 @@ def evaluate_candidate(
     changed = 1.0 if candidate_content.strip() != base_content.strip() else 0.0
     score = round((0.45 * 1.0) + (0.4 * coverage) + (0.15 * changed), 3)
     blocked = any(item.blocked for item in constraints)
+    benchmark_gate = _benchmark_gate_payload(
+        constraints=constraints,
+        blocked=blocked,
+        score=score,
+        observations=normalized_observations,
+    )
     change_summary, review_risks = _review_lines_from_constraints(
         target_type,
         constraints=constraints,
         score=score,
+        benchmark_gate=benchmark_gate,
     )
     receipt = EvolutionReceipt(
         target_type=target_type,
@@ -678,11 +764,7 @@ def evaluate_candidate(
         ),
         change_summary=change_summary,
         review_risks=review_risks,
-        benchmark_gate=_benchmark_gate_payload(
-            constraints=constraints,
-            blocked=blocked,
-            score=score,
-        ),
+        benchmark_gate=benchmark_gate,
         pr_draft=_build_pr_draft(
             target_type,
             source_name=str(source_metadata.get("name") or source_metadata.get("title") or resolved_source.stem),
@@ -743,7 +825,13 @@ def create_evolution_proposal(
         saved_path = _save_candidate(target_type, file_name=candidate_file_name, content=candidate_content)
         receipt = replace(receipt, saved_path=saved_path)
         receipt_path = _write_receipt(candidate_file_name, receipt)
-        receipt = replace(receipt, receipt_path=receipt_path)
+        updated_gate = dict(receipt.benchmark_gate)
+        updated_gate["rollback_ready"] = True
+        updated_gate["safety_receipt_state"] = "candidate_and_receipt_written"
+        updated_gate["saved_candidate_path"] = saved_path
+        updated_gate["receipt_path"] = receipt_path
+        receipt = replace(receipt, benchmark_gate=updated_gate, receipt_path=receipt_path)
+        _write_receipt(candidate_file_name, receipt)
     return {
         "status": "saved" if saved_path else "blocked",
         "candidate_name": candidate_name,

@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 from src.browser.benchmark import COMPUTER_USE_BENCHMARK_SCENARIO_NAMES, COMPUTER_USE_BENCHMARK_SUITE_NAME
+from src.evolution.benchmark import (
+    GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
+    GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -154,19 +158,18 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
     ),
     BenchmarkSuiteDefinition(
-        name="governed_improvement",
-        label="Governed improvement gates",
+        name=GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
+        label="Governed improvement safeguards",
         description=(
-            "Verifies that self-evolution stays bounded, review-oriented, and tied to explicit proof receipts."
+            "Pins anti-misevolution blocking, preference-diversity safeguards, canary-and-rollback policy, "
+            "and operator-visible governed-improvement receipts into one deterministic proof lane."
         ),
         benchmark_axis="governed_self_improvement",
-        operator_summary="Self-evolution remains eval-gated and review-first instead of mutating capability assets without receipts.",
-        remaining_gap="The rollout is still human-reviewed and should stay that way until stronger live regression evidence exists.",
-        scenario_names=(
-            "governed_self_evolution_behavior",
-            "capability_repair_behavior",
-            "capability_preflight_behavior",
+        operator_summary=(
+            "Self-improvement now exposes anti-drift, canary, rollback, and receipt policy instead of treating candidate generation as sufficient proof."
         ),
+        remaining_gap="Broader live adoption telemetry and longer-horizon candidate diversity replay still remain for future work.",
+        scenario_names=GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
     ),
 )
 

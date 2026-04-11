@@ -713,6 +713,48 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_computer_use_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "computer_use_browser_desktop",
+                    "benchmark_posture": "ci_gated_operator_visible",
+                    "operator_status": "browser_desktop_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "browser_replay_state": "extract_html_and_screenshot_receipts_visible",
+                    "desktop_action_state": "dismiss_poll_and_ack_receipts_visible",
+                    "cross_surface_receipt_state": "continuity_and_operator_receipts_visible",
+                },
+                "scenario_names": [
+                    "browser_execution_task_replay_behavior",
+                    "browser_runtime_audit",
+                    "native_desktop_shell_behavior",
+                    "desktop_notification_action_replay_behavior",
+                    "cross_surface_notification_controls_behavior",
+                    "cross_surface_continuity_behavior",
+                    "workflow_boundary_blocked_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "browser_task_replay_policy": "extract_html_and_screenshot_actions_require_distinct_audit_receipts",
+                    "desktop_action_replay_policy": "enqueue_dismiss_poll_and_ack_must_remain_cross_surface_replayable",
+                    "cross_surface_continuity_policy": "browser_and_desktop_share_one_operator_visible_continuity_snapshot",
+                    "operator_visibility": "benchmark_proof_plus_computer_use_receipts_visible",
+                    "receipt_surfaces": [
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/computer-use-benchmark",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -755,6 +797,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -779,7 +822,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert trust_suite["scenario_count"] >= 7
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
-    assert "browser_runtime_audit" in computer_suite["scenario_names"]
+    assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -789,6 +832,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["workflow_endurance_benchmark"]["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
     assert payload["trust_boundary_benchmark"]["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
+    assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
+    assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
 
 
 @pytest.mark.asyncio
@@ -860,6 +905,98 @@ async def test_operator_trust_boundary_benchmark_surface_degrades_summary_on_fai
     assert payload["summary"]["delegation_partition_state"] == "regressions_detected"
     assert payload["summary"]["workflow_replay_state"] == "regressions_detected"
     assert payload["failure_report"][0]["scenario_name"] == "secret_ref_egress_boundary_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_computer_use_benchmark_surface_reports_policy_and_receipts(client):
+    resp = await client.get("/api/operator/computer-use-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "computer_use_browser_desktop"
+    assert payload["summary"]["operator_status"] == "browser_desktop_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["browser_replay_state"] == "extract_html_and_screenshot_receipts_visible"
+    assert payload["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
+    assert "/api/operator/computer-use-benchmark" in payload["policy"]["receipt_surfaces"]
+    assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_computer_use_benchmark_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=7,
+        passed=5,
+        failed=2,
+        duration_ms=14,
+        results=[
+            SimpleNamespace(
+                passed=False,
+                name="desktop_notification_action_replay_behavior",
+                error="desktop notification replay regression",
+            )
+        ],
+    )
+
+    with patch("src.browser.benchmark._run_computer_use_benchmark_suite", AsyncMock(return_value=failing_summary)):
+        resp = await client.get("/api/operator/computer-use-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "ci_regressions_detected_operator_visible"
+    assert payload["summary"]["browser_replay_state"] == "regressions_detected"
+    assert payload["summary"]["desktop_action_state"] == "regressions_detected"
+    assert payload["summary"]["cross_surface_receipt_state"] == "regressions_detected"
+    assert payload["failure_report"][0]["scenario_name"] == "desktop_notification_action_replay_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_benchmark_proof_degrades_top_level_posture_when_child_benchmark_is_red(client):
+    with patch(
+        "src.api.operator.build_computer_use_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "computer_use_browser_desktop",
+                    "benchmark_posture": "ci_regressions_detected_operator_visible",
+                    "operator_status": "browser_desktop_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 1,
+                    "browser_replay_state": "regressions_detected",
+                    "desktop_action_state": "regressions_detected",
+                    "cross_surface_receipt_state": "regressions_detected",
+                },
+                "scenario_names": ["browser_execution_task_replay_behavior"],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [
+                    {
+                        "type": "benchmark_regression",
+                        "scenario_name": "desktop_notification_action_replay_behavior",
+                        "summary": "desktop notification replay regression",
+                        "reason": "deterministic_eval_failure",
+                    }
+                ],
+                "policy": {
+                    "browser_task_replay_policy": "extract_html_and_screenshot_actions_require_distinct_audit_receipts",
+                    "desktop_action_replay_policy": "enqueue_dismiss_poll_and_ack_must_remain_cross_surface_replayable",
+                    "cross_surface_continuity_policy": "browser_and_desktop_share_one_operator_visible_continuity_snapshot",
+                    "operator_visibility": "benchmark_proof_plus_computer_use_receipts_visible",
+                    "receipt_surfaces": ["/api/operator/computer-use-benchmark"],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 6, "failed": 1, "duration_ms": 100},
+            }
+        ),
+    ):
+        resp = await client.get("/api/operator/benchmark-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed_with_regressions"
+    assert payload["summary"]["computer_use_benchmark_posture"] == "ci_regressions_detected_operator_visible"
 
 
 @pytest.mark.asyncio

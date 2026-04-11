@@ -167,6 +167,7 @@ interface OperatorBenchmarkProofSummary {
   user_model_benchmark_posture?: string;
   workflow_endurance_benchmark_posture?: string;
   trust_boundary_benchmark_posture?: string;
+  computer_use_benchmark_posture?: string;
 }
 
 interface OperatorBenchmarkProofSuite {
@@ -212,6 +213,7 @@ interface OperatorBenchmarkProof {
   user_model_benchmark: OperatorUserModelBenchmark | null;
   workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
   trust_boundary_benchmark: OperatorTrustBoundaryBenchmark | null;
+  computer_use_benchmark: OperatorComputerUseBenchmark | null;
   governed_improvement: {
     target_count: number;
     target_types: string[];
@@ -310,6 +312,36 @@ interface OperatorTrustBoundaryBenchmark {
     delegation_partition_policy: string;
     background_execution_policy: string;
     workflow_replay_policy: string;
+    operator_visibility: string;
+    receipt_surfaces: string[];
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorComputerUseBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorComputerUseBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    browser_replay_state: string;
+    desktop_action_state: string;
+    cross_surface_receipt_state: string;
+  };
+  failure_report: OperatorComputerUseBenchmarkFailure[];
+  policy: {
+    browser_task_replay_policy: string;
+    desktop_action_replay_policy: string;
+    cross_surface_continuity_policy: string;
     operator_visibility: string;
     receipt_surfaces: string[];
     ci_gate_mode: string;
@@ -2257,10 +2289,12 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const userModelBenchmark = record.user_model_benchmark;
   const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
   const trustBoundaryBenchmark = record.trust_boundary_benchmark;
+  const computerUseBenchmark = record.computer_use_benchmark;
   let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
   let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
+  let normalizedComputerUseBenchmark: OperatorComputerUseBenchmark | null = null;
   if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
     const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
     const memorySummary = memoryBenchmarkRecord.summary;
@@ -2459,6 +2493,61 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       };
     }
   }
+  if (computerUseBenchmark && typeof computerUseBenchmark === "object" && !Array.isArray(computerUseBenchmark)) {
+    const computerBenchmarkRecord = computerUseBenchmark as Record<string, unknown>;
+    const computerSummary = computerBenchmarkRecord.summary;
+    const computerPolicy = computerBenchmarkRecord.policy;
+    if (
+      computerSummary && typeof computerSummary === "object" && !Array.isArray(computerSummary)
+      && computerPolicy && typeof computerPolicy === "object" && !Array.isArray(computerPolicy)
+    ) {
+      const computerSummaryRecord = computerSummary as Record<string, unknown>;
+      const computerPolicyRecord = computerPolicy as Record<string, unknown>;
+      normalizedComputerUseBenchmark = {
+        summary: {
+          suite_name: typeof computerSummaryRecord.suite_name === "string" ? computerSummaryRecord.suite_name : "computer_use_browser_desktop",
+          benchmark_posture: typeof computerSummaryRecord.benchmark_posture === "string" ? computerSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof computerSummaryRecord.operator_status === "string" ? computerSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof computerSummaryRecord.scenario_count === "number" ? computerSummaryRecord.scenario_count : 0,
+          dimension_count: typeof computerSummaryRecord.dimension_count === "number" ? computerSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof computerSummaryRecord.failure_mode_count === "number" ? computerSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof computerSummaryRecord.active_failure_count === "number" ? computerSummaryRecord.active_failure_count : 0,
+          browser_replay_state: typeof computerSummaryRecord.browser_replay_state === "string" ? computerSummaryRecord.browser_replay_state : "unknown",
+          desktop_action_state: typeof computerSummaryRecord.desktop_action_state === "string" ? computerSummaryRecord.desktop_action_state : "unknown",
+          cross_surface_receipt_state: typeof computerSummaryRecord.cross_surface_receipt_state === "string" ? computerSummaryRecord.cross_surface_receipt_state : "unknown",
+        },
+        failure_report: Array.isArray(computerBenchmarkRecord.failure_report)
+          ? computerBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          browser_task_replay_policy: typeof computerPolicyRecord.browser_task_replay_policy === "string"
+            ? computerPolicyRecord.browser_task_replay_policy
+            : "unknown",
+          desktop_action_replay_policy: typeof computerPolicyRecord.desktop_action_replay_policy === "string"
+            ? computerPolicyRecord.desktop_action_replay_policy
+            : "unknown",
+          cross_surface_continuity_policy: typeof computerPolicyRecord.cross_surface_continuity_policy === "string"
+            ? computerPolicyRecord.cross_surface_continuity_policy
+            : "unknown",
+          operator_visibility: typeof computerPolicyRecord.operator_visibility === "string"
+            ? computerPolicyRecord.operator_visibility
+            : "unknown",
+          receipt_surfaces: Array.isArray(computerPolicyRecord.receipt_surfaces)
+            ? computerPolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          ci_gate_mode: typeof computerPolicyRecord.ci_gate_mode === "string" ? computerPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
   return {
     summary: {
       suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
@@ -2478,6 +2567,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
         : "unknown",
       trust_boundary_benchmark_posture: typeof summaryRecord.trust_boundary_benchmark_posture === "string"
         ? summaryRecord.trust_boundary_benchmark_posture
+        : "unknown",
+      computer_use_benchmark_posture: typeof summaryRecord.computer_use_benchmark_posture === "string"
+        ? summaryRecord.computer_use_benchmark_posture
         : "unknown",
     },
     suites: Array.isArray(record.suites)
@@ -2502,6 +2594,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
     user_model_benchmark: normalizedUserModelBenchmark,
     workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
     trust_boundary_benchmark: normalizedTrustBoundaryBenchmark,
+    computer_use_benchmark: normalizedComputerUseBenchmark,
     governed_improvement: {
       target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
       target_types: Array.isArray(governedRecord.target_types)
@@ -12322,6 +12415,39 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 ].join(" · ")}
                               </div>
                               {operatorBenchmarkProof.trust_boundary_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.computer_use_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Computer-use benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.computer_use_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.computer_use_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.browser_replay_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.desktop_action_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.cross_surface_receipt_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.computer_use_benchmark.policy.browser_task_replay_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.computer_use_benchmark.policy.desktop_action_replay_policy.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.computer_use_benchmark.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.computer_use_benchmark.failure_report.slice(0, 2).map((failure) => (
                                 <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
                                   {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
                                 </div>

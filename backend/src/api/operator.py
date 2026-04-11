@@ -26,6 +26,7 @@ from src.api.workflows import (
 from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
+from src.browser.benchmark import build_computer_use_benchmark_report
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report
@@ -2729,11 +2730,18 @@ async def get_operator_control_plane(
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
-    memory_benchmark, user_model_benchmark, workflow_endurance_benchmark, trust_boundary_benchmark = await asyncio.gather(
+    (
+        memory_benchmark,
+        user_model_benchmark,
+        workflow_endurance_benchmark,
+        trust_boundary_benchmark,
+        computer_use_benchmark,
+    ) = await asyncio.gather(
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
         build_trust_boundary_benchmark_report(),
+        build_computer_use_benchmark_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -2741,6 +2749,14 @@ async def get_operator_benchmark_proof():
         for name in evolution_benchmark_gate_policy().get("required_benchmark_suites", [])
         if str(name).strip()
     }
+    child_benchmark_postures = [
+        str(memory_benchmark["summary"]["benchmark_posture"]),
+        str(user_model_benchmark["summary"]["benchmark_posture"]),
+        str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
+        str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
+        str(computer_use_benchmark["summary"]["benchmark_posture"]),
+    ]
+    has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
         str(scenario_name)
         for suite in suites
@@ -2758,7 +2774,11 @@ async def get_operator_benchmark_proof():
         "summary": {
             "suite_count": len(suites),
             "scenario_count": len(unique_scenarios),
-            "benchmark_posture": "deterministic_proof_backed",
+            "benchmark_posture": (
+                "deterministic_proof_backed"
+                if not has_regressions
+                else "deterministic_proof_backed_with_regressions"
+            ),
             "operator_status": "operator_visible",
             "remaining_gap": "live_provider_and_real_computer_use_depth",
             "governed_improvement_status": "review_gated",
@@ -2766,12 +2786,14 @@ async def get_operator_benchmark_proof():
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
+            "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
+        "computer_use_benchmark": computer_use_benchmark,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -2794,6 +2816,11 @@ async def get_operator_workflow_endurance_benchmark():
 @router.get("/operator/trust-boundary-benchmark")
 async def get_operator_trust_boundary_benchmark():
     return await build_trust_boundary_benchmark_report()
+
+
+@router.get("/operator/computer-use-benchmark")
+async def get_operator_computer_use_benchmark():
+    return await build_computer_use_benchmark_report()
 
 
 @router.get("/operator/guardian-state")

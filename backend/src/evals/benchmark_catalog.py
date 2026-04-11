@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
+from src.browser.benchmark import COMPUTER_USE_BENCHMARK_SCENARIO_NAMES, COMPUTER_USE_BENCHMARK_SUITE_NAME
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -119,22 +120,17 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         scenario_names=TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
-        name="computer_use_browser_desktop",
+        name=COMPUTER_USE_BENCHMARK_SUITE_NAME,
         label="Computer-use, browser, and desktop execution",
         description=(
-            "Groups the current browser, native desktop, and cross-surface execution seams into one benchmark-facing proof lane."
+            "Pins replayable browser tasks, desktop notification actions, cross-surface continuity, and operator-visible receipts into one CI-gated proof lane."
         ),
         benchmark_axis="computer_use_execution",
-        operator_summary="Browser and desktop continuity paths stay visible, recoverable, and auditable instead of collapsing into one opaque transport lane.",
-        remaining_gap="A fuller real-world browser or desktop task harness still remains for future work.",
-        scenario_names=(
-            "browser_runtime_audit",
-            "native_presence_notification_behavior",
-            "native_desktop_shell_behavior",
-            "cross_surface_notification_controls_behavior",
-            "cross_surface_continuity_behavior",
-            "workflow_boundary_blocked_surface_behavior",
+        operator_summary=(
+            "Browser and desktop execution now have one explicit benchmark lane with replay receipts instead of depending on isolated browser or daemon anecdotes."
         ),
+        remaining_gap="Broader live website, OS, and mobile task depth still remains for future work.",
+        scenario_names=COMPUTER_USE_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="planning_retrieval_reporting",

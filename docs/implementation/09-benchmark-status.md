@@ -7,7 +7,7 @@ title: 09. Benchmark Status
 ## Status On `develop`
 
 - [x] The capability import program and benchmark refresh are now landed on `develop`.
-- [x] Seraph now also has an operator-visible benchmark-proof surface with explicit deterministic suite coverage, a dedicated guardian-memory benchmark suite, a dedicated workflow-endurance benchmark suite, a dedicated trust-boundary benchmark suite, and governed-improvement gate policy.
+- [x] Seraph now also has an operator-visible benchmark-proof surface with explicit deterministic suite coverage, a dedicated guardian-memory benchmark suite, a dedicated workflow-endurance benchmark suite, a dedicated trust-boundary benchmark suite, a dedicated computer-use benchmark suite, and governed-improvement gate policy.
 - [ ] Seraph still cannot credibly claim broad benchmark superiority from implementation alone.
 
 ## Paired Research
@@ -44,7 +44,7 @@ This file owns three implementation questions:
 - [x] Seraph now has real shipped surfaces on every benchmark axis, including the imported capability families from the Hermes/OpenClaw program.
 - [x] Guardian memory, proactive scaffolding, runtime legibility, and capability breadth are now materially stronger than a prototype-only baseline.
 - [ ] Seraph is still not in a position to claim broad benchmark superiority from shipped implementation alone.
-- [x] The shipped repo can now point to explicit benchmark-suite receipts for guardian memory quality, workflow endurance and repair, trust boundaries and safety receipts, memory/workflow continuity, browser or desktop execution seams, planning or retrieval reporting, and governed self-improvement gates instead of only ad hoc eval-scenario memory.
+- [x] The shipped repo can now point to explicit benchmark-suite receipts for guardian memory quality, workflow endurance and repair, trust boundaries and safety receipts, replayable browser/desktop computer-use proof, memory/workflow continuity, planning or retrieval reporting, and governed self-improvement gates instead of only ad hoc eval-scenario memory.
 - [ ] The biggest implementation gaps now cluster around host/container-grade privileged execution isolation beyond the new field-scoped secret-ref, mutation-allowlist, disposable worker roots, credential-egress allowlists, session-partitioned process trust receipts, and background-session inventory substrate, broader long-horizon workflow autonomy beyond the now-shipped queue-state orchestration, recovery-density guidance, branch/output debugger visibility, and explicit workflow operating-layer eval proof, deeper intervention learning beyond the new live-versus-procedural conflict diagnostics plus first user-model preference inference, richer world-model quality beyond the new ranking/arbitration plus ambiguity guardrail layer, production-grade hardening for the broadened reach surfaces even after the new browser-provider and node-adapter continuity inventory, and broader live-provider integration proof beyond the now-shipped provider-planning comparison surfaces.
 
 ## Acceptance Checklist

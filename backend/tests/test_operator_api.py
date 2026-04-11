@@ -676,6 +676,43 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_trust_boundary_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "trust_boundary_and_safety_receipts",
+                    "benchmark_posture": "ci_gated_operator_visible",
+                    "operator_status": "safety_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "secret_egress_state": "field_scoped_egress_allowlist_required",
+                    "delegation_partition_state": "vault_and_background_partitioned",
+                    "workflow_replay_state": "boundary_drift_blocks_replay",
+                    "operator_receipt_state": "benchmark_and_runtime_visible",
+                },
+                "scenario_names": [
+                    "secret_ref_egress_boundary_behavior",
+                    "tool_policy_guardrails_behavior",
+                    "delegation_secret_boundary_behavior",
+                    "process_recovery_boundary_behavior",
+                    "background_session_handoff_behavior",
+                    "workflow_boundary_blocked_surface_behavior",
+                    "source_mutation_boundary_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "secret_egress_policy": "field_scoped_secret_refs_plus_required_credential_egress_allowlist",
+                    "operator_visibility": "benchmark_proof_plus_runtime_receipts_visible",
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -711,12 +748,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 7
+    assert payload["summary"]["suite_count"] == 8
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -736,6 +774,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     workflow_suite = next(item for item in payload["suites"] if item["name"] == "workflow_endurance_and_repair")
     assert "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"]
     assert workflow_suite["scenario_count"] >= 4
+    trust_suite = next(item for item in payload["suites"] if item["name"] == "trust_boundary_and_safety_receipts")
+    assert "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"]
+    assert trust_suite["scenario_count"] >= 7
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_runtime_audit" in computer_suite["scenario_names"]
@@ -746,6 +787,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["user_model_benchmark"]["policy"]["clarify_before_action_policy"] == "required_on_high_ambiguity"
     assert payload["workflow_endurance_benchmark"]["summary"]["suite_name"] == "workflow_endurance_and_repair"
     assert payload["workflow_endurance_benchmark"]["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
+    assert payload["trust_boundary_benchmark"]["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
+    assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
 
 
 @pytest.mark.asyncio
@@ -774,6 +817,49 @@ async def test_operator_workflow_endurance_benchmark_surface_reports_policy_and_
     assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
     assert payload["policy"]["anticipatory_repair_policy"] == "prepare_repair_and_backup_branch_before_obvious_failure_points"
     assert payload["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
+
+
+@pytest.mark.asyncio
+async def test_operator_trust_boundary_benchmark_surface_reports_policy_and_receipts(client):
+    resp = await client.get("/api/operator/trust-boundary-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
+    assert payload["summary"]["operator_status"] == "safety_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["secret_egress_state"] == "field_scoped_egress_allowlist_required"
+    assert payload["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+    assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_trust_boundary_benchmark_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=7,
+        passed=5,
+        failed=2,
+        duration_ms=12,
+        results=[
+            SimpleNamespace(
+                passed=False,
+                name="secret_ref_egress_boundary_behavior",
+                error="secret ref egress regression",
+            )
+        ],
+    )
+
+    with patch("src.security.benchmark._run_trust_boundary_benchmark_suite", AsyncMock(return_value=failing_summary)):
+        resp = await client.get("/api/operator/trust-boundary-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "ci_regressions_detected_operator_visible"
+    assert payload["summary"]["secret_egress_state"] == "regressions_detected"
+    assert payload["summary"]["delegation_partition_state"] == "regressions_detected"
+    assert payload["summary"]["workflow_replay_state"] == "regressions_detected"
+    assert payload["failure_report"][0]["scenario_name"] == "secret_ref_egress_boundary_behavior"
 
 
 @pytest.mark.asyncio

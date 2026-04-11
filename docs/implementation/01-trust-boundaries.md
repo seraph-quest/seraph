@@ -29,6 +29,7 @@
 - [x] authenticated MCP-backed tools now preserve source-specific approval and audit context through wrapper layers, and workflow checkpoint/replay paths fail closed when a run crosses into an authenticated external-source boundary instead of treating it like generic MCP read access
 - [x] tool metadata and runtime secret-ref handling now fail closed to explicit field-level injection surfaces, and connector-backed authenticated mutation bundles now reject undeclared payload fields instead of passing arbitrary write arguments through to external runtimes
 - [x] managed execution now also uses disposable worker roots outside the workspace for direct command and background-process runtime state, MCP secret-ref resolution now requires an explicit credential-egress allowlist, and delegated/workflow/operator trust receipts now preserve connector-egress plus branch-handoff trust partitions instead of flattening privileged execution back to a generic session boundary
+- [x] trust posture now also has a named deterministic benchmark surface: `trust_boundary_and_safety_receipts` pins secret-egress controls, delegation/background partitioning, workflow replay drift blocking, and operator-visible safety receipts into one explicit operator report instead of leaving trust proof spread across raw eval names and isolated API receipts
 
 ## Working On Now
 
@@ -46,10 +47,11 @@
 - [x] this workstream now also ships the second Batch AT aggregate for session-bound managed-process recovery, so background-process listing, output reads, and stop controls fail closed outside the originating session instead of leaving cross-session recovery handles live
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy and session-partitioned process trust metadata, so `start_process` no longer inherits the generic high-risk approval path and process-runtime approvals/audit receipts now carry the narrower managed-process boundary contract
 - [x] this workstream now also ships the second Batch BA aggregate for disposable worker runtime isolation, explicit credential-egress allowlists for secret-bearing MCP execution, and preserved trust-partition receipts across delegated, workflow, and background-handoff surfaces
+- [x] this workstream now also ships Batch BK for adversarial trust-boundary evals and operator safety receipts, so trust posture is CI-gated through a named suite and exposed directly through benchmark-proof and trust-boundary benchmark operator surfaces
 
 ## Still To Do On `develop`
 
-- [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, disposable worker roots, credential-egress policy, and specialist-surface hardening passes
+- [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, disposable worker roots, credential-egress policy, operator-visible trust benchmark, and specialist-surface hardening passes
 - [ ] add deeper policy distinctions inside MCP and external execution paths
 - [ ] keep trust UX strict without making approvals noisy or unusable
 
@@ -66,6 +68,27 @@
 - [ ] secret use is fully scoped and auditable end to end
 
 ## Current Slice Record
+
+### `trust-boundary-evals-and-safety-receipts-v1`
+
+- status: complete on `feat/trust-boundary-evals-batch-bk-v1`, intended for the aggregate Batch BK PR for `#402`
+- root cause addressed:
+  - trust hardening had become materially stronger on `develop`, but the proof layer still relied on scattered runtime eval names, approval receipts, and operator surfaces instead of one named deterministic benchmark lane
+  - the first BK pass also exposed three real review failures: the trust-boundary benchmark report recursed through its own operator surface, the report overclaimed healthy trust posture even when benchmark failures were present, and the cockpit benchmark card hid trust-boundary failure receipts behind summary-only text
+- scope:
+  - Seraph now ships a named `trust_boundary_and_safety_receipts` suite that groups secret-ref egress containment, delegation/background partitioning, workflow boundary drift blocking, and operator-visible safety receipt coverage into one benchmark axis
+  - `/api/operator/benchmark-proof` and `/api/operator/trust-boundary-benchmark` now surface that trust benchmark posture directly, including trust policy, failure taxonomy, receipt surfaces, and live failure reports
+  - the cockpit benchmark-proof surface now renders the trust-boundary benchmark card with concrete failure receipts instead of only showing posture summaries
+- validation:
+  - `python3 -m py_compile backend/src/api/operator.py backend/src/evals/benchmark_catalog.py backend/src/evals/harness.py backend/src/security/benchmark.py backend/tests/test_operator_api.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_operator_api.py::test_operator_trust_boundary_benchmark_surface_reports_policy_and_receipts tests/test_operator_api.py::test_operator_trust_boundary_benchmark_surface_degrades_summary_on_failures tests/test_eval_harness.py::test_run_benchmark_suites_executes_trust_boundary_and_safety_receipts_suite tests/test_eval_harness.py::test_trust_boundary_benchmark_surface_behavior_runtime_eval_details tests/test_eval_harness.py::test_benchmark_proof_surface_behavior_runtime_eval_details -q -o addopts=''`
+  - `cd frontend && NODE_OPTIONS=--experimental-require-module npx vitest run src/components/cockpit/CockpitView.test.tsx`
+  - `cd docs && npm run build`
+  - `git diff --check`
+- review pass:
+  - `Poincare` found one high issue and two medium issues in the first backend pass: direct recursion through the trust-boundary report, success-state overclaim during failing benchmark runs, and benchmark wording that claimed stronger host-level proof than the exercised eval actually established
+  - `Herschel` found one medium frontend issue: the cockpit trust-boundary benchmark card parsed failure receipts but never rendered them, so operators could see non-zero failure counts without the actual failing categories or reasons
+  - fixed by removing the recursive operator-surface scenario from the named suite, degrading trust-state summaries when failures exist, tightening the secret-egress wording to match the exercised proof, and rendering trust-boundary failure receipts directly in the operator surface
 
 ### `capability-bootstrap-autonomy-boundary-v1`
 

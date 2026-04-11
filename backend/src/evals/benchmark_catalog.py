@@ -10,6 +10,7 @@ from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
 )
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
+from src.security.benchmark import TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES, TRUST_BOUNDARY_BENCHMARK_SUITE_NAME
 from src.workflows.benchmark import (
     WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
     WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
@@ -102,6 +103,20 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live workload replay and external long-context benchmark parity still remain for future work.",
         scenario_names=WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=TRUST_BOUNDARY_BENCHMARK_SUITE_NAME,
+        label="Trust boundaries and safety receipts",
+        description=(
+            "Pins adversarial secret-egress, delegation partitioning, background-session containment, "
+            "workflow boundary drift, and operator-visible safety receipts into one deterministic proof lane."
+        ),
+        benchmark_axis="trust_boundary_and_safety_receipts",
+        operator_summary=(
+            "Trust posture now has one explicit benchmark lane for secret egress, replay drift, delegation boundaries, and operator safety receipts."
+        ),
+        remaining_gap="Broader live hostile-environment replay and stronger privileged-path isolation still remain for future work.",
+        scenario_names=TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="computer_use_browser_desktop",

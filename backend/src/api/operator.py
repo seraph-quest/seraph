@@ -28,6 +28,7 @@ from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
+from src.guardian.benchmark import build_guardian_user_model_benchmark_report
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
@@ -2292,6 +2293,8 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
     world_model = getattr(state, "world_model", None)
     confidence = getattr(state, "confidence", None)
     observer_context = getattr(state, "observer_context", None)
+    user_model_profile = getattr(world_model, "user_model_profile", None)
+    facets = list(getattr(user_model_profile, "facets", ()) or ())
     return {
         "summary": {
             "session_id": session_id,
@@ -2303,6 +2306,7 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
             "recent_sessions_confidence": getattr(confidence, "recent_sessions", "unknown"),
             "intent_uncertainty_level": getattr(state, "intent_uncertainty_level", "clear"),
             "intent_resolution": getattr(state, "intent_resolution", "proceed"),
+            "action_posture": getattr(state, "action_posture", "act_when_grounded"),
             "current_focus": getattr(world_model, "current_focus", "No clear focus signal"),
             "focus_source": getattr(world_model, "focus_source", "unknown"),
             "focus_alignment": getattr(world_model, "focus_alignment", "unknown"),
@@ -2330,6 +2334,31 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
             "memory_reconciliation_diagnostics": list(
                 getattr(state, "memory_reconciliation_diagnostics", ()) or ()
             ),
+            "restraint_reasons": list(getattr(state, "restraint_reasons", ()) or ()),
+            "user_model_benchmark_diagnostics": list(
+                getattr(state, "user_model_benchmark_diagnostics", ()) or ()
+            ),
+        },
+        "user_model": {
+            "confidence": getattr(user_model_profile, "confidence", "empty"),
+            "restraint_posture": getattr(user_model_profile, "restraint_posture", "act_when_grounded"),
+            "continuity_strategy": getattr(user_model_profile, "continuity_strategy", "preserve_current_context"),
+            "clarification_watchpoints": list(
+                getattr(user_model_profile, "clarification_watchpoints", ()) or ()
+            ),
+            "restraint_reasons": list(getattr(user_model_profile, "restraint_reasons", ()) or ()),
+            "evidence_store": list(getattr(user_model_profile, "evidence_store", ()) or ()),
+            "facets": [
+                {
+                    "key": getattr(facet, "key", "facet"),
+                    "label": getattr(facet, "label", "Facet"),
+                    "value": getattr(facet, "value", "unknown"),
+                    "confidence": getattr(facet, "confidence", "unknown"),
+                    "evidence_sources": list(getattr(facet, "evidence_sources", ()) or ()),
+                    "evidence_lines": list(getattr(facet, "evidence_lines", ()) or ()),
+                }
+                for facet in facets
+            ],
         },
         "operator_guidance": {
             "active_projects": list(getattr(world_model, "active_projects", ()) or ()),
@@ -2449,6 +2478,7 @@ async def get_operator_control_plane(
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
     memory_benchmark = await build_guardian_memory_benchmark_report()
+    user_model_benchmark = await build_guardian_user_model_benchmark_report()
     evolution_targets = list_evolution_targets()
     required_suite_names = {
         str(name)
@@ -2477,9 +2507,11 @@ async def get_operator_benchmark_proof():
             "remaining_gap": "live_provider_and_real_computer_use_depth",
             "governed_improvement_status": "review_gated",
             "memory_benchmark_posture": memory_benchmark["summary"]["benchmark_posture"],
+            "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
+        "user_model_benchmark": user_model_benchmark,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,

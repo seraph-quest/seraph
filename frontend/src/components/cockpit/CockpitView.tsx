@@ -163,6 +163,7 @@ interface OperatorBenchmarkProofSummary {
   operator_status: string;
   remaining_gap: string;
   governed_improvement_status: string;
+  user_model_benchmark_posture?: string;
 }
 
 interface OperatorBenchmarkProofSuite {
@@ -205,6 +206,7 @@ interface OperatorBenchmarkProof {
   summary: OperatorBenchmarkProofSummary;
   suites: OperatorBenchmarkProofSuite[];
   memory_benchmark: OperatorMemoryBenchmark | null;
+  user_model_benchmark: OperatorUserModelBenchmark | null;
   governed_improvement: {
     target_count: number;
     target_types: string[];
@@ -220,6 +222,34 @@ interface OperatorBenchmarkProof {
   };
 }
 
+interface OperatorUserModelBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorUserModelBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    clarification_policy_state: string;
+    restraint_policy_state: string;
+  };
+  failure_report: OperatorUserModelBenchmarkFailure[];
+  policy: {
+    canonical_authority: string;
+    clarify_before_action_policy: string;
+    personalization_override_policy: string;
+    operator_visibility: string;
+    ci_gate_mode: string;
+  };
+}
+
 interface OperatorGuardianStateSummary {
   session_id?: string | null;
   overall_confidence: string;
@@ -230,6 +260,7 @@ interface OperatorGuardianStateSummary {
   recent_sessions_confidence: string;
   intent_uncertainty_level: string;
   intent_resolution: string;
+  action_posture: string;
   current_focus: string;
   focus_source: string;
   focus_alignment: string;
@@ -245,8 +276,29 @@ interface OperatorGuardianStateExplanation {
   corroboration_sources: string[];
   preference_inference_diagnostics: string[];
   learning_diagnostics: string[];
+  restraint_reasons: string[];
+  user_model_benchmark_diagnostics: string[];
   memory_provider_diagnostics: string[];
   memory_reconciliation_diagnostics: string[];
+}
+
+interface OperatorGuardianUserModelFacet {
+  key: string;
+  label: string;
+  value: string;
+  confidence: string;
+  evidence_sources: string[];
+  evidence_lines: string[];
+}
+
+interface OperatorGuardianUserModelProfile {
+  confidence: string;
+  restraint_posture: string;
+  continuity_strategy: string;
+  clarification_watchpoints: string[];
+  restraint_reasons: string[];
+  evidence_store: string[];
+  facets: OperatorGuardianUserModelFacet[];
 }
 
 interface OperatorGuardianStateGuidance {
@@ -272,6 +324,7 @@ interface OperatorGuardianStateObserver {
 interface OperatorGuardianState {
   summary: OperatorGuardianStateSummary;
   explanation: OperatorGuardianStateExplanation;
+  user_model: OperatorGuardianUserModelProfile;
   operator_guidance: OperatorGuardianStateGuidance;
   observer: OperatorGuardianStateObserver;
 }
@@ -2085,7 +2138,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   }
   const gatePolicyRecord = gatePolicy as Record<string, unknown>;
   const memoryBenchmark = record.memory_benchmark;
+  const userModelBenchmark = record.user_model_benchmark;
   let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
+  let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
     const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
     const memorySummary = memoryBenchmarkRecord.summary;
@@ -2128,6 +2183,53 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       };
     }
   }
+  if (userModelBenchmark && typeof userModelBenchmark === "object" && !Array.isArray(userModelBenchmark)) {
+    const userModelBenchmarkRecord = userModelBenchmark as Record<string, unknown>;
+    const userModelSummary = userModelBenchmarkRecord.summary;
+    const userModelPolicy = userModelBenchmarkRecord.policy;
+    if (
+      userModelSummary && typeof userModelSummary === "object" && !Array.isArray(userModelSummary)
+      && userModelPolicy && typeof userModelPolicy === "object" && !Array.isArray(userModelPolicy)
+    ) {
+      const userModelSummaryRecord = userModelSummary as Record<string, unknown>;
+      const userModelPolicyRecord = userModelPolicy as Record<string, unknown>;
+      normalizedUserModelBenchmark = {
+        summary: {
+          suite_name: typeof userModelSummaryRecord.suite_name === "string" ? userModelSummaryRecord.suite_name : "guardian_user_model_restraint",
+          benchmark_posture: typeof userModelSummaryRecord.benchmark_posture === "string" ? userModelSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof userModelSummaryRecord.operator_status === "string" ? userModelSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof userModelSummaryRecord.scenario_count === "number" ? userModelSummaryRecord.scenario_count : 0,
+          dimension_count: typeof userModelSummaryRecord.dimension_count === "number" ? userModelSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof userModelSummaryRecord.failure_mode_count === "number" ? userModelSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof userModelSummaryRecord.active_failure_count === "number" ? userModelSummaryRecord.active_failure_count : 0,
+          clarification_policy_state: typeof userModelSummaryRecord.clarification_policy_state === "string" ? userModelSummaryRecord.clarification_policy_state : "unknown",
+          restraint_policy_state: typeof userModelSummaryRecord.restraint_policy_state === "string" ? userModelSummaryRecord.restraint_policy_state : "unknown",
+        },
+        failure_report: Array.isArray(userModelBenchmarkRecord.failure_report)
+          ? userModelBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          canonical_authority: typeof userModelPolicyRecord.canonical_authority === "string" ? userModelPolicyRecord.canonical_authority : "unknown",
+          clarify_before_action_policy: typeof userModelPolicyRecord.clarify_before_action_policy === "string"
+            ? userModelPolicyRecord.clarify_before_action_policy
+            : "unknown",
+          personalization_override_policy: typeof userModelPolicyRecord.personalization_override_policy === "string"
+            ? userModelPolicyRecord.personalization_override_policy
+            : "unknown",
+          operator_visibility: typeof userModelPolicyRecord.operator_visibility === "string" ? userModelPolicyRecord.operator_visibility : "unknown",
+          ci_gate_mode: typeof userModelPolicyRecord.ci_gate_mode === "string" ? userModelPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
   return {
     summary: {
       suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
@@ -2136,6 +2238,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
       remaining_gap: typeof summaryRecord.remaining_gap === "string" ? summaryRecord.remaining_gap : "unknown",
       governed_improvement_status: typeof summaryRecord.governed_improvement_status === "string" ? summaryRecord.governed_improvement_status : "unknown",
+      user_model_benchmark_posture: typeof summaryRecord.user_model_benchmark_posture === "string"
+        ? summaryRecord.user_model_benchmark_posture
+        : "unknown",
     },
     suites: Array.isArray(record.suites)
       ? record.suites.flatMap((entry) => {
@@ -2153,9 +2258,10 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
             ? suite.scenario_names.filter((item): item is string => typeof item === "string")
             : [],
         }];
-      })
+    })
       : [],
     memory_benchmark: normalizedMemoryBenchmark,
+    user_model_benchmark: normalizedUserModelBenchmark,
     governed_improvement: {
       target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
       target_types: Array.isArray(governedRecord.target_types)
@@ -2431,6 +2537,9 @@ function normalizeOperatorGuardianState(value: unknown): OperatorGuardianState |
   const explanationRecord = explanation as Record<string, unknown>;
   const guidanceRecord = operatorGuidance as Record<string, unknown>;
   const observerRecord = observer as Record<string, unknown>;
+  const userModelRecord = record.user_model && typeof record.user_model === "object" && !Array.isArray(record.user_model)
+    ? record.user_model as Record<string, unknown>
+    : null;
   return {
     summary: {
       session_id: typeof summaryRecord.session_id === "string" ? summaryRecord.session_id : null,
@@ -2442,6 +2551,7 @@ function normalizeOperatorGuardianState(value: unknown): OperatorGuardianState |
       recent_sessions_confidence: typeof summaryRecord.recent_sessions_confidence === "string" ? summaryRecord.recent_sessions_confidence : "unknown",
       intent_uncertainty_level: typeof summaryRecord.intent_uncertainty_level === "string" ? summaryRecord.intent_uncertainty_level : "clear",
       intent_resolution: typeof summaryRecord.intent_resolution === "string" ? summaryRecord.intent_resolution : "proceed",
+      action_posture: typeof summaryRecord.action_posture === "string" ? summaryRecord.action_posture : "act_when_grounded",
       current_focus: typeof summaryRecord.current_focus === "string" ? summaryRecord.current_focus : "No clear focus signal",
       focus_source: typeof summaryRecord.focus_source === "string" ? summaryRecord.focus_source : "unknown",
       focus_alignment: typeof summaryRecord.focus_alignment === "string" ? summaryRecord.focus_alignment : "unknown",
@@ -2468,11 +2578,49 @@ function normalizeOperatorGuardianState(value: unknown): OperatorGuardianState |
       learning_diagnostics: Array.isArray(explanationRecord.learning_diagnostics)
         ? explanationRecord.learning_diagnostics.filter((item): item is string => typeof item === "string")
         : [],
+      restraint_reasons: Array.isArray(explanationRecord.restraint_reasons)
+        ? explanationRecord.restraint_reasons.filter((item): item is string => typeof item === "string")
+        : [],
+      user_model_benchmark_diagnostics: Array.isArray(explanationRecord.user_model_benchmark_diagnostics)
+        ? explanationRecord.user_model_benchmark_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
       memory_provider_diagnostics: Array.isArray(explanationRecord.memory_provider_diagnostics)
         ? explanationRecord.memory_provider_diagnostics.filter((item): item is string => typeof item === "string")
         : [],
       memory_reconciliation_diagnostics: Array.isArray(explanationRecord.memory_reconciliation_diagnostics)
         ? explanationRecord.memory_reconciliation_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+    },
+    user_model: {
+      confidence: userModelRecord && typeof userModelRecord.confidence === "string" ? userModelRecord.confidence : "empty",
+      restraint_posture: userModelRecord && typeof userModelRecord.restraint_posture === "string" ? userModelRecord.restraint_posture : "act_when_grounded",
+      continuity_strategy: userModelRecord && typeof userModelRecord.continuity_strategy === "string" ? userModelRecord.continuity_strategy : "preserve_current_context",
+      clarification_watchpoints: userModelRecord && Array.isArray(userModelRecord.clarification_watchpoints)
+        ? userModelRecord.clarification_watchpoints.filter((item): item is string => typeof item === "string")
+        : [],
+      restraint_reasons: userModelRecord && Array.isArray(userModelRecord.restraint_reasons)
+        ? userModelRecord.restraint_reasons.filter((item): item is string => typeof item === "string")
+        : [],
+      evidence_store: userModelRecord && Array.isArray(userModelRecord.evidence_store)
+        ? userModelRecord.evidence_store.filter((item): item is string => typeof item === "string")
+        : [],
+      facets: userModelRecord && Array.isArray(userModelRecord.facets)
+        ? userModelRecord.facets.flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const facet = item as Record<string, unknown>;
+          return [{
+            key: typeof facet.key === "string" ? facet.key : "facet",
+            label: typeof facet.label === "string" ? facet.label : "Facet",
+            value: typeof facet.value === "string" ? facet.value : "unknown",
+            confidence: typeof facet.confidence === "string" ? facet.confidence : "unknown",
+            evidence_sources: Array.isArray(facet.evidence_sources)
+              ? facet.evidence_sources.filter((entry): entry is string => typeof entry === "string")
+              : [],
+            evidence_lines: Array.isArray(facet.evidence_lines)
+              ? facet.evidence_lines.filter((entry): entry is string => typeof entry === "string")
+              : [],
+          }];
+        })
         : [],
     },
     operator_guidance: {
@@ -10444,7 +10592,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             title="Guardian state"
             meta={
               operatorGuardianState
-                ? `${operatorGuardianState.summary.overall_confidence} · ${operatorGuardianState.summary.intent_resolution.replace(/_/g, " ")}`
+                ? `${operatorGuardianState.summary.overall_confidence} · ${operatorGuardianState.summary.action_posture.replace(/_/g, " ")}`
                 : `${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`
             }
             hint={COCKPIT_WINDOW_HINTS.guardianState}
@@ -10466,6 +10614,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-value">
                     {operatorGuardianState
                       ? operatorGuardianState.summary.intent_resolution.replace(/_/g, " ")
+                      : "unknown"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">action posture</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState
+                      ? operatorGuardianState.summary.action_posture.replace(/_/g, " ")
                       : "unknown"}
                   </div>
                 </div>
@@ -10523,6 +10679,57 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
               </div>
               <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model restraint</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState
+                    ? [
+                      operatorGuardianState.user_model.restraint_posture.replace(/_/g, " "),
+                      operatorGuardianState.user_model.continuity_strategy.replace(/_/g, " "),
+                    ].join(" • ")
+                    : "User-model restraint unavailable."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">clarification watchpoints</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.user_model.clarification_watchpoints.length
+                    ? operatorGuardianState.user_model.clarification_watchpoints.join(" • ")
+                    : "No explicit watchpoints surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">restraint reasons</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.restraint_reasons.length
+                    ? operatorGuardianState.explanation.restraint_reasons.join(" • ")
+                    : "No explicit restraint reasons surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model evidence</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.user_model.evidence_store.length
+                    ? operatorGuardianState.user_model.evidence_store.slice(0, 3).join(" • ")
+                    : "No explicit user-model evidence surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model facets</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.user_model.facets.length
+                    ? operatorGuardianState.user_model.facets
+                      .slice(0, 3)
+                      .map((facet) => [
+                        facet.label,
+                        facet.value,
+                        facet.confidence.replace(/_/g, " "),
+                        facet.evidence_lines[0] ?? facet.evidence_sources[0] ?? null,
+                      ].filter(Boolean).join(" · "))
+                      .join(" • ")
+                    : "No explicit user-model facets surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
                 <div className="cockpit-key">judgment risks</div>
                 <div className="cockpit-value cockpit-value--multiline">
                   {operatorGuardianState?.explanation.judgment_risks.length
@@ -10554,6 +10761,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 <div className="cockpit-key">learning guidance</div>
                 <div className="cockpit-value cockpit-value--multiline">
                   {operatorGuardianState?.operator_guidance.learning_guidance ?? "No explicit learning guidance yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model benchmark</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.user_model_benchmark_diagnostics.length
+                    ? operatorGuardianState.explanation.user_model_benchmark_diagnostics.join(" • ")
+                    : "No user-model benchmark diagnostics surfaced."}
                 </div>
               </div>
               <div className="cockpit-context-block">
@@ -11728,7 +11943,28 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             </div>
                           </div>
                         ) : null}
-                        {operatorBenchmarkProof.suites.slice(0, 5).map((suite) => (
+                        {operatorBenchmarkProof.user_model_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Guardian user-model benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.user_model_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.user_model_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.user_model_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.user_model_benchmark.summary.clarification_policy_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.user_model_benchmark.summary.restraint_policy_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.user_model_benchmark.policy.canonical_authority.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.suites.map((suite) => (
                           <div key={suite.name} className="cockpit-operator-row cockpit-operator-row--entry">
                             <div className="cockpit-operator-details">
                               <div className="cockpit-value">{suite.label}</div>

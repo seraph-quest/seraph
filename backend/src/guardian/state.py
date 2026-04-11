@@ -14,6 +14,17 @@ from src.observer.context import CurrentContext
 logger = logging.getLogger(__name__)
 
 
+def _dedupe(items: list[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return tuple(ordered)
+
+
 @dataclass(frozen=True)
 class GuardianStateConfidence:
     overall: str
@@ -44,8 +55,11 @@ class GuardianState:
     memory_reconciliation_diagnostics: tuple[str, ...] = ()
     intent_uncertainty_level: str = "clear"
     intent_resolution: str = "proceed"
+    action_posture: str = "act_when_grounded"
     intent_uncertainty_diagnostics: tuple[str, ...] = ()
     judgment_proof_lines: tuple[str, ...] = ()
+    restraint_reasons: tuple[str, ...] = ()
+    user_model_benchmark_diagnostics: tuple[str, ...] = ()
 
     @property
     def active_goals_summary(self) -> str:
@@ -112,7 +126,9 @@ class GuardianState:
         if self.intent_uncertainty_diagnostics:
             lines.append("")
             lines.append(
-                f"Intent uncertainty: {self.intent_uncertainty_level} (recommended resolution: {self.intent_resolution})"
+                "Intent uncertainty: "
+                f"{self.intent_uncertainty_level} (recommended resolution: {self.intent_resolution}; "
+                f"action posture: {self.action_posture})"
             )
             lines.extend(f"- {item}" for item in self.intent_uncertainty_diagnostics)
 
@@ -120,6 +136,16 @@ class GuardianState:
             lines.append("")
             lines.append("Judgment proof:")
             lines.extend(f"- {item}" for item in self.judgment_proof_lines)
+
+        if self.restraint_reasons:
+            lines.append("")
+            lines.append("Restraint reasons:")
+            lines.extend(f"- {item}" for item in self.restraint_reasons)
+
+        if self.user_model_benchmark_diagnostics:
+            lines.append("")
+            lines.append("User-model benchmark diagnostics:")
+            lines.extend(f"- {item}" for item in self.user_model_benchmark_diagnostics)
 
         if self.recent_execution_summary:
             lines.extend(["", "Recent execution:", self.recent_execution_summary])
@@ -754,6 +780,86 @@ def _judgment_proof_lines(
     return tuple(lines)
 
 
+def _action_posture_and_restraint_reasons(
+    *,
+    confidence: GuardianStateConfidence,
+    observer_context: CurrentContext,
+    world_model: GuardianWorldModel,
+    intent_uncertainty_level: str,
+    intent_resolution: str,
+) -> tuple[str, tuple[str, ...]]:
+    reasons: list[str] = []
+    action_posture = "act_when_grounded"
+    low_urgency_focus_context = (
+        observer_context.interruption_mode == "focus"
+        and observer_context.salience_level == "low"
+    )
+
+    if intent_resolution == "clarify":
+        action_posture = "clarify_first"
+        reasons.append(
+            "Intent remains weakly grounded, so clarification is safer than taking a confident action."
+        )
+    elif intent_resolution == "proceed_with_caution":
+        action_posture = "guarded_action"
+        reasons.append(
+            "Intent or preference evidence is incomplete, so any action should stay explicit and reversible."
+        )
+    elif intent_resolution == "defer_or_clarify":
+        action_posture = "clarify_or_wait"
+        reasons.append(
+            "Evidence is not strong enough for silent execution, so Seraph should clarify or wait."
+        )
+
+    if confidence.overall in {"degraded", "partial"} and low_urgency_focus_context:
+        action_posture = "abstain_low_urgency"
+        reasons.append(
+            "Guardian confidence is not fully grounded while the user is in focus mode and the observed salience is low, so low-urgency action should abstain."
+        )
+    elif world_model.user_model_profile is not None:
+        reasons.extend(world_model.user_model_profile.restraint_reasons)
+        if (
+            world_model.user_model_profile.restraint_posture == "clarify_before_personalizing"
+            and action_posture == "act_when_grounded"
+        ):
+            action_posture = "guarded_action"
+        elif (
+            world_model.user_model_profile.restraint_posture == "guard_async_delivery"
+            and action_posture == "act_when_grounded"
+        ):
+            action_posture = "prefer_async_or_wait"
+
+    if intent_uncertainty_level == "high" and action_posture != "clarify_first":
+        action_posture = "clarify_first"
+    return action_posture, tuple(_dedupe(list(reasons)))
+
+
+def _user_model_benchmark_diagnostics(
+    *,
+    world_model: GuardianWorldModel,
+    intent_uncertainty_level: str,
+    action_posture: str,
+) -> tuple[str, ...]:
+    profile = world_model.user_model_profile
+    if profile is None or profile.confidence == "empty":
+        return ()
+    diagnostics = [
+        (
+            "User-model benchmark posture: explicit facet evidence, clarification watchpoints, "
+            "and restraint receipts are surfaced through the canonical guardian world model."
+        ),
+        (
+            f"User-model benchmark state: confidence={profile.confidence}, "
+            f"restraint_posture={profile.restraint_posture}, action_posture={action_posture}."
+        ),
+        (
+            f"Clarification benchmark state: intent_uncertainty={intent_uncertainty_level}, "
+            f"watchpoint_count={len(profile.clarification_watchpoints)}."
+        ),
+    ]
+    return tuple(diagnostics)
+
+
 async def build_guardian_state(
     *,
     session_id: str | None = None,
@@ -929,10 +1035,22 @@ async def build_guardian_state(
             world_model=world_model,
         )
     )
+    action_posture, restraint_reasons = _action_posture_and_restraint_reasons(
+        confidence=confidence,
+        observer_context=observer_context,
+        world_model=world_model,
+        intent_uncertainty_level=intent_uncertainty_level,
+        intent_resolution=intent_resolution,
+    )
     judgment_proof_lines = _judgment_proof_lines(
         observer_context=observer_context,
         world_model=world_model,
         intent_uncertainty_diagnostics=intent_uncertainty_diagnostics,
+    )
+    user_model_benchmark_diagnostics = _user_model_benchmark_diagnostics(
+        world_model=world_model,
+        intent_uncertainty_level=intent_uncertainty_level,
+        action_posture=action_posture,
     )
 
     return GuardianState(
@@ -967,7 +1085,10 @@ async def build_guardian_state(
         memory_reconciliation_diagnostics=memory_reconciliation_diagnostics,
         intent_uncertainty_level=intent_uncertainty_level,
         intent_resolution=intent_resolution,
+        action_posture=action_posture,
         intent_uncertainty_diagnostics=intent_uncertainty_diagnostics,
         judgment_proof_lines=judgment_proof_lines,
+        restraint_reasons=restraint_reasons,
+        user_model_benchmark_diagnostics=user_model_benchmark_diagnostics,
         confidence=confidence,
     )

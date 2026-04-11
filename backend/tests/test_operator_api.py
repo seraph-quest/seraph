@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -642,15 +643,47 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             {"target_type": "skill", "source_path": "/tmp/skills/web-briefing.md"},
             {"target_type": "prompt_pack", "source_path": "/tmp/extensions/review-pack/prompts/review.md"},
         ],
+    ), patch(
+        "src.api.operator.build_guardian_user_model_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "guardian_user_model_restraint",
+                    "benchmark_posture": "ci_gated_operator_visible",
+                    "operator_status": "guardian_state_visible",
+                    "scenario_count": 4,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "clarification_policy_state": "required_on_high_ambiguity",
+                    "restraint_policy_state": "clarify_or_wait_before_unverified_personalization",
+                },
+                "scenario_names": [
+                    "guardian_user_model_continuity_behavior",
+                    "guardian_clarification_restraint_behavior",
+                    "guardian_judgment_behavior",
+                    "operator_guardian_state_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "clarify_before_action_policy": "required_on_high_ambiguity",
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
+            }
+        ),
     ):
         resp = await client.get("/api/operator/benchmark-proof")
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 5
+    assert payload["summary"]["suite_count"] == 6
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -660,6 +693,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
     assert guardian_memory_suite["scenario_count"] >= 8
+    user_model_suite = next(item for item in payload["suites"] if item["name"] == "guardian_user_model_restraint")
+    assert "guardian_clarification_restraint_behavior" in user_model_suite["scenario_names"]
+    assert user_model_suite["scenario_count"] >= 4
 
     memory_suite = next(item for item in payload["suites"] if item["name"] == "memory_continuity_workflows")
     assert "workflow_operating_layer_behavior" in memory_suite["scenario_names"]
@@ -670,6 +706,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+    assert payload["user_model_benchmark"]["summary"]["suite_name"] == "guardian_user_model_restraint"
+    assert payload["user_model_benchmark"]["policy"]["clarify_before_action_policy"] == "required_on_high_ambiguity"
 
 
 @pytest.mark.asyncio
@@ -704,6 +742,7 @@ async def test_operator_guardian_state_surfaces_confidence_and_explanation(clien
             "Project-target proof: Atlas remains the strongest active project anchor.",
             "Referent proof: the user message contains an unresolved referent.",
         ),
+        action_posture="clarify_first",
         intent_uncertainty_diagnostics=(
             "Ambiguous referent detected in the latest user message.",
         ),
@@ -716,6 +755,12 @@ async def test_operator_guardian_state_surfaces_confidence_and_explanation(clien
         memory_reconciliation_diagnostics=(
             "Conflict policy: archive superseded project hints after reconciliation.",
         ),
+        restraint_reasons=(
+            "Intent remains weakly grounded, so clarification is safer than taking a confident action.",
+        ),
+        user_model_benchmark_diagnostics=(
+            "User-model benchmark state: confidence=grounded, restraint_posture=clarify_before_personalizing, action_posture=clarify_first.",
+        ),
         learning_guidance="Prefer clarification before interrupting.",
         recent_execution_summary="- Atlas deploy failed recently",
         world_model=SimpleNamespace(
@@ -725,6 +770,24 @@ async def test_operator_guardian_state_surfaces_confidence_and_explanation(clien
             intervention_receptivity="guarded",
             dominant_thread="Atlas launch thread",
             user_model_confidence="grounded",
+            user_model_profile=SimpleNamespace(
+                confidence="grounded",
+                restraint_posture="clarify_before_personalizing",
+                continuity_strategy="prefer_existing_thread",
+                clarification_watchpoints=("Clarify interaction style when live and procedural preference evidence disagree.",),
+                restraint_reasons=("Preference evidence is split, so Seraph should explain uncertainty first.",),
+                evidence_store=("Prefers concise updates during Atlas launch work.",),
+                facets=(
+                    SimpleNamespace(
+                        key="communication_style",
+                        label="Communication preference",
+                        value="brief literal",
+                        confidence="grounded",
+                        evidence_sources=("preference_memory", "live_learning"),
+                        evidence_lines=("Prefers concise updates during Atlas launch work.",),
+                    ),
+                ),
+            ),
             judgment_risks=("Competing project anchors still require conservative judgment.",),
             corroboration_sources=("observer", "memory", "recent_sessions"),
             preference_inference_diagnostics=("User-model evidence sources: observer, memory",),
@@ -756,11 +819,16 @@ async def test_operator_guardian_state_surfaces_confidence_and_explanation(clien
     assert payload["summary"]["session_id"] == "session-1"
     assert payload["summary"]["overall_confidence"] == "partial"
     assert payload["summary"]["intent_resolution"] == "clarify_first"
+    assert payload["summary"]["action_posture"] == "clarify_first"
     assert payload["summary"]["current_focus"] == "Atlas release planning"
     assert payload["summary"]["user_model_confidence"] == "grounded"
     assert payload["explanation"]["judgment_proof_lines"][0].startswith("Project-target proof:")
     assert payload["explanation"]["judgment_risks"][0].startswith("Competing project anchors")
     assert payload["explanation"]["learning_diagnostics"][0].startswith("Fresh live outcomes")
+    assert payload["explanation"]["restraint_reasons"][0].startswith("Intent remains weakly grounded")
+    assert payload["user_model"]["restraint_posture"] == "clarify_before_personalizing"
+    assert payload["user_model"]["continuity_strategy"] == "prefer_existing_thread"
+    assert payload["user_model"]["facets"][0]["label"] == "Communication preference"
     assert payload["operator_guidance"]["next_up"][0].startswith("Clarify whether the user meant")
     assert payload["observer"]["active_project"] == "Atlas"
     assert payload["observer"]["is_working_hours"] is True
@@ -1728,6 +1796,23 @@ async def test_operator_continuity_graph_links_sessions_workflows_artifacts_and_
 
 @pytest.mark.asyncio
 async def test_operator_engineering_memory_applies_window_and_reports_total_bundle_counts(client):
+    now = datetime.now(timezone.utc)
+    fresh_pr_started_at = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    fresh_pr_updated_at = (now - timedelta(hours=1, minutes=56)).isoformat().replace("+00:00", "Z")
+    fresh_repo_started_at = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    fresh_repo_updated_at = (now - timedelta(hours=2, minutes=45)).isoformat().replace("+00:00", "Z")
+    stale_started_at = (now - timedelta(hours=49)).isoformat().replace("+00:00", "Z")
+    stale_updated_at = (now - timedelta(hours=48, minutes=55)).isoformat().replace("+00:00", "Z")
+    fresh_approval_created_at = (now - timedelta(hours=1, minutes=57)).isoformat().replace("+00:00", "Z")
+    stale_approval_created_at = (now - timedelta(hours=49, minutes=55)).isoformat().replace("+00:00", "Z")
+    fresh_pr_audit_created_at = (now - timedelta(hours=1, minutes=56)).isoformat().replace("+00:00", "Z")
+    fresh_repo_audit_created_at = (now - timedelta(hours=2, minutes=44)).isoformat().replace("+00:00", "Z")
+    fresh_work_item_audit_created_at = (now - timedelta(hours=1, minutes=54)).isoformat().replace("+00:00", "Z")
+    fresh_pr_matched_at = (now - timedelta(hours=1, minutes=58)).isoformat().replace("+00:00", "Z")
+    fresh_repo_matched_at = (now - timedelta(hours=2, minutes=50)).isoformat().replace("+00:00", "Z")
+    fresh_work_item_matched_at = (now - timedelta(hours=1, minutes=59)).isoformat().replace("+00:00", "Z")
+    stale_matched_at = (now - timedelta(hours=49, minutes=50)).isoformat().replace("+00:00", "Z")
+
     with (
         patch(
             "src.api.operator._list_workflow_runs",
@@ -1738,8 +1823,8 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "workflow_name": "repo-review",
                         "summary": "Review seraph-quest/seraph/pull/390 before publish.",
                         "status": "running",
-                        "started_at": "2026-04-10T10:00:00Z",
-                        "updated_at": "2026-04-10T10:04:00Z",
+                        "started_at": fresh_pr_started_at,
+                        "updated_at": fresh_pr_updated_at,
                         "thread_id": "session-1",
                         "thread_label": "PR review thread",
                         "thread_continue_message": "Continue review for seraph-quest/seraph/pull/390.",
@@ -1750,8 +1835,8 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "workflow_name": "roadmap-refresh",
                         "summary": "Planning work for seraph-quest/seraph roadmap.",
                         "status": "running",
-                        "started_at": "2026-04-10T09:00:00Z",
-                        "updated_at": "2026-04-10T09:15:00Z",
+                        "started_at": fresh_repo_started_at,
+                        "updated_at": fresh_repo_updated_at,
                         "thread_id": "session-2",
                         "thread_label": "Roadmap thread",
                         "thread_continue_message": "Continue seraph-quest/seraph roadmap refresh.",
@@ -1762,8 +1847,8 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "workflow_name": "old-review",
                         "summary": "Stale follow-up for seraph-quest/seraph#12 should not appear.",
                         "status": "completed",
-                        "started_at": "2026-04-07T08:00:00Z",
-                        "updated_at": "2026-04-07T08:05:00Z",
+                        "started_at": stale_started_at,
+                        "updated_at": stale_updated_at,
                         "thread_id": "session-stale",
                         "thread_label": "Stale thread",
                         "thread_continue_message": "Old follow-up",
@@ -1780,7 +1865,7 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "id": "approval-work-item",
                         "tool_name": "execute_source_mutation",
                         "summary": "Publish receipt to seraph-quest/seraph#12.",
-                        "created_at": "2026-04-10T10:03:00Z",
+                        "created_at": fresh_approval_created_at,
                         "thread_id": "session-3",
                         "thread_label": "Issue thread",
                         "resume_message": "Resume seraph-quest/seraph#12 publication.",
@@ -1795,7 +1880,7 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "id": "approval-stale",
                         "tool_name": "execute_source_mutation",
                         "summary": "Old stale approval for seraph-quest/seraph#77.",
-                        "created_at": "2026-04-07T07:00:00Z",
+                        "created_at": stale_approval_created_at,
                         "thread_id": "session-stale",
                         "thread_label": "Stale thread",
                         "resume_message": "Ignore stale approval",
@@ -1818,7 +1903,7 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "event_type": "authenticated_source_mutation",
                         "tool_name": "add_review_to_pr",
                         "summary": "Published review receipt to seraph-quest/seraph/pull/390.",
-                        "created_at": "2026-04-10T10:04:00Z",
+                        "created_at": fresh_pr_audit_created_at,
                         "session_id": "session-1",
                         "details": {
                             "target_reference": "seraph-quest/seraph/pull/390",
@@ -1829,7 +1914,7 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "event_type": "authenticated_source_mutation",
                         "tool_name": "create_pull_request",
                         "summary": "Opened planning PR from seraph-quest/seraph.",
-                        "created_at": "2026-04-10T09:16:00Z",
+                        "created_at": fresh_repo_audit_created_at,
                         "session_id": "session-2",
                         "details": {
                             "target_reference": "seraph-quest/seraph",
@@ -1840,7 +1925,7 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                         "event_type": "authenticated_source_mutation",
                         "tool_name": "reply_to_issue",
                         "summary": "Posted follow-up to seraph-quest/seraph#12.",
-                        "created_at": "2026-04-10T10:06:00Z",
+                        "created_at": fresh_work_item_audit_created_at,
                         "session_id": "session-3",
                         "details": {
                             "target_reference": "seraph-quest/seraph#12",
@@ -1856,28 +1941,28 @@ async def test_operator_engineering_memory_applies_window_and_reports_total_bund
                     {
                         "session_id": "session-1",
                         "title": "PR review thread",
-                        "matched_at": "2026-04-10T10:02:00Z",
+                        "matched_at": fresh_pr_matched_at,
                         "snippet": "Need to finish seraph-quest/seraph/pull/390 review and publish the receipt.",
                         "source": "message",
                     },
                     {
                         "session_id": "session-2",
                         "title": "Roadmap thread",
-                        "matched_at": "2026-04-10T09:10:00Z",
+                        "matched_at": fresh_repo_matched_at,
                         "snippet": "Planning work for seraph-quest/seraph roadmap and next batch.",
                         "source": "message",
                     },
                     {
                         "session_id": "session-3",
                         "title": "Issue thread",
-                        "matched_at": "2026-04-10T10:01:00Z",
+                        "matched_at": fresh_work_item_matched_at,
                         "snippet": "Need to follow up on seraph-quest/seraph#12.",
                         "source": "message",
                     },
                     {
                         "session_id": "session-stale",
                         "title": "Stale thread",
-                        "matched_at": "2026-04-07T07:05:00Z",
+                        "matched_at": stale_matched_at,
                         "snippet": "Old note for seraph-quest/seraph#77.",
                         "source": "message",
                     },

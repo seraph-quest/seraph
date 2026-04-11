@@ -1758,10 +1758,31 @@ def test_build_guardian_world_model_surfaces_user_model_preference_inference():
         == item
         for item in model.preference_inference_diagnostics
     )
+    assert model.user_model_profile is not None
+    assert model.user_model_profile.confidence == "grounded"
+    assert model.user_model_profile.restraint_posture == "guard_async_delivery"
+    assert model.user_model_profile.continuity_strategy == "prefer_existing_thread"
+    assert any(
+        facet.key == "communication_style" and facet.value == "brief literal"
+        for facet in model.user_model_profile.facets
+    )
+    communication_facet = next(
+        facet for facet in model.user_model_profile.facets if facet.key == "communication_style"
+    )
+    assert any(
+        "Prefers concise updates during Atlas launch work." in item
+        for item in communication_facet.evidence_lines
+    )
+    assert not any("be_more_direct" in item for item in communication_facet.evidence_lines)
+    assert any(
+        "Prefers concise updates during Atlas launch work." in item
+        for item in model.user_model_profile.evidence_store
+    )
     prompt = model.to_prompt_block()
     assert "User-model confidence: grounded" in prompt
     assert "User-model signals:" in prompt
     assert "Preference inference diagnostics:" in prompt
+    assert "User-model evidence store:" in prompt
 
 
 def test_build_guardian_world_model_marks_split_user_model_preference_evidence():
@@ -1824,6 +1845,17 @@ def test_build_guardian_world_model_marks_split_user_model_preference_evidence()
         for item in model.preference_inference_diagnostics
     )
     assert "Communication preference: prefer direct phrasing over softer framing." in model.user_model_signals
+    assert model.user_model_profile is not None
+    assert model.user_model_profile.restraint_posture == "clarify_before_personalizing"
+    assert any(
+        "Clarify interaction style" in item
+        for item in model.user_model_profile.clarification_watchpoints
+    )
+    communication_facet = next(
+        facet for facet in model.user_model_profile.facets if facet.key == "communication_style"
+    )
+    assert communication_facet.value == "direct"
+    assert any("be_more_direct" in item for item in communication_facet.evidence_lines)
 
 
 def test_build_guardian_world_model_ignores_unrelated_obligation_watchpoints():
@@ -3202,6 +3234,7 @@ async def test_build_guardian_state_marks_ambiguous_project_request_for_clarific
 
     assert state.intent_uncertainty_level == "high"
     assert state.intent_resolution == "clarify"
+    assert state.action_posture == "clarify_first"
     assert any(
         "ambiguous referent" in item.lower()
         for item in state.intent_uncertainty_diagnostics
@@ -3218,11 +3251,10 @@ async def test_build_guardian_state_marks_ambiguous_project_request_for_clarific
         "referent proof:" in item.lower()
         for item in state.judgment_proof_lines
     )
-    assert (
-        "Intent uncertainty: high (recommended resolution: clarify)"
-        in state.to_prompt_block()
-    )
+    assert "Intent uncertainty: high" in state.to_prompt_block()
+    assert "recommended resolution: clarify; action posture: clarify_first" in state.to_prompt_block()
     assert "Judgment proof:" in state.to_prompt_block()
+    assert "Restraint reasons:" in state.to_prompt_block()
 
 
 @pytest.mark.asyncio
@@ -3350,10 +3382,66 @@ async def test_build_guardian_state_marks_split_preference_evidence_as_caution(a
         "observer proof:" in item.lower()
         for item in state.judgment_proof_lines
     )
-    assert (
-        "Intent uncertainty: medium (recommended resolution: proceed_with_caution)"
-        in state.to_prompt_block()
+    assert state.action_posture == "guarded_action"
+    assert "Intent uncertainty: medium" in state.to_prompt_block()
+    assert "recommended resolution: proceed_with_caution; action posture: guarded_action" in state.to_prompt_block()
+    assert "User-model benchmark diagnostics:" in state.to_prompt_block()
+
+
+@pytest.mark.asyncio
+async def test_build_guardian_state_abstains_only_for_low_salience_focus_context(async_db):
+    sm = SessionManager()
+    await sm.get_or_create("current")
+    await sm.add_message("current", "user", "Can you follow up later?")
+    await sm.add_message("current", "assistant", "Let me check the delivery guidance.")
+
+    ctx = CurrentContext(
+        time_of_day="morning",
+        day_of_week="Monday",
+        is_working_hours=True,
+        active_goals_summary="Keep quiet background awareness",
+        active_project="Atlas",
+        active_window="VS Code",
+        screen_context="Reading notes",
+        data_quality="good",
+        observer_confidence="partial",
+        salience_level="low",
+        salience_reason="background",
+        interruption_cost="medium",
+        interruption_mode="focus",
     )
+
+    with (
+        patch("src.observer.manager.context_manager.get_context", return_value=ctx),
+        patch(
+            "src.profile.service.sync_soul_file_to_profile",
+            AsyncMock(return_value={"Identity": "Builder"}),
+        ),
+        patch("src.audit.repository.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
+            return_value=["Atlas"],
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
+            AsyncMock(return_value=MagicMock(effective_signal=GuardianLearningSignal.neutral("advisory"))),
+        ),
+        patch(
+            "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
+            AsyncMock(return_value=""),
+        ),
+        patch(
+            "src.memory.procedural_guidance.load_procedural_memory_guidance",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        state = await build_guardian_state(
+            session_id="current",
+            user_message="Can you follow up later?",
+        )
+
+    assert state.action_posture == "abstain_low_urgency"
+    assert any("observed salience is low" in item for item in state.restraint_reasons)
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
+from src.guardian.benchmark import (
+    GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
+    GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
+)
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
 
 
@@ -39,6 +43,20 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Live long-horizon workload replay and external benchmark parity still remain for future work.",
         scenario_names=GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
+        label="Guardian user-model and restraint benchmark",
+        description=(
+            "Pins persistent user-model receipts, ambiguity-aware clarification, "
+            "guardian restraint, and operator-visible judgment contracts into one CI-gated suite."
+        ),
+        benchmark_axis="guardian_judgment_and_restraint",
+        operator_summary=(
+            "User modeling now tightens clarification and restraint behavior through explicit receipts instead of hidden personalization."
+        ),
+        remaining_gap="Longer-horizon live replay and broader external user-model benchmarks still remain for future work.",
+        scenario_names=GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

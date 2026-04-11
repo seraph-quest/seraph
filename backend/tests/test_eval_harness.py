@@ -161,8 +161,9 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 5
+    assert details["suite_count"] == 6
     assert details["guardian_memory_suite_present"] is True
+    assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["computer_suite_present"] is True
     assert details["planning_suite_present"] is True
@@ -204,6 +205,20 @@ def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
     }
 
 
+def test_run_benchmark_suites_executes_guardian_user_model_restraint_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_user_model_restraint"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "guardian_user_model_continuity_behavior",
+        "guardian_clarification_restraint_behavior",
+        "guardian_judgment_behavior",
+        "operator_guardian_state_surface_behavior",
+    }
+
+
 def test_process_recovery_boundary_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["process_recovery_boundary_behavior"]))
 
@@ -239,6 +254,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
     assert "guardian_judgment_behavior" in captured.out
+    assert "guardian_user_model_continuity_behavior" in captured.out
+    assert "guardian_clarification_restraint_behavior" in captured.out
     assert "guardian_long_horizon_learning_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
@@ -321,12 +338,14 @@ def test_main_lists_available_benchmark_suites(capsys):
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "guardian_memory_quality" in captured.out
+    assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert available_benchmark_suites() == (
         "guardian_memory_quality",
+        "guardian_user_model_restraint",
         "memory_continuity_workflows",
         "computer_use_browser_desktop",
         "planning_retrieval_reporting",
@@ -429,6 +448,10 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "session_consolidation_behavior",
                 "memory_commitment_continuity_behavior",
                 "memory_collaborator_lookup_behavior",
+                "memory_engineering_retrieval_benchmark_behavior",
+                "memory_contradiction_ranking_behavior",
+                "memory_selective_forgetting_surface_behavior",
+                "operator_memory_benchmark_surface_behavior",
                 "memory_provider_user_model_behavior",
                 "memory_provider_stale_evidence_behavior",
                 "memory_provider_writeback_behavior",
@@ -1923,10 +1946,58 @@ def test_operator_guardian_state_surface_runtime_eval_exposes_expected_details()
     assert details["session_id_matches"] is True
     assert details["overall_confidence"] == "partial"
     assert details["intent_resolution"] == "clarify_first"
+    assert details["action_posture"] == "clarify_first"
     assert details["focus_source"] == "observer_goal_window"
     assert details["user_model_confidence"] == "grounded"
     assert details["has_project_target_proof"] is True
     assert details["has_judgment_risk"] is True
     assert details["has_learning_diagnostic"] is True
+    assert details["has_restraint_reason"] is True
+    assert details["user_model_facets_visible"] is True
+    assert details["user_model_restraint_posture"] == "clarify_before_personalizing"
     assert details["next_up_mentions_clarify"] is True
     assert details["observer_project"] == "Atlas"
+
+
+def test_guardian_user_model_and_restraint_runtime_evals_expose_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "guardian_user_model_continuity_behavior",
+                "guardian_clarification_restraint_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}
+
+    assert details["guardian_user_model_continuity_behavior"]["confidence"] == "grounded"
+    assert details["guardian_user_model_continuity_behavior"]["facet_count"] >= 3
+    assert details["guardian_user_model_continuity_behavior"]["evidence_store_count"] >= 3
+    assert details["guardian_user_model_continuity_behavior"]["restraint_posture"] in {
+        "clarify_before_personalizing",
+        "guard_async_delivery",
+    }
+    assert details["guardian_user_model_continuity_behavior"]["continuity_strategy"] == "prefer_existing_thread"
+    assert details["guardian_user_model_continuity_behavior"]["has_clarification_watchpoint"] is True
+    assert details["guardian_user_model_continuity_behavior"]["has_existing_thread_facet"] is True
+    assert details["guardian_user_model_continuity_behavior"]["has_brief_literal_facet"] is True
+    assert details["guardian_user_model_continuity_behavior"]["prompt_includes_user_model_profile"] is True
+
+    assert details["guardian_clarification_restraint_behavior"]["intent_uncertainty_level"] in {"medium", "high"}
+    assert details["guardian_clarification_restraint_behavior"]["intent_resolution"] in {
+        "clarify",
+        "proceed_with_caution",
+        "defer_or_clarify",
+    }
+    assert details["guardian_clarification_restraint_behavior"]["action_posture"] in {
+        "clarify_first",
+        "guarded_action",
+    }
+    assert details["guardian_clarification_restraint_behavior"]["restraint_reason_count"] >= 1
+    assert details["guardian_clarification_restraint_behavior"]["user_model_benchmark_diagnostic_count"] >= 1
+    assert details["guardian_clarification_restraint_behavior"]["has_benchmark_state_line"] is True
+    assert details["guardian_clarification_restraint_behavior"]["prompt_includes_restraint_reasons"] is True
+    assert details["guardian_clarification_restraint_behavior"]["prompt_includes_user_model_benchmark"] is True

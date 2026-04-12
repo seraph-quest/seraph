@@ -28,6 +28,7 @@ from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.browser.benchmark import build_computer_use_benchmark_report
 from src.evals.benchmark_catalog import benchmark_suite_report
+from src.evolution.benchmark import build_governed_improvement_benchmark_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report
 from src.guardian.feedback import guardian_feedback_repository
@@ -2736,12 +2737,14 @@ async def get_operator_benchmark_proof():
         workflow_endurance_benchmark,
         trust_boundary_benchmark,
         computer_use_benchmark,
+        governed_improvement_benchmark,
     ) = await asyncio.gather(
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_computer_use_benchmark_report(),
+        build_governed_improvement_benchmark_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -2755,6 +2758,7 @@ async def get_operator_benchmark_proof():
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
+        str(governed_improvement_benchmark["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -2781,12 +2785,17 @@ async def get_operator_benchmark_proof():
             ),
             "operator_status": "operator_visible",
             "remaining_gap": "live_provider_and_real_computer_use_depth",
-            "governed_improvement_status": "review_gated",
+            "governed_improvement_status": (
+                "review_gated_canary_required"
+                if "regressions_detected" not in str(governed_improvement_benchmark["summary"]["benchmark_posture"])
+                else "review_gated_with_regressions"
+            ),
             "memory_benchmark_posture": memory_benchmark["summary"]["benchmark_posture"],
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
+            "governed_improvement_benchmark_posture": governed_improvement_benchmark["summary"]["benchmark_posture"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
@@ -2799,6 +2808,11 @@ async def get_operator_benchmark_proof():
             "target_types": target_types,
             "gate_policy": evolution_benchmark_gate_policy(),
             "required_suite_count": len(required_suite_names),
+            "summary": governed_improvement_benchmark["summary"],
+            "failure_report": governed_improvement_benchmark["failure_report"],
+            "policy": governed_improvement_benchmark["policy"],
+            "latest_run": governed_improvement_benchmark["latest_run"],
+            "recent_receipts": governed_improvement_benchmark["recent_receipts"],
         },
     }
 
@@ -2821,6 +2835,11 @@ async def get_operator_trust_boundary_benchmark():
 @router.get("/operator/computer-use-benchmark")
 async def get_operator_computer_use_benchmark():
     return await build_computer_use_benchmark_report()
+
+
+@router.get("/operator/governed-improvement-benchmark")
+async def get_operator_governed_improvement_benchmark():
+    return await build_governed_improvement_benchmark_report()
 
 
 @router.get("/operator/guardian-state")

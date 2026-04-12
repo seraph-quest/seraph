@@ -168,6 +168,7 @@ interface OperatorBenchmarkProofSummary {
   workflow_endurance_benchmark_posture?: string;
   trust_boundary_benchmark_posture?: string;
   computer_use_benchmark_posture?: string;
+  governed_improvement_benchmark_posture?: string;
 }
 
 interface OperatorBenchmarkProofSuite {
@@ -206,6 +207,28 @@ interface OperatorMemoryBenchmark {
   };
 }
 
+interface OperatorGovernedImprovementBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorGovernedImprovementReceipt {
+  id: string;
+  candidate_name: string;
+  target_type: string;
+  quality_state: string;
+  score: number;
+  rollout_state: string;
+  acceptance_state: string;
+  diversity_guard_state: string;
+  rollback_ready: boolean;
+  blocked_constraints: string[];
+  saved_candidate_path: string;
+  receipt_path: string;
+  updated_at: string;
+}
+
 interface OperatorBenchmarkProof {
   summary: OperatorBenchmarkProofSummary;
   suites: OperatorBenchmarkProofSuite[];
@@ -226,6 +249,32 @@ interface OperatorBenchmarkProof {
       required_benchmark_suites: string[];
       proof_contract: string;
     };
+    summary: {
+      suite_name: string;
+      benchmark_posture: string;
+      operator_status: string;
+      scenario_count: number;
+      dimension_count: number;
+      failure_mode_count: number;
+      active_failure_count: number;
+      anti_misevolution_state: string;
+      canary_rollout_state: string;
+      rollback_state: string;
+      operator_receipt_state: string;
+      recent_receipt_count: number;
+      held_receipt_count: number;
+    } | null;
+    failure_report: OperatorGovernedImprovementBenchmarkFailure[];
+    policy: {
+      preference_diversity_policy: string;
+      canary_rollout_policy: string;
+      rollback_policy: string;
+      acceptance_policy: string;
+      operator_visibility: string;
+      receipt_surfaces: string[];
+      ci_gate_mode: string;
+    } | null;
+    recent_receipts: OperatorGovernedImprovementReceipt[];
   };
 }
 
@@ -2290,11 +2339,17 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
   const trustBoundaryBenchmark = record.trust_boundary_benchmark;
   const computerUseBenchmark = record.computer_use_benchmark;
+  const governedBenchmarkSummary = governedRecord.summary;
+  const governedBenchmarkPolicy = governedRecord.policy;
   let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
   let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
   let normalizedComputerUseBenchmark: OperatorComputerUseBenchmark | null = null;
+  let normalizedGovernedBenchmarkSummary: OperatorBenchmarkProof["governed_improvement"]["summary"] = null;
+  let normalizedGovernedBenchmarkPolicy: OperatorBenchmarkProof["governed_improvement"]["policy"] = null;
+  let normalizedGovernedBenchmarkFailures: OperatorGovernedImprovementBenchmarkFailure[] = [];
+  let normalizedGovernedBenchmarkReceipts: OperatorGovernedImprovementReceipt[] = [];
   if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
     const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
     const memorySummary = memoryBenchmarkRecord.summary;
@@ -2548,6 +2603,73 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       };
     }
   }
+  if (
+    governedBenchmarkSummary && typeof governedBenchmarkSummary === "object" && !Array.isArray(governedBenchmarkSummary)
+    && governedBenchmarkPolicy && typeof governedBenchmarkPolicy === "object" && !Array.isArray(governedBenchmarkPolicy)
+  ) {
+    const governedSummaryRecord = governedBenchmarkSummary as Record<string, unknown>;
+    const governedPolicyRecord = governedBenchmarkPolicy as Record<string, unknown>;
+    normalizedGovernedBenchmarkSummary = {
+      suite_name: typeof governedSummaryRecord.suite_name === "string" ? governedSummaryRecord.suite_name : "governed_improvement",
+      benchmark_posture: typeof governedSummaryRecord.benchmark_posture === "string" ? governedSummaryRecord.benchmark_posture : "unknown",
+      operator_status: typeof governedSummaryRecord.operator_status === "string" ? governedSummaryRecord.operator_status : "unknown",
+      scenario_count: typeof governedSummaryRecord.scenario_count === "number" ? governedSummaryRecord.scenario_count : 0,
+      dimension_count: typeof governedSummaryRecord.dimension_count === "number" ? governedSummaryRecord.dimension_count : 0,
+      failure_mode_count: typeof governedSummaryRecord.failure_mode_count === "number" ? governedSummaryRecord.failure_mode_count : 0,
+      active_failure_count: typeof governedSummaryRecord.active_failure_count === "number" ? governedSummaryRecord.active_failure_count : 0,
+      anti_misevolution_state: typeof governedSummaryRecord.anti_misevolution_state === "string" ? governedSummaryRecord.anti_misevolution_state : "unknown",
+      canary_rollout_state: typeof governedSummaryRecord.canary_rollout_state === "string" ? governedSummaryRecord.canary_rollout_state : "unknown",
+      rollback_state: typeof governedSummaryRecord.rollback_state === "string" ? governedSummaryRecord.rollback_state : "unknown",
+      operator_receipt_state: typeof governedSummaryRecord.operator_receipt_state === "string" ? governedSummaryRecord.operator_receipt_state : "unknown",
+      recent_receipt_count: typeof governedSummaryRecord.recent_receipt_count === "number" ? governedSummaryRecord.recent_receipt_count : 0,
+      held_receipt_count: typeof governedSummaryRecord.held_receipt_count === "number" ? governedSummaryRecord.held_receipt_count : 0,
+    };
+    normalizedGovernedBenchmarkPolicy = {
+      preference_diversity_policy: typeof governedPolicyRecord.preference_diversity_policy === "string" ? governedPolicyRecord.preference_diversity_policy : "unknown",
+      canary_rollout_policy: typeof governedPolicyRecord.canary_rollout_policy === "string" ? governedPolicyRecord.canary_rollout_policy : "unknown",
+      rollback_policy: typeof governedPolicyRecord.rollback_policy === "string" ? governedPolicyRecord.rollback_policy : "unknown",
+      acceptance_policy: typeof governedPolicyRecord.acceptance_policy === "string" ? governedPolicyRecord.acceptance_policy : "unknown",
+      operator_visibility: typeof governedPolicyRecord.operator_visibility === "string" ? governedPolicyRecord.operator_visibility : "unknown",
+      receipt_surfaces: Array.isArray(governedPolicyRecord.receipt_surfaces)
+        ? governedPolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+        : [],
+      ci_gate_mode: typeof governedPolicyRecord.ci_gate_mode === "string" ? governedPolicyRecord.ci_gate_mode : "unknown",
+    };
+    normalizedGovernedBenchmarkFailures = Array.isArray(governedRecord.failure_report)
+      ? governedRecord.failure_report.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const failure = entry as Record<string, unknown>;
+        return [{
+          type: typeof failure.type === "string" ? failure.type : "unknown",
+          summary: typeof failure.summary === "string" ? failure.summary : "",
+          reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+        }];
+      })
+      : [];
+    normalizedGovernedBenchmarkReceipts = Array.isArray(governedRecord.recent_receipts)
+      ? governedRecord.recent_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const receipt = entry as Record<string, unknown>;
+        return [{
+          id: typeof receipt.id === "string" ? receipt.id : "receipt",
+          candidate_name: typeof receipt.candidate_name === "string" ? receipt.candidate_name : "Candidate",
+          target_type: typeof receipt.target_type === "string" ? receipt.target_type : "unknown",
+          quality_state: typeof receipt.quality_state === "string" ? receipt.quality_state : "unknown",
+          score: typeof receipt.score === "number" ? receipt.score : 0,
+          rollout_state: typeof receipt.rollout_state === "string" ? receipt.rollout_state : "unknown",
+          acceptance_state: typeof receipt.acceptance_state === "string" ? receipt.acceptance_state : "unknown",
+          diversity_guard_state: typeof receipt.diversity_guard_state === "string" ? receipt.diversity_guard_state : "unknown",
+          rollback_ready: Boolean(receipt.rollback_ready),
+          blocked_constraints: Array.isArray(receipt.blocked_constraints)
+            ? receipt.blocked_constraints.filter((item): item is string => typeof item === "string")
+            : [],
+          saved_candidate_path: typeof receipt.saved_candidate_path === "string" ? receipt.saved_candidate_path : "",
+          receipt_path: typeof receipt.receipt_path === "string" ? receipt.receipt_path : "",
+          updated_at: typeof receipt.updated_at === "string" ? receipt.updated_at : "",
+        }];
+      })
+      : [];
+  }
   return {
     summary: {
       suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
@@ -2570,6 +2692,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
         : "unknown",
       computer_use_benchmark_posture: typeof summaryRecord.computer_use_benchmark_posture === "string"
         ? summaryRecord.computer_use_benchmark_posture
+        : "unknown",
+      governed_improvement_benchmark_posture: typeof summaryRecord.governed_improvement_benchmark_posture === "string"
+        ? summaryRecord.governed_improvement_benchmark_posture
         : "unknown",
     },
     suites: Array.isArray(record.suites)
@@ -2611,6 +2736,10 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
           : [],
         proof_contract: typeof gatePolicyRecord.proof_contract === "string" ? gatePolicyRecord.proof_contract : "unknown",
       },
+      summary: normalizedGovernedBenchmarkSummary,
+      failure_report: normalizedGovernedBenchmarkFailures,
+      policy: normalizedGovernedBenchmarkPolicy,
+      recent_receipts: normalizedGovernedBenchmarkReceipts,
     },
   };
 }
@@ -12320,6 +12449,50 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             operatorBenchmarkProof.governed_improvement.gate_policy.proof_contract.replace(/_/g, " "),
                           ].join(" · ")}
                         </div>
+                        {operatorBenchmarkProof.governed_improvement.summary && operatorBenchmarkProof.governed_improvement.policy ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Governed improvement benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.governed_improvement.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.governed_improvement.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.governed_improvement.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.governed_improvement.summary.anti_misevolution_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.summary.canary_rollout_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.summary.rollback_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.summary.operator_receipt_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.governed_improvement.policy.preference_diversity_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.policy.canary_rollout_policy.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.governed_improvement.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.governed_improvement.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                              {operatorBenchmarkProof.governed_improvement.recent_receipts.slice(0, 2).map((receipt) => (
+                                <div key={receipt.id} className="cockpit-operator-note">
+                                  {[
+                                    receipt.candidate_name,
+                                    receipt.acceptance_state.replace(/_/g, " "),
+                                    receipt.diversity_guard_state.replace(/_/g, " "),
+                                    receipt.rollback_ready ? "rollback ready" : "rollback pending",
+                                  ].join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                         {operatorBenchmarkProof.memory_benchmark ? (
                           <div className="cockpit-operator-row cockpit-operator-row--entry">
                             <div className="cockpit-operator-details">

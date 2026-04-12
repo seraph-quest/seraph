@@ -785,6 +785,70 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
+    ), patch(
+        "src.api.operator.build_governed_improvement_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "governed_improvement",
+                    "benchmark_posture": "ci_gated_operator_visible",
+                    "operator_status": "saved_proposal_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "anti_misevolution_state": "preference_collapse_blocked",
+                    "canary_rollout_state": "review_candidates_canary_only",
+                    "rollback_state": "candidate_and_receipt_paths_required",
+                    "operator_receipt_state": "saved_proposal_and_benchmark_receipts_visible",
+                    "recent_receipt_count": 1,
+                    "held_receipt_count": 0,
+                },
+                "scenario_names": [
+                    "governed_self_evolution_behavior",
+                    "governed_preference_diversity_behavior",
+                    "governed_canary_rollout_behavior",
+                    "operator_governed_improvement_benchmark_surface_behavior",
+                    "capability_repair_behavior",
+                    "capability_preflight_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "preference_diversity_policy": "block_preference_collapse_and_watch_single_signal_edits",
+                    "canary_rollout_policy": "saved_review_candidates_remain_canary_only_until_reviewed_promotion",
+                    "rollback_policy": "candidate_receipt_and_source_baseline_required_before_promotion",
+                    "acceptance_policy": "benchmark_gated_canary_then_reviewed_promotion",
+                    "operator_visibility": "benchmark_proof_plus_recent_saved_receipts_visible",
+                    "receipt_surfaces": [
+                        "/api/evolution/validate",
+                        "/api/evolution/proposals",
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/governed-improvement-benchmark",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+                "recent_receipts": [
+                    {
+                        "id": "web-briefing-review-candidate",
+                        "candidate_name": "Web Briefing Review Candidate",
+                        "target_type": "skill",
+                        "quality_state": "ready",
+                        "score": 1.0,
+                        "rollout_state": "review_ready",
+                        "acceptance_state": "ready_for_canary",
+                        "diversity_guard_state": "multi_signal_preserved",
+                        "rollback_ready": True,
+                        "blocked_constraints": [],
+                        "saved_candidate_path": "/tmp/extensions/workspace-capabilities/skills/web-briefing-review-candidate.md",
+                        "receipt_path": "/tmp/extensions/workspace-capabilities/evolution/receipts/web-briefing-review-candidate.json",
+                        "updated_at": "2026-04-11T08:00:00+00:00",
+                    }
+                ],
+            }
+        ),
     ):
         resp = await client.get("/api/operator/benchmark-proof")
 
@@ -792,15 +856,20 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     payload = resp.json()
     assert payload["summary"]["suite_count"] == 8
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
-    assert payload["summary"]["governed_improvement_status"] == "review_gated"
+    assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
+    assert payload["governed_improvement"]["summary"]["suite_name"] == "governed_improvement"
+    assert payload["governed_improvement"]["summary"]["canary_rollout_state"] == "review_candidates_canary_only"
+    assert payload["governed_improvement"]["policy"]["rollback_policy"] == "candidate_receipt_and_source_baseline_required_before_promotion"
+    assert payload["governed_improvement"]["recent_receipts"][0]["acceptance_state"] == "ready_for_canary"
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
@@ -834,6 +903,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
+
+
+@pytest.mark.asyncio
+async def test_operator_governed_improvement_benchmark_surface_reports_policy_and_receipts(client):
+    resp = await client.get("/api/operator/governed-improvement-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "governed_improvement"
+    assert payload["summary"]["operator_status"] == "saved_proposal_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["anti_misevolution_state"] == "preference_collapse_blocked"
+    assert payload["policy"]["preference_diversity_policy"] == "block_preference_collapse_and_watch_single_signal_edits"
+    assert payload["policy"]["canary_rollout_policy"] == "saved_review_candidates_remain_canary_only_until_reviewed_promotion"
+    assert "/api/operator/governed-improvement-benchmark" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

@@ -4161,6 +4161,7 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
 
 async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
     import json
+    import itertools
     import tempfile
     from dataclasses import dataclass, field
     from unittest.mock import AsyncMock
@@ -4323,13 +4324,17 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
         adapter = EvalMemoryProviderAdapter()
         register_memory_provider_adapter(adapter)
         try:
+            vector_ids = itertools.count(1)
             with (
                 patch.object(settings, "workspace_dir", workspace_dir),
                 patch(
                     "src.memory.consolidator.completion_with_fallback",
                     AsyncMock(return_value=mock_resp),
                 ),
-                patch("src.memory.consolidator.add_memory", side_effect=["vec-project", "vec-commitment"]),
+                patch(
+                    "src.memory.consolidator.add_memory",
+                    side_effect=lambda *_args, **_kwargs: f"vec-memory-{next(vector_ids)}",
+                ),
                 patch(
                     "src.memory.consolidator.sync_soul_file_to_profile",
                     AsyncMock(return_value={"Identity": "Builder"}),
@@ -4883,7 +4888,7 @@ async def _eval_memory_engineering_retrieval_benchmark_behavior() -> dict[str, A
                 session_id="memory-engineering-current",
                 user_message="What unblocks issue 399 after PR 405 lands?",
             )
-            report = await build_guardian_memory_benchmark_report()
+            report = await build_guardian_memory_benchmark_report(run_suite=False)
 
     return {
         "engineering_memory_has_issue_reference": "Issue #399" in state.memory_context,
@@ -4978,7 +4983,7 @@ async def _eval_memory_selective_forgetting_surface_behavior() -> dict[str, Any]
             to_memory_id=superseded.memory_id,
             edge_type=MemoryEdgeType.contradicts,
         )
-        report = await build_guardian_memory_benchmark_report()
+        report = await build_guardian_memory_benchmark_report(run_suite=False)
 
     failure_types = {item["type"] for item in report["failure_report"]}
     return {
@@ -4993,7 +4998,34 @@ async def _eval_memory_selective_forgetting_surface_behavior() -> dict[str, Any]
 async def _eval_operator_memory_benchmark_surface_behavior() -> dict[str, Any]:
     from src.api.operator import get_operator_memory_benchmark
 
-    payload = await get_operator_memory_benchmark()
+    suite_summary = EvalSummary(
+        results=[
+            types.SimpleNamespace(
+                name="memory_engineering_retrieval_benchmark_behavior",
+                passed=True,
+                error=None,
+            )
+        ],
+        duration_ms=12,
+    )
+    reconciliation = {
+        "state": "steady",
+        "archived_count": 0,
+        "superseded_count": 0,
+        "recent_conflicts": [],
+        "recent_archivals": [],
+    }
+    with (
+        patch(
+            "src.memory.benchmark._run_guardian_memory_benchmark_suite",
+            AsyncMock(return_value=suite_summary),
+        ),
+        patch(
+            "src.memory.benchmark.summarize_memory_reconciliation_state",
+            AsyncMock(return_value=reconciliation),
+        ),
+    ):
+        payload = await get_operator_memory_benchmark()
     return {
         "suite_name_visible": payload["summary"]["suite_name"] == "guardian_memory_quality",
         "operator_status_visible": payload["summary"]["operator_status"] == "memory_proof_visible",

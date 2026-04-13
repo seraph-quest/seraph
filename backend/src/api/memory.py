@@ -10,6 +10,10 @@ router = APIRouter()
 @router.get("/memory/providers")
 async def list_memory_providers():
     payload = list_memory_provider_inventory()
-    payload["canonical_memory_reconciliation"] = await summarize_memory_reconciliation_state()
-    payload["guardian_memory_benchmark"] = await build_guardian_memory_benchmark_report()
+    reconciliation = await summarize_memory_reconciliation_state()
+    payload["canonical_memory_reconciliation"] = reconciliation
+    payload["guardian_memory_benchmark"] = await build_guardian_memory_benchmark_report(
+        run_suite=False,
+        reconciliation=reconciliation,
+    )
     return payload

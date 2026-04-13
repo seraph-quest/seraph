@@ -245,7 +245,13 @@ async def test_memory_provider_inventory_endpoint_lists_configured_additive_prov
     assert payload["canonical_memory_reconciliation"]["policy"]["authoritative_memory"] == "guardian"
     assert payload["canonical_memory_reconciliation"]["recent_conflicts"][0]["summary"] == "Atlas launch delayed"
     assert payload["guardian_memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
+    assert payload["guardian_memory_benchmark"]["summary"]["benchmark_posture"] == "suite_contract_visible_not_run"
     assert payload["guardian_memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+    assert payload["guardian_memory_benchmark"]["latest_run"]["executed"] is False
+    assert (
+        payload["guardian_memory_benchmark"]["canonical_memory_reconciliation"]
+        == payload["canonical_memory_reconciliation"]
+    )
     assert payload["provenance_taxonomy"][0]["name"] == "guardian_canonical"
     assert payload["adapter_model_rules"][0].startswith("Every provider capability is modeled")
     assert payload["quality_controls"]["project_scoped_buckets"] == [

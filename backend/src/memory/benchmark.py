@@ -143,23 +143,83 @@ def _memory_failure_report(summary: dict[str, Any]) -> list[dict[str, str]]:
     return failures[:6]
 
 
-async def build_guardian_memory_benchmark_report() -> dict[str, Any]:
-    reconciliation = await summarize_memory_reconciliation_state()
-    failure_report = _memory_failure_report(reconciliation)
-    contradiction_state = str(reconciliation.get("state") or "steady")
+def _guardian_memory_suite_failure_report(summary: Any) -> list[dict[str, str]]:
+    failures: list[dict[str, str]] = []
+    for result in getattr(summary, "results", []):
+        if getattr(result, "passed", True):
+            continue
+        failures.append(
+            {
+                "type": "benchmark_regression",
+                "scenario_name": str(getattr(result, "name", "") or "unknown_scenario"),
+                "summary": str(getattr(result, "error", "") or "Guardian memory benchmark scenario failed."),
+                "reason": "deterministic_eval_failure",
+            }
+        )
+    return failures[:6]
+
+
+def _placeholder_guardian_memory_benchmark_summary():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        total=None,
+        passed=None,
+        failed=0,
+        duration_ms=None,
+        results=[],
+    )
+
+
+async def _run_guardian_memory_benchmark_suite():
+    from src.evals.harness import run_benchmark_suites
+
+    return await run_benchmark_suites([GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME])
+
+
+async def build_guardian_memory_benchmark_report(
+    *,
+    run_suite: bool = True,
+    reconciliation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = (
+        await _run_guardian_memory_benchmark_suite()
+        if run_suite
+        else _placeholder_guardian_memory_benchmark_summary()
+    )
+    reconciliation_summary = (
+        reconciliation
+        if isinstance(reconciliation, dict)
+        else await summarize_memory_reconciliation_state()
+    )
+    benchmark_failures = _guardian_memory_suite_failure_report(summary) if run_suite else []
+    reconciliation_failures = _memory_failure_report(reconciliation_summary)
+    failure_report = (benchmark_failures + reconciliation_failures)[:6]
+    contradiction_state = str(reconciliation_summary.get("state") or "steady")
+    if run_suite:
+        benchmark_posture = (
+            "ci_gated_operator_visible"
+            if summary.failed == 0
+            else "ci_regressions_detected_operator_visible"
+        )
+        active_failure_count = summary.failed + len(reconciliation_failures)
+    else:
+        benchmark_posture = "suite_contract_visible_not_run"
+        active_failure_count = len(reconciliation_failures)
     return {
         "summary": {
             "suite_name": GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME,
-            "benchmark_posture": "ci_gated_operator_visible",
+            "benchmark_posture": benchmark_posture,
             "operator_status": "memory_proof_visible",
             "scenario_count": len(GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES),
             "dimension_count": len(guardian_memory_benchmark_dimensions()),
             "failure_mode_count": len(guardian_memory_failure_taxonomy()),
-            "active_failure_count": len(failure_report),
+            "active_failure_count": active_failure_count,
             "contradiction_state": contradiction_state,
             "selective_forgetting_state": (
                 "active"
-                if int(reconciliation.get("archived_count") or 0) or int(reconciliation.get("superseded_count") or 0)
+                if int(reconciliation_summary.get("archived_count") or 0)
+                or int(reconciliation_summary.get("superseded_count") or 0)
                 else "steady"
             ),
         },
@@ -168,5 +228,12 @@ async def build_guardian_memory_benchmark_report() -> dict[str, Any]:
         "failure_taxonomy": guardian_memory_failure_taxonomy(),
         "failure_report": failure_report,
         "policy": guardian_memory_benchmark_policy_payload(),
-        "canonical_memory_reconciliation": reconciliation,
+        "latest_run": {
+            "total": summary.total,
+            "passed": summary.passed,
+            "failed": summary.failed,
+            "duration_ms": summary.duration_ms,
+            "executed": run_suite,
+        },
+        "canonical_memory_reconciliation": reconciliation_summary,
     }

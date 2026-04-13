@@ -1643,6 +1643,9 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_pr_reference"] is True
     assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_approval_reference"] is True
     assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_artifact_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_audit_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_repository_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_session_match"] is True
     assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["benchmark_suite_named"] is True
     assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["benchmark_dimensions_visible"] is True
     assert details_by_name["memory_contradiction_ranking_behavior"]["keeps_current_truth"] is True

@@ -23,7 +23,7 @@ def guardian_memory_benchmark_dimensions() -> list[dict[str, str]]:
         {
             "name": "reasoning_heavy_retrieval",
             "label": "Reasoning-heavy retrieval",
-            "summary": "Seraph should recall workflow, approval, artifact, and repo continuity with useful guardian ranking instead of raw snippet match volume.",
+            "summary": "Seraph should recover workflow, approval, audit, artifact, and repo or PR continuity bundles with useful guardian ranking instead of raw snippet match volume.",
         },
         {
             "name": "contradiction_resolution",

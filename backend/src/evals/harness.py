@@ -4795,106 +4795,121 @@ async def _eval_memory_reconciliation_policy_behavior() -> dict[str, Any]:
 
 
 async def _eval_memory_engineering_retrieval_benchmark_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_engineering_memory
     from src.memory.benchmark import build_guardian_memory_benchmark_report
 
-    async with _patched_async_db(
-        "src.agent.session.get_session",
-        "src.guardian.feedback.get_session",
+    workflow_runs = [
+        {
+            "id": "run-follow-up",
+            "workflow_name": "guardian-memory-follow-up",
+            "summary": "Advance seraph-quest/seraph#399 after seraph-quest/seraph/pull/405 lands.",
+            "status": "running",
+            "started_at": "2026-04-10T10:00:00Z",
+            "updated_at": "2026-04-10T10:06:00Z",
+            "thread_id": "memory-thread",
+            "thread_label": "Guardian memory follow-up",
+            "thread_continue_message": "Continue work for seraph-quest/seraph/pull/405 and issue seraph-quest/seraph#399.",
+            "artifact_paths": ["notes/pr-405-handoff.md"],
+        },
+        {
+            "id": "run-repo",
+            "workflow_name": "repo-roadmap",
+            "summary": "Refresh roadmap for seraph-quest/seraph.",
+            "status": "completed",
+            "started_at": "2026-04-10T09:00:00Z",
+            "updated_at": "2026-04-10T09:15:00Z",
+            "thread_id": "repo-thread",
+            "thread_label": "Repo roadmap",
+            "thread_continue_message": "Continue roadmap refresh for seraph-quest/seraph.",
+            "artifact_paths": ["notes/seraph-roadmap.md"],
+        },
+    ]
+    approvals = [
+        {
+            "id": "approval-pr",
+            "tool_name": "write_file",
+            "summary": "Publish the PR 405 follow-up receipt.",
+            "risk_level": "high",
+            "created_at": "2026-04-10T10:04:00Z",
+            "thread_id": "memory-thread",
+            "thread_label": "Guardian memory follow-up",
+            "resume_message": "Continue publication for seraph-quest/seraph/pull/405.",
+            "approval_scope": {
+                "target": {
+                    "reference": "seraph-quest/seraph/pull/405",
+                }
+            },
+        }
+    ]
+    audit_events = [
+        {
+            "id": "audit-pr",
+            "event_type": "authenticated_source_mutation",
+            "tool_name": "add_comment_to_issue",
+            "summary": "Logged handoff evidence for seraph-quest/seraph/pull/405.",
+            "created_at": "2026-04-10T10:05:00Z",
+            "session_id": "memory-thread",
+            "details": {"target_reference": "seraph-quest/seraph/pull/405"},
+        },
+        {
+            "id": "audit-repo",
+            "event_type": "authenticated_source_mutation",
+            "tool_name": "create_pull_request",
+            "summary": "Opened planning branch for seraph-quest/seraph.",
+            "created_at": "2026-04-10T09:16:00Z",
+            "session_id": "repo-thread",
+            "details": {"target_reference": "seraph-quest/seraph"},
+        },
+    ]
+    session_matches = [
+        {
+            "session_id": "memory-thread",
+            "title": "Guardian memory follow-up",
+            "matched_at": "2026-04-10T10:03:00Z",
+            "snippet": "Issue seraph-quest/seraph#399 stays blocked until seraph-quest/seraph/pull/405 lands and the receipt is published.",
+            "source": "message",
+        },
+        {
+            "session_id": "repo-thread",
+            "title": "Repo roadmap",
+            "matched_at": "2026-04-10T09:10:00Z",
+            "snippet": "Planning work for seraph-quest/seraph roadmap continuity.",
+            "source": "message",
+        },
+    ]
+
+    with (
+        patch("src.api.operator._list_workflow_runs", return_value=workflow_runs),
+        patch("src.api.operator.approval_repository.list_pending", return_value=approvals),
+        patch("src.api.operator.audit_repository.list_events", return_value=audit_events),
+        patch("src.api.operator.session_manager.search_sessions", return_value=session_matches),
     ):
-        await session_manager.get_or_create("memory-engineering-current")
-        await session_manager.add_message(
-            "memory-engineering-current",
-            "user",
-            "What unblocks issue 399 after PR 405 lands?",
+        payload = await get_operator_engineering_memory(
+            q="399 405 seraph",
+            limit_bundles=6,
+            limit_session_matches=3,
+            window_hours=168,
         )
-        await session_manager.add_message(
-            "memory-engineering-current",
-            "assistant",
-            "Let me recover the engineering memory bundle.",
-        )
-        await memory_repository.create_memory(
-            content="Atlas release remains the active engineering project.",
-            kind="project",
-            summary="Atlas release",
-            importance=0.95,
-            confidence=0.93,
-        )
-        await memory_repository.create_memory(
-            content="Issue #399 is the guardian-memory batch that follows PR #405.",
-            kind="commitment",
-            summary="Issue #399 follows PR #405",
-            importance=0.91,
-            confidence=0.88,
-        )
-        await memory_repository.create_memory(
-            content="Workflow repo-review is paused on a write_file approval receipt before the follow-up can continue.",
-            kind="timeline",
-            summary="repo-review paused on write_file approval",
-            importance=0.89,
-            confidence=0.9,
-        )
-        await memory_repository.create_memory(
-            content="Artifact handoff bundle tracks the repo-review output and release evidence for PR #405.",
-            kind="procedural",
-            summary="Artifact handoff bundle for PR #405",
-            importance=0.82,
-            confidence=0.86,
-        )
+        report = await build_guardian_memory_benchmark_report(run_suite=False)
 
-        ctx = _make_context(
-            active_goals_summary="Advance the guardian-memory batch after the release lands",
-            active_project="Atlas",
-            active_window="VS Code",
-            screen_context="Reviewing issue 399 follow-up notes after PR 405",
-            data_quality="good",
-            observer_confidence="grounded",
-            salience_level="high",
-            salience_reason="active_goals",
-            interruption_cost="low",
-        )
-
-        with (
-            patch("src.observer.manager.context_manager.get_context", return_value=ctx),
-            patch(
-                "src.profile.service.sync_soul_file_to_profile",
-                AsyncMock(return_value={"Identity": "Builder"}),
-            ),
-            patch("src.memory.hybrid_retrieval.search_with_status", return_value=([], False)),
-            patch("src.audit.repository.audit_repository.list_events", return_value=[]),
-            patch(
-                "src.observer.screen_repository.screen_observation_repo.get_recent_projects",
-                return_value=["Atlas"],
-            ),
-            patch(
-                "src.guardian.feedback.guardian_feedback_repository.resolve_learning_signal",
-                AsyncMock(
-                    return_value=MagicMock(
-                        effective_signal=GuardianLearningSignal.neutral("advisory"),
-                        dominant_scope="global",
-                        decisions=tuple(),
-                    )
-                ),
-            ),
-            patch(
-                "src.guardian.feedback.guardian_feedback_repository.summarize_recent_for_scope",
-                AsyncMock(return_value=""),
-            ),
-            patch(
-                "src.memory.procedural_guidance.load_procedural_memory_guidance",
-                AsyncMock(return_value=None),
-            ),
-        ):
-            state = await build_guardian_state(
-                session_id="memory-engineering-current",
-                user_message="What unblocks issue 399 after PR 405 lands?",
-            )
-            report = await build_guardian_memory_benchmark_report(run_suite=False)
+    pull_request_bundle = next(
+        bundle for bundle in payload["bundles"] if bundle["reference"] == "seraph-quest/seraph/pull/405"
+    )
+    issue_bundle = next(
+        bundle for bundle in payload["bundles"] if bundle["reference"] == "seraph-quest/seraph#399"
+    )
+    repository_bundle = next(
+        bundle for bundle in payload["bundles"] if bundle["reference"] == "seraph-quest/seraph"
+    )
 
     return {
-        "engineering_memory_has_issue_reference": "Issue #399" in state.memory_context,
-        "engineering_memory_has_pr_reference": "PR #405" in state.memory_context,
-        "engineering_memory_has_approval_reference": "write_file approval" in state.memory_context,
-        "engineering_memory_has_artifact_reference": "Artifact handoff bundle" in state.memory_context,
+        "engineering_memory_has_issue_reference": issue_bundle["workflow_count"] == 1,
+        "engineering_memory_has_pr_reference": payload["bundles"][0]["reference"] == "seraph-quest/seraph/pull/405",
+        "engineering_memory_has_approval_reference": pull_request_bundle["approval_count"] == 1,
+        "engineering_memory_has_artifact_reference": pull_request_bundle["artifact_paths"] == ["notes/pr-405-handoff.md"],
+        "engineering_memory_has_audit_reference": len(pull_request_bundle["review_receipts"]) == 1,
+        "engineering_memory_has_repository_reference": repository_bundle["workflow_count"] == 1,
+        "engineering_memory_has_session_match": pull_request_bundle["session_match_count"] == 1,
         "benchmark_suite_named": report["summary"]["suite_name"] == "guardian_memory_quality",
         "benchmark_dimensions_visible": len(report["dimensions"]) >= 5,
     }

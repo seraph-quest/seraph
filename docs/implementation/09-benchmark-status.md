@@ -7,7 +7,7 @@ title: 09. Benchmark Status
 ## Status On `develop`
 
 - [x] The capability import program and benchmark refresh are now landed on `develop`.
-- [x] Seraph now also has an operator-visible benchmark-proof surface with explicit deterministic suite coverage, a dedicated guardian-memory benchmark suite, a dedicated workflow-endurance benchmark suite, a dedicated trust-boundary benchmark suite, a dedicated computer-use benchmark suite, and a dedicated governed-improvement benchmark surface with anti-misevolution, canary, rollback, and receipt policy.
+- [x] Seraph now also has an operator-visible benchmark-proof surface with explicit deterministic suite coverage, a dedicated guardian-memory benchmark suite that exercises workflow, approval, audit, artifact, and repo or PR continuity retrieval, a dedicated workflow-endurance benchmark suite, a dedicated trust-boundary benchmark suite, a dedicated computer-use benchmark suite, and a dedicated governed-improvement benchmark surface with anti-misevolution, canary, rollback, and receipt policy.
 - [ ] Seraph still cannot credibly claim broad benchmark superiority from implementation alone.
 
 ## Paired Research

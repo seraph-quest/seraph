@@ -86,7 +86,6 @@
 
 ### `artifact-lineage-and-follow-on-control-v1`
 
-- status: in progress on `feat/long-running-workflow-control-batch-ah-v1`
 - root causes addressed:
   - the cockpit already had dense workflow-family control, but artifacts were still treated mostly as generic file-context handoff with one or two compatible workflow buttons
   - operators still had to jump back into workflow lineage views to understand which run produced an artifact, which related outputs existed in the same family, and what the best follow-on action was
@@ -109,7 +108,6 @@
 
 ### `artifact-lineage-and-long-running-control-v2`
 
-- status: complete on `feat/long-running-workflow-control-batch-ah-v2` and ready for PR
 - root causes addressed:
   - Batch AH v1 made artifact provenance and related outputs visible, but operators still had to hop between evidence shortcuts, recent outputs, and the artifact inspector to keep acting on the same artifact thread
   - artifact lineage still degraded too hard once provenance was ambiguous, even when the runtime could truthfully surface a bounded set of recent candidate source runs for operator review
@@ -137,7 +135,6 @@
 
 ### `workflow-history-and-lineage-density-v2`
 
-- status: complete on `feat/workflow-history-density-batch-ah-v3` and ready for PR
 - root causes addressed:
   - the cockpit already exposed branch-family controls, but operators still had to mentally reconstruct chronology across outputs, checkpoints, and timeline events
   - workflow rows still summarized runs one layer at a time, which made long-running branch state visible but not dense enough to debug without opening and cross-referencing several panes
@@ -168,7 +165,6 @@
 
 ### `onboarding-web-context-v1`
 
-- status: in progress on `feat/onboarding-web-context-v1`
 - root causes addressed:
   - onboarding was intentionally limited to guardian-record and goal-capture tools, but that also meant Seraph could not inspect a homepage, portfolio, company page, or similar source even when the user pasted the exact URL into onboarding
   - simply enabling general browser/search tools in onboarding would over-widen the boundary instead of honoring only explicit user-provided context
@@ -194,7 +190,6 @@
 
 ### `cockpit-density-and-cross-surface-command-control-v2`
 
-- status: complete on `feat/cockpit-density-batch-k-v1` and ready for PR
 - root causes addressed:
   - the cockpit already exposed approvals, workflow families, queued guardian items, artifacts, trace, and reach health, but operators still had to scan multiple panes and inspector stacks to find the next blocked or time-sensitive action
   - cockpit command control was still too mouse-heavy for active workflow supervision, especially when operators needed to inspect, approve, continue, redirect, or reopen the most urgent item quickly
@@ -224,7 +219,6 @@
 
 ### `workflow-step-focus-and-handoff-v1`
 
-- status: complete on `feat/workflow-operator-density-batch-o-v1` and ready for PR
 - root causes addressed:
   - the cockpit already showed workflow timelines and artifacts, but failed or recoverable steps were still too easy to miss because the operator had to reconstruct the hottest step from generic timeline rows and inspector stacks
   - workflow rows still exposed replay and approval controls, but they did not offer a direct handoff path from the current failed step or the latest workflow output back into the command surface
@@ -233,7 +227,7 @@
   - workflow timeline rows now surface prioritized step-focus summaries plus direct `Use failure context` and `Use latest output` actions
   - the workflow inspector now promotes focused step rows with direct context handoff, output reuse, repair, retry, and compatible follow-on workflow actions
   - keyboard-first control now also includes `Shift+W` for top-workflow inspection and `Shift+U` for the latest workflow output handoff
-- review findings fixed before PR:
+- review findings fixed during implementation:
   - `Shift+W` initially chose the newest workflow triage entry instead of the best step-bearing run, so the shortcut could open a branch without the dense step context the shortcut was supposed to surface
   - the new step-focus layer also exposed stale uniqueness assumptions in older cockpit tests that expected certain workflow summary strings and `Use Output` controls to appear only once
   - fixed by preferring the best step-bearing workflow candidate for `Shift+W` and by tightening the older tests so they assert presence rather than accidental uniqueness
@@ -252,7 +246,6 @@
 
 ### `workflow-branch-debugging-and-long-running-control-v1`
 
-- status: complete on `feat/workflow-branch-debug-batch-s-v1` and ready for PR
 - root causes addressed:
   - the cockpit already carried truthful branch/checkpoint metadata, but operators still had to infer branch origin, the best continuation target, and recent family failures from scattered chips, action rows, and timestamps
   - branch-family debugging still favored "latest branch" over "best continuation", which is not the same thing once a family has multiple resumable or failed descendants
@@ -261,7 +254,7 @@
   - workflow rows now include concise branch-debug summaries for origin, best continuation, and latest family failure
   - the workflow inspector now exposes explicit branch-origin, best-continuation, and failure-lineage rows with direct open, continue, and output reuse actions
   - the branch-debug surface stays on the existing workflow-family lineage model instead of inventing a second workflow-debug state machine
-- review findings fixed before PR:
+- review findings fixed during implementation:
   - the first pass surfaced multiple legitimate `recovery ready` and `Open Parent` affordances, which broke older uniqueness assumptions in the branch-family cockpit test
   - fixed by tightening the branch-family test to assert presence of the new debugger surface without treating duplicated valid affordances as regressions
 - validation:
@@ -276,7 +269,6 @@
 
 ### `workflow-history-comparison-and-family-output-control-v1`
 
-- status: in progress on `feat/workflow-history-comparison-batch-t-v1`
 - root causes addressed:
   - Batch S made branch origin and best continuation visible, but operators still had to infer how sibling, child, and ancestor runs differed or which family output was most useful for reuse
   - workflow history across a family still favored one-run inspection instead of giving the operator a denser comparison surface tied to the current workflow
@@ -302,7 +294,6 @@
 
 ### `workflow-output-comparison-drafts-and-family-diff-control-v1`
 
-- status: in progress on `feat/workflow-output-comparison-batch-u-v1`
 - root causes addressed:
   - Batch T made workflow family history and family-output reuse visible, but operators still had to manually reconstruct a comparison prompt when they wanted to inspect how the current run differed from a child, peer, ancestor, or family-output run
   - the cockpit already knew the relevant family relationships and output paths, but it did not turn that lineage into a direct comparison action
@@ -319,7 +310,6 @@
 
 ### `workflow-family-action-bundles-and-continuation-planning-v1`
 
-- status: in progress on `feat/workflow-family-action-bundles-batch-v1`
 - root causes addressed:
   - Batch U made workflow family comparison and output reuse actionable, but operators still had to manually reconstruct one coherent next-step prompt from best continuation, latest family failure, and reusable family outputs
   - the cockpit already had the truthful family state needed for that synthesis, but it still exposed those signals as separate actions instead of one bundled planning handoff
@@ -345,7 +335,6 @@
 
 ### `workflow-triage-quick-actions-and-follow-through-control-v1`
 
-- status: in progress on `feat/workflow-triage-quick-actions-batch-w-v1`
 - root causes addressed:
   - Batch V made bundled workflow-family planning available once the operator opened the inspector, but the active triage lane still treated workflows mostly as inspect-first rows
   - the triage lane already knew when a workflow had reusable output, a distinct best continuation, or a latest branch, but those follow-through actions still required an inspector hop
@@ -365,7 +354,6 @@
 
 ### `workflow-triage-branch-debug-and-best-continuation-control-v1`
 
-- status: complete on `feat/workflow-triage-branch-debug-batch-x-v1`, intended for the aggregate Batch X PR for `#283`
 - root causes addressed:
   - Batch W made triage useful for output reuse, comparison, and next-step drafting, but the hottest workflow rows still hid failure-context reuse and direct best-continuation control behind an inspector hop
   - the operator shell still needed broader keyboard-first workflow branch-debug control beyond inspect/latest-branch/output-only shortcuts
@@ -391,7 +379,6 @@
 
 ### `workflow-triage-recovery-controls-v1`
 
-- status: complete on `feat/workflow-triage-recovery-controls-batch-y-v1`, intended for the aggregate Batch Y PR for `#285`
 - root causes addressed:
   - Batch X made workflow triage strong for follow-through, but the hottest failed or blocked workflows still hid retry-step, repair-step, and replay-repair controls behind the workflow timeline or inspector
   - keyboard-first workflow control still had no direct recovery draft path for the primary workflow target
@@ -416,7 +403,6 @@
 
 ### `workflow-keyboard-continuation-and-comparison-control-v1`
 
-- status: in progress on `feat/workflow-keyboard-continuation-batch-z-v1`
 - root causes addressed:
   - Batch Y made the triage lane dense and truthful, but the highest-value best-continuation actions were still partly mouse-only even though the same triage state was already available to the keyboard layer
   - the keyboard surface could inspect the latest branch or draft the next step, but it still could not directly open the best continuation, continue that branch, or compare against it
@@ -441,7 +427,6 @@
 
 ### `workflow-family-row-control-parity-and-failure-follow-through-v1`
 
-- status: in progress on `feat/workflow-checkpoint-control-batch-aa-v1`
 - root causes addressed:
   - child-branch rows already exposed denser long-running actions, but ancestor, peer, and failure-lineage rows still dropped back to thinner one-off affordances even when they had reusable outputs or continuable context
   - the inspector therefore showed the family history truthfully, but did not let operators act on that truth with consistent density across the whole family surface
@@ -458,7 +443,6 @@
 
 ### `workflow-family-checkpoint-drilldown-and-step-control-v1`
 
-- status: in progress on `feat/workflow-family-checkpoint-control-batch-ab-v1`
 - root causes addressed:
   - the workflow inspector could already continue family runs generically, but best-continuation, ancestor, peer, and failure-lineage rows still hid the actual checkpoint branch/retry actions that explain what that continuation would do
   - step-aware checkpoint control was therefore denser for the selected run timeline than for the related family rows that often carry the more relevant continuation target
@@ -483,7 +467,6 @@
 
 ### `workflow-family-recovery-control-parity-v1`
 
-- status: in progress on `feat/workflow-family-recovery-batch-ac-v1`
 - root causes addressed:
   - family rows could already continue and branch from checkpoints, but they still hid the direct `retry step` and `repair step` actions that the triage surface exposed for the same failed workflow state
   - that left the workflow inspector inconsistent: the selected timeline and triage lane were recovery-aware, while best-continuation and failure-lineage family rows still stopped at generic continuation

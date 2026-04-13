@@ -2851,7 +2851,7 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
-          summary: { suite_count: 8, scenario_count: 48, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated_canary_required", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible", trust_boundary_benchmark_posture: "ci_gated_operator_visible", governed_improvement_benchmark_posture: "ci_gated_operator_visible" },
+          summary: { suite_count: 8, scenario_count: 52, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated_canary_required", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible", trust_boundary_benchmark_posture: "ci_gated_operator_visible", governed_improvement_benchmark_posture: "ci_gated_operator_visible" },
           suites: [],
           memory_benchmark: null,
           user_model_benchmark: null,
@@ -5058,7 +5058,7 @@ describe("CockpitView", () => {
         return Promise.resolve(mockResponse({
           summary: {
             suite_count: 8,
-            scenario_count: 50,
+            scenario_count: 52,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
@@ -5111,7 +5111,13 @@ describe("CockpitView", () => {
               clarification_policy_state: "required_on_high_ambiguity",
               restraint_policy_state: "clarify_or_wait_before_unverified_personalization",
             },
-            failure_report: [],
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "ambiguous referent restraint regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
             policy: {
               canonical_authority: "guardian_world_model",
               clarify_before_action_policy: "required_on_high_ambiguity",
@@ -5133,7 +5139,13 @@ describe("CockpitView", () => {
               condensation_fidelity_state: "recovery_paths_and_output_history_retained",
               branch_continuity_state: "backup_branch_operator_selectable",
             },
-            failure_report: [],
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "backup branch recovery regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
             policy: {
               anticipatory_repair_policy: "prepare_repair_and_backup_branch_before_obvious_failure_points",
               backup_branch_policy: "checkpoint_backed_branch_receipts_must_remain_operator_selectable",
@@ -5501,7 +5513,7 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/8 suites · 50 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/8 suites · 52 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
@@ -5515,7 +5527,9 @@ describe("CockpitView", () => {
     expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · ambiguous referent restraint regression · deterministic eval failure/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/checkpoint and pre repair visible · recovery paths and output history retained · backup branch operator selectable/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · backup branch recovery regression · deterministic eval failure/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();

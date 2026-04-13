@@ -12537,6 +12537,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                   operatorBenchmarkProof.user_model_benchmark.policy.canonical_authority.replace(/_/g, " "),
                                 ].join(" · ")}
                               </div>
+                              {operatorBenchmarkProof.user_model_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
                             </div>
                           </div>
                         ) : null}
@@ -12558,6 +12563,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                   operatorBenchmarkProof.workflow_endurance_benchmark.summary.branch_continuity_state.replace(/_/g, " "),
                                 ].join(" · ")}
                               </div>
+                              {operatorBenchmarkProof.workflow_endurance_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
                             </div>
                           </div>
                         ) : null}

@@ -225,5 +225,5 @@ Wave 1 covers the runtime-parity slices from the capability import program:
   - docs build: passed
 - final review gate:
   - slice-level subagent reviews are recorded above for each landed slice
-  - final follow-up review requests were sent after the wave-wide validation to verify the branch state and docs alignment
+  - final follow-up review requests were sent after the wave-wide validation to verify shipped-state and docs alignment
   - those follow-up checks timed out without returning additional findings before the wave was closed, so the concrete reviewer record for Wave 1 remains the slice-level findings and resolutions logged above

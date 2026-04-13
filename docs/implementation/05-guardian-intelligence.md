@@ -104,13 +104,12 @@ Each internal slice in these memory batches should close with:
 - a subagent review pass for bugs, regressions, and misleading claims
 - a short implementation log entry in this document before the slice is treated as complete
 
-## Batch A Branch Review Log
+## Batch A Review Log
 
-This section records the internal Batch A slices on the feature branch before the aggregate GitHub PR is opened.
+This section records the landed Batch A slices and their validation and review receipts.
 
 ### `memory-eval-harness-v1`
 
-- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
 - scope:
   - expanded `backend/src/evals/harness.py` with deterministic memory-behavior scenarios for linked commitment recall, linked collaborator recall, bounded snapshot stability, and supersession filtering
   - taught the eval harness DB patch helpers about `src.memory.repository.get_session` and cleared the bounded snapshot cache around each scenario so the new memory scenarios run in isolated process state
@@ -138,7 +137,6 @@ This section records the internal Batch A slices on the feature branch before th
 
 ### `typed-memory-schema-v1`
 
-- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
 - scope:
   - added structured SQLite memory tables and enums for typed memories, entities, sources, edges, and snapshots
   - added `memory_repository` CRUD helpers for entities, memories, edges, and snapshots
@@ -167,7 +165,6 @@ This section records the internal Batch A slices on the feature branch before th
 
 ### `memory-kinds-and-provenance-v1`
 
-- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
 - scope:
   - added `backend/src/memory/types.py` to normalize kind/category mapping, bucket mapping, and consolidation payload parsing
   - upgraded session consolidation to accept typed memory objects with kind, summary, confidence, importance, and last-confirmed provenance while remaining backward-compatible with the legacy four lists
@@ -201,7 +198,6 @@ This section records the internal Batch A slices on the feature branch before th
 
 ### `entity-and-project-linking-v1`
 
-- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
 - scope:
   - added `backend/src/memory/linking.py` to resolve conservative subject and project entity links during typed consolidation writes
   - extended `memory_repository` with exact or alias entity resolution plus linked-memory lookup by project or subject ids
@@ -236,7 +232,6 @@ This section records the internal Batch A slices on the feature branch before th
 
 ### `bounded-memory-snapshots-v1`
 
-- status: complete on `feat/memory-batch-a-v1`, pending inclusion in the aggregate Batch A PR
 - scope:
   - added `backend/src/memory/snapshots.py` to build a compact bounded guardian snapshot from soul identity plus structured memory kinds
   - refreshes that snapshot after consolidation so durable semantic changes project into the always-on guardian prefix without rebuilding it ad hoc every call
@@ -262,13 +257,12 @@ This section records the internal Batch A slices on the feature branch before th
     - snapshot promotion still runs from consolidation boundaries; broader lifecycle hooks near compaction and workflow boundaries belong in the later flush-lifecycle slice
     - bounded snapshot contents are still semantic-only and do not yet include procedural memory or episodic recall planning
 
-## Batch B Branch Review Log
+## Batch B Review Log
 
-This section records the internal Batch B slices on the feature branch before the aggregate GitHub PR is opened.
+This section records the landed Batch B slices and their validation and review receipts.
 
 ### `episodic-memory-events-v1`
 
-- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
 - scope:
   - added a structured `memory_episodes` table plus `MemoryEpisodeType` so Seraph now has a first-class episodic substrate alongside semantic memory
   - extended `memory_repository` with typed episode create and list helpers, including filtering by session, entity links, and episode type
@@ -299,7 +293,6 @@ This section records the internal Batch B slices on the feature branch before th
 
 ### `observer-episodic-fusion-v1`
 
-- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
 - scope:
   - extended `CurrentContext` with `active_project` so observer state carries explicit project focus instead of only goals plus window text
   - added `backend/src/memory/observer_episodes.py` to derive conservative `observer` episodes for project, focus, and activity transitions with explicit provenance metadata
@@ -330,7 +323,6 @@ This section records the internal Batch B slices on the feature branch before th
 
 ### `session-search-fts-and-event-index-v1`
 
-- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
 - scope:
   - added a SQLite `session_recall_fts` index that backfills existing rows and stays updated through triggers on sessions, user or assistant messages, and non-conversation episodic events
   - upgraded `SessionManager.search_sessions(...)` to use the FTS index for normal text queries while keeping a bounded LIKE fallback for punctuation-heavy queries such as `%` and `_`
@@ -357,7 +349,6 @@ This section records the internal Batch B slices on the feature branch before th
 
 ### `hybrid-memory-retrieval-v1`
 
-- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
 - scope:
   - added `backend/src/memory/hybrid_retrieval.py` as a reusable retriever that combines lexical structured-memory hits, project-linked boosts, episodic hits, vector-store hits, dedupe, and reranking into one bounded memory bundle
   - kept the retriever independent from guardian-state wiring so the later planner slice can consume one tested retrieval backbone instead of reimplementing ranking logic in multiple places
@@ -379,7 +370,6 @@ This section records the internal Batch B slices on the feature branch before th
 
 ### `guardian-state-retrieval-planner-v1`
 
-- status: complete on `feat/memory-batch-b-v1`, pending inclusion in the aggregate Batch B PR
 - scope:
   - added `backend/src/memory/retrieval_planner.py` so guardian-state memory assembly now flows through one planner instead of splitting structured-memory assembly and query-time recall across separate code paths
   - moved structured semantic bundle assembly out of `backend/src/guardian/state.py` and into the planner, keeping project-linked semantic boosts while layering hybrid semantic plus episodic recall on top
@@ -401,7 +391,6 @@ This section records the internal Batch B slices on the feature branch before th
 
 ### Batch B Aggregate Validation
 
-- status: ready for the aggregate Batch B GitHub PR from `feat/memory-batch-b-v1`
 - targeted validation:
   - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/src/memory/hybrid_retrieval.py backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py`
   - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py backend/tests/test_memory_repository.py -q`
@@ -415,13 +404,12 @@ This section records the internal Batch B slices on the feature branch before th
   - a follow-up subagent review was started with `Einstein` (`019d2695-7bf7-7b10-97dd-6145a50ea090`) for the observer-entity reuse and fallback-event-search fixes
   - that review thread stalled before returning findings, so the review record relies on the targeted regression tests for `backend/tests/test_observer_manager.py` and `backend/tests/test_session.py` instead of claiming an unreturned clean review
 
-## Batch C Branch Review Log
+## Batch C Review Log
 
-This section records the internal Batch C slices on the feature branch before the aggregate GitHub PR is opened.
+This section records the landed Batch C slices and their validation and review receipts.
 
 ### `memory-flush-lifecycle-hooks-v1`
 
-- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
 - scope:
   - added `backend/src/memory/flush.py` as the centralized lifecycle flush entrypoint with session-fingerprint dedupe plus in-flight overlap protection so repeated triggers do not double-write the same unchanged session
   - routed chat-response flushes, websocket-response flushes, and scheduler catch-up flushes through that helper instead of scheduling raw consolidation calls directly
@@ -454,7 +442,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `multi-stage-memory-consolidation-v1`
 
-- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
 - scope:
   - refactored `backend/src/memory/consolidator.py` into an explicit pipeline with `capture`, `extract`, `merge`, and `strengthen` stages under `backend/src/memory/pipeline/` instead of keeping all extraction and write behavior in one monolithic function
   - added capture-stage source-message collection so structured memories can keep concrete message provenance instead of only a coarse session id
@@ -495,7 +482,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `soul-projection-and-structured-profile-v1`
 
-- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
 - scope:
   - added `backend/src/profile/service.py` as the structured profile service for the singleton user record instead of leaving profile creation, onboarding state, and soul access split across API handlers and file utilities
   - moved `soul.md` rendering and parsing into `backend/src/memory/soul.py` so the file becomes a readable projection surface while `user_profiles.preferences_json` plus `user_profiles.soul_text` hold the structured durable state underneath it
@@ -522,7 +508,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `procedural-memory-from-outcomes-v1`
 
-- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
 - scope:
   - added `MemoryKind.procedural` in `backend/src/db/models.py` and mapped it through `backend/src/memory/types.py` so outcome-derived lessons become first-class durable memory instead of piggybacking on generic preference text
   - added `backend/src/memory/procedural.py` to materialize `GuardianLearningSignal` into scoped procedural memories for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread lessons
@@ -564,7 +549,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `memory-decay-contradiction-and-archive-v1`
 
-- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
 - scope:
   - added `backend/src/memory/decay.py` so Batch C now has an explicit decay-maintenance pass that detects conservative contradiction pairs for comparable active memories, marks losing rows `superseded`, writes contradiction plus supersession metadata, and materializes `contradicts` and `supersedes` edges instead of leaving stale memories active forever
   - added staleness decay windows by memory kind, with confidence and reinforcement step-downs plus archival metadata once a memory becomes both old enough and weak enough to stop competing with fresher context
@@ -611,7 +595,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `guardian-memory-behavioral-evals-v1`
 
-- status: complete on `feat/memory-batch-c-v1`, pending inclusion in the aggregate Batch C PR
 - scope:
   - expanded `backend/src/evals/harness.py` with `memory_decay_contradiction_cleanup_behavior`, which proves the decay-maintenance path supersedes contradictory project memory, keeps superseded embeddings out of hybrid retrieval, and keeps guardian-state memory context focused on the winning project state
   - added `procedural_memory_adaptation_behavior` so the eval harness now proves feedback-derived procedural memory can refresh same-session bounded context and surface the learned rule text back into guardian memory context without waiting for a new session
@@ -679,7 +662,7 @@ This section records the internal Batch C slices on the feature branch before th
     - `Zeno` also flagged the exact-session-id placeholder drift risk, and `Kepler` flagged the missing scheduled-job update backfill; both were fixed on the branch and regression-covered
     - follow-up recheck:
       - `Kepler` reported no further material findings after the goal-delete, exact-session-id, and scheduled-job-update fixes landed
-- final full backend sweep on the current branch state:
+- final full backend sweep on the shipped implementation state:
   - result: `1298 passed, 27 warnings`
   - command:
     - `backend/.venv/bin/python -m pytest backend/tests -q`
@@ -699,7 +682,7 @@ This section records the internal Batch C slices on the feature branch before th
       - the follow-up raise path aborted teardown before cleanup finished
     - both issues were fixed before the final validation pass
     - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the final diff and reported no current concrete findings
-  - final CI-parity validation on the current branch state:
+  - final CI-parity validation on the shipped implementation state:
     - targeted subset:
       - result: `11 passed, 24 warnings`
       - command:
@@ -720,7 +703,7 @@ This section records the internal Batch C slices on the feature branch before th
     - added a regression in `backend/tests/test_eval_harness.py` that runs `vector_store_runtime_audit` before `guardian_state_synthesis` and proves the guardian-state confidence remains `overall=partial` and `memory=degraded`
   - subagent review:
     - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the current harness and test diff and reported no material findings
-  - final validation on the current branch state:
+  - final validation on the shipped implementation state:
     - targeted subset:
       - result: `3 passed`
       - command:
@@ -732,7 +715,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `procedural-memory-policy-routing-v1`
 
-- status: complete on `feat/procedural-memory-policy-routing-v1`, pending inclusion in the next memory follow-up PR
 - root cause addressed:
   - Batch C made intervention lessons durable and prompt-visible, but the delivery gate and guardian-state learning guidance still read only the live `GuardianLearningSignal` heuristic window
   - when that live window was neutral, the system could ignore durable procedural lessons that had already been written from prior outcomes and feedback
@@ -792,7 +774,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `guardian-learning-evidence-foundation`
 
-- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
 - root cause addressed:
   - the codebase now has two policy-time learning sources: fresh `GuardianLearningSignal` heuristics and durable procedural memories
   - before this slice, those sources exposed only bias labels, not a comparable evidence surface, so the next arbitration layer would have had to compare incomparable inputs
@@ -811,7 +792,7 @@ This section records the internal Batch C slices on the feature branch before th
   - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
     - result: `21 passed`
 - subagent review:
-  - `Locke`, `Harvey`, and `Hypatia` returned concrete issues against the first `#240` branch state:
+  - `Locke`, `Harvey`, and `Hypatia` returned concrete issues against the first `#240` implementation pass:
     - native-channel and async-native evidence could still be inferred from generic positive rows without proof that the winning intervention actually used native delivery
     - missing `transport` could still be treated as direct/browser evidence, which made delivery-axis lessons stronger than the runtime data justified
     - procedural reads did not reliably fall back from malformed `support_count` metadata to legacy `evidence_count`
@@ -820,7 +801,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `guardian-learning-arbitration`
 
-- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
 - root cause addressed:
   - policy-time learning guidance was still resolving conflicts by overlay order: if procedural memory had any non-neutral lesson, it could overwrite fresher live guardian-learning heuristics without proving that the durable lesson still had stronger evidence
   - that kept delivery and guardian-state synthesis shallow even after the memory substrate could expose comparable evidence across live and durable sources
@@ -838,7 +818,7 @@ This section records the internal Batch C slices on the feature branch before th
   - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py::test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_neutral backend/tests/test_delivery.py::test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery backend/tests/test_delivery.py::test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_stale backend/tests/test_guardian_state.py::test_build_guardian_state_uses_procedural_memory_guidance_when_live_signal_is_neutral backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_live_learning_when_stale_memory_conflicts backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
     - result: `30 passed`
 - subagent review:
-  - `Huygens` returned three concrete issues against the first `#237` branch state:
+  - `Huygens` returned three concrete issues against the first `#237` implementation pass:
     - guardian-state learning guidance still omitted the delivery axis even when arbitration had selected a non-neutral delivery bias
     - guardian-state arbitration still hardcoded `intervention_type="advisory"` instead of using the requested intervention type
     - arbitration provenance still labeled the effective guidance `heuristic_plus_procedural_memory` whenever procedural memory was active, even if live evidence won every contested axis
@@ -846,7 +826,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `scoped-procedural-guidance-resolution`
 
-- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
 - root cause addressed:
   - procedural guidance had already grown the ability to persist thread- and project-scoped lessons, but policy-time resolution was still unsafe in two ways:
     - the candidate scope order could let broader project guidance resolve before tighter continuity-thread guidance when both existed
@@ -886,7 +865,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `weighted-guardian-learning-support`
 
-- status: complete on `feat/guardian-learning-batch-d-v1`, pending inclusion in the aggregate Batch D PR
 - root cause addressed:
   - even after `#240` and `#237`, live bias selection still relied too heavily on flat counts, and arbitration could still overvalue noisier higher-volume evidence over stronger lower-volume evidence
   - the live outcome loop was also still manufacturing unsupported phrasing, cadence, and thread lessons from generic success/failure rows even though runtime never records which of those variants was actually used
@@ -927,7 +905,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `durable-world-model-evidence-fusion-v1`
 
-- status: complete on `feat/guardian-world-model-batch-j-v1`, pending inclusion in the aggregate Batch J PR
 - scope:
   - extended `backend/src/guardian/world_model.py` so `GuardianWorldModel` now records `focus_source` and `judgment_risks`, making guardian-state synthesis distinguish live observer focus from session or memory fallback and surface when the world model should stay cautious
   - updated `backend/src/guardian/state.py` so world-model confidence no longer stays artificially grounded when focus is only inferred from history, when durable project recall conflicts with the live observer project, or when recent intervention outcomes skew negative enough to keep receptivity selective
@@ -936,7 +913,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `long-horizon-guardian-learning-v2`
 
-- status: complete on `feat/long-horizon-guardian-learning-batch-p-v1`, pending inclusion in the aggregate Batch P PR
 - root causes addressed:
   - guardian-state synthesis was still treating collaborator, obligation, and timeline recall as flat memory buckets, so stale durable support context could stay ahead of live-project-aligned context and weaken judgment only after the operator manually inferred the mismatch
   - recent execution pressure was visible in the world model, but it was not treated as a contradiction source against the live project anchor and it did not combine with negative intervention trends to make the guardian more selective
@@ -966,7 +942,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `cross-thread-project-state-and-follow-through-v1`
 
-- status: complete on `feat/cross-thread-followthrough-batch-q-v1`, pending inclusion in the aggregate Batch Q PR
 - root causes addressed:
   - the world model already carried recent session summaries, but it was not treating live-project-matching recent threads as stronger continuity evidence than unrelated recent-session carryover
   - execution setbacks were already visible in `execution_pressure`, but they were still detached from open project commitments, so the guardian could not surface explicit follow-through risk on the same live project
@@ -1004,7 +979,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `multi-project-arbitration-and-cross-source-project-carryover-v1`
 
-- status: complete on `feat/multi-project-arbitration-batch-r-v1`, pending inclusion in the aggregate Batch R PR
 - root causes addressed:
   - project arbitration was still effectively list-ordered, so observer aliases, recent screen-project ordering, or whichever project string appeared first could outweigh broader cross-source evidence
   - semantically identical labels like `Atlas` and `Atlas launch` were still treated as separate project competitors in ambiguity and active-project output, which made both risk reporting and project-state synthesis noisier than the actual evidence
@@ -1033,7 +1007,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `intervention-quality-learning-from-longer-horizon-outcomes-v1`
 
-- status: complete on `feat/guardian-world-model-batch-j-v1`, pending inclusion in the aggregate Batch J PR
 - scope:
   - added scoped live-learning resolution in `backend/src/guardian/feedback.py`, so guardian policy now resolves per-axis live evidence across `global`, `thread`, `project`, and `thread_project` lanes before comparing that guidance against durable procedural memory
   - updated `backend/src/guardian/state.py` and `backend/src/observer/delivery.py` so both guardian-state synthesis and live delivery use the same scoped live-learning result instead of flattening everything through the global recent-feedback window
@@ -1065,7 +1038,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `additive-memory-provider-extensibility-v1`
 
-- status: complete on `feat/memory-provider-extensibility-batch-n-v1`, pending inclusion in the aggregate Batch N PR
 - scope:
   - added manifest, layout, and registry support for extension-defined `memory_providers`, including canonical-memory ownership rules that keep guardian memory authoritative
   - added `backend/src/memory/providers.py` so Seraph can inventory configured memory-provider adapters, expose runtime state to operators, and merge additive provider retrieval into memory planning without making providers canonical
@@ -1096,7 +1068,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `long-horizon-guardian-learning-and-intervention-quality-v3`
 
-- status: complete on `feat/long-horizon-guardian-learning-batch-ai-v1`, pending inclusion in the aggregate Batch AI PR
 - scope:
   - extended `backend/src/guardian/feedback.py` and `backend/src/guardian/learning_evidence.py` so guardian learning tracks multi-day and scheduled outcome spread instead of only short-window outcome counts
   - carried that spread into `backend/src/memory/procedural.py` and `backend/src/memory/procedural_guidance.py` so procedural recall can preserve the same longer-horizon evidence lanes
@@ -1126,7 +1097,6 @@ This section records the internal Batch C slices on the feature branch before th
 
 ### `guardian-judgment-and-long-horizon-learning-quality-v4`
 
-- status: complete on `feat/guardian-judgment-batch-aq-v1`, pending inclusion in the aggregate Batch AQ PR
 - scope:
   - extended `backend/src/guardian/world_model.py` so guardian state now ranks competing project context explicitly, exposes inspectable project-ranking diagnostics, and surfaces conservative stale-signal arbitration when recent execution/support evidence stays split across nearby anchors
   - extended `backend/src/guardian/state.py` so guardian state now carries inspectable learning diagnostics summarizing the dominant live-learning scope, observed outcome spread, long-horizon day spread, and any procedural-memory overrides

@@ -300,7 +300,7 @@ runtime surfaces instead of roadmap placeholders.
 - findings:
   - secret-bearing packs were install-gated, but configure operations that
     stored new secret values were still bypassing the lifecycle approval gate
-  - the roadmap still drifted from the branch state
+  - the roadmap still drifted from the shipped implementation state
 - resolution:
   - configure operations now require lifecycle approval when the request
     supplies new password-backed secret values, while redacted no-op

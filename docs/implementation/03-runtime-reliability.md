@@ -36,7 +36,7 @@
 - [x] Runtime Reliability is no longer the repo-wide active focus after provider explainability and budgets v3 plus guardian behavioral evals v9 shipped
 - [x] the previous runtime-focused slice sequence is fully shipped on `develop`
 - [x] `provider-policy-safeguards-v3`, `provider-policy-explainability-and-budgets-v3`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, including richer routing reason surfaces, budget/task-class guardrails, and deeper deterministic proof for bootstrap plus branching behavior
-- [x] `provider-policy-simulation-and-budget-planning-v1` is now represented in the shipped branch state, including candidate-route scoring, explicit budget steering, and cross-surface route legibility
+- [x] `provider-policy-simulation-and-budget-planning-v1` is now represented in the shipped runtime state, including candidate-route scoring, explicit budget steering, and cross-surface route legibility
 - [ ] richer runtime work still remains on `develop`, but the remaining gap is now broader live-provider, long-running, and production-like eval depth rather than missing first-pass planning or route-comparison surfaces
 
 ## Still To Do On `develop`
@@ -76,7 +76,6 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 
 ### `provider-planning-benchmark-proof-and-live-integration-depth-v2`
 
-- status: complete on `feat/provider-planning-batch-ay-v1`, pending inclusion in the aggregate Batch AY PR for `#366`
 - root cause addressed:
   - the first planning pass could score routes, but it still hid why Seraph retained a healthy primary when a standby route won the raw planning score
   - operator/activity surfaces and the runtime audit still lacked a denser chosen-versus-alternate comparison contract that benchmark-facing proof could point to directly
@@ -99,7 +98,6 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 
 ### `runtime-planning-provider-feedback-and-live-eval-depth-v2`
 
-- status: complete on `feat/runtime-planning-batch-ak-v1`, pending inclusion in the aggregate Batch AK PR for `#307`
 - root cause addressed:
   - the first simulation-grade router could score candidates and expose budget steering, but it still treated live provider failures too shallowly once a target left immediate cooldown
   - route explanations and downstream operator/activity surfaces still lacked a denser production-readiness or failure-risk summary, and the heaviest runtime eval seam was still brittle enough to burn an entire backend shard
@@ -129,11 +127,10 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 - subagent review:
   - focused read-only subagent review was run on the runtime/eval seam and on the API/shard-runner seam
   - both review passes ended with no remaining material findings
-  - the only material review finding was the stale-feedback decay bug above, which was fixed on the same branch before PR open
+  - the only material review finding was the stale-feedback decay bug above, which was fixed before merge
 
 ### `provider-policy-simulation-and-budget-planning-v1`
 
-- status: complete on `feat/provider-policy-simulation-batch-f-v1`, pending inclusion in the aggregate Batch F PR for `#236`
 - root cause addressed:
   - runtime routing already had weighted target scoring, fallback chains, and guardrails, but it still lacked a first-class route-planning surface
   - budget steering was still implicit in the final target order, and operators could not inspect why one plausible route beat another across audit, operator, and activity-ledger surfaces

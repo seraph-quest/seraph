@@ -949,6 +949,34 @@ async def test_operator_workflow_endurance_benchmark_surface_reports_policy_and_
 
 
 @pytest.mark.asyncio
+async def test_operator_workflow_endurance_benchmark_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=4,
+        passed=2,
+        failed=2,
+        duration_ms=13,
+        results=[
+            SimpleNamespace(
+                passed=False,
+                name="workflow_backup_branch_surface_behavior",
+                error="backup branch regression",
+            )
+        ],
+    )
+
+    with patch("src.workflows.benchmark._run_workflow_endurance_benchmark_suite", AsyncMock(return_value=failing_summary)):
+        resp = await client.get("/api/operator/workflow-endurance-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "ci_regressions_detected_operator_visible"
+    assert payload["summary"]["anticipatory_repair_state"] == "regressions_detected"
+    assert payload["summary"]["condensation_fidelity_state"] == "regressions_detected"
+    assert payload["summary"]["branch_continuity_state"] == "regressions_detected"
+    assert payload["failure_report"][0]["scenario_name"] == "workflow_backup_branch_surface_behavior"
+
+
+@pytest.mark.asyncio
 async def test_operator_trust_boundary_benchmark_surface_reports_policy_and_receipts(client):
     resp = await client.get("/api/operator/trust-boundary-benchmark")
 

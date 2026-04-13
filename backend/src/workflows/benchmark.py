@@ -105,12 +105,27 @@ async def _run_workflow_endurance_benchmark_suite():
     return await run_benchmark_suites([WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME])
 
 
+def _workflow_endurance_summary_states(healthy: bool) -> dict[str, str]:
+    if healthy:
+        return {
+            "anticipatory_repair_state": "checkpoint_and_pre_repair_visible",
+            "condensation_fidelity_state": "recovery_paths_and_output_history_retained",
+            "branch_continuity_state": "backup_branch_operator_selectable",
+        }
+    return {
+        "anticipatory_repair_state": "regressions_detected",
+        "condensation_fidelity_state": "regressions_detected",
+        "branch_continuity_state": "regressions_detected",
+    }
+
+
 async def build_workflow_endurance_benchmark_report() -> dict[str, Any]:
     summary = await _run_workflow_endurance_benchmark_suite()
     failure_report = _workflow_endurance_failure_report(summary)
+    healthy = summary.failed == 0
     benchmark_posture = (
         "ci_gated_operator_visible"
-        if summary.failed == 0
+        if healthy
         else "ci_regressions_detected_operator_visible"
     )
     return {
@@ -122,9 +137,7 @@ async def build_workflow_endurance_benchmark_report() -> dict[str, Any]:
             "dimension_count": len(workflow_endurance_benchmark_dimensions()),
             "failure_mode_count": len(workflow_endurance_failure_taxonomy()),
             "active_failure_count": summary.failed,
-            "anticipatory_repair_state": "checkpoint_and_pre_repair_visible",
-            "condensation_fidelity_state": "recovery_paths_and_output_history_retained",
-            "branch_continuity_state": "backup_branch_operator_selectable",
+            **_workflow_endurance_summary_states(healthy),
         },
         "scenario_names": list(WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES),
         "dimensions": workflow_endurance_benchmark_dimensions(),

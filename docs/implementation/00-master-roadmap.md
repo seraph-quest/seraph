@@ -32,14 +32,15 @@ When these docs are updated on an open feature branch, they describe the intende
 - `docs/implementation/08-docs-contract.md` explains the boundary between research truth and implementation truth.
 - `docs/implementation/09-benchmark-status.md` mirrors the benchmark axes from research as shipped implementation status.
 - `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
-- `docs/implementation/01` through `07` are the only workstream docs; `08` through `10` are cross-cutting implementation mirrors, not extra workstreams.
+- `docs/implementation/11-world-class-strategy-delivery.md` mirrors the cross-cutting world-class strategy translation as delivery rules.
+- `docs/implementation/01` through `07` are the only workstream docs; `08` through `11` are cross-cutting implementation mirrors, not extra workstreams.
 - if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
 - active execution state belongs in the GitHub Project, issues, and PRs rather than this document
 
 ## Current Status
 
 Read this roadmap together with [Development Status](./STATUS.md).
-For the implementation-side mirrors of the evidence, benchmark, and superiority layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), and [10. Superiority Delivery](./10-superiority-delivery.md).
+For the implementation-side mirrors of the evidence, benchmark, superiority, and world-class strategy layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md).
 
 Legend for the checklist column:
 
@@ -531,7 +532,7 @@ This was the major Guardian Intelligence execution program after the first-pass 
 6. Embodied Interface
 7. Ecosystem And Delegation
 
-Implementation docs `08` through `10` are supporting mirror layers for this roadmap, not additional workstreams.
+Implementation docs `08` through `11` are supporting mirror layers for this roadmap, not additional workstreams.
 
 ## Stable Interfaces Outside This Transition
 
@@ -612,7 +613,7 @@ Implementation docs `08` through `10` are supporting mirror layers for this road
 
 1. Read [Development Status](./STATUS.md) for the live shipped vs unfinished view.
 2. Read this file for workstream ordering and current scope.
-3. Read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), and [10. Superiority Delivery](./10-superiority-delivery.md) for the implementation-side mirrors of the research benchmark/program docs.
+3. Read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md) for the implementation-side mirrors of the research benchmark/program docs and cross-cutting strategy translation.
 4. Read `01` through `07` for detailed per-workstream checklists.
 5. Read the research docs for the benchmark and superiority target.
 6. Treat `/legacy` docs as supporting history, not the live source of truth.

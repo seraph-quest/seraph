@@ -97,6 +97,7 @@ Seraph should be judged against OpenClaw, Hermes, and IronClaw on explicit axes:
 
 ## Implementation Mapping
 
+- The canonical strategy and priority stack live in [17. Seraph World-Class Strategy](./17-seraph-world-class-strategy.md).
 - Research 01 and 02 map to Workstream 05 in `docs/implementation/05-guardian-intelligence.md`
 - Research 03 maps to Workstream 03 in `docs/implementation/03-runtime-reliability.md`
 - Research 04 maps to Workstream 01 in `docs/implementation/01-trust-boundaries.md`

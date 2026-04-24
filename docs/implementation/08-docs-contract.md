@@ -35,6 +35,7 @@ If a major concept appears in research but not implementation, or vice versa, th
 - [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program, completed-program record, and workstream-to-gap translation
 - [x] `docs/implementation/09-benchmark-status.md` mirrors the benchmark on shipped implementation terms
 - [x] `docs/implementation/10-superiority-delivery.md` mirrors the superiority program on delivery terms
+- [x] `docs/implementation/11-world-class-strategy-delivery.md` mirrors the cross-cutting world-class strategy translation on delivery terms
 - [x] the GitHub Project owns execution state
 - [x] GitHub issues and PRs own active work tracking, review state, and merge state
 - [x] `docs/docs/` owns historical/archive material that is no longer current truth
@@ -44,7 +45,7 @@ If a major concept appears in research but not implementation, or vice versa, th
 - [x] If research adds a new benchmark or program layer, implementation needs a mirror doc in the same PR.
 - [x] If implementation changes shipped truth, update `STATUS.md`, the owning workstream file, and any affected mirror docs in the same PR.
 - [x] If active execution state changes, update the GitHub Project, issue, or PR instead of mirroring that state in docs.
-- [x] If the strategic implementation program changes materially, update the roadmap and any affected mirror docs in the same PR.
+- [x] If the strategic implementation program or cross-cutting strategy translation changes materially, update the roadmap and any affected mirror docs in the same PR.
 - [x] Open PRs, review state, and branch state belong in issues, PRs, and the GitHub Project, not in docs that claim to describe `develop`.
 
 ## Project Workflow
@@ -129,7 +130,7 @@ Use this as the default execution model when several internal slices will land t
 - [x] Every implementation workstream should link to its paired research doc or docs.
 - [x] Research should not carry a stale duplicate of GitHub execution state.
 - [x] Implementation should not make benchmark or superiority claims without a research-side source.
-- [ ] The trees are only “in parity” when a reader can move from synthesis -> benchmark/program -> shipped implementation without guessing which file owns what.
+- [ ] The trees are only “in parity” when a reader can move from synthesis -> benchmark/program -> shipped implementation -> cross-cutting strategy mirror without guessing which file owns what.
 
 ## Acceptance Checklist
 

@@ -31,6 +31,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph now also fails closed on field-scoped secret-reference injection and connector-backed authenticated mutation payloads: tool metadata surfaces explicit `secret_ref_fields`, runtime secret refs only resolve on declared injection-safe fields, and managed write actions reject undeclared payload keys instead of forwarding arbitrary connector arguments.
 - [x] Seraph now also binds managed background-process recovery to the originating session: process list, output-read, and stop surfaces fail closed outside that session instead of leaving long-running helper recovery broadly discoverable.
 - [x] Seraph now also runs direct command and managed background-process execution inside disposable worker roots outside the workspace, requires explicit credential-egress allowlists before secret-bearing MCP execution can cross a connector boundary, and keeps delegated/workflow/operator trust receipts truthful about connector-egress plus branch-handoff partitions instead of flattening them back to a generic session surface.
+- [x] `docs/implementation/11-world-class-strategy-delivery.md` now translates the world-class strategy into delivery rules, while active execution remains in the GitHub Project, issues, and PRs.
 - [x] Seraph now also has a governed self-evolution loop for declarative capability assets: `/api/evolution` plus `propose_capability_evolution` can generate eval-scored review candidates for skills, runbooks, starter packs, and prompt packs, persist review receipts inside the managed workspace package, and block semantic drift or privileged prompt-surface expansion before anything reaches human PR review.
 - [x] Governed self-evolution receipts now also carry explicit change summaries and review-risk notes, so saved candidates and PR drafts explain why a variant still needs human review instead of only returning raw blocked/pass constraints.
 - [x] Governed self-improvement now also blocks obvious preference-collapse drift, carries explicit canary-only and rollback-ready benchmark-gate receipts on saved candidates, and exposes recent saved proposal receipts through the operator benchmark surface instead of treating candidate generation alone as proof.
@@ -73,8 +74,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program.
 - [x] this file owns the fastest shipped snapshot on `develop`.
 - [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record.
-- [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, and `docs/implementation/10-superiority-delivery.md` are the implementation-side mirrors of the research evidence/benchmark/program docs.
-- [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `10` are meta mirrors, not extra workstreams.
+- [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, `docs/implementation/10-superiority-delivery.md`, and `docs/implementation/11-world-class-strategy-delivery.md` are the implementation-side mirrors of the research evidence, benchmark, program, and cross-cutting strategy layers.
+- [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `11` are meta mirrors, not extra workstreams.
 - [x] the GitHub Project, issues, and PRs own active execution and review state.
 
 ## Current Focus On `develop`
@@ -97,6 +98,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The cockpit desktop shell, presence pane, and active triage now also surface explicit presence-surface ready/attention summaries plus direct repair/follow-up drafts for messaging, adapter, and observer surfaces, so broader non-browser reach no longer hides behind route-only health or catalog inventory views.
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
+- [x] The cross-cutting world-class strategy translation is tracked in `docs/implementation/11-world-class-strategy-delivery.md`.
 - [x] The next strategic focus is now post-import hardening: deeper execution isolation beyond the new field-scoped secret-ref, mutation-allowlist, and session-bound process-recovery layer, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
 
 ## Current Target Shape

@@ -13,6 +13,9 @@ permissions:
   tools:
     - session_search
     - delegate_task
+  execution_boundaries:
+    - conversation_history_read
+    - delegation
   network: false
 contributes:
   workflow_runtimes:

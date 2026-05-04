@@ -154,7 +154,7 @@ def _merge_explicit_boundaries_into_profile(
     missing_boundaries = [
         boundary
         for boundary in required_boundaries
-        if declared_boundaries and boundary not in declared_boundaries
+        if boundary not in declared_boundaries
     ]
     requires_network = bool(profile.get("requires_network")) or any(
         boundary in NETWORK_BOUNDARIES for boundary in required_boundaries
@@ -243,7 +243,7 @@ def evaluate_tool_permissions(
     missing_boundaries = [
         boundary
         for boundary in required_boundaries
-        if declared_boundaries and boundary not in declared_boundaries
+        if boundary not in declared_boundaries
     ]
     missing_network = requires_network and not manifest_permissions.network
     ok = not missing_tools and not missing_boundaries and not missing_network
@@ -315,7 +315,6 @@ def evaluate_contribution_permissions(
                     for _ in [0]
                     if extension is not None
                     and extension.manifest is not None
-                    and extension.manifest.permissions.execution_boundaries
                     and "external_mcp" not in extension.manifest.permissions.execution_boundaries
                 ],
                 "requires_network": True,
@@ -468,6 +467,21 @@ def summarize_extension_permissions(
         if extension.manifest is not None
         else []
     )
+    declared_data_access = (
+        _dedupe_strings(extension.manifest.permissions.data_access)
+        if extension.manifest is not None
+        else []
+    )
+    declared_mutation_rights = (
+        _dedupe_strings(extension.manifest.permissions.mutation_rights)
+        if extension.manifest is not None
+        else []
+    )
+    declared_audit_events = (
+        _dedupe_strings(extension.manifest.permissions.audit_events)
+        if extension.manifest is not None
+        else []
+    )
     required_tools = _dedupe_strings(
         [tool_name for profile in contribution_profiles for tool_name in profile.get("required_tools", [])]
     )
@@ -511,6 +525,9 @@ def summarize_extension_permissions(
             ),
             "secrets": declared_secrets,
             "env": declared_env,
+            "data_access": declared_data_access,
+            "mutation_rights": declared_mutation_rights,
+            "audit_events": declared_audit_events,
         },
         "required": {
             "tools": required_tools,

@@ -14,6 +14,10 @@ permissions:
     - clarify
     - session_search
     - todo
+  execution_boundaries:
+    - conversation
+    - conversation_history_read
+    - conversation_state
   network: false
 contributes:
   skills:

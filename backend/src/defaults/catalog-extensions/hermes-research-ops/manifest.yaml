@@ -14,6 +14,9 @@ permissions:
     - browse_webpage
     - web_search
     - write_file
+  execution_boundaries:
+    - external_read
+    - workspace_write
   network: true
 contributes:
   skills:

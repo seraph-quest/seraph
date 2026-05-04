@@ -27,6 +27,16 @@ permissions:
     - view_soul
     - web_search
     - write_file
+  execution_boundaries:
+    - authenticated_external_source
+    - connector_mutation
+    - external_mcp
+    - external_read
+    - guardian_state_read
+    - guardian_state_write
+    - sandbox_execution
+    - workspace_read
+    - workspace_write
   network: true
 contributes:
   skills:

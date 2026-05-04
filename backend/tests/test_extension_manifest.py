@@ -30,6 +30,12 @@ permissions:
   tools:
     - web_search
     - write_file
+  data_access:
+    - public_web
+  mutation_rights:
+    - workspace.files.write
+  audit_events:
+    - tool_call
   network: true
 """
     )
@@ -39,6 +45,9 @@ permissions:
     assert manifest.trust.value == "bundled"
     assert manifest.contributed_types() == {"skills", "workflows", "runbooks", "mcp_servers"}
     assert manifest.permissions.tools == ["web_search", "write_file"]
+    assert manifest.permissions.data_access == ["public_web"]
+    assert manifest.permissions.mutation_rights == ["workspace.files.write"]
+    assert manifest.permissions.audit_events == ["tool_call"]
     assert manifest.is_compatible_with("2026.4.10") is True
     assert manifest.is_compatible_with("2027.1.0") is False
 

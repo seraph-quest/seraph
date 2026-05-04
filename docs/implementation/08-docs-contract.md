@@ -100,6 +100,26 @@ Use this as the default execution model when several internal slices will land t
 - do not mirror one aggregate PR across all child slice issues; the parent batch issue remains the main project item for aggregate `PR` and `Code Review` state
 - use issue comments or the PR body for receipts and progress notes, not as a second authoritative slice-state surface
 
+## M1 Capability Contract Updates
+
+M1 capability-kernel docs are contract docs. They define the reusable capability taxonomy and manifest semantics that M2, M3, and M9 depend on; they must not become a live issue mirror.
+
+When a PR changes capability identity, manifest contribution semantics, permission vocabulary, provenance, health, compatibility, lifecycle state, or package ownership, update all affected durable truth surfaces in the same PR:
+
+- [00. Master Roadmap](./00-master-roadmap.md): strategic contract and completed-program context
+- [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md): milestone consumer rules and proof language
+- owning workstream docs: shipped behavior, missing gap, validation, and review receipts when shipped truth changes
+- [STATUS](./STATUS.md): only when the branch changes the fastest shipped snapshot after merge
+
+M1 acceptance language should identify:
+
+- capability classes covered, including core tools, workflow tools, MCP tools, skills, workflows, runbooks, starter packs, automations, browser or computer-use surfaces, managed connectors, memory providers, and extension-owned contributions
+- the source and owner for each class, including whether the behavior is core-owned, package-owned, connector-owned, or transitional compatibility behavior
+- declared permissions, mutation rights, provenance, trust level, health, dependencies, compatibility, and available operator actions
+- the proof surface, such as API payloads, manifest validation, lifecycle receipts, audit or activity receipts, cockpit inventory, deterministic tests, or benchmark suites
+
+Do not mark M1 complete from docs alone. Completion requires implementation receipts on `develop`, linked issue or PR proof, and operator-visible inventory that downstream M2/M3/M9 work can rely on.
+
 ## Latest Workflow Contract Update
 
 - [x] GitHub Project now owns the active execution layer for Seraph.

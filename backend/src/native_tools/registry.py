@@ -138,6 +138,11 @@ TOOL_METADATA: dict[str, dict] = {
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
     },
+    "http_request": {
+        "description": "Fetch an HTTP resource through the packaged request connector",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["external_read"],
+    },
     "source_capabilities": {
         "description": "Inspect the provider-neutral source access surfaces available to the current runtime",
         "policy_modes": ["safe", "balanced", "full"],

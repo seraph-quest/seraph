@@ -19,4 +19,18 @@ permissions:
     - browser_session
   execution_boundaries:
     - external_read
+    - secret_management
   network: true
+  data_access:
+    - browser_session_state
+    - external_web_pages
+    - relay_credentials
+  mutation_rights:
+    - browser_navigation
+    - extension_relay_session_config
+  audit_events:
+    - connector_configured
+    - connector_enabled
+    - browser_session_started
+  secrets:
+    - extension_relay_token

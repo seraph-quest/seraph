@@ -10,10 +10,16 @@ title: 09. Benchmark Status
 - [x] Seraph now also has an operator-visible benchmark-proof surface with explicit deterministic suite coverage, a dedicated guardian-memory benchmark suite that exercises workflow, approval, audit, artifact, and repo or PR continuity retrieval, a dedicated workflow-endurance benchmark suite, a dedicated trust-boundary benchmark suite, a dedicated computer-use benchmark suite, and a dedicated governed-improvement benchmark surface with anti-misevolution, canary, rollback, and receipt policy.
 - [ ] Seraph still cannot credibly claim broad benchmark superiority from implementation alone.
 
+M0 claim gate:
+
+- [19. Strategy Claim Ledger](/research/strategy-claim-ledger) owns allowed wording for broad superiority, world-class, best, strongest, secure, private, production-ready, complete, and ahead-of-competitor claims.
+
 ## Paired Research
 
 - benchmark source of truth: [10. Competitive Benchmark](/research/competitive-benchmark)
 - evidence rules: [09. Reference Systems And Evidence](/research/reference-systems-and-evidence)
+- M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
+- M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
 
 ## Purpose
 

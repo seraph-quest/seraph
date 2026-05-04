@@ -13,6 +13,8 @@ title: 11. World-Class Strategy Delivery
 - design source of truth: [11. Superiority Program](/research/superiority-program)
 - benchmark input: [10. Competitive Benchmark](/research/competitive-benchmark)
 - canonical strategy source of truth: [17. Seraph World-Class Strategy](/research/seraph-world-class-strategy)
+- M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
+- M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
 - synthesis context: [00. Research Synthesis](/research)
 
 ## Purpose
@@ -22,6 +24,8 @@ This file is the implementation-side mirror for the world-class Seraph strategy.
 It translates strategy into delivery rules without time-boxed roadmaps. Seraph execution is milestone-based only: no quarters, no month targets, no date promises, and no countdown-style roadmap language.
 
 Active execution remains in the GitHub Project, issues, and PRs. This doc only explains how implementation should be prioritized, proven, and bounded on `develop`.
+
+M0 competitor truth lives in [18. Agent Competition Truth Table](/research/agent-competition-truth-table). Claim wording lives in [19. Strategy Claim Ledger](/research/strategy-claim-ledger). Implementation docs should not make new world-class, superiority, security, privacy, production-readiness, or ahead-of-competitor claims unless the wording is allowed by the claim ledger.
 
 ## Delivery Ownership
 
@@ -103,8 +107,13 @@ The first execution wave underneath that spine is:
 Implementation meaning: strategy, delivery, competitive evidence, and active execution must not drift.
 
 - shipped foundations: paired research/implementation docs, GitHub issue/PR workflow, implementation status docs, and explicit docs contract language
-- missing strategic gaps: consistent milestone labels across Project items, clearer Project fields for proof and ownership, tighter update rules when PRs change strategic status, and a maintained primary-source competitor matrix
-- proof requirements: every active strategy item is represented in the GitHub Project with owner, milestone, acceptance criteria, linked PR or issue state, and competitor gap where relevant
+- missing strategic gaps: consistent milestone labels across Project items, clearer Project fields for proof and ownership, tighter update rules when PRs change strategic status, maintained primary-source competitor matrix, and claim-ledger review discipline
+- proof requirements: every active strategy item is represented in the GitHub Project with owner, milestone, acceptance criteria, linked PR or issue state, competitor gap where relevant, and allowed wording for strategic claims
+
+M0 batch ownership:
+
+- [#424 Agent competition truth table and capability benchmark](https://github.com/seraph-quest/seraph/issues/424) owns the primary-source competitor matrix and capability benchmark axes.
+- [#436 Strategy claim ledger and proof gate](https://github.com/seraph-quest/seraph/issues/436) owns [19. Strategy Claim Ledger](/research/strategy-claim-ledger), the allowed wording/status model, and the review gate for unbacked superiority language.
 
 ## M1 Capability Kernel And Manifest Contract
 
@@ -194,6 +203,7 @@ Implementation meaning: extension capability should stay typed, governable, and 
 - do not turn active execution into a doc-tracked queue; GitHub Project items, issues, and PRs own that state
 - do not treat time as the organizing principle; milestones, priority, moat, proof, and trust boundary are the organizing principles
 - do not ship a roadmap item without a named milestone, pillar, competitor or adjacent-agent gap, capability gap, moat effect, proof or eval plan, trust boundary, and operator surface
+- do not introduce world-class, best, strongest, superior, secure, private, production-ready, complete, or ahead-of-competitor wording unless [19. Strategy Claim Ledger](/research/strategy-claim-ledger) allows that exact status and wording
 - do not treat capability breadth as permission to become plugin soup; Seraph is a capability-first guardian agent OS/workspace with governed composition
 - do not treat TEEs as a complete safety story; keep approvals, audit, sandboxing, and tool isolation as first-class constraints
 - do not reclassify already-shipped trust-drift blocking as missing work; deepen and generalize the existing receipts across future delegated/background/browser/provider paths instead

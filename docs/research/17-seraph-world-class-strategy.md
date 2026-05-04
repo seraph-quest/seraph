@@ -19,6 +19,10 @@ Use this document with:
 - [13. Hermes And OpenClaw Capability Import Plan](./13-hermes-and-openclaw-capability-import-plan.md)
 - [14. Seraph Memory SOTA Roadmap](./14-seraph-memory-sota-roadmap.md)
 - [16. Seraph State And Roadmap Corrections 2026-04](./16-seraph-state-and-roadmap-corrections-2026-04.md)
+- [18. Agent Competition Truth Table](./18-agent-competition-truth-table.md)
+- [18. Agent Competition Truth Table](./18-agent-competition-truth-table.md)
+- [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md)
+- [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md)
 
 ## Locked Product Shape
 
@@ -68,6 +72,8 @@ Seraph should learn aggressively from adjacent agents without becoming a copy of
 - Adjacent agents such as Claude Code, Codex, Cursor, Devin-style workers, OpenHands, Aider, Goose, AnythingLLM/LangGraph-style builders, and browser/computer-use agents show the broader category direction: the winning surface is not chat alone, but supervised capability composition with durable context, inspectable execution, and strong recovery.
 
 The implication is not "add every plugin." The implication is that Seraph must become a coherent capability OS: capability breadth, composition, trust, memory, and operator supervision must reinforce one another.
+
+M0 owns the competition truth and claim discipline for this frame. Before any doc, issue, or PR says Seraph is world-class, best, strongest, superior, secure, private, production-ready, or ahead of a competitor, it must be grounded in [18. Agent Competition Truth Table](./18-agent-competition-truth-table.md) and pass through [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md). Unbacked claims stay aspirational.
 
 ### Reference-System Pressure Details
 
@@ -286,4 +292,4 @@ The report memo and the surrounding research point to the same conclusion:
 - capability import must stay typed and governed
 - superiority claims must be benchmarked, not assumed
 
-That is the strategy for becoming the greatest capability-first guardian agent OS/workspace in the world: win the capability loop, win the guardian loop, win the trust loop, win the workflow loop, and prove it milestone by milestone.
+That is the strategy for pursuing a world-class capability-first guardian agent OS/workspace: win the capability loop, win the guardian loop, win the trust loop, win the workflow loop, and prove it milestone by milestone.

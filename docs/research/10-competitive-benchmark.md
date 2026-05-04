@@ -15,6 +15,13 @@ The goal is not to win every category on paper. The goal is to identify exactly 
 Implementation mirror:
 
 - `docs/implementation/09-benchmark-status.md` owns the shipped-on-`develop` translation of these axes
+
+M0 proof gate:
+
+- `docs/research/18-agent-competition-truth-table.md` owns the broader primary-source competitor truth table and capability benchmark axes
+- `docs/research/19-strategy-claim-ledger.md` owns allowed wording for world-class or superiority claims
+- `docs/research/18-agent-competition-truth-table.md` owns the broader primary-source competitor truth table and capability benchmark pressure
+- `docs/research/19-strategy-claim-ledger.md` owns allowed wording for world-class or superiority claims
 - `docs/research/15-reference-systems-refresh-2026-04.md` records the April 2026 benchmark refresh that motivated the latest corrections in this file
 
 ## How To Read This

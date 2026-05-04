@@ -50,6 +50,9 @@ def _write_installable_extension(
         "    - starter-packs/local-pack.json\n"
         "permissions:\n"
         "  tools: [read_file]\n"
+        "  execution_boundaries: [workspace_read]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_read]\n"
         "  network: false\n",
         encoding="utf-8",
     )
@@ -118,6 +121,9 @@ def _write_high_risk_extension(root: Path) -> Path:
         "    - workflows/write-note.md\n"
         "permissions:\n"
         "  tools: [write_file]\n"
+        "  execution_boundaries: [workspace_write]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_write]\n"
         "  network: false\n",
         encoding="utf-8",
     )
@@ -159,6 +165,9 @@ def _write_multi_high_risk_extension(root: Path) -> Path:
         "    - workflows/write-note-b.md\n"
         "permissions:\n"
         "  tools: [write_file]\n"
+        "  execution_boundaries: [workspace_write]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_write]\n"
         "  network: false\n",
         encoding="utf-8",
     )
@@ -223,6 +232,8 @@ def _write_mcp_connector_extension(
         "  mcp_servers:\n"
         "    - mcp/github.json\n"
         "permissions:\n"
+        "  execution_boundaries: [external_mcp]\n"
+        "  audit_events: [mcp_request]\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -258,6 +269,8 @@ def _write_multi_mcp_connector_extension(root: Path) -> Path:
         "    - mcp/github-primary.json\n"
         "    - mcp/github-secondary.json\n"
         "permissions:\n"
+        "  execution_boundaries: [external_mcp]\n"
+        "  audit_events: [mcp_request]\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -303,6 +316,7 @@ def _write_managed_connector_extension(root: Path) -> Path:
         "  managed_connectors:\n"
         "    - connectors/managed/github.yaml\n"
         "permissions:\n"
+        "  execution_boundaries: []\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -350,6 +364,9 @@ def _write_mixed_managed_connector_extension(root: Path) -> Path:
         "    - connectors/managed/github.yaml\n"
         "permissions:\n"
         "  tools: [read_file]\n"
+        "  execution_boundaries: [workspace_read]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_read]\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -434,6 +451,9 @@ def _write_wave2_extension(root: Path) -> Path:
         "trust: local\n"
         "permissions:\n"
         "  tools: [read_file]\n"
+        "  execution_boundaries: [workspace_read, secret_management]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_read, secret_management]\n"
         "  network: true\n"
         "contributes:\n"
         "  toolset_presets:\n"
@@ -498,6 +518,7 @@ def _write_toolset_boundary_extension(root: Path, *, boundary: str, network: boo
         "  name: Seraph\n"
         "trust: local\n"
         "permissions:\n"
+        f"  execution_boundaries: [{boundary}]\n"
         f"  network: {network_literal}\n"
         "contributes:\n"
         "  toolset_presets:\n"
@@ -3049,6 +3070,9 @@ async def test_workspace_extension_source_save_updates_package_members(client, e
                     "    - starter-packs/local-pack.json\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -3351,6 +3375,9 @@ async def test_manifest_source_save_rejects_unloadable_package_updates(client, e
                     "    - skills/local-skill.md\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -3401,6 +3428,9 @@ async def test_manifest_source_save_validates_manifest_yml_aliases(client, exten
                     "    - skills/local-skill.md\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -3463,6 +3493,9 @@ async def test_broken_workspace_manifest_can_be_loaded_and_repaired_via_source_a
                     "    - starter-packs/local-pack.json\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },

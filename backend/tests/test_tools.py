@@ -1,11 +1,12 @@
 import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
 
 from config.settings import settings
 from src.audit.repository import audit_repository
-from src.tools.filesystem_tool import _safe_resolve, read_file, write_file
+from src.tools.filesystem_tool import _safe_resolve, apply_workspace_patch, preview_workspace_patch, read_file, write_file
 from src.tools.template_tool import fill_template
 from src.tools.web_search_tool import web_search
 
@@ -78,6 +79,70 @@ class TestFilesystemTool:
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         write_file.forward("sub/dir/file.txt", "nested content")
         assert (tmp_path / "sub" / "dir" / "file.txt").read_text() == "nested content"
+
+    def test_preview_workspace_patch_returns_diff_without_writing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
+
+        receipt = json.loads(preview_workspace_patch.forward("notes.md", "beta", "gamma"))
+
+        assert receipt["applied"] is False
+        assert receipt["occurrence_count"] == 1
+        assert "+gamma" in receipt["diff"]
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    def test_apply_workspace_patch_writes_and_logs_receipt(self, tmp_path, monkeypatch, async_db):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
+
+        receipt = json.loads(apply_workspace_patch.forward("notes.md", "beta", "gamma"))
+
+        assert receipt["applied"] is True
+        assert receipt["rollback"]["tool"] == "apply_workspace_patch"
+        assert receipt["before_hash_guarded"] is False
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\ngamma\n"
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        patch_event = next(e for e in events if e["details"]["operation"] == "apply_patch")
+        assert patch_event["tool_name"] == "filesystem:workspace"
+        assert patch_event["details"]["occurrence_count"] == 1
+        assert patch_event["details"]["before_sha256"] == receipt["before_sha256"]
+
+    def test_apply_workspace_patch_blocks_stale_before_hash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
+        receipt = json.loads(preview_workspace_patch.forward("notes.md", "beta", "gamma"))
+        (tmp_path / "notes.md").write_text("alpha\nchanged elsewhere\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="expected_before_sha256"):
+            apply_workspace_patch.forward(
+                "notes.md",
+                "beta",
+                "gamma",
+                expected_before_sha256=receipt["before_sha256"],
+            )
+
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nchanged elsewhere\n"
+
+    def test_workspace_patch_blocks_ambiguous_occurrences(self, tmp_path, monkeypatch, async_db):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("repeat\nrepeat\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Expected 1 occurrence"):
+            apply_workspace_patch.forward("notes.md", "repeat", "changed")
+
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "repeat\nrepeat\n"
+
+    def test_workspace_patch_rejects_replace_all_semantics_until_supported(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("repeat\nrepeat\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="expected_occurrences must be 1"):
+            preview_workspace_patch.forward("notes.md", "repeat", "changed", expected_occurrences=2)
 
     def test_read_file_not_a_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))

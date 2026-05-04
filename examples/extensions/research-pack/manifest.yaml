@@ -17,4 +17,10 @@ contributes:
 permissions:
   tools:
   - read_file
+  execution_boundaries:
+  - workspace_read
+  data_access:
+  - workspace_files
+  audit_events:
+  - filesystem_read
   network: false

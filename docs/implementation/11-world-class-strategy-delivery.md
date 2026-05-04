@@ -155,6 +155,14 @@ Implementation meaning: Seraph should be excellent at real work across terminal,
 - missing strategic gaps: broader repair coverage across connectors, browser/computer-use providers, delegated workers, automation triggers, external credentials, local/remote sandboxes, and artifact handoffs; clearer failure grouping by capability family
 - proof requirements: repeatable execution and blocked-capability scenarios with inspectable diagnosis, safe repair action, audit receipt, and operator-visible recovery state
 
+M2 batch execution rules:
+
+- execution depth must land as capability contract surface area, runnable tool behavior, operator-visible receipts, and deterministic tests together
+- file work needs first-class patch preview/apply behavior, not only raw file overwrite
+- terminal, process, browser, HTTP, sandbox, filesystem, patch, and background-session surfaces should expose operation modes, session model, persistence, artifact contract, health, controls, and recovery actions
+- M2 cannot claim parity or excellence if #435 trust-boundary checks are left as follow-up work; SSRF, DNS-resolution preflight for private addresses, redirect-to-internal, path traversal, secret egress, replay drift, delegation, and prompt/extension permission creep must stay in the acceptance frame
+- previous failed PR tests are part of the batch acceptance burden when they affect the same milestone surfaces, especially deterministic benchmark and engineering-memory proof
+
 ## M3 Trusted Execution Boundaries
 
 Implementation meaning: every capability path needs least privilege, approval behavior, auditability, and fail-closed semantics appropriate to its risk.

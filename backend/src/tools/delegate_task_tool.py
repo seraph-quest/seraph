@@ -64,7 +64,14 @@ _SPECIALIST_DEFAULT_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "collect_source_evidence",
         "plan_source_review",
     ),
-    "file_worker": ("read_file", "write_file", "fill_template", "execute_code"),
+    "file_worker": (
+        "read_file",
+        "write_file",
+        "preview_workspace_patch",
+        "apply_workspace_patch",
+        "fill_template",
+        "execute_code",
+    ),
 }
 
 

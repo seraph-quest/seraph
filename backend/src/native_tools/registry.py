@@ -9,6 +9,76 @@ TOOL_NAME_ALIASES: dict[str, str] = {
 }
 
 
+_EXECUTION_PROFILES: dict[str, dict] = {
+    "workspace_read": {
+        "operation_modes": ["inspect"],
+        "session_model": "stateless_workspace_call",
+        "persistence": "audit_receipt_only",
+        "recovery_actions": ["retry_after_path_correction"],
+        "artifact_contract": {"outputs": ["file_text"], "receipt_required": True},
+        "provider_health": {"provider": "local_workspace", "state": "ready"},
+        "interactive_controls": ["inspect"],
+    },
+    "workspace_write": {
+        "operation_modes": ["mutate"],
+        "session_model": "stateless_workspace_call",
+        "persistence": "workspace_file_plus_audit_receipt",
+        "recovery_actions": ["restore_from_receipt_hash", "retry_after_path_correction"],
+        "artifact_contract": {"outputs": ["file_write_receipt"], "receipt_required": True},
+        "provider_health": {"provider": "local_workspace", "state": "ready"},
+        "interactive_controls": ["inspect", "approve"],
+    },
+    "workspace_patch": {
+        "operation_modes": ["preview", "mutate"],
+        "session_model": "stateless_workspace_call",
+        "persistence": "workspace_file_plus_diff_receipt",
+        "recovery_actions": ["preview", "apply", "guarded_reapply", "retry_after_occurrence_mismatch"],
+        "artifact_contract": {
+            "outputs": ["unified_diff", "before_after_hashes", "rollback_hint"],
+            "receipt_required": True,
+        },
+        "provider_health": {"provider": "local_workspace", "state": "ready"},
+        "interactive_controls": ["inspect", "approve", "repair", "compare"],
+    },
+    "sandbox": {
+        "operation_modes": ["execute", "inspect"],
+        "session_model": "ephemeral_sandbox_call",
+        "persistence": "stdout_stderr_exit_receipt",
+        "recovery_actions": ["retry_with_bounded_input", "inspect_error"],
+        "artifact_contract": {"outputs": ["stdout", "stderr", "exit_code"], "receipt_required": True},
+        "provider_health": {"provider": "snekbox", "state": "configured_by_runtime"},
+        "interactive_controls": ["inspect", "approve"],
+    },
+    "process": {
+        "operation_modes": ["execute", "stream", "background"],
+        "session_model": "session_scoped_process_group",
+        "persistence": "process_handle_plus_stream_receipts",
+        "recovery_actions": ["read_output", "stop", "retry", "repair_command"],
+        "artifact_contract": {"outputs": ["stdout", "stderr", "exit_code", "process_id"], "receipt_required": True},
+        "provider_health": {"provider": "managed_process_runtime", "state": "policy_gated"},
+        "interactive_controls": ["inspect", "approve", "pause", "stop", "retry", "repair"],
+    },
+    "browser": {
+        "operation_modes": ["navigate", "extract", "snapshot"],
+        "session_model": "session_scoped_browser_provider",
+        "persistence": "audit_receipt_and_optional_snapshot",
+        "recovery_actions": ["retry_navigation", "inspect_snapshot", "repair_selector"],
+        "artifact_contract": {"outputs": ["html_text", "screenshot_ref", "browser_receipt"], "receipt_required": True},
+        "provider_health": {"provider": "playwright_or_configured_browser_provider", "state": "policy_gated"},
+        "interactive_controls": ["inspect", "approve", "pause", "retry"],
+    },
+    "external_http": {
+        "operation_modes": ["fetch"],
+        "session_model": "stateless_external_request",
+        "persistence": "response_receipt",
+        "recovery_actions": ["retry", "inspect_redirect_block"],
+        "artifact_contract": {"outputs": ["status", "headers", "truncated_body"], "receipt_required": True},
+        "provider_health": {"provider": "httpx_connector", "state": "ssrf_guarded"},
+        "interactive_controls": ["inspect", "approve"],
+    },
+}
+
+
 def canonical_tool_name(tool_name: str) -> str:
     """Return the canonical runtime tool name for a tool or legacy alias."""
     return TOOL_NAME_ALIASES.get(tool_name, tool_name)
@@ -25,11 +95,25 @@ TOOL_METADATA: dict[str, dict] = {
         "description": "Read a file from the workspace",
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["workspace_read"],
+        "execution": _EXECUTION_PROFILES["workspace_read"],
     },
     "write_file": {
         "description": "Write content to a file",
         "policy_modes": ["balanced", "full"],
         "execution_boundaries": ["workspace_write"],
+        "execution": _EXECUTION_PROFILES["workspace_write"],
+    },
+    "preview_workspace_patch": {
+        "description": "Preview a bounded workspace text replacement with diff and rollback hashes",
+        "policy_modes": ["safe", "balanced", "full"],
+        "execution_boundaries": ["workspace_read"],
+        "execution": _EXECUTION_PROFILES["workspace_patch"],
+    },
+    "apply_workspace_patch": {
+        "description": "Apply a bounded workspace text replacement with diff receipt and rollback hashes",
+        "policy_modes": ["balanced", "full"],
+        "execution_boundaries": ["workspace_read", "workspace_write"],
+        "execution": _EXECUTION_PROFILES["workspace_patch"],
     },
     "fill_template": {
         "description": "Fill a text template with values",
@@ -71,6 +155,7 @@ TOOL_METADATA: dict[str, dict] = {
         "description": "Execute bounded code in a sandboxed environment",
         "policy_modes": ["full"],
         "execution_boundaries": ["sandbox_execution"],
+        "execution": _EXECUTION_PROFILES["sandbox"],
     },
     "delegate_task": {
         "description": "Delegate a bounded subtask to a specialist runtime",
@@ -106,42 +191,50 @@ TOOL_METADATA: dict[str, dict] = {
         "description": "Run an approved workspace-scoped command inside the runtime container",
         "policy_modes": ["full"],
         "execution_boundaries": ["container_process_execution", "workspace_scoped_paths"],
+        "execution": _EXECUTION_PROFILES["process"],
     },
     "start_process": {
         "description": "Start an approved workspace-scoped background process inside the runtime container",
         "policy_modes": ["full"],
         "execution_boundaries": ["container_process_management", "background_execution", "session_process_partition"],
         "approval_behavior": "always",
+        "execution": _EXECUTION_PROFILES["process"],
     },
     "list_processes": {
         "description": "List background processes started through the runtime process manager",
         "policy_modes": ["full"],
         "execution_boundaries": ["container_process_read", "session_process_partition"],
+        "execution": _EXECUTION_PROFILES["process"],
     },
     "read_process_output": {
         "description": "Read recent stdout/stderr output for a managed background process",
         "policy_modes": ["full"],
         "execution_boundaries": ["container_process_read", "session_process_partition"],
+        "execution": _EXECUTION_PROFILES["process"],
     },
     "stop_process": {
         "description": "Stop a managed background process inside the runtime container",
         "policy_modes": ["full"],
         "execution_boundaries": ["container_process_management", "session_process_partition"],
+        "execution": _EXECUTION_PROFILES["process"],
     },
     "browse_webpage": {
         "description": "Browse and extract content from a webpage",
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
+        "execution": _EXECUTION_PROFILES["browser"],
     },
     "browser_session": {
         "description": "Manage structured browser sessions, page refs, and snapshots for the current session",
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
+        "execution": _EXECUTION_PROFILES["browser"],
     },
     "http_request": {
         "description": "Fetch an HTTP resource through the packaged request connector",
         "policy_modes": ["safe", "balanced", "full"],
         "execution_boundaries": ["external_read"],
+        "execution": _EXECUTION_PROFILES["external_http"],
     },
     "source_capabilities": {
         "description": "Inspect the provider-neutral source access surfaces available to the current runtime",

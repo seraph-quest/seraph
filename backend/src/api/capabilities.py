@@ -1443,6 +1443,7 @@ def _tool_status_list(tool_mode: str) -> list[dict[str, Any]]:
                 execution_boundaries=execution_boundaries,
                 availability=availability,
                 blocked_reason=blocked_reason,
+                execution=metadata.get("execution") if isinstance(metadata.get("execution"), dict) else None,
             ),
         })
     return result

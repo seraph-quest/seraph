@@ -15,6 +15,7 @@ from src.llm_runtime import completion_with_fallback_sync
 logger = logging.getLogger(__name__)
 
 _summary_cache: dict[str, str] = {}
+_encoding_unavailable = False
 
 
 @lru_cache(maxsize=1)
@@ -23,9 +24,13 @@ def _load_encoding():
 
 
 def _get_encoding():
+    global _encoding_unavailable
+    if _encoding_unavailable:
+        return None
     try:
         return _load_encoding()
     except Exception:
+        _encoding_unavailable = True
         logger.warning("Failed to load tiktoken encoding, using approximate token counts", exc_info=True)
         return None
 

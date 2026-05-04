@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from config.settings import settings
@@ -19,6 +19,7 @@ class SiteAccessDecision:
     reason: str | None = None
     matched_rule: str | None = None
     allowlist_active: bool = False
+    resolved_addresses: tuple[str, ...] = ()
 
 
 def _normalize_rule(raw_rule: str) -> str:
@@ -62,23 +63,52 @@ def _hostname_matches_rule(hostname: str, rule: str) -> bool:
     return hostname == rule or hostname.endswith(f".{rule}")
 
 
-def _is_internal_hostname(hostname: str) -> bool:
-    if hostname in _BLOCKED_HOSTS:
-        return True
+def _is_internal_ip(value: str) -> bool:
     try:
-        ip = ipaddress.ip_address(hostname)
+        ip = ipaddress.ip_address(value)
         return ip.is_private or ip.is_loopback or ip.is_link_local
     except ValueError:
-        pass
+        return False
+
+
+def _resolved_addresses(hostname: str) -> tuple[str, ...]:
+    addresses: list[str] = []
+    seen: set[str] = set()
+    try:
+        results = socket.getaddrinfo(hostname, None)
+    except OSError:
+        return ()
+    for result in results:
+        sockaddr = result[4]
+        if not sockaddr:
+            continue
+        address = str(sockaddr[0])
+        if address and address not in seen:
+            addresses.append(address)
+            seen.add(address)
+    return tuple(addresses)
+
+
+def _is_internal_hostname(hostname: str, *, resolve_dns: bool = False) -> tuple[bool, tuple[str, ...]]:
+    if hostname in _BLOCKED_HOSTS:
+        return True, ()
+    if _is_internal_ip(hostname):
+        return True, ()
     try:
         ipv4 = ipaddress.ip_address(socket.inet_aton(hostname))
-        return ipv4.is_private or ipv4.is_loopback or ipv4.is_link_local
+        if ipv4.is_private or ipv4.is_loopback or ipv4.is_link_local:
+            return True, ()
     except (OSError, ValueError):
         pass
-    return hostname.endswith((".local", ".internal", ".localhost"))
+    if hostname.endswith((".local", ".internal", ".localhost")):
+        return True, ()
+    addresses = _resolved_addresses(hostname) if resolve_dns else ()
+    if any(_is_internal_ip(address) for address in addresses):
+        return True, addresses
+    return False, addresses
 
 
-def evaluate_site_access(url_or_hostname: str) -> SiteAccessDecision:
+def evaluate_site_access(url_or_hostname: str, *, resolve_dns: bool = False) -> SiteAccessDecision:
     hostname = _normalize_hostname(url_or_hostname)
     allowlist = _configured_allowlist()
     blocklist = _configured_blocklist()
@@ -91,12 +121,14 @@ def evaluate_site_access(url_or_hostname: str) -> SiteAccessDecision:
             allowlist_active=bool(allowlist),
         )
 
-    if _is_internal_hostname(hostname):
+    is_internal, resolved_addresses = _is_internal_hostname(hostname, resolve_dns=resolve_dns)
+    if is_internal:
         return SiteAccessDecision(
             allowed=False,
             hostname=hostname,
             reason="internal_private",
             allowlist_active=bool(allowlist),
+            resolved_addresses=resolved_addresses,
         )
 
     for rule in blocklist:
@@ -107,6 +139,7 @@ def evaluate_site_access(url_or_hostname: str) -> SiteAccessDecision:
                 reason="blocklisted_domain",
                 matched_rule=rule,
                 allowlist_active=bool(allowlist),
+                resolved_addresses=resolved_addresses,
             )
 
     if allowlist:
@@ -117,15 +150,22 @@ def evaluate_site_access(url_or_hostname: str) -> SiteAccessDecision:
                     hostname=hostname,
                     matched_rule=rule,
                     allowlist_active=True,
+                    resolved_addresses=resolved_addresses,
                 )
         return SiteAccessDecision(
             allowed=False,
             hostname=hostname,
             reason="not_allowlisted",
             allowlist_active=True,
+            resolved_addresses=resolved_addresses,
         )
 
-    return SiteAccessDecision(allowed=True, hostname=hostname, allowlist_active=False)
+    return SiteAccessDecision(
+        allowed=True,
+        hostname=hostname,
+        allowlist_active=False,
+        resolved_addresses=resolved_addresses,
+    )
 
 
 def site_policy_summary(url_or_hostname: str) -> dict[str, str | bool]:

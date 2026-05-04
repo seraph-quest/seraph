@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -142,3 +143,8 @@ def reset_memory_flush_cache():
     _reset_memory_flush_state()
     yield
     _reset_memory_flush_state()
+
+
+@pytest.fixture(autouse=True)
+def ensure_test_workspace_dir():
+    Path(os.environ["WORKSPACE_DIR"]).mkdir(parents=True, exist_ok=True)

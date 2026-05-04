@@ -8,6 +8,7 @@ import json
 import os
 import queue
 import shutil
+import socket
 import sys
 import time
 import tempfile
@@ -96,11 +97,13 @@ from src.scheduler.connection_manager import BroadcastResult
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.browser_tool import browse_webpage
 from src.tools.delegate_task_tool import delegate_task
-from src.tools.filesystem_tool import read_file, write_file
+from src.artifacts.registry import artifact_records_from_paths
+from src.tools.filesystem_tool import apply_workspace_patch, preview_workspace_patch, read_file, write_file
 from src.tools.process_tools import (
     list_processes,
     process_runtime_manager,
     read_process_output,
+    run_command,
     start_process,
     stop_process,
 )
@@ -3272,6 +3275,141 @@ async def _eval_browser_execution_task_replay_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_execution_artifact_registry_behavior() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="seraph-artifact-registry-") as tmpdir:
+        notes_path = os.path.join(tmpdir, "notes.md")
+        with open(notes_path, "w", encoding="utf-8") as handle:
+            handle.write("before\n")
+        with patch.object(settings, "workspace_dir", tmpdir):
+            records = artifact_records_from_paths(
+                ["notes.md"],
+                producer="workflow:artifact-demo",
+                run_id="run-1",
+                session_id="session-1",
+                trust_boundary={
+                    "status": "unchanged",
+                    "execution_boundaries": ["workspace_write"],
+                },
+                recovery_hint="Replay the workflow run before replacing this artifact.",
+            )
+            preview = json.loads(preview_workspace_patch.forward("notes.md", "before", "after"))
+            applied = json.loads(
+                apply_workspace_patch.forward(
+                    "notes.md",
+                    "before",
+                    "after",
+                    expected_before_sha256=preview["before_sha256"],
+                )
+            )
+
+    record = records[0]
+    return {
+        "stable_artifact_id_present": record["artifact_id"].startswith("art_"),
+        "content_hash_present": bool(record["content_sha256"]),
+        "producer_visible": record["producer"] == "workflow:artifact-demo",
+        "trust_boundary_visible": record["trust_boundary"]["execution_boundaries"] == ["workspace_write"],
+        "recovery_hint_visible": "Replay the workflow" in record["recovery_hint"],
+        "patch_artifact_id_present": applied["artifact_id"].startswith("art_"),
+        "patch_artifact_type_visible": applied["artifact"]["artifact_type"] == "workspace_patch",
+        "patch_hash_matches_after": applied["artifact"]["content_sha256"] == applied["after_sha256"],
+        "patch_rollback_hint_visible": "rollback" in applied["artifact"]["recovery_hint"].lower(),
+    }
+
+
+def _eval_filesystem_patch_receipt_behavior() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="seraph-patch-receipt-") as tmpdir:
+        notes_path = os.path.join(tmpdir, "notes.md")
+        with open(notes_path, "w", encoding="utf-8") as handle:
+            handle.write("alpha\nbeta\n")
+        with patch.object(settings, "workspace_dir", tmpdir):
+            preview = json.loads(preview_workspace_patch.forward("notes.md", "beta", "gamma"))
+            applied = json.loads(
+                apply_workspace_patch.forward(
+                    "notes.md",
+                    "beta",
+                    "gamma",
+                    expected_before_sha256=preview["before_sha256"],
+                )
+            )
+            stale_error = ""
+            try:
+                apply_workspace_patch.forward(
+                    "notes.md",
+                    "gamma",
+                    "delta",
+                    expected_before_sha256=preview["before_sha256"],
+                )
+            except ValueError as exc:
+                stale_error = str(exc)
+
+    return {
+        "preview_not_applied": preview["applied"] is False,
+        "preview_diff_visible": "-beta" in preview["diff"] and "+gamma" in preview["diff"],
+        "apply_hash_guarded": applied["before_hash_guarded"] is True,
+        "apply_rollback_visible": applied["rollback"]["tool"] == "apply_workspace_patch",
+        "apply_artifact_visible": applied["artifact"]["artifact_type"] == "workspace_patch",
+        "stale_hash_blocked": "expected_before_sha256" in stale_error,
+    }
+
+
+async def _eval_execution_security_gauntlet_behavior() -> dict[str, Any]:
+    from src.extensions.capability_contract import build_capability_contract
+    from src.security.site_policy import evaluate_site_access
+    from src.tools.browser_tool import _route_guarded_browser_request
+
+    class _FakeRoute:
+        def __init__(self) -> None:
+            self.aborted = False
+            self.continued = False
+
+        async def abort(self) -> None:
+            self.aborted = True
+
+        async def continue_(self) -> None:
+            self.continued = True
+
+    class _FakeRequest:
+        url = "http://127.0.0.1/admin"
+
+    route = _FakeRoute()
+    await _route_guarded_browser_request(route, _FakeRequest())
+
+    def _private_dns(*_args: Any, **_kwargs: Any) -> list[tuple[Any, Any, Any, Any, tuple[str, int]]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.10.1.5", 443))]
+
+    with patch("src.security.site_policy.socket.getaddrinfo", side_effect=_private_dns):
+        dns_decision = evaluate_site_access("https://public.example.test", resolve_dns=True)
+
+    shell_meta = run_command(command="python3;cat", args_json="[]")
+    arg_newline = run_command(command="python3", args_json=json.dumps(["script.py\n--escape"]))
+    inline_python = start_process(command="python3", args_json=json.dumps(["-c", "print('escape')"]))
+    localhost_browser = browse_webpage("http://127.0.0.1/admin", action="extract")
+
+    underdeclared_profile = {
+        "missing_network": True,
+        "missing_execution_boundaries": ["secret_management"],
+        "required_execution_boundaries": ["secret_management"],
+    }
+    quarantined = build_capability_contract(
+        None,
+        contribution_type="memory_providers",
+        reference="connectors/memory/graph-memory.yaml",
+        metadata={"name": "graph-memory"},
+        permission_profile=underdeclared_profile,
+    )
+
+    return {
+        "loopback_route_aborted": route.aborted and not route.continued,
+        "private_dns_blocked": dns_decision.allowed is False and dns_decision.reason == "internal_private",
+        "localhost_browser_blocked": "internal/private" in localhost_browser,
+        "shell_metacharacter_blocked": "single executable token" in shell_meta,
+        "newline_argument_blocked": "cannot contain newlines" in arg_newline,
+        "inline_interpreter_escape_blocked": "Inline Python execution" in inline_python,
+        "permission_creep_quarantined": quarantined["quarantine"]["state"] == "quarantined",
+        "permission_creep_reason_visible": "undeclared network access" in quarantined["enforcement"]["reason"],
+    }
+
+
 async def _eval_observer_calendar_source_audit() -> dict[str, Any]:
     mock_path = MagicMock()
     mock_path.exists.return_value = True
@@ -3920,6 +4058,10 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
                 "publisher:\n"
                 "  name: Seraph\n"
                 "trust: local\n"
+                "permissions:\n"
+                "  execution_boundaries:\n"
+                "    - secret_management\n"
+                "  network: true\n"
                 "contributes:\n"
                 "  memory_providers:\n"
                 "    - connectors/memory/graph-memory.yaml\n"
@@ -4099,6 +4241,10 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
             "publisher:\n"
             "  name: Seraph\n"
             "trust: local\n"
+            "permissions:\n"
+            "  execution_boundaries:\n"
+            "    - secret_management\n"
+            "  network: true\n"
             "contributes:\n"
             "  memory_providers:\n"
             "    - connectors/memory/graph-memory.yaml\n"
@@ -4242,6 +4388,10 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                 "publisher:\n"
                 "  name: Seraph\n"
                 "trust: local\n"
+                "permissions:\n"
+                "  execution_boundaries:\n"
+                "    - secret_management\n"
+                "  network: true\n"
                 "contributes:\n"
                 "  memory_providers:\n"
                 "    - connectors/memory/graph-memory.yaml\n"
@@ -11691,6 +11841,24 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Browser extract, html, and screenshot actions leave distinct replay receipts instead of one opaque browse result.",
         runner=_eval_browser_execution_task_replay_behavior,
+    ),
+    EvalScenario(
+        name="execution_artifact_registry_behavior",
+        category="observability",
+        description="Execution artifacts carry stable IDs, hashes, producers, trust boundaries, and recovery hints instead of raw path-only receipts.",
+        runner=_eval_execution_artifact_registry_behavior,
+    ),
+    EvalScenario(
+        name="filesystem_patch_receipt_behavior",
+        category="tool",
+        description="Workspace patch preview/apply returns diff, hash guard, rollback, and artifact lineage receipts.",
+        runner=_eval_filesystem_patch_receipt_behavior,
+    ),
+    EvalScenario(
+        name="execution_security_gauntlet_behavior",
+        category="behavior",
+        description="The M2 execution gauntlet pins private-network blocking, shell-injection rejection, permission quarantine, and browser subrequest containment.",
+        runner=_eval_execution_security_gauntlet_behavior,
     ),
     EvalScenario(
         name="observer_calendar_source_audit",

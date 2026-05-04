@@ -7,6 +7,7 @@ from pathlib import Path
 from smolagents import tool
 
 from config.settings import settings
+from src.artifacts.registry import build_artifact_record
 from src.audit.runtime import log_integration_event_sync
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,18 @@ def _patch_receipt(
     before_hash_guarded: bool,
 ) -> str:
     changed_lines = sum(1 for line in diff.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+    artifact = build_artifact_record(
+        file_path=file_path,
+        artifact_type="workspace_patch",
+        producer=f"filesystem:{operation}",
+        trust_boundary="workspace_write",
+        recovery_hint="Apply the rollback restore_text hash through apply_workspace_patch after checking expected_before_sha256.",
+        content=after,
+    )
     return json.dumps(
         {
+            "artifact_id": artifact["artifact_id"],
+            "artifact": artifact,
             "operation": operation,
             "file_path": file_path,
             "applied": applied,

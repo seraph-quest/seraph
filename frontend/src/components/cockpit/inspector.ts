@@ -18,6 +18,13 @@ export interface ArtifactRecord {
   sessionId?: string | null;
   createdAt: string;
   summary: string;
+  artifactType?: string | null;
+  producer?: string | null;
+  runId?: string | null;
+  contentSha256?: string | null;
+  sizeBytes?: number | null;
+  trustBoundary?: Record<string, unknown> | null;
+  recoveryHint?: string | null;
 }
 
 export interface WorkflowStepRecord {
@@ -227,6 +234,38 @@ function extractArtifactPaths(value: unknown): string[] {
   return paths;
 }
 
+function artifactRecordsFromRegistry(
+  value: unknown,
+  event: CockpitAuditEvent,
+  run: WorkflowRunRecord,
+): ArtifactRecord[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry, index): ArtifactRecord[] => {
+    const record = asRecord(entry);
+    const filePath = readString(record?.file_path);
+    if (!record || !filePath) return [];
+    const artifactId = readString(record.artifact_id) ?? `${event.id}:artifact-registry:${index}`;
+    const producer = readString(record.producer);
+    const runId = readString(record.run_id) ?? run.runIdentity ?? null;
+    return [{
+      id: artifactId,
+      source: producer ? `artifact registry: ${producer}` : "artifact registry",
+      filePath,
+      sessionId: readString(record.session_id) ?? run.sessionId ?? event.session_id ?? null,
+      createdAt: event.created_at,
+      summary: event.summary,
+      artifactType: readString(record.artifact_type),
+      producer,
+      runId,
+      contentSha256: readString(record.content_sha256),
+      sizeBytes: typeof record.size_bytes === "number" ? record.size_bytes : null,
+      trustBoundary: asRecord(record.trust_boundary),
+      recoveryHint: readString(record.recovery_hint),
+    }];
+  });
+}
+
 function workflowKey(event: CockpitAuditEvent): string {
   return `${event.session_id ?? "global"}:${event.tool_name ?? "workflow"}`;
 }
@@ -299,9 +338,18 @@ export function collectWorkflowRuns(events: CockpitAuditEvent[]): WorkflowRunRec
         : []),
       ...extractArtifactPaths(details?.arguments),
     ].filter((value, index, list) => list.indexOf(value) === index);
+    const registryArtifacts = artifactRecordsFromRegistry(details?.artifact_registry, event, run);
+    const artifactMapWithRegistry = new Map(artifactMap);
+    registryArtifacts.forEach((artifact) => {
+      artifactMapWithRegistry.set(`${artifact.sessionId ?? "global"}:${artifact.filePath}`, artifact);
+    });
+    const artifactPathsWithRegistry = [
+      ...artifactPaths,
+      ...registryArtifacts.map((artifact) => artifact.filePath),
+    ].filter((value, index, list) => list.indexOf(value) === index);
 
-    const linkedArtifacts = artifactPaths
-      .map((filePath) => artifactMap.get(`${run.sessionId ?? "global"}:${filePath}`))
+    const linkedArtifacts = artifactPathsWithRegistry
+      .map((filePath) => artifactMapWithRegistry.get(`${run.sessionId ?? "global"}:${filePath}`))
       .filter((artifact): artifact is ArtifactRecord => artifact != null);
 
     run.status = event.event_type === "tool_failed" ? "failed" : "succeeded";
@@ -310,7 +358,7 @@ export function collectWorkflowRuns(events: CockpitAuditEvent[]): WorkflowRunRec
     run.stepTools = Array.isArray(details?.step_tools)
       ? details.step_tools.filter((value): value is string => typeof value === "string")
       : run.stepTools;
-    run.artifactPaths = artifactPaths;
+    run.artifactPaths = artifactPathsWithRegistry;
     run.continuedErrorSteps = Array.isArray(details?.continued_error_steps)
       ? details.continued_error_steps.filter((value): value is string => typeof value === "string")
       : run.continuedErrorSteps;

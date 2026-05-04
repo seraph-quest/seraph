@@ -1,8 +1,8 @@
 # Workstream 02: Execution Plane
 
-## Status On `develop`
+## Status On This Branch
 
-- [ ] Workstream 02 is only partially shipped on `develop`.
+- [x] M2 execution completion is implemented in this batch and awaiting merge back to `develop`.
 
 ## Paired Research
 
@@ -48,6 +48,8 @@
 - [x] the cockpit operator surface now composes background sessions, engineering-memory bundles, and the continuity graph into one background-supervision lane with direct continue/open-thread/latest-output/latest-branch/next-step control instead of making operators pivot across three separate continuity endpoints to resume long-running work
 - [x] the operator workflow-orchestration surface now also compacts long-running runs into explicit state capsules with visible-versus-compacted step counts, artifact totals, recent-step labels, and preserved retry/checkpoint/repair paths instead of forcing operators to reconstruct durable recovery state from raw step lists alone
 - [x] the operator workflow-orchestration surface now also exposes anticipatory repair drafts, backup-branch candidates, condensation-fidelity state, and thread-level endurance summaries, and the operator benchmark-proof surface now includes a dedicated `workflow_endurance_and_repair` suite instead of leaving long-horizon workflow quality buried inside generic runtime scenario output
+- [x] the execution plane now has a dedicated `m2_execution_supremacy` suite and `/api/operator/m2-execution-benchmark` surface that gates terminal/process/sandbox, browser/HTTP/computer-use, filesystem patching, artifact registry, operator receipts, and the #435 adversarial security gauntlet together instead of spreading M2 completion across small slices
+- [x] patch preview/apply receipts and workflow-run projections now expose stable artifact records with artifact IDs, producer lineage, content hashes, trust-boundary context, and recovery hints instead of leaving execution outputs as raw path strings only
 
 ## Working On Now
 
@@ -68,20 +70,21 @@
 - [x] this workstream now also ships the second Batch BA aggregate for disposable worker lifecycle isolation, explicit credential-egress policy surfaced across tool/workflow/operator APIs, and preserved trust-partition receipts for delegated plus background-handoff execution
 - [x] this workstream now also ships the first Batch BD aggregate for long-running workflow operating-layer density across the operator API, cockpit orchestration lane, and runtime eval harness, including long-run state compaction, queue-state supervision, denser repair paths, branch/output debugger context, and explicit long-horizon workflow proof
 - [x] this workstream now also ships the first Batch BJ aggregate for anticipatory workflow repair, backup-branch planning, condensation-fidelity visibility, a named workflow-endurance benchmark suite, operator-readable failure taxonomy, and cockpit pre-repair plus backup-branch control
+- [x] this workstream now ships the M2 completion batch for integrated execution proof: `m2_execution_supremacy`, artifact registry receipts, explicit #435 security-gauntlet scenarios, and repair of the PR #445 shard-8/shard-9 regressions inside the same milestone PR
 
 ## Still To Do On `develop`
 
-- [ ] richer browser and workflow execution beyond the current tool-level operations
-- [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, queue-state recovery supervision, anticipatory repair drafts, backup-branch candidates, condensation-fidelity state, branch/output debugger density, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
+- [ ] richer live-provider browser/computer-use depth beyond the deterministic extract/html/screenshot proof and current local provider model
+- [ ] deeper host/container-grade isolation beyond disposable worker roots, session-scoped process handles, and sandbox timeout/nonzero receipts
 - [ ] broader external system leverage without weakening trust boundaries or the new credential-egress contract
 
 ## M2 Batch Acceptance Notes
 
-- execution capability metadata should make native tool contracts show operation modes, session model, persistence, artifact contracts, provider health, interactive controls, and recovery actions instead of leaving execution semantics implicit in tool names
-- file mutation should include patch preview/apply receipts with unified diffs, before/after hashes, occurrence checks, and rollback hints, so agents can inspect, compare, repair, and recover edits without relying only on raw overwrite behavior
-- browser and HTTP execution must keep internal/private network protections on initial requests, browser subrequests, and redirected/final targets, with private-address DNS-resolution preflight coverage
-- the batch should repair prior PR test failures that are milestone-relevant, especially deterministic benchmark proof, engineering-memory search evidence, extension example validation, and session-owned process cleanup
-- the batch should not claim M2 is complete from one PR; it should claim only the concrete shipped surfaces and tests that land on `develop`
+- execution capability metadata now has one M2 readiness gate: `m2_execution_supremacy`.
+- file mutation now includes patch preview/apply receipts with unified diffs, before/after hashes, occurrence checks, rollback hints, and stable artifact records.
+- browser and HTTP-style execution keeps internal/private network protections on initial browser requests, browser subrequests, final/redirected targets, and DNS-resolved private addresses.
+- prior PR #445 shard failures are fixed in this batch: transient tiktoken loading no longer permanently disables retry, and memory-provider fixtures now declare network plus secret-management boundaries required by extension quarantine policy.
+- M2 completion is one PR: #427 and #435 close only when this integrated benchmark, artifact registry, operator proof, docs, and serial shard validation all land together.
 
 ## Current Slice Record
 

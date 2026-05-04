@@ -88,6 +88,10 @@ class TestFilesystemTool:
 
         assert receipt["applied"] is False
         assert receipt["occurrence_count"] == 1
+        assert receipt["artifact_id"].startswith("art_")
+        assert receipt["artifact"]["artifact_type"] == "workspace_patch"
+        assert receipt["artifact"]["producer"] == "filesystem:preview_patch"
+        assert receipt["artifact"]["content_sha256"] == receipt["after_sha256"]
         assert "+gamma" in receipt["diff"]
         assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nbeta\n"
 
@@ -98,6 +102,11 @@ class TestFilesystemTool:
         receipt = json.loads(apply_workspace_patch.forward("notes.md", "beta", "gamma"))
 
         assert receipt["applied"] is True
+        assert receipt["artifact_id"].startswith("art_")
+        assert receipt["artifact"]["artifact_type"] == "workspace_patch"
+        assert receipt["artifact"]["producer"] == "filesystem:apply_patch"
+        assert receipt["artifact"]["trust_boundary"] == "workspace_write"
+        assert "rollback" in receipt["artifact"]["recovery_hint"].lower()
         assert receipt["rollback"]["tool"] == "apply_workspace_patch"
         assert receipt["before_hash_guarded"] is False
         assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\ngamma\n"

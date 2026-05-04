@@ -15,6 +15,7 @@ from config.settings import settings
 from src.api.capabilities import _recommended_tool_policy_mode
 from src.agent.session import session_manager
 from src.agent.factory import get_base_tools_and_active_skills
+from src.artifacts.registry import artifact_records_from_paths
 from src.approval.repository import fingerprint_tool_call
 from src.approval.repository import approval_repository
 from src.audit.repository import audit_repository
@@ -1653,6 +1654,14 @@ async def _list_workflow_runs(
                 else None
             ),
             "run_identity": run_identity,
+            "artifact_registry": artifact_records_from_paths(
+                list(run.get("artifact_paths", [])),
+                producer=f"workflow:{run['workflow_name']}",
+                run_id=run_identity,
+                session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+                trust_boundary=trust_boundary,
+                recovery_hint="Replay or resume the workflow from operator recovery controls before replacing this artifact.",
+            ),
             "timeline": _timeline_entries_for_run(run, approvals=approvals),
             "failed_step_tool": (
                 next(
@@ -1813,6 +1822,29 @@ async def _list_workflow_runs(
                 if resume_surface_allowed
                 else None
             )
+            retry_from_step_draft = (
+                _workflow_retry_from_step_draft(
+                    str(run["workflow_name"]),
+                    step_id=str(run["continued_error_steps"][0]),
+                    arguments=run.get("arguments"),
+                    parent_run_identity=run_identity,
+                    root_run_identity=str(lineage.get("root_run_identity") or run_identity),
+                    branch_kind="retry_failed_step",
+                    branch_depth=int(lineage.get("branch_depth") or 0) + 1,
+                )
+                if resume_surface_allowed
+                and replay_allowed
+                and run.get("continued_error_steps")
+                and (
+                    bool(run.get("checkpoint_context_available"))
+                    or (
+                        isinstance(run.get("step_records"), list)
+                        and run.get("step_records")
+                        and str(run["continued_error_steps"][0]) == str(run["step_records"][0].get("id") or "")
+                    )
+                )
+                else None
+            )
             run.update({
                 "thread_id": run.get("session_id"),
                 "thread_label": (
@@ -1829,29 +1861,7 @@ async def _list_workflow_runs(
                     else None
                 ),
                 "resume_from_step": resume_from_step,
-                "retry_from_step_draft": (
-                    _workflow_retry_from_step_draft(
-                        str(run["workflow_name"]),
-                        step_id=str(run["continued_error_steps"][0]),
-                        arguments=run.get("arguments"),
-                        parent_run_identity=run_identity,
-                        root_run_identity=str(lineage.get("root_run_identity") or run_identity),
-                        branch_kind="retry_failed_step",
-                        branch_depth=int(lineage.get("branch_depth") or 0) + 1,
-                    )
-                    if resume_surface_allowed
-                    and replay_allowed
-                    and run.get("continued_error_steps")
-                    and (
-                        bool(run.get("checkpoint_context_available"))
-                        or (
-                            isinstance(run.get("step_records"), list)
-                            and run.get("step_records")
-                            and str(run["continued_error_steps"][0]) == str(run["step_records"][0].get("id") or "")
-                        )
-                    )
-                    else None
-                ),
+                "retry_from_step_draft": retry_from_step_draft,
                 "resume_checkpoint_label": _resume_checkpoint_label(
                     approvals=approvals,
                     continued_error_steps=list(run.get("continued_error_steps", [])),
@@ -1873,6 +1883,14 @@ async def _list_workflow_runs(
                     else None
                 ),
                 "run_identity": run_identity,
+                "artifact_registry": artifact_records_from_paths(
+                    list(run.get("artifact_paths", [])),
+                    producer=f"workflow:{run['workflow_name']}",
+                    run_id=run_identity,
+                    session_id=run.get("session_id") if isinstance(run.get("session_id"), str) else None,
+                    trust_boundary=trust_boundary,
+                    recovery_hint="Replay or resume the workflow from operator recovery controls before replacing this artifact.",
+                ),
                 "timeline": _timeline_entries_for_run(run, approvals=approvals),
                 "failed_step_tool": (
                     next(

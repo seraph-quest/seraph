@@ -192,6 +192,76 @@ describe("collectWorkflowRuns", () => {
     ]);
   });
 
+  it("uses workflow artifact registry receipts when audit writes are absent", () => {
+    const events: CockpitAuditEvent[] = [
+      {
+        id: "evt-call",
+        session_id: "session-1",
+        event_type: "tool_call",
+        tool_name: "workflow_web_brief_to_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "Calling workflow",
+        details: {
+          arguments: {
+            query: "seraph",
+          },
+        },
+        created_at: "2026-03-18T12:01:00Z",
+      },
+      {
+        id: "evt-result",
+        session_id: "session-1",
+        event_type: "tool_result",
+        tool_name: "workflow_web_brief_to_file",
+        risk_level: "medium",
+        policy_mode: "balanced",
+        summary: "workflow_web_brief_to_file succeeded (2 steps)",
+        details: {
+          workflow_name: "web-brief-to-file",
+          step_tools: ["web_search", "write_file"],
+          artifact_registry: [
+            {
+              artifact_id: "art_123",
+              artifact_type: "workflow_output",
+              file_path: "notes/brief.md",
+              producer: "workflow:web-brief-to-file",
+              run_id: "session-1:workflow_web_brief_to_file:web-brief",
+              session_id: "session-1",
+              content_sha256: "abc123",
+              size_bytes: 42,
+              trust_boundary: { status: "stable" },
+              recovery_hint: "Replay before replacing.",
+            },
+          ],
+          continued_error_steps: [],
+        },
+        created_at: "2026-03-18T12:01:45Z",
+      },
+    ];
+
+    const [run] = collectWorkflowRuns(events);
+
+    expect(run.artifactPaths).toEqual(["notes/brief.md"]);
+    expect(run.artifacts).toEqual([
+      {
+        id: "art_123",
+        source: "artifact registry: workflow:web-brief-to-file",
+        filePath: "notes/brief.md",
+        sessionId: "session-1",
+        createdAt: "2026-03-18T12:01:45Z",
+        summary: "workflow_web_brief_to_file succeeded (2 steps)",
+        artifactType: "workflow_output",
+        producer: "workflow:web-brief-to-file",
+        runId: "session-1:workflow_web_brief_to_file:web-brief",
+        contentSha256: "abc123",
+        sizeBytes: 42,
+        trustBoundary: { status: "stable" },
+        recoveryHint: "Replay before replacing.",
+      },
+    ]);
+  });
+
   it("matches repeated workflow runs in arrival order", () => {
     const events: CockpitAuditEvent[] = [
       {

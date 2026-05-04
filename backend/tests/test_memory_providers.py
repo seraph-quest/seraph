@@ -143,6 +143,10 @@ def _write_memory_provider_extension(
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
+        "permissions:\n"
+        "  execution_boundaries:\n"
+        "    - secret_management\n"
+        "  network: true\n"
         "contributes:\n"
         "  memory_providers:\n"
         "    - connectors/memory/graph-memory.yaml\n",

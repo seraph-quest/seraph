@@ -1518,6 +1518,11 @@ async def test_workflow_runs_endpoint_projects_history_and_boundaries(client):
     assert run["risk_level"] == "medium"
     assert run["execution_boundaries"] == ["external_read", "workspace_write"]
     assert run["artifact_paths"] == ["notes/brief.md"]
+    assert run["artifact_registry"][0]["artifact_id"].startswith("art_")
+    assert run["artifact_registry"][0]["file_path"] == "notes/brief.md"
+    assert run["artifact_registry"][0]["producer"] == "workflow:web-brief-to-file"
+    assert run["artifact_registry"][0]["run_id"] == "session-1:workflow_web_brief_to_file:web-brief"
+    assert run["artifact_registry"][0]["trust_boundary"]["status"] == "stable"
     assert run["run_fingerprint"] == "web-brief"
     assert run["run_identity"] == "session-1:workflow_web_brief_to_file:web-brief"
     assert run["step_records"][0]["tool"] == "web_search"

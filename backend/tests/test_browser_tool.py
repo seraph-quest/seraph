@@ -8,6 +8,7 @@ import pytest
 from config.settings import settings
 from src.audit.repository import audit_repository
 from src.tools.browser_tool import browse_webpage
+from src.tools.browser_tool import _route_guarded_browser_request
 
 
 class _ImmediateFuture:
@@ -92,6 +93,45 @@ def test_browse_webpage_blocks_site_policy_domain(async_db):
     assert events[0]["details"]["hostname"] == "docs.example.com"
     assert events[0]["details"]["site_policy_reason"] == "blocklisted_domain"
     assert events[0]["details"]["site_policy_rule"] == "example.com"
+
+
+def test_browse_webpage_blocks_private_dns_resolution_preflight(async_db):
+    with patch(
+        "src.security.site_policy.socket.getaddrinfo",
+        return_value=[(None, None, None, None, ("10.0.0.11", 0))],
+    ):
+        result = browse_webpage("https://public-looking.example/docs")
+
+    assert "internal/private" in result.lower()
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "integration_blocked"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["site_policy_reason"] == "internal_private"
+    assert events[0]["details"]["resolved_addresses"] == ["10.0.0.11"]
+
+
+def test_browser_route_guard_blocks_internal_subrequest():
+    route = AsyncMock()
+    request = type("Request", (), {"url": "http://127.0.0.1/secret.js"})()
+
+    asyncio.run(_route_guarded_browser_request(route, request))
+
+    route.abort.assert_awaited_once()
+    route.continue_.assert_not_called()
+
+
+def test_browser_route_guard_allows_external_subrequest():
+    route = AsyncMock()
+    request = type("Request", (), {"url": "https://cdn.example.com/app.js"})()
+
+    asyncio.run(_route_guarded_browser_request(route, request))
+
+    route.continue_.assert_awaited_once()
+    route.abort.assert_not_called()
 
 
 def test_browse_webpage_logs_timeout_runtime_audit(async_db):

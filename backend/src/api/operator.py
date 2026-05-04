@@ -214,6 +214,19 @@ def _within_operator_window(value: str | datetime | None, cutoff: datetime) -> b
     return _parse_iso(value) >= cutoff
 
 
+def _engineering_memory_reference_time(*groups: list[dict[str, Any]]) -> datetime:
+    timestamps: list[datetime] = []
+    for group in groups:
+        for item in group if isinstance(group, list) else []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("updated_at", "started_at", "created_at", "matched_at"):
+                value = item.get(key)
+                if value:
+                    timestamps.append(_parse_iso(value))
+    return max(timestamps) if timestamps else datetime.now(timezone.utc)
+
+
 def _build_engineering_memory_bundles(
     workflow_runs: list[dict[str, Any]],
     pending_approvals: list[dict[str, Any]],
@@ -3012,25 +3025,35 @@ async def get_operator_engineering_memory(
         if normalized_query
         else asyncio.sleep(0, result=[]),
     )
+    workflow_runs = workflow_runs if isinstance(workflow_runs, list) else []
+    pending_approvals = pending_approvals if isinstance(pending_approvals, list) else []
+    audit_events = audit_events if isinstance(audit_events, list) else []
+    session_search_matches = session_search_matches if isinstance(session_search_matches, list) else []
+    cutoff = _engineering_memory_reference_time(
+        workflow_runs,
+        pending_approvals,
+        audit_events,
+        session_search_matches,
+    ) - timedelta(hours=window_hours)
     filtered_workflow_runs = [
         run
-        for run in (workflow_runs if isinstance(workflow_runs, list) else [])
+        for run in workflow_runs
         if isinstance(run, dict) and _within_operator_window(run.get("updated_at") or run.get("started_at"), cutoff)
     ]
     filtered_pending_approvals = [
         approval
-        for approval in (pending_approvals if isinstance(pending_approvals, list) else [])
+        for approval in pending_approvals
         if isinstance(approval, dict) and _within_operator_window(approval.get("created_at"), cutoff)
     ]
     filtered_session_search_matches = [
         match
-        for match in (session_search_matches if isinstance(session_search_matches, list) else [])
+        for match in session_search_matches
         if isinstance(match, dict) and _within_operator_window(match.get("matched_at"), cutoff)
     ]
     all_bundles = _build_engineering_memory_bundles(
         filtered_workflow_runs,
         filtered_pending_approvals,
-        audit_events if isinstance(audit_events, list) else [],
+        audit_events,
         filtered_session_search_matches,
         normalized_query=_engineering_query(normalized_query),
         limit_bundles=None,

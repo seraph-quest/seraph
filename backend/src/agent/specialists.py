@@ -43,6 +43,8 @@ TOOL_DOMAINS: dict[str, str] = {
     "browser_session": "research",
     "read_file": "files",
     "write_file": "files",
+    "preview_workspace_patch": "files",
+    "apply_workspace_patch": "files",
     "fill_template": "files",
     "execute_code": "files",
 }

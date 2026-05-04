@@ -263,6 +263,7 @@ def build_native_tool_contract(
     execution_boundaries: list[str],
     availability: str,
     blocked_reason: str | None,
+    execution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     permission_profile = {
         "ok": availability == "ready",
@@ -324,6 +325,7 @@ def build_native_tool_contract(
             },
         },
         "mutation_rights": _mutation_rights(required_boundaries),
+        "execution": dict(execution or {}),
         "audit": _audit_contract(permission_profile, required_boundaries),
         "health": health,
         "preflight": {

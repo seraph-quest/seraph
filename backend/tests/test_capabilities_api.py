@@ -305,7 +305,14 @@ def test_tool_status_list_exposes_native_capability_contract():
     assert contract["family"] == "native_tool"
     assert contract["trust_class"] == "seraph_bundled"
     assert contract["permissions"]["required"]["execution_boundaries"] == ["workspace_read"]
+    assert contract["execution"]["operation_modes"] == ["inspect"]
+    assert contract["execution"]["artifact_contract"]["receipt_required"] is True
     assert contract["preflight"]["ready"] is True
+
+    patch_contract = tools["apply_workspace_patch"]["capability_contract"]
+    assert patch_contract["permissions"]["required"]["execution_boundaries"] == ["workspace_read", "workspace_write"]
+    assert patch_contract["execution"]["operation_modes"] == ["preview", "mutate"]
+    assert "guarded_reapply" in patch_contract["execution"]["recovery_actions"]
 
     blocked_contract = tools["write_file"]["capability_contract"]
     assert blocked_contract["preflight"]["ready"] is False

@@ -75,6 +75,14 @@
 - [ ] deeper long-running workflow supervision and durable orchestration beyond the current cockpit workflow-run surface, long-run state capsules, queue-state recovery supervision, anticipatory repair drafts, backup-branch candidates, condensation-fidelity state, branch/output debugger density, typed artifact-input handoff, branch-family supervision, checkpoint branch controls, approval-aware timeline, and boundary-aware replay model
 - [ ] broader external system leverage without weakening trust boundaries or the new credential-egress contract
 
+## M2 Batch Acceptance Notes
+
+- execution capability metadata should make native tool contracts show operation modes, session model, persistence, artifact contracts, provider health, interactive controls, and recovery actions instead of leaving execution semantics implicit in tool names
+- file mutation should include patch preview/apply receipts with unified diffs, before/after hashes, occurrence checks, and rollback hints, so agents can inspect, compare, repair, and recover edits without relying only on raw overwrite behavior
+- browser and HTTP execution must keep internal/private network protections on initial requests, browser subrequests, and redirected/final targets, with private-address DNS-resolution preflight coverage
+- the batch should repair prior PR test failures that are milestone-relevant, especially deterministic benchmark proof, engineering-memory search evidence, extension example validation, and session-owned process cleanup
+- the batch should not claim M2 is complete from one PR; it should claim only the concrete shipped surfaces and tests that land on `develop`
+
 ## Current Slice Record
 
 ### `workflow-autonomy-supervision-and-artifact-control-v1`

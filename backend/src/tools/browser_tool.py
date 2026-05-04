@@ -12,7 +12,7 @@ from src.security.site_policy import SiteAccessDecision, evaluate_site_access
 
 logger = logging.getLogger(__name__)
 
-def _browser_details(url: str, action: str, decision: SiteAccessDecision | None = None) -> dict[str, str | bool]:
+def _browser_details(url: str, action: str, decision: SiteAccessDecision | None = None) -> dict[str, object]:
     parsed = urlparse(url)
     details: dict[str, str | bool] = {
         "hostname": parsed.hostname or "",
@@ -23,6 +23,7 @@ def _browser_details(url: str, action: str, decision: SiteAccessDecision | None 
         details["site_policy_reason"] = decision.reason or ""
         details["site_policy_rule"] = decision.matched_rule or ""
         details["site_allowlist_active"] = decision.allowlist_active
+        details["resolved_addresses"] = list(decision.resolved_addresses)
     return details
 
 
@@ -34,6 +35,20 @@ def _blocked_site_message(decision: SiteAccessDecision) -> str:
     if decision.reason == "not_allowlisted":
         return f"Error: Access to '{decision.hostname}' is not permitted by the browser site allowlist."
     return "Error: URL could not be evaluated by site policy."
+
+
+async def _route_guarded_browser_request(route, request) -> None:
+    decision = evaluate_site_access(request.url, resolve_dns=True)
+    if not decision.allowed:
+        logger.warning(
+            "Blocked browser request by site policy: url=%s reason=%s resolved=%s",
+            request.url,
+            decision.reason,
+            decision.resolved_addresses,
+        )
+        await route.abort()
+        return
+    await route.continue_()
 
 
 async def _browse(url: str, action: str) -> str:
@@ -50,13 +65,18 @@ async def _browse(url: str, action: str) -> str:
             ),
         )
         page = await context.new_page()
+        await page.route("**/*", _route_guarded_browser_request)
 
         try:
-            await page.goto(
+            response = await page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=settings.browser_timeout * 1000,
             )
+            final_url = getattr(response, "url", None) or page.url
+            final_decision = evaluate_site_access(str(final_url), resolve_dns=True)
+            if not final_decision.allowed:
+                raise PermissionError(_blocked_site_message(final_decision))
             # Wait a bit for dynamic content
             await page.wait_for_timeout(1000)
 
@@ -113,7 +133,7 @@ def browse_webpage(url: str, action: str = "extract") -> str:
     if not url.startswith(("http://", "https://")):
         return "Error: URL must start with http:// or https://"
 
-    decision = evaluate_site_access(url)
+    decision = evaluate_site_access(url, resolve_dns=True)
     if not decision.allowed:
         log_integration_event_sync(
             integration_type="browser",

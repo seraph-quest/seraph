@@ -15,6 +15,7 @@ from .doctor import ExtensionDoctorReport, doctor_snapshot
 from .layout import CONTRIBUTION_LAYOUTS
 from .manifest import ExtensionKind, ExtensionTrust
 from .registry import ExtensionRegistry
+from src.tools.policy import get_tool_execution_boundaries
 
 _DEFAULT_CAPABILITY_CONTRIBUTIONS: tuple[str, ...] = ("skills",)
 _DEFAULT_CONNECTOR_CONTRIBUTIONS: tuple[str, ...] = ("managed_connectors",)
@@ -23,6 +24,19 @@ _DEFAULT_TOOL_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "skills": (),
     "workflows": ("read_file",),
     "toolset_presets": ("read_file",),
+}
+
+_DEFAULT_DATA_ACCESS_BY_BOUNDARY: dict[str, str] = {
+    "workspace_read": "workspace_files",
+    "workspace_write": "workspace_files",
+}
+
+_DEFAULT_AUDIT_BY_BOUNDARY: dict[str, str] = {
+    "workspace_read": "filesystem_read",
+    "workspace_write": "filesystem_write",
+    "external_read": "external_fetch",
+    "external_mcp": "mcp_request",
+    "secret_management": "secret_management",
 }
 
 _NETWORKED_SCAFFOLD_CONTRIBUTIONS = {
@@ -309,6 +323,9 @@ def scaffold_extension_package(
     created_files: list[Path] = []
     manifest_contributions: dict[str, list[str]] = {}
     required_tools: list[str] = []
+    required_boundaries: list[str] = []
+    data_access: list[str] = []
+    audit_events: list[str] = []
 
     for contribution_type in selected_contributions:
         template_path, builder = _PLACEHOLDER_BUILDERS[contribution_type]
@@ -322,6 +339,19 @@ def scaffold_extension_package(
         for tool_name in _DEFAULT_TOOL_PERMISSIONS.get(contribution_type, ()):
             if tool_name not in required_tools:
                 required_tools.append(tool_name)
+            for boundary in get_tool_execution_boundaries(tool_name):
+                if boundary not in required_boundaries:
+                    required_boundaries.append(boundary)
+                access = _DEFAULT_DATA_ACCESS_BY_BOUNDARY.get(boundary)
+                if access and access not in data_access:
+                    data_access.append(access)
+                audit_event = _DEFAULT_AUDIT_BY_BOUNDARY.get(boundary)
+                if audit_event and audit_event not in audit_events:
+                    audit_events.append(audit_event)
+        if contribution_type in _NETWORKED_SCAFFOLD_CONTRIBUTIONS and "secret_management" not in required_boundaries:
+            required_boundaries.append("secret_management")
+            if "secret_management" not in audit_events:
+                audit_events.append("secret_management")
 
     manifest_payload = {
         "id": extension_id,
@@ -334,6 +364,9 @@ def scaffold_extension_package(
         "contributes": manifest_contributions,
         "permissions": {
             "tools": required_tools,
+            "execution_boundaries": required_boundaries,
+            "data_access": data_access,
+            "audit_events": audit_events,
             "network": any(
                 contribution_type in _NETWORKED_SCAFFOLD_CONTRIBUTIONS
                 for contribution_type in selected_contributions

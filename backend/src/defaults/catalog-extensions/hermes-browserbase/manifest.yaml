@@ -19,4 +19,18 @@ permissions:
     - browser_session
   execution_boundaries:
     - external_read
+    - secret_management
   network: true
+  data_access:
+    - browser_session_state
+    - external_web_pages
+    - provider_credentials
+  mutation_rights:
+    - browser_navigation
+    - remote_browser_session_config
+  audit_events:
+    - connector_configured
+    - connector_enabled
+    - browser_session_started
+  secrets:
+    - browserbase_api_key

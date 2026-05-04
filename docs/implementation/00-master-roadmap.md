@@ -36,11 +36,22 @@ When these docs are updated on an open feature branch, they describe the intende
 - `docs/implementation/01` through `07` are the only workstream docs; `08` through `11` are cross-cutting implementation mirrors, not extra workstreams.
 - if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
 - active execution state belongs in the GitHub Project, issues, and PRs rather than this document
+- M1 capability-kernel contract changes must update this roadmap plus [08. Docs Contract](./08-docs-contract.md) and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md) together, because M2 execution breadth, M3 trust-boundary enforcement, and M9 ecosystem governance all consume that contract.
 
 ## Current Status
 
 Read this roadmap together with [Development Status](./STATUS.md).
 For the implementation-side mirrors of the evidence, benchmark, superiority, and world-class strategy layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md).
+
+## M1 Capability Contract
+
+M1 is the stable source of truth for capability identity and manifest semantics that later milestones consume. It is not a separate feature queue.
+
+- M2 consumes M1 to know which execution surfaces exist, which owner controls them, what dependencies or health states block them, and which operator actions are allowed.
+- M3 consumes M1 to enforce declared permissions, mutation rights, trust levels, provenance, approval behavior, audit expectations, and fail-closed boundary rules.
+- M9 consumes M1 to govern extension-owned contributions through manifest kind, version, compatibility, publisher, lifecycle state, package health, and review or verification posture.
+- Capability inventory proof must stay operator-visible and evidence-grounded: each capability class should expose source, owner, trust level, boundary, health, dependencies, declared permissions, and available actions before later milestones treat that class as ready.
+- PRs that alter capability taxonomy, manifest semantics, permission vocabulary, provenance, health, compatibility, or lifecycle behavior must include acceptance and proof language that identifies the affected M2, M3, or M9 consumer.
 
 Legend for the checklist column:
 

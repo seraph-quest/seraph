@@ -20,3 +20,14 @@ permissions:
   execution_boundaries:
     - external_read
   network: true
+  data_access:
+    - browser_session_state
+    - external_web_pages
+    - remote_cdp_endpoint
+  mutation_rights:
+    - browser_navigation
+    - remote_browser_session_config
+  audit_events:
+    - connector_configured
+    - connector_enabled
+    - browser_session_started

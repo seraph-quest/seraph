@@ -622,6 +622,26 @@ class TestCatalogAPI:
         )
         assert messaging_connector["enabled"] is True
         assert messaging_connector["status"] == "planned"
+        contract = messaging_connector["capability_contract"]
+        assert contract["permissions"]["declared"]["data_access"] == [
+            "operator_messages",
+            "delivery_threads",
+            "messaging_credentials",
+        ]
+        assert contract["permissions"]["declared"]["mutation_rights"] == [
+            "send_operator_message",
+            "update_delivery_thread",
+        ]
+        assert contract["permissions"]["declared"]["execution_boundaries"] == [
+            "external_read",
+            "connector_mutation",
+            "secret_management",
+        ]
+        assert contract["permissions"]["declared"]["audit_events"] == [
+            "connector_configured",
+            "connector_enabled",
+            "message_delivery_attempted",
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -707,6 +727,28 @@ class TestCatalogAPI:
         assert provider["name"] == "browserbase"
         assert provider["provider_kind"] == "browserbase"
         assert provider["status"] == "requires_config"
+        contract = provider["capability_contract"]
+        assert contract["schema_version"] == "2026-05-04.m1"
+        assert contract["trust_class"] == "seraph_bundled"
+        assert contract["provenance"]["version"] == "2026.3.23"
+        assert contract["permissions"]["declared"]["data_access"] == [
+            "browser_session_state",
+            "external_web_pages",
+            "provider_credentials",
+        ]
+        assert contract["permissions"]["declared"]["mutation_rights"] == [
+            "browser_navigation",
+            "remote_browser_session_config",
+        ]
+        assert contract["permissions"]["declared"]["audit_events"] == [
+            "connector_configured",
+            "connector_enabled",
+            "browser_session_started",
+        ]
+        assert contract["permissions"]["declared"]["execution_boundaries"] == [
+            "external_read",
+            "secret_management",
+        ]
         assert preset["name"] == "browserbase-ops"
         assert "browser_session" in preset["include_tools"]
 

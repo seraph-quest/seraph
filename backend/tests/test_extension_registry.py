@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src.extensions.channels import select_active_channel_adapters
+from src.extensions.lifecycle import _contribution_payload
 from src.extensions.observers import select_active_observer_definitions
 from src.extensions.registry import ExtensionRegistry
 
@@ -43,6 +44,64 @@ contributes:
     assert extension.source == "manifest"
     assert {item.contribution_type for item in extension.contributions} == {"skills", "workflows"}
     assert extension.metadata["compatibility"] == ">=2026.4.10"
+
+
+def test_contribution_payload_surfaces_rejected_capability_contract(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "contract-pack"
+    (pack_dir / "workflows").mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.contract-pack
+version: 2026.5.4
+display_name: Contract Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflows:
+    - workflows/write-note.md
+permissions:
+  tools: []
+  network: false
+""".strip(),
+        encoding="utf-8",
+    )
+    (pack_dir / "workflows" / "write-note.md").write_text(
+        "---\n"
+        "name: write-note\n"
+        "description: Write note\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments: {}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    extension = snapshot.get_extension("seraph.contract-pack")
+    assert extension is not None
+
+    payload = _contribution_payload(
+        extension,
+        extension.contributions[0],
+        indexes={},
+        state_entry={},
+    )
+
+    assert payload["status"] == "rejected"
+    assert payload["runtime_ready"] is False
+    assert payload["capability_contract"]["permissions"]["missing"]["tools"] == ["write_file"]
+    assert payload["capability_enforcement"]["reason"]
 
 
 def test_registry_enriches_wave2_contribution_metadata(tmp_path: Path):

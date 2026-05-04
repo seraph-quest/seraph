@@ -1287,6 +1287,39 @@ interface ExtensionContributionPermissionProfile {
   missing_execution_boundaries: string[];
 }
 
+interface ExtensionCapabilityContract {
+  schema_version?: string;
+  version?: string;
+  capability_id?: string;
+  family?: string;
+  trust_class?: string;
+  operator?: {
+    display_name?: string | null;
+    description?: string | null;
+  };
+  operator_description?: string | null;
+  provenance?: Record<string, unknown>;
+  permissions?: {
+    declared?: {
+      tools?: string[];
+      execution_boundaries?: string[];
+      network?: boolean | null;
+      data_access?: string[];
+      mutation_rights?: string[] | Record<string, boolean>;
+      audit_events?: string[];
+      secrets?: string[];
+      env?: string[];
+    };
+    required?: Record<string, unknown>;
+    missing?: Record<string, unknown>;
+  };
+  runtime?: Record<string, unknown>;
+  enforcement?: Record<string, unknown>;
+  mutation_rights?: Record<string, boolean>;
+  audit?: Record<string, unknown>;
+  quarantine?: Record<string, unknown>;
+}
+
 interface ExtensionContributionHealth {
   state: string;
   summary?: string | null;
@@ -1326,6 +1359,8 @@ interface ExtensionContributionInfo {
   effective_output_surface?: string | null;
   health?: ExtensionContributionHealth | null;
   permission_profile?: ExtensionContributionPermissionProfile | null;
+  capability_contract?: ExtensionCapabilityContract | null;
+  capability_enforcement?: Record<string, unknown> | null;
   config_fields: Array<Record<string, unknown>>;
   config_keys: string[];
   capabilities: string[];
@@ -1641,6 +1676,7 @@ interface ImportedCapabilityFamilySummary {
   ready: number;
   attention: number;
   approval: number;
+  contractCount: number;
   packages: string[];
   entries: Array<{
     packageId: string;
@@ -1978,6 +2014,52 @@ function formatExtensionGovernanceSummary(extensionPackage: ExtensionPackageInfo
     parts.push(`${degradedConnectors} degraded ${degradedConnectors === 1 ? "connector" : "connectors"}`);
   }
   return parts.length ? parts.join(" · ") : null;
+}
+
+function readContractDeclaredList(
+  contract: ExtensionCapabilityContract | null | undefined,
+  field: "data_access" | "audit_events" | "execution_boundaries",
+): string[] {
+  const value = contract?.permissions?.declared?.[field];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function readContractMutationRights(contract: ExtensionCapabilityContract | null | undefined): string[] {
+  const declared = contract?.permissions?.declared?.mutation_rights;
+  if (Array.isArray(declared)) {
+    return declared.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  }
+  if (declared && typeof declared === "object") {
+    return Object.entries(declared)
+      .filter(([, enabled]) => enabled === true)
+      .map(([name]) => name);
+  }
+  const derived = contract?.mutation_rights;
+  if (derived && typeof derived === "object") {
+    return Object.entries(derived)
+      .filter(([, enabled]) => enabled === true)
+      .map(([name]) => name);
+  }
+  return [];
+}
+
+function formatExtensionContractSummary(extensionPackage: ExtensionPackageInfo): string | null {
+  const contributionsWithContracts = extensionPackage.contributions.filter((item) => item.capability_contract);
+  if (!contributionsWithContracts.length) return null;
+  const dataAccess = Array.from(new Set(
+    contributionsWithContracts.flatMap((item) => readContractDeclaredList(item.capability_contract, "data_access")),
+  ));
+  const mutationRights = Array.from(new Set(
+    contributionsWithContracts.flatMap((item) => readContractMutationRights(item.capability_contract)),
+  ));
+  const parts = [`${contributionsWithContracts.length}/${extensionPackage.contributions.length} contracts`];
+  if (dataAccess.length) {
+    parts.push(`${dataAccess.slice(0, 2).map(activitySpendBucketLabel).join(", ")} data`);
+  }
+  if (mutationRights.length) {
+    parts.push(`${mutationRights.slice(0, 2).map(activitySpendBucketLabel).join(", ")} mutation`);
+  }
+  return parts.join(" · ");
 }
 
 function isContributionActive(contribution: ExtensionContributionInfo): boolean {
@@ -3426,6 +3508,14 @@ function normalizeExtensionContribution(value: Record<string, unknown>): Extensi
     effective_output_surface: readString("effective_output_surface"),
     health: normalizeContributionHealth(value.health),
     permission_profile: normalizeContributionPermissionProfile(value.permission_profile),
+    capability_contract:
+      value.capability_contract && typeof value.capability_contract === "object" && !Array.isArray(value.capability_contract)
+        ? value.capability_contract as ExtensionCapabilityContract
+        : null,
+    capability_enforcement:
+      value.capability_enforcement && typeof value.capability_enforcement === "object" && !Array.isArray(value.capability_enforcement)
+        ? value.capability_enforcement as Record<string, unknown>
+        : null,
     config_fields: Array.isArray(value.config_fields)
       ? value.config_fields.flatMap((entry) => (
         entry && typeof entry === "object" && !Array.isArray(entry) ? [entry as Record<string, unknown>] : []
@@ -3700,6 +3790,7 @@ function buildExtensionManifestEntity(extension: ExtensionPackageInfo): Operator
       permission_summary: extension.permission_summary ?? null,
       approval_profile: extension.approval_profile ?? null,
       connector_summary: extension.connector_summary ?? null,
+      capability_contract_summary: formatExtensionContractSummary(extension),
       contributions: extension.contributions,
     },
   };
@@ -6063,6 +6154,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         entry.contribution.permission_profile?.requires_approval
         || entry.contribution.approval_behavior === "always"
       )).length;
+      const contractCount = entries.filter((entry) => entry.contribution.capability_contract).length;
       return {
         type: definition.type,
         label: definition.label,
@@ -6071,6 +6163,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ready,
         attention,
         approval,
+        contractCount,
         packages,
         entries,
       };
@@ -13600,6 +13693,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     status: entry.contribution.status,
                                     health: entry.contribution.health,
                                     permission_profile: entry.contribution.permission_profile,
+                                    capability_contract: entry.contribution.capability_contract,
                                   })),
                                 },
                               },
@@ -13613,6 +13707,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {family.installed > family.total ? ` · ${family.installed - family.total} inactive` : ""}
                             {family.attention ? ` · ${family.attention} attention` : ""}
                             {family.approval ? ` · ${family.approval} approval` : ""}
+                            {family.contractCount ? ` · ${family.contractCount} contracts` : ""}
                             {family.packages.length ? ` · ${family.packages.join(", ")}` : ""}
                           </div>
                         </button>
@@ -14160,6 +14255,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 formatExtensionCompatibilityLabel(extensionPackage.compatibility),
                                 formatExtensionDiagnosticsSummary(extensionPackage.diagnostics_summary),
                                 formatExtensionGovernanceSummary(extensionPackage),
+                                formatExtensionContractSummary(extensionPackage),
                                 formatExtensionPublisherLabel(extensionPackage.publisher),
                               ].filter(Boolean).join(" · ")}
                             </div>

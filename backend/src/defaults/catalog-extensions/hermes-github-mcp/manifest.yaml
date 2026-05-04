@@ -10,6 +10,8 @@ trust: bundled
 summary: GitHub MCP connector packaged with a matching operator toolset preset.
 description: Installs a packaged GitHub MCP connector and a toolset preset that makes the server easier to reason about in the operator surface.
 permissions:
+  execution_boundaries:
+    - external_mcp
   network: true
 contributes:
   mcp_servers:

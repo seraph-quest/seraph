@@ -34,6 +34,7 @@ from src.extensions.manifest import (
     load_extension_manifest,
     parse_extension_manifest,
 )
+from src.extensions.capability_contract import build_capability_contract
 from src.extensions.permissions import (
     evaluate_contribution_permissions,
     evaluate_tool_permissions,
@@ -1369,6 +1370,32 @@ def _planned_connector_definition_errors(contribution: ExtensionContributionReco
     return errors
 
 
+def _finalize_contribution_payload(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    permission_profile = payload.get("permission_profile")
+    if not isinstance(permission_profile, dict):
+        return payload
+    contract = build_capability_contract(
+        extension,
+        contribution_type=contribution.contribution_type,
+        reference=contribution.reference,
+        metadata=contribution.metadata,
+        permission_profile=permission_profile,
+    )
+    payload["capability_contract"] = contract
+    payload["capability_enforcement"] = contract["enforcement"]
+    enforcement_status = str(contract["enforcement"].get("status") or "")
+    if enforcement_status == "rejected":
+        payload["status"] = enforcement_status
+        payload["runtime_ready"] = False
+    elif enforcement_status == "quarantined":
+        payload["runtime_ready"] = False
+    return payload
+
+
 def _contribution_payload(
     extension: ExtensionRecord,
     contribution: ExtensionContributionRecord,
@@ -1414,7 +1441,7 @@ def _contribution_payload(
         health = mcp_server_health(contribution.metadata, runtime_entry)
         payload["health"] = health.as_payload()
         payload.setdefault("status", health.state)
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "managed_connectors":
         default_enabled = _connector_default_enabled(contribution)
         enabled = _connector_enabled(contribution, state_entry)
@@ -1465,7 +1492,7 @@ def _contribution_payload(
             enabled=enabled,
         ).as_payload()
         payload["status"] = str(payload["health"].get("state") or payload["status"])
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type in _PLANNED_CONNECTOR_CONTRIBUTION_TYPES:
         default_enabled = _connector_default_enabled(contribution)
         enabled = _connector_enabled(contribution, state_entry)
@@ -1540,7 +1567,7 @@ def _contribution_payload(
             payload["configured"] = configured and not config_errors
             payload["health"] = health.as_payload()
             payload["status"] = str(payload["health"].get("state") or "planned")
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "observer_definitions":
         active_definition = (
             indexes.get("observer_definitions", {}).get(normalized_path or "")
@@ -1593,7 +1620,7 @@ def _contribution_payload(
             supports_disable=True,
             supports_test=True,
         ).as_payload()
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "channel_adapters":
         active_adapter = (
             indexes.get("channel_adapters", {}).get(normalized_path or "")
@@ -1669,7 +1696,7 @@ def _contribution_payload(
             payload["health"] = health.as_payload()
             if daemon_connected is not None:
                 payload["health"]["connected"] = daemon_connected
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type in {"observer_connectors", "workspace_adapters"}:
         payload = {
             "type": contribution.contribution_type,
@@ -1686,7 +1713,7 @@ def _contribution_payload(
                 "Runtime support for this connector surface is not wired yet.",
             ).as_payload(),
         }
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     item = (
         indexes.get(contribution.contribution_type, {}).get(normalized_path or "")
         if normalized_path is not None
@@ -1766,7 +1793,7 @@ def _contribution_payload(
     payload.setdefault("missing_manifest_network", bool(payload["permission_profile"]["missing_network"]))
     payload.setdefault("approval_behavior", payload["permission_profile"]["approval_behavior"])
     payload.setdefault("requires_approval", bool(payload["permission_profile"]["requires_approval"]))
-    return payload
+    return _finalize_contribution_payload(extension, contribution, payload)
 
 
 def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
@@ -2212,6 +2239,32 @@ def _set_runtime_selector_contribution_enabled(
     }
 
 
+def _raise_if_capability_enforcement_blocks_enable(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+) -> None:
+    permission_profile = evaluate_contribution_permissions(
+        extension,
+        contribution_type=contribution.contribution_type,
+        metadata=contribution.metadata,
+    )
+    contract = build_capability_contract(
+        extension,
+        contribution_type=contribution.contribution_type,
+        reference=contribution.reference,
+        metadata=contribution.metadata,
+        permission_profile=permission_profile,
+    )
+    enforcement = contract["enforcement"]
+    if enforcement.get("status") not in {"rejected", "quarantined"}:
+        return
+    status = str(enforcement.get("status") or "blocked")
+    reason = str(enforcement.get("reason") or "manifest permissions do not cover the contribution")
+    raise ValueError(
+        f"connector '{contribution.reference}' in extension '{extension.id}' is {status}: {reason}"
+    )
+
+
 def set_extension_connector_enabled(
     extension_id: str,
     reference: str,
@@ -2226,6 +2279,8 @@ def set_extension_connector_enabled(
     contribution = next((item for item in extension.contributions if item.reference == reference), None)
     if contribution is None:
         raise KeyError(reference)
+    if enabled:
+        _raise_if_capability_enforcement_blocks_enable(extension, contribution)
     if contribution.contribution_type == "managed_connectors":
         return _set_managed_connector_enabled(extension, contribution, enabled=enabled)
     if contribution.contribution_type == "memory_providers":

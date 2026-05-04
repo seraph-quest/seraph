@@ -139,10 +139,21 @@ class ExtensionPermissions(BaseModel):
     tools: list[str] = Field(default_factory=list)
     execution_boundaries: list[str] = Field(default_factory=list)
     network: bool = False
+    data_access: list[str] = Field(default_factory=list)
+    mutation_rights: list[str] = Field(default_factory=list)
+    audit_events: list[str] = Field(default_factory=list)
     secrets: list[str] = Field(default_factory=list)
     env: list[str] = Field(default_factory=list)
 
-    @field_validator("tools", "execution_boundaries", "secrets", "env")
+    @field_validator(
+        "tools",
+        "execution_boundaries",
+        "data_access",
+        "mutation_rights",
+        "audit_events",
+        "secrets",
+        "env",
+    )
     @classmethod
     def _validate_string_list(cls, values: list[str]) -> list[str]:
         normalized: list[str] = []

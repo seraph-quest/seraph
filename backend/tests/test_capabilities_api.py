@@ -295,6 +295,23 @@ def test_mcp_status_list_exposes_packaged_toolset_presets(tmp_path):
     ]
 
 
+def test_tool_status_list_exposes_native_capability_contract():
+    from src.api.capabilities import _tool_status_list
+
+    tools = {item["name"]: item for item in _tool_status_list("safe")}
+
+    contract = tools["read_file"]["capability_contract"]
+    assert contract["schema_version"] == "2026-05-04.m1"
+    assert contract["family"] == "native_tool"
+    assert contract["trust_class"] == "seraph_bundled"
+    assert contract["permissions"]["required"]["execution_boundaries"] == ["workspace_read"]
+    assert contract["preflight"]["ready"] is True
+
+    blocked_contract = tools["write_file"]["capability_contract"]
+    assert blocked_contract["preflight"]["ready"] is False
+    assert blocked_contract["preflight"]["blocking_reasons"] == ["tool_policy_safe"]
+
+
 def test_doctor_reports_missing_mcp_server_reference_for_toolset_preset(tmp_path):
     package_dir = tmp_path / "extensions" / "github-pack"
     (package_dir / "presets" / "toolset").mkdir(parents=True)

@@ -791,6 +791,18 @@ async def test_list_extensions_includes_bundled_core_capabilities(client, extens
     assert bundled["version_line"] == ".".join(str(bundled["version"]).split(".")[:2])
     assert bundled["compatibility"]["compatible"] is True
     assert bundled["diagnostics_summary"]["issue_count"] == 0
+    skill_contribution = next(
+        item
+        for item in bundled["contributions"]
+        if item["type"] == "skills" and item.get("name") == "web-briefing"
+    )
+    contract = skill_contribution["capability_contract"]
+    assert contract["schema_version"] == "2026-05-04.m1"
+    assert contract["family"] == "skill"
+    assert contract["trust_class"] == "seraph_bundled"
+    assert contract["provenance"]["extension_id"] == "seraph.core-capabilities"
+    assert "web_search" in contract["permissions"]["required"]["tools"]
+    assert contract["enforcement"]["status"] == "accepted"
     managed = next(item for item in payload["extensions"] if item["id"] == "seraph.core-managed-connectors")
     assert managed["location"] == "bundled"
     assert managed["enable_supported"] is True

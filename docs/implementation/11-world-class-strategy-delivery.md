@@ -123,6 +123,30 @@ Implementation meaning: Seraph needs one stable capability map and permission co
 - missing strategic gaps: sharper taxonomy for core tools vs workflow tools vs MCP tools vs skills vs runbooks vs starter packs vs connectors vs extension-owned surfaces; clearer capability family ownership; one contract for permissions, provenance, mutation rights, health, compatibility, and trust level
 - proof requirements: operator-visible inventory that shows source, trust level, owner, boundary, health, dependencies, declared permissions, and available actions for each capability class
 
+M1 source-of-truth contract:
+
+- scope: core tools, workflow tools, MCP tools, skills, workflows, runbooks, starter packs, automations, browser/computer-use surfaces, managed connectors, memory providers, source adapters, channel adapters, observer sources, and extension-owned contributions
+- identity: every capability class needs a stable family, source, owner, package or core boundary, lifecycle state, and operator-facing label
+- manifest contract: extension-owned capability must declare kind, contribution type, version, compatibility, publisher or origin, dependencies, declared permissions, trust level, health checks, and lifecycle controls before downstream milestones treat it as dependable
+- permission contract: mutation rights, secret use, filesystem/process/browser/provider reach, connector egress, approval profile, and audit expectations must be explicit enough for M3 trust-boundary work to enforce or fail closed
+- provenance contract: inventory and receipts should distinguish core-owned behavior, package-owned behavior, managed connector behavior, raw MCP exposure, external provider evidence, and transitional compatibility paths
+- operator proof: cockpit/API surfaces should let an operator inspect why a capability exists, where it came from, what it can do, what blocks it, what repair or install action is available, and which receipt proves the state
+
+Acceptance for #425/#434:
+
+- the durable docs name M1 as the capability-kernel source of truth for M2, M3, and M9
+- the accepted contract covers identity, manifest shape, permissions, provenance, mutation rights, health, compatibility, lifecycle state, and trust level
+- acceptance/proof wording is evidence-grounded and does not imply M1 is complete from documentation alone
+- future M2/M3/M9 work has a clear rule for when it must update M1 docs or reject a capability class as underdeclared
+
+Proof language for the batch should cite concrete receipts, not broad strategy claims: affected manifests or APIs, capability inventory payloads, lifecycle/validation output, audit or Activity Ledger receipts, deterministic tests, benchmark suites, issue links, PR validation, and implementation-doc paths.
+
+M2/M3/M9 dependency rules:
+
+- M2 may build execution depth only on capability classes with declared owner, dependencies, health, available actions, and recovery/repair semantics.
+- M3 may enforce trusted execution only on capability classes with declared permissions, mutation rights, approval behavior, audit expectations, provenance, and fail-closed behavior.
+- M9 may grow ecosystem breadth only on extension-owned capability classes with manifest kind, contribution type, version, compatibility, publisher or origin, lifecycle state, package health, and review or verification posture.
+
 ## M2 Execution Supremacy
 
 Implementation meaning: Seraph should be excellent at real work across terminal, process management, browser/computer use, file operations, patching, artifacts, sandboxes, background sessions, and repair.

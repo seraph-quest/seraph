@@ -9426,7 +9426,45 @@ describe("CockpitView", () => {
               lifecycle_boundaries: ["workspace_write"],
             },
             connector_summary: { total: 1, ready: 0, states: { degraded: 1 } },
-            contributions: [],
+            contributions: [{
+              type: "messaging_connectors",
+              reference: "connectors/messaging/slack.yaml",
+              resolved_path: "/tmp/workspace/extensions/research-pack/connectors/messaging/slack.yaml",
+              loaded: true,
+              enabled: true,
+              configured: true,
+              name: "slack",
+              status: "ready",
+              health: { state: "ready", ready: true },
+              permission_profile: {
+                status: "granted",
+                requires_network: true,
+                missing_network: false,
+                requires_approval: true,
+                approval_behavior: "lifecycle",
+                missing_tools: [],
+                missing_execution_boundaries: [],
+              },
+              capability_contract: {
+                schema_version: "2026-05-04.m1",
+                trust_class: "workspace",
+                provenance: { extension_id: "seraph.research-pack", version: "2026.4.03" },
+                permissions: {
+                  declared: {
+                    data_access: ["operator_messages"],
+                    mutation_rights: ["send_operator_message"],
+                    audit_events: ["message_delivery_attempted"],
+                    execution_boundaries: ["external_read", "connector_mutation"],
+                  },
+                },
+              },
+              config_fields: [],
+              config_keys: [],
+              capabilities: [],
+              delivery_modes: ["channel"],
+              requires_network: true,
+              requires_daemon: false,
+            }],
             studio_files: [{
               key: "seraph.research-pack:manifest",
               role: "manifest",
@@ -9474,6 +9512,15 @@ describe("CockpitView", () => {
     expect(within(healthRow as HTMLElement).getByRole("button", { name: "draft" })).toBeInTheDocument();
     expect(within(healthRow as HTMLElement).getByText(/publisher Workspace/)).toBeInTheDocument();
     expect(within(healthRow as HTMLElement).getByText(/lifecycle approval/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/1\/1 contracts/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/operator messages data/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/send operator message mutation/)).toBeInTheDocument();
+
+    const reachSection = screen.getByText("imported capability reach").closest(".cockpit-operator-section");
+    expect(reachSection).not.toBeNull();
+    const messagingRow = within(reachSection as HTMLElement).getByText("messaging").closest(".cockpit-operator-row");
+    expect(messagingRow).not.toBeNull();
+    expect(within(messagingRow as HTMLElement).getByText(/1 contracts/)).toBeInTheDocument();
 
     const flowSection = screen.getByText("marketplace flows").closest(".cockpit-operator-section");
     expect(flowSection).not.toBeNull();

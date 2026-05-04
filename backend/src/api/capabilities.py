@@ -23,7 +23,8 @@ from src.api.catalog import (
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
-from src.extensions.lifecycle import get_extension
+from src.extensions.capability_contract import build_native_tool_contract
+from src.extensions.lifecycle import get_extension, list_extensions
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.extensions.source_operations import (
@@ -1421,15 +1422,28 @@ def _tool_status_list(tool_mode: str) -> list[dict[str, Any]]:
     for tool_name in sorted(TOOL_METADATA.keys()):
         metadata = get_tool_metadata(tool_name) or {}
         allowed = is_tool_allowed(tool_name, tool_mode)
+        availability = "ready" if allowed else "blocked"
+        blocked_reason = None if allowed else f"tool_policy_{tool_mode}"
+        execution_boundaries = get_tool_execution_boundaries(tool_name)
+        risk_level = get_tool_risk_level(tool_name)
         result.append({
             "name": tool_name,
             "description": metadata.get("description", ""),
             "policy_modes": metadata.get("policy_modes", []),
-            "risk_level": get_tool_risk_level(tool_name),
-            "execution_boundaries": get_tool_execution_boundaries(tool_name),
+            "risk_level": risk_level,
+            "execution_boundaries": execution_boundaries,
             "accepts_secret_refs": bool(metadata.get("accepts_secret_refs", False)),
-            "availability": "ready" if allowed else "blocked",
-            "blocked_reason": None if allowed else f"tool_policy_{tool_mode}",
+            "availability": availability,
+            "blocked_reason": blocked_reason,
+            "capability_contract": build_native_tool_contract(
+                name=tool_name,
+                description=str(metadata.get("description") or ""),
+                policy_modes=list(metadata.get("policy_modes", [])),
+                risk_level=risk_level,
+                execution_boundaries=execution_boundaries,
+                availability=availability,
+                blocked_reason=blocked_reason,
+            ),
         })
     return result
 
@@ -1717,6 +1731,47 @@ def _marketplace_flows(
     return flows
 
 
+def _capability_contract_inventory(native_tools: list[dict[str, Any]]) -> dict[str, Any]:
+    contracts = [
+        tool["capability_contract"]
+        for tool in native_tools
+        if isinstance(tool.get("capability_contract"), dict)
+    ]
+    try:
+        extension_payload = list_extensions()
+    except Exception:
+        extension_payload = {"extensions": []}
+    for extension in extension_payload.get("extensions", []) or []:
+        if not isinstance(extension, dict):
+            continue
+        for contribution in extension.get("contributions", []) or []:
+            if not isinstance(contribution, dict):
+                continue
+            contract = contribution.get("capability_contract")
+            if isinstance(contract, dict):
+                contracts.append(contract)
+    enforcement_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    for contract in contracts:
+        family = str(contract.get("family") or contract.get("contribution_type") or "unknown")
+        family_counts[family] = family_counts.get(family, 0) + 1
+        enforcement = contract.get("enforcement")
+        status = (
+            str(enforcement.get("status") or "unknown")
+            if isinstance(enforcement, dict)
+            else str(contract.get("quarantine", {}).get("state") or "unknown")
+        )
+        enforcement_counts[status] = enforcement_counts.get(status, 0) + 1
+    return {
+        "contracts": contracts,
+        "summary": {
+            "total": len(contracts),
+            "families": family_counts,
+            "enforcement": enforcement_counts,
+        },
+    }
+
+
 def _build_capability_overview() -> dict[str, Any]:
     base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
     tool_mode = get_current_tool_policy_mode()
@@ -1756,6 +1811,7 @@ def _build_capability_overview() -> dict[str, Any]:
         catalog_items=catalog_items,
         runbooks=runbooks,
     )
+    capability_contract_inventory = _capability_contract_inventory(native_tools)
     ready_tools = sum(1 for tool in native_tools if tool["availability"] == "ready")
     ready_skills = sum(1 for skill in skills if skill["availability"] == "ready")
     ready_workflows = sum(1 for workflow in workflows if workflow["availability"] == "ready")
@@ -1782,6 +1838,9 @@ def _build_capability_overview() -> dict[str, Any]:
                 if str(flow.get("availability") or "") in {"ready", "installed"}
             ),
             "marketplace_flows_total": len(marketplace_flows),
+            "capability_contracts_total": int(capability_contract_inventory["summary"]["total"]),
+            "capability_contract_families": capability_contract_inventory["summary"]["families"],
+            "capability_contract_enforcement": capability_contract_inventory["summary"]["enforcement"],
         },
         "native_tools": native_tools,
         "skills": skills,
@@ -1794,6 +1853,7 @@ def _build_capability_overview() -> dict[str, Any]:
         "recommendations": recommendations,
         "runbooks": runbooks,
         "marketplace_flows": marketplace_flows,
+        "capability_contracts": capability_contract_inventory["contracts"],
     }
 
 

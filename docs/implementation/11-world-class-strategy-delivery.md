@@ -19,95 +19,196 @@ title: 11. World-Class Strategy Delivery
 
 This file is the implementation-side mirror for the world-class Seraph strategy.
 
-It translates strategy into delivery rules without time-boxed roadmaps.
+It translates strategy into delivery rules without time-boxed roadmaps. Seraph execution is milestone-based only: no quarters, no month targets, no date promises, and no countdown-style roadmap language.
 
 Active execution remains in the GitHub Project, issues, and PRs. This doc only explains how implementation should be prioritized, proven, and bounded on `develop`.
 
+## Delivery Ownership
+
+The GitHub Project owns active execution.
+
+- Current execution project: [Seraph Execution](https://github.com/orgs/seraph-quest/projects/1)
+- GitHub Project items own priority, assignment, dependency state, PR links, review state, and completion.
+- Issues own scoped problem statements, acceptance criteria, milestone labels, and proof requirements.
+- PRs own integration truth until merged.
+- Implementation docs own durable delivery rules and shipped/missing strategic status, not live task queues.
+- Research docs own product strategy, milestone order, competitive frame, and acceptance standards.
+
+If docs and Project state disagree, the Project is the execution source of truth and the docs should be corrected only through an explicit strategy or status update.
+
+## Lead And Delegated Execution Operating Model
+
+Seraph implementation should run as lead-directed, delegated execution.
+
+- The lead owns milestone order, scope boundaries, acceptance criteria, priority calls, and final tradeoffs.
+- Delegated agents own bounded issues or slices with explicit file limits, constraints, proof requirements, and PR outputs.
+- Delegated agents must not rewrite strategy, change milestone order, broaden capability scope, or create time-bounded commitments without lead direction.
+- Delegated execution should produce small, inspectable changes with named milestone impact and repeatable proof.
+- When implementation reveals a strategy conflict, agents should surface it to the lead or Project rather than improvising a new roadmap in docs.
+
 ## Priority Model
 
-Priority is a leverage model, not a calendar model.
+Priority is a milestone and leverage model, not a calendar model.
 
-- `P0`: must ship to defend the core moat or the core trust boundary; if it is missing, broader leverage compounds the wrong thing.
-- `P1`: major strategic leverage that sharpens the moat, broadens power-user value, or removes a meaningful execution bottleneck.
-- `P2`: important product quality, control-surface, or reach expansion work that improves the system but should not outrank the moat or trust layers.
+- `P0`: must ship to defend the core capability OS moat, guardian moat, or trust boundary; if it is missing, broader leverage compounds the wrong thing.
+- `P1`: major strategic leverage that sharpens capability composition, supervised workflow power, ecosystem discipline, or benchmark proof.
+- `P2`: important product quality, control-surface, or reach expansion work that improves the system but should not outrank capability, guardian, or trust layers.
 - `Guardrail Product Boundary Discipline`: the named non-negotiable guardrail that keeps the strategy coherent; safety, audit, boundary, and proof constraints must hold across all priorities and any item that does not strengthen a named pillar should be rejected, deferred, or reframed.
 
-## P0 Guardian Intelligence Moat
+The corrected priority is capability-first. Guardian intelligence remains a moat and operating mode, but implementation should not treat "guardian capabilities" as the only top priority. Tools, workflows, connectors, automation, browser/computer use, memory, delegation, and supervised execution must become one coherent capability workspace.
 
-Implementation meaning: Seraph should keep becoming better at durable judgment, project continuity, selective attention, and long-horizon operator support than a generic assistant can be.
+## Milestone Stack
 
-- shipped foundations: persistent guardian state, memory, observer synthesis, project and continuity modeling, learning signals, contradiction-aware world-model arbitration, watchpoints, and the first governed additive memory-provider lane
-- missing strategic gaps: deeper long-horizon learning loops, stronger project arbitration under sparse or conflicting evidence, more faithful reuse of continuity across sessions and threads, and stronger additive memory-provider follow-through without replacing canonical guardian memory
-- proof requirements: benchmark coverage for long-horizon recall and judgment, repeatable demos that show continuity surviving session churn, and explicit receipts that live evidence can override stale procedural bias when it should
+This is the delivery stack. It is intentionally not time-bounded.
 
-## P0 Trusted Intelligence and Trusted Execution
+- `M0. Competition truth and execution governance`: GitHub Project owns live execution state; docs own strategy, milestone definitions, acceptance rules, and primary-source competitive truth.
+- `M1. Capability kernel and manifest contract`: one coherent map and contract for core tools, workflows, skills, MCP, connectors, automations, browser/computer-use surfaces, memory providers, runbooks, and extension-owned contributions.
+- `M2. Execution supremacy`: terminal, process, browser/computer use, files, patching, artifacts, sandboxes, background sessions, and repair flows are excellent enough to compete with serious task agents.
+- `M3. Trusted execution boundaries`: tool, workflow, browser, connector, secret, filesystem, process, delegation, and provider paths have explicit least-privilege boundaries and proof.
+- `M4. Selective reach and channels`: native, messaging, browser, node, webhook, and external channels extend capability and continuity without fragmenting trust.
+- `M5. Jobs, routines, workflows, and delegation`: long-running work supports branch, checkpoint, resume, compare, repair, handoff, background ownership, routines, and delegated execution.
+- `M6. Memory superiority`: memory changes behavior through provenance, confidence, conflict handling, freshness, privacy boundaries, operator correction, and behavior-changing recall.
+- `M7. Dense cockpit and activity ledger`: the operator can inspect capability state, execution history, approvals, routing, spend, artifacts, interventions, and recovery without source diving.
+- `M8. Guardian brain over the capability substrate`: memory, world model, goals, salience, timing, and feedback shape capability choice, sequencing, restraint, and follow-through.
+- `M9. Governed ecosystem`: external capability packs, managed connectors, versioning, compatibility, trust levels, and review flows can scale without turning Seraph into plugin soup.
 
-Implementation meaning: Seraph should infer locally first, move into an attested TEE lane when the task deserves it, fall back to redacted cloud execution only when needed, and keep every tool/action path isolated from unnecessary privilege.
+## Initial GitHub Project Spine
+
+These issues are the execution spine created for the milestone program. The Project remains the live source of truth for ownership, dependencies, status, and PR links.
+
+- [#424 M0: Agent competition truth table and capability benchmark](https://github.com/seraph-quest/seraph/issues/424)
+- [#425 M1: Capability kernel and manifest contract](https://github.com/seraph-quest/seraph/issues/425)
+- [#427 M2: Execution supremacy across terminal browser files and sandboxes](https://github.com/seraph-quest/seraph/issues/427)
+- [#428 M3: Secure capability host and trust-boundary enforcement](https://github.com/seraph-quest/seraph/issues/428)
+- [#426 M4: Channels presence and device pairing](https://github.com/seraph-quest/seraph/issues/426)
+- [#429 M5: Jobs routines workflows and delegation](https://github.com/seraph-quest/seraph/issues/429)
+- [#433 M6: Memory superiority and behavior-changing recall](https://github.com/seraph-quest/seraph/issues/433)
+- [#430 M7: Operator cockpit and activity control legibility](https://github.com/seraph-quest/seraph/issues/430)
+- [#431 M8: Guardian brain over the capability substrate](https://github.com/seraph-quest/seraph/issues/431)
+- [#432 M9: Ecosystem marketplace and verified capability packs](https://github.com/seraph-quest/seraph/issues/432)
+
+The first execution wave underneath that spine is:
+
+- [#436 P0: Strategy claim ledger and proof gate](https://github.com/seraph-quest/seraph/issues/436)
+- [#434 P0: Atomic capability contract freeze](https://github.com/seraph-quest/seraph/issues/434)
+- [#435 P0: IronClaw-class capability security parity gauntlet](https://github.com/seraph-quest/seraph/issues/435)
+- [#437 P0: Guardian intervention quality benchmark](https://github.com/seraph-quest/seraph/issues/437)
+- [#439 P1: Cockpit operator efficiency benchmark](https://github.com/seraph-quest/seraph/issues/439)
+- [#438 P1: One excellent reach channel canary](https://github.com/seraph-quest/seraph/issues/438)
+- [#441 P1: Memory provider quality gate](https://github.com/seraph-quest/seraph/issues/441)
+- [#440 P1: Live workflow endurance canary](https://github.com/seraph-quest/seraph/issues/440)
+
+## M0 Competition Truth And Execution Governance
+
+Implementation meaning: strategy, delivery, competitive evidence, and active execution must not drift.
+
+- shipped foundations: paired research/implementation docs, GitHub issue/PR workflow, implementation status docs, and explicit docs contract language
+- missing strategic gaps: consistent milestone labels across Project items, clearer Project fields for proof and ownership, tighter update rules when PRs change strategic status, and a maintained primary-source competitor matrix
+- proof requirements: every active strategy item is represented in the GitHub Project with owner, milestone, acceptance criteria, linked PR or issue state, and competitor gap where relevant
+
+## M1 Capability Kernel And Manifest Contract
+
+Implementation meaning: Seraph needs one stable capability map and permission contract before capability breadth can scale safely.
+
+- shipped foundations: native tools, skills, MCP, workflows, runbooks, starter packs, extension manifests, catalog extensions, managed connectors, and cockpit-visible capability surfaces
+- missing strategic gaps: sharper taxonomy for core tools vs workflow tools vs MCP tools vs skills vs runbooks vs starter packs vs connectors vs extension-owned surfaces; clearer capability family ownership; one contract for permissions, provenance, mutation rights, health, compatibility, and trust level
+- proof requirements: operator-visible inventory that shows source, trust level, owner, boundary, health, dependencies, declared permissions, and available actions for each capability class
+
+## M2 Execution Supremacy
+
+Implementation meaning: Seraph should be excellent at real work across terminal, process management, browser/computer use, file operations, patching, artifacts, sandboxes, background sessions, and repair.
+
+- shipped foundations: capability discovery, policy-aware blocked reasons, preflight/autorepair, extension health, install/repair guidance, starter-pack activation, workflow diagnostics, and cockpit controls
+- missing strategic gaps: broader repair coverage across connectors, browser/computer-use providers, delegated workers, automation triggers, external credentials, local/remote sandboxes, and artifact handoffs; clearer failure grouping by capability family
+- proof requirements: repeatable execution and blocked-capability scenarios with inspectable diagnosis, safe repair action, audit receipt, and operator-visible recovery state
+
+## M3 Trusted Execution Boundaries
+
+Implementation meaning: every capability path needs least privilege, approval behavior, auditability, and fail-closed semantics appropriate to its risk.
 
 - shipped foundations: approvals, audit logging, secret redaction, secret-reference containment, sandboxed execution, background-process partitioning, disposable worker roots, credential-egress allowlists, managed connector boundary metadata, and replay drift blocking on privileged surfaces
-- missing strategic gaps: broader host-grade isolation, stricter enforcement across future delegated/background/browser/provider paths, deeper credential-egress discipline for connector and browser work, and clearer tool/action separation for the routes that can mutate state
-- proof requirements: boundary-specific evals for browser, connector, delegation, background, and provider fallback paths; operator-visible audit receipts; and fail-closed behavior when a path cannot prove it stayed within its trust envelope
+- missing strategic gaps: broader host-grade isolation, stricter enforcement across future delegated/background/browser/provider paths, deeper credential-egress discipline for connector and browser work, and clearer tool/action separation for state-mutating routes
+- proof requirements: boundary-specific evals for browser, connector, delegation, background, provider fallback, filesystem, process, and workflow paths; operator-visible audit receipts; fail-closed behavior when a path cannot prove it stayed within its trust envelope
 
-TEEs are helpful, but they do not solve prompt injection or unsafe tool execution by themselves.
+TEEs are helpful, but they do not solve prompt injection or unsafe tool execution by themselves. Existing trust-drift blocking should be deepened and generalized across future delegated/background/browser/provider paths, not treated as a missing foundation.
 
-Existing trust-drift blocking should be deepened and generalized across future delegated/background/browser/provider paths, not treated as a missing foundation.
+## M4 Selective Reach And Channels
 
-## P1 Capabilities And Extension Discipline
+Implementation meaning: Seraph should expand beyond the browser only where the additional channel improves leverage, trust, or continuity.
 
-Implementation meaning: extension capability should stay typed, governable, and easy to reason about, with clear core-vs-extension boundaries and a stable capability taxonomy.
+- shipped foundations: browser-native continuity, desktop presence, messaging and connector surfaces, typed reach/adaptor inventory, native notifications, and channel-routing foundations
+- missing strategic gaps: broader but selective non-browser reach, clearer operator control over active channels, stronger continuity across high-value channels, and safer action cards for external surfaces
+- proof requirements: each added reach surface should justify its trust cost, demonstrate a clear use case, and preserve continuity rather than fragmenting it
 
-- shipped foundations: skills, MCP, starter packs, extension lifecycle, package health, capability discovery, managed connectors, typed source adapters, and cockpit-visible operator control over packaged capability surfaces
-- missing strategic gaps: stronger typed extension contracts across all extension kinds, more explicit managed-connector governance, clearer version and compatibility semantics, and a stable taxonomy that keeps core features separate from extension contributions
-- proof requirements: manifest and lifecycle validation, compatibility and enable/disable receipts, connector and extension health proofs, and operator surfaces that show why a capability exists, where it came from, and what trust level it carries
-
-## P1 Supervised Workflow Operating Layer
+## M5 Jobs, Routines, Workflows, And Delegation
 
 Implementation meaning: Seraph should operate long-running work as a supervised system, not as isolated run executions.
 
 - shipped foundations: workflow history, step records, branch-family supervision, typed artifact handoff, checkpoint-truthful resume/branch control, workspace-level orchestration, live operator timelines, activity ledgers, and background-session continuity
-- missing strategic gaps: deeper step-level control, richer multi-session supervision, more complete lineage and checkpoint control, and stronger recovery/repair surfaces for long-running work
-- proof requirements: deterministic workflow-endurance and supervision evals, inspectable branch and recovery receipts, and operator flows that can continue, compare, repair, or branch without reconstructing context manually
+- missing strategic gaps: deeper step-level control, richer multi-session supervision, clearer delegated-agent ownership, stronger lineage and checkpoint control, durable routines and heartbeat-style work, and stronger recovery/repair surfaces for long-running work
+- proof requirements: deterministic workflow-endurance and supervision evals, inspectable branch and recovery receipts, and operator flows that can continue, compare, repair, delegate, or branch without reconstructing context manually
 
-## P1 Benchmark And Proof System
+## M6 Memory Superiority
 
-Implementation meaning: no strategic claim should be considered real unless the implementation, the benchmark, and the operator demo all agree.
+Implementation meaning: memory should change behavior and improve outcomes, not merely store more objects.
 
-- shipped foundations: deterministic runtime evals, named benchmark suites for memory, workflow endurance, trust boundaries, computer use, and governed improvement, plus operator-readable receipts for several key execution seams
-- missing strategic gaps: broader live-provider and real-world integration proof, stronger coverage for future delegated and browser paths, and more repeatable proof surfaces for claims that would otherwise stay aspirational
-- proof requirements: every major strategy item needs an explicit benchmark, a concrete operator-visible demo path, and a traceable implementation receipt on `develop`
+- shipped foundations: persistent guardian state, memory, observer synthesis, project and continuity modeling, learning signals, contradiction-aware world-model arbitration, watchpoints, and governed additive memory-provider foundations
+- missing strategic gaps: deeper long-horizon learning loops, stronger project arbitration under sparse or conflicting evidence, more faithful reuse of continuity across sessions and threads, stricter provenance/conflict/freshness handling, and quality gates for external memory providers
+- proof requirements: benchmark coverage for long-horizon recall, contradiction handling, stale-memory suppression, provider quality, and receipts showing memory changed capability choice, timing, intervention, or suppression appropriately
 
-## P2 Cockpit Legibility And Control
+## M7 Dense Cockpit And Activity Ledger
 
 Implementation meaning: the operator surface should stay obvious, dense, and fast enough that the user can understand what Seraph is doing without hunting across panes.
 
-- shipped foundations: browser cockpit, command surfaces, activity ledger, operator terminal, workflow supervision views, live feed, and active triage
-- missing strategic gaps: denser control over complex flows, better cross-surface explanation of system state, and more direct actions for recovery, comparison, and follow-through
-- proof requirements: cockpit tasks should be inspectable without source diving, common operator moves should stay keyboard-first, and the surface should make trust and execution state legible at a glance
+- shipped foundations: browser cockpit, command surfaces, activity ledger, operator terminal, workflow supervision views, live feed, active triage, approvals, traces, and capability panes
+- missing strategic gaps: denser control over complex flows, better cross-surface explanation of system state, more direct actions for recovery, comparison, and follow-through, and clearer grouping across capability families
+- proof requirements: cockpit tasks should be inspectable without source diving, common operator moves should stay keyboard-first, and the surface should make trust, capability, and execution state legible at a glance
 
-## P2 Selective Reach
+## M8 Guardian Brain Over The Capability Substrate
 
-Implementation meaning: Seraph should expand beyond the browser only where the additional channel improves leverage, trust, or continuity.
+Implementation meaning: guardian intelligence should improve which capabilities Seraph chooses, when it uses them, when it asks, when it waits, and how it follows through.
 
-- shipped foundations: browser-native continuity, desktop presence, messaging and connector surfaces, and typed reach/adaptor inventory
-- missing strategic gaps: broader but selective non-browser reach, clearer operator control over which channels are active, and stronger continuity across the channels that matter most
-- proof requirements: each added reach surface should justify its trust cost, demonstrate a clear use case, and preserve continuity rather than fragmenting it
+- shipped foundations: guardian strategy, project and continuity modeling, salience, watchpoints, intervention planning, operator feedback, and memory-backed context
+- missing strategic gaps: stronger act/defer/bundle/clarify/approval/stay-silent judgment, tighter coupling between guardian state and capability selection or restraint, and sharper intervention quality under ambiguity
+- proof requirements: guardian intervention benchmarks with positive and negative cases, repeatable demos that show continuity surviving session churn, and receipts showing guardian state changed capability choice, timing, or suppression appropriately
+
+## Cross-Cutting Benchmark-Grade Proof
+
+Implementation meaning: no strategic claim should be considered real unless the implementation, the benchmark, and the operator demo all agree.
+
+- competitive frame: Hermes is strong on terminal ergonomics, background sessions, broad tools, MCP, browser work, memory, and channels; OpenClaw is strong on operator control UI, tool events, health/log/config, multi-agent composition, browser execution, sandboxing, and gateway security; IronClaw is strong on security-first execution, permissions, isolation, routines, hooks, extensions, and multi-surface control; adjacent agents such as Claude Code, Codex, Cursor, Devin-style workers, OpenHands, Aider, Goose, LangGraph-style builders, and browser/computer-use agents prove that the category is moving toward supervised capability composition
+- shipped foundations: deterministic runtime evals, named benchmark suites for memory, workflow endurance, trust boundaries, computer use, governed improvement, and operator-readable receipts for several key execution seams
+- missing strategic gaps: broader live-provider and real-world integration proof, stronger coverage for future delegated and browser paths, and more repeatable proof surfaces for claims that would otherwise stay aspirational
+- proof requirements: every major strategy item needs an explicit benchmark, a concrete operator-visible demo path, and a traceable implementation receipt on `develop`
+
+## M9 Governed Ecosystem
+
+Implementation meaning: extension capability should stay typed, governable, and easy to reason about, with clear core-vs-extension boundaries and a stable capability taxonomy.
+
+- shipped foundations: skills, MCP, starter packs, extension lifecycle, package health, capability discovery, managed connectors, typed source adapters, catalog extensions, and cockpit-visible operator control over packaged capability surfaces
+- missing strategic gaps: stronger typed extension contracts across all extension kinds, more explicit managed-connector governance, clearer version and compatibility semantics, review/verification flows, and a stable taxonomy that keeps core features separate from extension contributions
+- proof requirements: manifest and lifecycle validation, compatibility and enable/disable receipts, connector and extension health proofs, and operator surfaces that show why a capability exists, where it came from, and what trust level it carries
 
 ## Guardrail Product Boundary Discipline
 
 - do not turn active execution into a doc-tracked queue; GitHub Project items, issues, and PRs own that state
-- do not treat time as the organizing principle; priority, moat, proof, and trust boundary are the organizing principles
-- do not ship a roadmap item without a named pillar, a competitor or capability gap, a moat effect, a proof or eval plan, a trust boundary, and an operator surface
+- do not treat time as the organizing principle; milestones, priority, moat, proof, and trust boundary are the organizing principles
+- do not ship a roadmap item without a named milestone, pillar, competitor or adjacent-agent gap, capability gap, moat effect, proof or eval plan, trust boundary, and operator surface
+- do not treat capability breadth as permission to become plugin soup; Seraph is a capability-first guardian agent OS/workspace with governed composition
 - do not treat TEEs as a complete safety story; keep approvals, audit, sandboxing, and tool isolation as first-class constraints
 - do not reclassify already-shipped trust-drift blocking as missing work; deepen and generalize the existing receipts across future delegated/background/browser/provider paths instead
 - do not let extension growth blur the line between core platform behavior and extension-owned behavior
 
 ## Acceptance Rules For Future Roadmap Items
 
-Future roadmap items should be accepted only when they clearly answer all of the following:
+Future roadmap items should be accepted into the GitHub Project only when they clearly answer all of the following:
 
+- milestone: which M0-M9 milestone does this advance?
 - pillar: which strategic pillar does this belong to?
-- gap: which competitor gap or internal weakness does it close?
-- moat: how does it strengthen Guardian Intelligence, Trusted Execution, or another durable advantage?
+- gap: which competitor, adjacent-agent, or internal weakness does it close?
+- capability: which capability class or composition path does it improve?
+- moat: how does it strengthen Capability OS, Guardian Intelligence, Trusted Execution, or another durable advantage?
 - proof: what benchmark, eval, or repeatable demo will prove it?
 - trust boundary: what new or existing boundary does it touch?
 - operator surface: where will an operator see, control, or verify it?
+- ownership: who owns execution, review, and completion in the GitHub Project?

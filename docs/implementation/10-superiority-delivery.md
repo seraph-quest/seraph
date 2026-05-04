@@ -8,10 +8,16 @@ title: 10. Superiority Delivery
 
 - [ ] The superiority program is only partially translated into shipped implementation on `develop`.
 
+M0 claim gate:
+
+- [19. Strategy Claim Ledger](/research/strategy-claim-ledger) owns allowed wording for superiority, world-class, best, strongest, secure, private, production-ready, complete, and ahead-of-competitor claims.
+
 ## Paired Research
 
 - design source of truth: [11. Superiority Program](/research/superiority-program)
 - benchmark input: [10. Competitive Benchmark](/research/competitive-benchmark)
+- M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
+- M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
 - synthesis context: [00. Research Synthesis](/research)
 
 ## Purpose

@@ -11,6 +11,8 @@ title: 08. Docs Contract
 ## Paired Research
 
 - evidence and comparison rules: [09. Reference Systems And Evidence](/research/reference-systems-and-evidence)
+- M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
+- M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
 
 ## Purpose
 
@@ -31,6 +33,8 @@ If a major concept appears in research but not implementation, or vice versa, th
 - [x] `docs/research/00-synthesis.md` owns the target-product synthesis
 - [x] `docs/research/10-competitive-benchmark.md` owns the comparative judgment
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program
+- [x] `docs/research/18-agent-competition-truth-table.md` owns M0 competitor truth and capability benchmark pressure
+- [x] `docs/research/19-strategy-claim-ledger.md` owns claim status, allowed wording, and proof-gate review rules
 - [x] `docs/implementation/STATUS.md` owns the fastest shipped snapshot
 - [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program, completed-program record, and workstream-to-gap translation
 - [x] `docs/implementation/09-benchmark-status.md` mirrors the benchmark on shipped implementation terms
@@ -46,6 +50,7 @@ If a major concept appears in research but not implementation, or vice versa, th
 - [x] If implementation changes shipped truth, update `STATUS.md`, the owning workstream file, and any affected mirror docs in the same PR.
 - [x] If active execution state changes, update the GitHub Project, issue, or PR instead of mirroring that state in docs.
 - [x] If the strategic implementation program or cross-cutting strategy translation changes materially, update the roadmap and any affected mirror docs in the same PR.
+- [x] If a doc introduces world-class, best, strongest, superior, secure, private, production-ready, complete, or ahead-of-competitor wording, check the M0 claim ledger and use only wording allowed for the claim status.
 - [x] Open PRs, review state, and branch state belong in issues, PRs, and the GitHub Project, not in docs that claim to describe `develop`.
 
 ## Project Workflow

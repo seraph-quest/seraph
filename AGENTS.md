@@ -4,11 +4,13 @@
 
 **Never commit directly to `develop` or `main`.**
 **Never create draft pull requests.**
+**Pull requests should complete whole milestones or batch-sized work, not tiny slices.**
 
 1. **Feature/fix branches**: Always create a `feat/` or `fix/` branch off `develop` for your work.
 2. **Merge to develop**: Once the feature branch is ready, merge it into `develop` (typically via PR).
 3. **Merge to main**: Only merge `develop` into `main` when explicitly requested by the user.
 4. **Ready PRs only**: Pull requests must be opened ready for review unless the user explicitly requests a draft.
+5. **Batch scope**: Default PR scope is a complete milestone or substantial batch. Use issue checklists, child issues, and internal commits for slices, but keep the team working until the batch acceptance criteria are complete.
 
 ```
 feat/my-feature  →  develop  →  main
@@ -35,6 +37,7 @@ Substantial work includes any task that changes strategy or docs truth, touches 
 - The lead must create or update the agent team to fit the task, plan, and risk profile before execution starts.
 - The agent team should fit the work. Typical roles include Planner, Explorer, Worker, Security, Memory, Docs, Integrator, and Critic/Contrarian. If subagent tooling is unavailable, the lead must run separate named passes and state that limitation.
 - The lead must delegate bounded work to agents with explicit ownership, file or module scope, acceptance criteria, proof requirements, and expected output.
+- The lead must plan batches around whole milestones or substantial milestone slices, then keep the team working until the batch is complete rather than opening partial PRs for individual micro-slices.
 - The lead must not directly implement substantial feature slices when a suitable worker agent can own them; the lead coordinates, reviews, integrates, and decides. The lead may directly implement small surgical changes, emergency fixes, or work where delegation tooling is unavailable, but must state the reason.
 - If agent capacity or tooling prevents delegation, the lead must state that limitation and keep any direct edits tightly scoped.
 - Before execution starts, the lead must confirm the branch is not `develop` or `main` and follows the `feat/` or `fix/` branch rule.

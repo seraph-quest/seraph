@@ -3,10 +3,12 @@
 ## Git Branching Strategy
 
 **Never commit directly to `develop` or `main`.**
+**Never create draft pull requests.**
 
 1. **Feature/fix branches**: Always create a `feat/` or `fix/` branch off `develop` for your work.
 2. **Merge to develop**: Once the feature branch is ready, merge it into `develop` (typically via PR).
 3. **Merge to main**: Only merge `develop` into `main` when explicitly requested by the user.
+4. **Ready PRs only**: Pull requests must be opened ready for review unless the user explicitly requests a draft.
 
 ```
 feat/my-feature  →  develop  →  main

@@ -2340,6 +2340,201 @@ describe("CockpitView", () => {
     );
   }, 30000);
 
+  it("surfaces M6 memory decisions, controls, privacy, and behavior-change proof", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Memory thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: true, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "steady",
+            primary_surface: "browser",
+            actionable_thread_count: 0,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 0,
+            attention_presence_surface_count: 0,
+          },
+          recovery_actions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/operator/m6-memory-superiority")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            operator_status: "m6_memory_superiority_visible",
+            active_memory_count: 4,
+            superseded_memory_count: 1,
+            archived_memory_count: 1,
+            source_receipt_count: 6,
+            control_receipt_count: 3,
+            behavior_receipt_count: 1,
+            privacy_boundary_count: 2,
+            provider_writeback_blocked_count: 1,
+            memory_confidence: "grounded",
+            action_posture: "clarify_first",
+            claim_boundary: "deterministic_operator_memory_control_and_behavior_receipts_not_live_external_memory_parity",
+          },
+          behavior_receipts: [
+            {
+              id: "guardian-state-memory-influence",
+              changed: true,
+              changed_dimensions: ["recall_context", "action_posture"],
+              action_posture: "clarify_first",
+              intent_resolution: "clarify",
+              memory_confidence: "grounded",
+              evidence: ["relevant_memory_context_present", "procedural_memory_guidance_present"],
+              diagnostics: ["state=conflict_reconciled, active=4, superseded=1, archived=1"],
+              receipt_contract: "memory_changed_or_explained_guardian_behavior",
+            },
+          ],
+          memory_records: [
+            {
+              id: "mem-pin",
+              kind: "preference",
+              status: "active",
+              summary: "Prefer short operator-ready release notes.",
+              content: "Prefer short operator-ready release notes.",
+              confidence: 0.91,
+              importance: 0.96,
+              reinforcement: 2.1,
+              last_confirmed_at: "2026-05-05T08:00:00Z",
+              updated_at: "2026-05-05T08:00:00Z",
+              provenance: { source_session_id: "session-1", source_count: 2, source_types: ["session", "operator"], has_source_receipt: true },
+              control: { pinned: true, corrected: false, forgotten: false, privacy_boundary: "private", provider_writeback_allowed: false },
+              conflict: { superseded_by_memory_id: null, superseded_reason: null, archived_reason: null },
+            },
+            {
+              id: "mem-forget",
+              kind: "project",
+              status: "archived",
+              summary: "Old Atlas launch channel is Telegram.",
+              content: "Old Atlas launch channel is Telegram.",
+              confidence: 0.2,
+              importance: 0.4,
+              reinforcement: 0.1,
+              last_confirmed_at: null,
+              updated_at: "2026-04-05T08:00:00Z",
+              provenance: { source_session_id: "session-1", source_count: 1, source_types: ["session"], has_source_receipt: true },
+              control: { pinned: false, corrected: false, forgotten: true, privacy_boundary: "standard", provider_writeback_allowed: true },
+              conflict: { superseded_by_memory_id: "mem-pin", superseded_reason: "operator_correction", archived_reason: "operator_forget" },
+            },
+          ],
+          control_receipts: [
+            {
+              id: "audit-pin",
+              action: "pin",
+              event_type: "memory.pinned",
+              memory_id: "mem-pin",
+              summary: "Memory pin: Prefer short operator-ready release notes.",
+              risk_level: "low",
+              session_id: "session-1",
+              created_at: "2026-05-05T08:01:00Z",
+              details: { memory_id: "mem-pin" },
+            },
+            {
+              id: "audit-forget",
+              action: "forget",
+              event_type: "memory.forgotten",
+              memory_id: "mem-forget",
+              summary: "Memory forget: Old Atlas launch channel is Telegram.",
+              risk_level: "medium",
+              session_id: "session-1",
+              created_at: "2026-05-05T08:02:00Z",
+              details: { memory_id: "mem-forget" },
+            },
+          ],
+          privacy_boundaries: ["private", "standard"],
+          reconciliation: {},
+          benchmark: {},
+          policy: {},
+        }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: { workspace_mode: "single_operator_guarded_workspace", review_posture: "operator_review", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: false, roles: [] },
+          usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 0, blocked_workflows: 0 },
+          runtime_posture: { runtime: { provider: "local", model: "test", model_label: "test", build_id: "test", version: "test" }, extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 }, continuity: { continuity_health: "steady", actionable_thread_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 } },
+          handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/benchmark-proof")) {
+        return Promise.resolve(mockResponse({
+          summary: { suite_count: 0, scenario_count: 0, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "none", governed_improvement_status: "review_gated_canary_required" },
+          suites: [],
+          memory_benchmark: null,
+          user_model_benchmark: null,
+          workflow_endurance_benchmark: null,
+          trust_boundary_benchmark: null,
+          secure_capability_host_benchmark: null,
+          computer_use_benchmark: null,
+          governed_improvement: { target_count: 0, target_types: [], required_suite_count: 0, gate_policy: { min_review_ready_score: 0, min_strong_score: 0, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" }, summary: null, failure_report: [], policy: null, recent_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/guardian-state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/operator/workflow-orchestration")) return Promise.resolve(mockResponse({ summary: {}, sessions: [], workflows: [] }));
+      if (url.includes("/api/operator/background-sessions")) return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, background_process_count: 0, running_background_process_count: 0, sessions_with_branch_handoff: 0, sessions_with_active_workflows: 0 }, sessions: [] }));
+      if (url.includes("/api/operator/m5-operating-layer")) return Promise.resolve(mockResponse({ summary: {}, jobs: [], routines: [], delegations: [], work_queue: [], missing_trigger_classes: [], proof_receipts: [] }));
+      if (url.includes("/api/operator/engineering-memory")) return Promise.resolve(mockResponse({ summary: { query: null, tracked_bundles: 0, repository_bundle_count: 0, pull_request_bundle_count: 0, work_item_bundle_count: 0, search_match_count: 0 }, bundles: [] }));
+      if (url.includes("/api/operator/continuity-graph")) return Promise.resolve(mockResponse({ summary: { continuity_health: null, primary_surface: null, recommended_focus: null, tracked_sessions: 0, workflow_count: 0, approval_count: 0, notification_count: 0, queued_insight_count: 0, intervention_count: 0, artifact_count: 0, edge_count: 0 }, sessions: [], nodes: [], edges: [] }));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const memorySurface = await screen.findByLabelText("M6 memory superiority");
+    await waitFor(() => {
+      expect(memorySurface).toHaveTextContent(/m6 memory superiority visible · 4 active · 3 control receipts · 1 behavior receipts · 1 provider-blocked/i);
+      expect(memorySurface).toHaveTextContent(/confidence grounded · posture clarify first · 1 corrected\/superseded · 1 forgotten\/archived · 6 source receipts · 2 privacy boundaries/i);
+      expect(memorySurface).toHaveTextContent(/Memory changed behavior/i);
+      expect(memorySurface).toHaveTextContent(/recall context, action posture · intent clarify · confidence grounded/i);
+      expect(memorySurface).toHaveTextContent(/Prefer short operator-ready release notes/i);
+      expect(memorySurface).toHaveTextContent(/preference · active · pinned · privacy private · provider writeback blocked/i);
+      expect(memorySurface).toHaveTextContent(/project · archived · forgotten · conflict operator_correction · stale operator_forget/i);
+      expect(memorySurface).toHaveTextContent(/memory pin/i);
+      expect(memorySurface).toHaveTextContent(/memory forget/i);
+    });
+  }, 30000);
+
   it("surfaces evidence shortcuts and keyboard-first triage control", async () => {
     useChatStore.setState({
       messages: [{
@@ -10877,7 +11072,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 16 }, () => {
+    const deferredResponses = Array.from({ length: 22 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -10902,7 +11097,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(21));
+    await waitFor(() => expect(cockpitFetchCount).toBe(22));
     view.unmount();
 
     await act(async () => {

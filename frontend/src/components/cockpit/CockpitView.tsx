@@ -865,6 +865,85 @@ interface OperatorM5OperatingLayer {
   proof_receipts: string[];
 }
 
+interface OperatorM6BehaviorReceipt {
+  id: string;
+  changed: boolean;
+  changed_dimensions: string[];
+  action_posture: string;
+  intent_resolution: string;
+  memory_confidence: string;
+  evidence: string[];
+  diagnostics: string[];
+  receipt_contract: string;
+}
+
+interface OperatorM6MemoryRecord {
+  id: string;
+  kind: string;
+  status: string;
+  summary: string;
+  content: string;
+  confidence: number;
+  importance: number;
+  reinforcement: number;
+  last_confirmed_at?: string | null;
+  updated_at: string;
+  provenance: {
+    source_session_id?: string | null;
+    source_count: number;
+    source_types: string[];
+    has_source_receipt: boolean;
+  };
+  control: {
+    pinned: boolean;
+    corrected: boolean;
+    forgotten: boolean;
+    privacy_boundary: string;
+    provider_writeback_allowed: boolean;
+  };
+  conflict: {
+    superseded_by_memory_id?: string | null;
+    superseded_reason?: string | null;
+    archived_reason?: string | null;
+  };
+}
+
+interface OperatorM6ControlReceipt {
+  id: string;
+  action: string;
+  event_type: string;
+  memory_id?: string | null;
+  summary: string;
+  risk_level: string;
+  session_id?: string | null;
+  created_at: string;
+  details: Record<string, unknown>;
+}
+
+interface OperatorM6MemorySuperiority {
+  summary: {
+    operator_status: string;
+    active_memory_count: number;
+    superseded_memory_count: number;
+    archived_memory_count: number;
+    source_receipt_count: number;
+    control_receipt_count: number;
+    behavior_receipt_count: number;
+    privacy_boundary_count: number;
+    provider_writeback_blocked_count: number;
+    memory_confidence: string;
+    action_posture: string;
+    claim_boundary: string;
+  };
+  behavior_receipts: OperatorM6BehaviorReceipt[];
+  memory_records: OperatorM6MemoryRecord[];
+  control_receipts: OperatorM6ControlReceipt[];
+  privacy_boundaries: string[];
+  reconciliation: Record<string, unknown>;
+  benchmark: Record<string, unknown>;
+  policy: Record<string, unknown>;
+}
+
 interface OperatorEngineeringMemorySessionMatch {
   session_id?: string | null;
   title?: string | null;
@@ -3742,6 +3821,133 @@ function normalizeOperatorM5OperatingLayer(value: unknown): OperatorM5OperatingL
   };
 }
 
+function normalizeOperatorM6MemorySuperiority(value: unknown): OperatorM6MemorySuperiority | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      active_memory_count: numberValue(summaryRecord.active_memory_count),
+      superseded_memory_count: numberValue(summaryRecord.superseded_memory_count),
+      archived_memory_count: numberValue(summaryRecord.archived_memory_count),
+      source_receipt_count: numberValue(summaryRecord.source_receipt_count),
+      control_receipt_count: numberValue(summaryRecord.control_receipt_count),
+      behavior_receipt_count: numberValue(summaryRecord.behavior_receipt_count),
+      privacy_boundary_count: numberValue(summaryRecord.privacy_boundary_count),
+      provider_writeback_blocked_count: numberValue(summaryRecord.provider_writeback_blocked_count),
+      memory_confidence: typeof summaryRecord.memory_confidence === "string" ? summaryRecord.memory_confidence : "unknown",
+      action_posture: typeof summaryRecord.action_posture === "string" ? summaryRecord.action_posture : "unknown",
+      claim_boundary: typeof summaryRecord.claim_boundary === "string" ? summaryRecord.claim_boundary : "unknown",
+    },
+    behavior_receipts: Array.isArray(record.behavior_receipts)
+      ? record.behavior_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const receipt = entry as Record<string, unknown>;
+        return [{
+          id: typeof receipt.id === "string" ? receipt.id : "behavior",
+          changed: Boolean(receipt.changed),
+          changed_dimensions: stringList(receipt.changed_dimensions),
+          action_posture: typeof receipt.action_posture === "string" ? receipt.action_posture : "unknown",
+          intent_resolution: typeof receipt.intent_resolution === "string" ? receipt.intent_resolution : "unknown",
+          memory_confidence: typeof receipt.memory_confidence === "string" ? receipt.memory_confidence : "unknown",
+          evidence: stringList(receipt.evidence),
+          diagnostics: stringList(receipt.diagnostics),
+          receipt_contract: typeof receipt.receipt_contract === "string" ? receipt.receipt_contract : "unknown",
+        }];
+      })
+      : [],
+    memory_records: Array.isArray(record.memory_records)
+      ? record.memory_records.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const provenance = item.provenance && typeof item.provenance === "object" && !Array.isArray(item.provenance)
+          ? item.provenance as Record<string, unknown>
+          : {};
+        const control = item.control && typeof item.control === "object" && !Array.isArray(item.control)
+          ? item.control as Record<string, unknown>
+          : {};
+        const conflict = item.conflict && typeof item.conflict === "object" && !Array.isArray(item.conflict)
+          ? item.conflict as Record<string, unknown>
+          : {};
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          kind: typeof item.kind === "string" ? item.kind : "memory",
+          status: typeof item.status === "string" ? item.status : "unknown",
+          summary: typeof item.summary === "string" ? item.summary : "",
+          content: typeof item.content === "string" ? item.content : "",
+          confidence: numberValue(item.confidence),
+          importance: numberValue(item.importance),
+          reinforcement: numberValue(item.reinforcement),
+          last_confirmed_at: typeof item.last_confirmed_at === "string" ? item.last_confirmed_at : null,
+          updated_at: typeof item.updated_at === "string" ? item.updated_at : "",
+          provenance: {
+            source_session_id: typeof provenance.source_session_id === "string" ? provenance.source_session_id : null,
+            source_count: numberValue(provenance.source_count),
+            source_types: stringList(provenance.source_types),
+            has_source_receipt: Boolean(provenance.has_source_receipt),
+          },
+          control: {
+            pinned: Boolean(control.pinned),
+            corrected: Boolean(control.corrected),
+            forgotten: Boolean(control.forgotten),
+            privacy_boundary: typeof control.privacy_boundary === "string" ? control.privacy_boundary : "standard",
+            provider_writeback_allowed: Boolean(control.provider_writeback_allowed),
+          },
+          conflict: {
+            superseded_by_memory_id: typeof conflict.superseded_by_memory_id === "string" ? conflict.superseded_by_memory_id : null,
+            superseded_reason: typeof conflict.superseded_reason === "string" ? conflict.superseded_reason : null,
+            archived_reason: typeof conflict.archived_reason === "string" ? conflict.archived_reason : null,
+          },
+        }];
+      })
+      : [],
+    control_receipts: Array.isArray(record.control_receipts)
+      ? record.control_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const receipt = entry as Record<string, unknown>;
+        const id = typeof receipt.id === "string" ? receipt.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          action: typeof receipt.action === "string" ? receipt.action : "audit",
+          event_type: typeof receipt.event_type === "string" ? receipt.event_type : "memory.audited",
+          memory_id: typeof receipt.memory_id === "string" ? receipt.memory_id : null,
+          summary: typeof receipt.summary === "string" ? receipt.summary : "",
+          risk_level: typeof receipt.risk_level === "string" ? receipt.risk_level : "low",
+          session_id: typeof receipt.session_id === "string" ? receipt.session_id : null,
+          created_at: typeof receipt.created_at === "string" ? receipt.created_at : "",
+          details: receipt.details && typeof receipt.details === "object" && !Array.isArray(receipt.details)
+            ? receipt.details as Record<string, unknown>
+            : {},
+        }];
+      })
+      : [],
+    privacy_boundaries: stringList(record.privacy_boundaries),
+    reconciliation: record.reconciliation && typeof record.reconciliation === "object" && !Array.isArray(record.reconciliation)
+      ? record.reconciliation as Record<string, unknown>
+      : {},
+    benchmark: record.benchmark && typeof record.benchmark === "object" && !Array.isArray(record.benchmark)
+      ? record.benchmark as Record<string, unknown>
+      : {},
+    policy: record.policy && typeof record.policy === "object" && !Array.isArray(record.policy)
+      ? record.policy as Record<string, unknown>
+      : {},
+  };
+}
+
 function normalizeOperatorEngineeringMemory(value: unknown): OperatorEngineeringMemory | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -5227,6 +5433,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
   const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
+  const [operatorM6MemorySuperiority, setOperatorM6MemorySuperiority] = useState<OperatorM6MemorySuperiority | null>(null);
   const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
@@ -5409,6 +5616,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       workflowOrchestrationResult,
       backgroundSessionsResult,
       m5OperatingLayerResult,
+      m6MemorySuperiorityResult,
       engineeringMemoryResult,
       continuityGraphResult,
       workflowRunsResult,
@@ -5431,6 +5639,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       fetchJson(`${API_URL}/api/operator/background-sessions`),
       fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
+      fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
       fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
@@ -5496,6 +5705,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
     setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
     setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
+    setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
     setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
@@ -6420,6 +6630,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       `${operatorBenchmarkProof.summary.scenario_count} scenarios`,
       operatorBenchmarkProof.summary.benchmark_posture.replace(/_/g, " "),
       `${operatorBenchmarkProof.governed_improvement.target_count} evolution targets`,
+    ].join(" · ")
+    : null;
+  const m6MemorySummary = operatorM6MemorySuperiority
+    ? [
+      operatorM6MemorySuperiority.summary.operator_status.replace(/_/g, " "),
+      `${operatorM6MemorySuperiority.summary.active_memory_count} active`,
+      `${operatorM6MemorySuperiority.summary.control_receipt_count} control receipts`,
+      `${operatorM6MemorySuperiority.summary.behavior_receipt_count} behavior receipts`,
+      `${operatorM6MemorySuperiority.summary.provider_writeback_blocked_count} provider-blocked`,
     ].join(" · ")
     : null;
   const backgroundContinuitySummary = (
@@ -13199,6 +13418,96 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </>
                     ) : (
                       <div className="cockpit-empty">Benchmark proof summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="M6 memory superiority">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M6 memory superiority</span>
+                      <span className="cockpit-operator-link">{m6MemorySummary ?? "summary unavailable"}</span>
+                    </div>
+                    {operatorM6MemorySuperiority ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `confidence ${operatorM6MemorySuperiority.summary.memory_confidence.replace(/_/g, " ")}`,
+                            `posture ${operatorM6MemorySuperiority.summary.action_posture.replace(/_/g, " ")}`,
+                            `${operatorM6MemorySuperiority.summary.superseded_memory_count} corrected/superseded`,
+                            `${operatorM6MemorySuperiority.summary.archived_memory_count} forgotten/archived`,
+                            `${operatorM6MemorySuperiority.summary.source_receipt_count} source receipts`,
+                            `${operatorM6MemorySuperiority.summary.privacy_boundary_count} privacy boundaries`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">
+                          {operatorM6MemorySuperiority.summary.claim_boundary.replace(/_/g, " ")}
+                        </div>
+                        {operatorM6MemorySuperiority.behavior_receipts.slice(0, 2).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">
+                                {receipt.changed ? "Memory changed behavior" : "Memory behavior unchanged"}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  receipt.changed_dimensions.length ? receipt.changed_dimensions.map((item) => item.replace(/_/g, " ")).join(", ") : "no changed dimension",
+                                  `intent ${receipt.intent_resolution.replace(/_/g, " ")}`,
+                                  `confidence ${receipt.memory_confidence.replace(/_/g, " ")}`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {receipt.evidence.length ? receipt.evidence.slice(0, 3).join(" · ") : receipt.receipt_contract.replace(/_/g, " ")}
+                              </div>
+                              {receipt.diagnostics.length ? (
+                                <div className="cockpit-operator-note">{receipt.diagnostics.slice(0, 2).join(" · ")}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM6MemorySuperiority.memory_records.slice(0, 5).map((memory) => (
+                          <div key={memory.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{memory.summary || memory.content || memory.kind}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  memory.kind.replace(/_/g, " "),
+                                  memory.status.replace(/_/g, " "),
+                                  memory.control.pinned ? "pinned" : null,
+                                  memory.control.corrected ? "corrected" : null,
+                                  memory.control.forgotten ? "forgotten" : null,
+                                  memory.conflict.superseded_reason ? `conflict ${memory.conflict.superseded_reason}` : null,
+                                  memory.conflict.archived_reason ? `stale ${memory.conflict.archived_reason}` : null,
+                                  `privacy ${memory.control.privacy_boundary.replace(/_/g, " ")}`,
+                                  memory.control.provider_writeback_allowed ? "provider writeback allowed" : "provider writeback blocked",
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `${memory.provenance.source_count} sources`,
+                                  memory.provenance.source_types.length ? memory.provenance.source_types.join(", ") : "source type pending",
+                                  memory.provenance.has_source_receipt ? "source receipt" : "no source receipt",
+                                  memory.last_confirmed_at ? `confirmed ${formatAge(memory.last_confirmed_at)}` : `updated ${formatAge(memory.updated_at)}`,
+                                ].join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM6MemorySuperiority.control_receipts.slice(0, 4).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{`memory ${receipt.action}`}</div>
+                              <div className="cockpit-operator-note">
+                                {[receipt.event_type.replace(/[_.]/g, " "), receipt.risk_level, receipt.created_at ? formatAge(receipt.created_at) : null].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{receipt.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM6MemorySuperiority.memory_records.length === 0 && operatorM6MemorySuperiority.control_receipts.length === 0 ? (
+                          <div className="cockpit-empty">No M6 memory decisions or control receipts are available yet.</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">M6 memory superiority summary unavailable.</div>
                     )}
                   </section>
 

@@ -16,6 +16,10 @@ from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
 )
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
+from src.memory.superiority_benchmark import (
+    M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
+    M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
+)
 from src.security.benchmark import TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES, TRUST_BOUNDARY_BENCHMARK_SUITE_NAME
 from src.security.secure_host_benchmark import (
     SECURE_CAPABILITY_HOST_BENCHMARK_SCENARIO_NAMES,
@@ -110,6 +114,24 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "engineering_memory_bundle_behavior",
             "operator_continuity_graph_behavior",
         ),
+    ),
+    BenchmarkSuiteDefinition(
+        name=M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
+        label="M6 memory superiority",
+        description=(
+            "Pins long-horizon recall, contradiction handling, stale-memory override, "
+            "source trust and privacy boundaries, provider quality, and behavior-change receipts "
+            "into one milestone-sized memory proof suite."
+        ),
+        benchmark_axis="m6_memory_superiority",
+        operator_summary=(
+            "M6 memory superiority is judged by recall, freshness, trust, provider quality, and receipted behavior change, "
+            "not by raw memory volume or unbounded provider authority."
+        ),
+        remaining_gap=(
+            "Broader live-provider workloads and external memory benchmark parity remain future proof work after the deterministic M6 lane."
+        ),
+        scenario_names=M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,

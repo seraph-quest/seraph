@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.agent.session import session_manager
 from src.guardian.world_model import GuardianWorldModel, build_guardian_world_model
@@ -53,6 +53,7 @@ class GuardianState:
     memory_benchmark_diagnostics: tuple[str, ...] = ()
     memory_provider_diagnostics: tuple[str, ...] = ()
     memory_reconciliation_diagnostics: tuple[str, ...] = ()
+    memory_decision_receipt: dict[str, object] = field(default_factory=dict)
     intent_uncertainty_level: str = "clear"
     intent_resolution: str = "proceed"
     action_posture: str = "act_when_grounded"
@@ -122,6 +123,34 @@ class GuardianState:
             lines.append("")
             lines.append("Memory reconciliation diagnostics:")
             lines.extend(f"- {item}" for item in self.memory_reconciliation_diagnostics)
+
+        if self.memory_decision_receipt:
+            capability = self.memory_decision_receipt.get("capability_choice")
+            suppression = self.memory_decision_receipt.get("suppression")
+            lines.append("")
+            lines.append("Memory decision receipt:")
+            lines.append(
+                "- "
+                + "; ".join(
+                    part
+                    for part in (
+                        f"changed_decision={self.memory_decision_receipt.get('changed_decision')}",
+                        f"lane={self.memory_decision_receipt.get('lane')}",
+                        f"timing={self.memory_decision_receipt.get('intervention_timing')}",
+                        (
+                            f"suppressed={suppression.get('suppressed_count')}"
+                            if isinstance(suppression, dict)
+                            else ""
+                        ),
+                        (
+                            f"capability={capability.get('lane')}"
+                            if isinstance(capability, dict)
+                            else ""
+                        ),
+                    )
+                    if part
+                )
+            )
 
         if self.intent_uncertainty_diagnostics:
             lines.append("")
@@ -1083,6 +1112,7 @@ async def build_guardian_state(
         memory_benchmark_diagnostics=memory_benchmark_diagnostics,
         memory_provider_diagnostics=memory_provider_diagnostics,
         memory_reconciliation_diagnostics=memory_reconciliation_diagnostics,
+        memory_decision_receipt=retrieval.decision_receipt,
         intent_uncertainty_level=intent_uncertainty_level,
         intent_resolution=intent_resolution,
         action_posture=action_posture,

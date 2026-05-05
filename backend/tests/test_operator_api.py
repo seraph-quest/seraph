@@ -25,6 +25,59 @@ def _default_empty_continuity_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_operator_m6_memory_superiority_surface_delegates_to_memory_payload(client):
+    payload = {
+        "summary": {
+            "operator_status": "m6_memory_superiority_visible",
+            "active_memory_count": 3,
+            "superseded_memory_count": 1,
+            "archived_memory_count": 1,
+            "source_receipt_count": 4,
+            "control_receipt_count": 2,
+            "behavior_receipt_count": 1,
+            "privacy_boundary_count": 1,
+            "provider_writeback_blocked_count": 1,
+            "memory_confidence": "grounded",
+            "action_posture": "clarify_first",
+            "claim_boundary": "deterministic_operator_memory_control_and_behavior_receipts_not_live_external_memory_parity",
+        },
+        "behavior_receipts": [
+            {
+                "id": "guardian-state-memory-influence",
+                "changed": True,
+                "changed_dimensions": ["recall_context", "action_posture"],
+                "action_posture": "clarify_first",
+                "intent_resolution": "clarify",
+                "memory_confidence": "grounded",
+                "evidence": ["relevant_memory_context_present"],
+                "diagnostics": ["state=conflict_reconciled"],
+                "receipt_contract": "memory_changed_or_explained_guardian_behavior",
+            }
+        ],
+        "memory_records": [],
+        "control_receipts": [],
+        "privacy_boundaries": ["private"],
+        "reconciliation": {},
+        "benchmark": {},
+        "policy": {},
+    }
+
+    with patch(
+        "src.api.operator.build_m6_memory_superiority_payload",
+        AsyncMock(return_value=payload),
+    ) as build_payload:
+        resp = await client.get(
+            "/api/operator/m6-memory-superiority",
+            params={"session_id": "session-1", "query": "Atlas"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["behavior_receipt_count"] == 1
+    assert resp.json()["behavior_receipts"][0]["changed_dimensions"] == ["recall_context", "action_posture"]
+    build_payload.assert_awaited_once_with(session_id="session-1", query="Atlas")
+
+
+@pytest.mark.asyncio
 async def test_operator_timeline_aggregates_threaded_workflows_notifications_and_repairs(client):
     with (
         patch(
@@ -902,6 +955,45 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_m6_memory_superiority_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m6_memory_superiority",
+                    "benchmark_posture": "m6_ci_gated_operator_visible",
+                    "operator_status": "m6_memory_superiority_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 6,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "long_horizon_recall_state": "workflow_approval_artifact_audit_session_receipts_ranked",
+                    "contradiction_state": "lower_ranked_contradictions_suppressed",
+                    "stale_override_state": "fresh_canonical_or_focused_provider_evidence_wins",
+                    "source_trust_privacy_state": "guardian_authority_external_advisory_no_secret_receipts",
+                    "provider_quality_state": "usefulness_and_degradation_receipts_visible",
+                    "behavior_change_receipt_state": "procedural_memory_receipts_required",
+                },
+                "scenario_names": [
+                    "m6_long_horizon_recall_behavior",
+                    "m6_contradiction_handling_behavior",
+                    "m6_stale_memory_override_behavior",
+                    "m6_source_trust_privacy_boundary_behavior",
+                    "m6_provider_quality_behavior",
+                    "m6_behavior_change_receipts_behavior",
+                    "operator_m6_memory_superiority_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "milestone_contract": "m6_memory_superiority_ships_as_one_ready_pr",
+                    "privacy_policy": "provider_config_and_secret_values_never_surface_in_operator_receipts",
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_governed_improvement_benchmark_report",
         AsyncMock(
             return_value={
@@ -970,7 +1062,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 12
+    assert payload["summary"]["suite_count"] == 13
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -981,6 +1073,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
+    assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -1018,6 +1111,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
     m2_suite = next(item for item in payload["suites"] if item["name"] == "m2_execution_supremacy")
     assert "execution_security_gauntlet_behavior" in m2_suite["scenario_names"]
+    m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
+    assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
+    assert m6_memory_suite["scenario_count"] == 7
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -1033,6 +1129,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
     assert payload["m2_execution_benchmark"]["policy"]["milestone_contract"] == "one_milestone_one_ready_pr"
+    assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
+    assert payload["m6_memory_superiority_benchmark"]["policy"]["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts"
 
 
 @pytest.mark.asyncio
@@ -1063,6 +1161,21 @@ async def test_operator_memory_benchmark_surface_reports_failure_taxonomy_and_po
     assert len(payload["failure_taxonomy"]) >= 5
     assert payload["policy"]["retrieval_ranking_policy"] == "contradiction_aware_query_and_project_weighted"
     assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_m6_memory_superiority_benchmark_surface_reports_policy_and_receipts(client):
+    resp = await client.get("/api/operator/m6-memory-superiority-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "m6_memory_superiority"
+    assert payload["summary"]["operator_status"] == "m6_memory_superiority_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["long_horizon_recall_state"] == "workflow_approval_artifact_audit_session_receipts_ranked"
+    assert payload["summary"]["source_trust_privacy_state"] == "guardian_authority_external_advisory_no_secret_receipts"
+    assert payload["policy"]["milestone_contract"] == "m6_memory_superiority_ships_as_one_ready_pr"
+    assert "/api/operator/m6-memory-superiority-benchmark" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

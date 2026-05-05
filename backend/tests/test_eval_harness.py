@@ -204,7 +204,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 12
+    assert details["suite_count"] == 13
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -217,6 +217,9 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
     assert details["m2_execution_suite_present"] is True
+    assert details["m6_memory_suite_present"] is True
+    assert details["m6_memory_suite_scenario_count_matches"] is True
+    assert details["m6_memory_suite_axis_matches"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
     assert details["required_suite_count_matches"] is True
@@ -256,6 +259,23 @@ def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
         "memory_provider_stale_evidence_behavior",
         "memory_provider_writeback_behavior",
         "memory_reconciliation_policy_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_m6_memory_superiority_suite():
+    summary = asyncio.run(run_benchmark_suites(["m6_memory_superiority"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "m6_long_horizon_recall_behavior",
+        "m6_contradiction_handling_behavior",
+        "m6_stale_memory_override_behavior",
+        "m6_source_trust_privacy_boundary_behavior",
+        "m6_provider_quality_behavior",
+        "m6_behavior_change_receipts_behavior",
+        "operator_m6_memory_superiority_benchmark_surface_behavior",
     }
 
 
@@ -381,6 +401,22 @@ def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval
     assert details["process_environment_state_visible"] is True
     assert details["claim_boundary_visible"] is True
     assert details["receipt_surfaces_visible"] is True
+
+
+def test_operator_m6_memory_superiority_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m6_memory_superiority_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["long_horizon_state_visible"] is True
+    assert details["source_trust_privacy_state_visible"] is True
+    assert details["behavior_change_receipt_state_visible"] is True
+    assert details["ci_gate_mode_visible"] is True
 
 
 def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
@@ -644,6 +680,9 @@ def test_main_lists_available_scenarios(capsys):
     assert "memory_decay_contradiction_cleanup_behavior" in captured.out
     assert "memory_reconciliation_policy_behavior" in captured.out
     assert "procedural_memory_adaptation_behavior" in captured.out
+    assert "m6_long_horizon_recall_behavior" in captured.out
+    assert "m6_source_trust_privacy_boundary_behavior" in captured.out
+    assert "operator_m6_memory_superiority_benchmark_surface_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
     assert "process_recovery_boundary_behavior" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
@@ -661,6 +700,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "guardian_memory_quality" in captured.out
     assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
+    assert "m6_memory_superiority" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
@@ -674,6 +714,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_memory_quality",
         "guardian_user_model_restraint",
         "memory_continuity_workflows",
+        "m6_memory_superiority",
         "workflow_endurance_and_repair",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

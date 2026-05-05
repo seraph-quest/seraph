@@ -907,6 +907,108 @@ class MemoryRepository:
                 db.expunge(memory)
             return list(memories)
 
+    async def get_memory(self, memory_id: str) -> Memory | None:
+        normalized_memory_id = str(memory_id or "").strip()
+        if not normalized_memory_id:
+            return None
+        async with get_session() as db:
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+            ).scalars().first()
+            if memory is not None:
+                db.expunge(memory)
+            return memory
+
+    async def update_memory_control_metadata(
+        self,
+        memory_id: str,
+        *,
+        status: MemoryStatus | str | None = None,
+        content: str | None = None,
+        summary: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        reinforcement: float | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+        last_confirmed_at: datetime | None = None,
+    ) -> Memory:
+        normalized_memory_id = str(memory_id or "").strip()
+        if not normalized_memory_id:
+            raise ValueError("memory_id must be non-empty")
+
+        def _normalize_timestamp(value: datetime | None) -> datetime | None:
+            if value is None:
+                return None
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        async with get_session() as db:
+            memory = (
+                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+            ).scalars().first()
+            if memory is None:
+                raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+
+            if status is not None:
+                memory.status = _coerce_enum(status, MemoryStatus)
+            if isinstance(content, str):
+                normalized_content = content.strip()
+                if not normalized_content:
+                    raise ValueError("content must be non-empty")
+                memory.content = normalized_content
+            if isinstance(summary, str):
+                memory.summary = summary.strip() or None
+            if confidence is not None:
+                memory.confidence = max(0.0, min(1.0, float(confidence)))
+            if importance is not None:
+                memory.importance = max(0.0, min(1.0, float(importance)))
+            if reinforcement is not None:
+                memory.reinforcement = max(0.0, float(reinforcement))
+            if last_confirmed_at is not None:
+                memory.last_confirmed_at = _normalize_timestamp(last_confirmed_at)
+
+            metadata: dict[str, Any]
+            try:
+                parsed_metadata = json.loads(memory.metadata_json or "{}")
+            except json.JSONDecodeError:
+                parsed_metadata = {}
+            metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
+            if metadata_updates:
+                metadata.update(metadata_updates)
+                memory.metadata_json = json.dumps(metadata, sort_keys=True)
+
+            memory.updated_at = _now()
+            db.add(memory)
+            await db.flush()
+            db.expunge(memory)
+            return memory
+
+    async def update_memory_control(
+        self,
+        memory_id: str,
+        *,
+        status: MemoryStatus | str | None = None,
+        content: str | None = None,
+        summary: str | None = None,
+        confidence: float | None = None,
+        importance: float | None = None,
+        reinforcement: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        last_confirmed_at: datetime | None = None,
+    ) -> Memory:
+        return await self.update_memory_control_metadata(
+            memory_id,
+            status=status,
+            content=content,
+            summary=summary,
+            confidence=confidence,
+            importance=importance,
+            reinforcement=reinforcement,
+            metadata_updates=metadata,
+            last_confirmed_at=last_confirmed_at,
+        )
+
     async def list_memories_for_scope(
         self,
         *,

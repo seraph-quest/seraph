@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 import re
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from config.settings import settings
 from src.agent.session import session_manager
@@ -35,6 +36,9 @@ from src.guardian.benchmark import build_guardian_user_model_benchmark_report
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
+from src.memory.control import apply_memory_operator_control
+from src.memory.superiority import build_m6_memory_superiority_payload
+from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
 from src.security.benchmark import build_trust_boundary_benchmark_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
 from src.observer.insight_queue import insight_queue
@@ -45,6 +49,15 @@ from src.workflows.benchmark import build_m5_operating_layer_benchmark_report, b
 from src.workflows.operating_layer import build_m5_operating_layer_payload
 
 router = APIRouter()
+
+
+class MemoryOperatorControlRequest(BaseModel):
+    action: str = Field(..., description="One of: correct, pin, forget, audit")
+    note: str | None = None
+    content: str | None = None
+    summary: str | None = None
+    privacy_boundary: str | None = None
+    session_id: str | None = None
 
 
 _ENGINEERING_PULL_REQUEST_RE = re.compile(
@@ -2605,6 +2618,7 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
             "memory_reconciliation_diagnostics": list(
                 getattr(state, "memory_reconciliation_diagnostics", ()) or ()
             ),
+            "memory_decision_receipt": getattr(state, "memory_decision_receipt", {}) or {},
             "restraint_reasons": list(getattr(state, "restraint_reasons", ()) or ()),
             "user_model_benchmark_diagnostics": list(
                 getattr(state, "user_model_benchmark_diagnostics", ()) or ()
@@ -2753,6 +2767,7 @@ async def get_operator_benchmark_proof():
         user_model_benchmark,
         workflow_endurance_benchmark,
         m5_operating_layer_benchmark,
+        m6_memory_superiority_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
@@ -2763,6 +2778,7 @@ async def get_operator_benchmark_proof():
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
         build_m5_operating_layer_benchmark_report(),
+        build_m6_memory_superiority_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
@@ -2780,6 +2796,7 @@ async def get_operator_benchmark_proof():
         str(user_model_benchmark["summary"]["benchmark_posture"]),
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
+        str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
@@ -2821,6 +2838,7 @@ async def get_operator_benchmark_proof():
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
+            "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
@@ -2832,6 +2850,7 @@ async def get_operator_benchmark_proof():
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
+        "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
@@ -2863,6 +2882,35 @@ async def get_operator_workflow_endurance_benchmark():
 @router.get("/operator/m5-operating-layer-benchmark")
 async def get_operator_m5_operating_layer_benchmark():
     return await build_m5_operating_layer_benchmark_report()
+
+
+@router.get("/operator/m6-memory-superiority-benchmark")
+async def get_operator_m6_memory_superiority_benchmark():
+    return await build_m6_memory_superiority_benchmark_report()
+
+
+@router.get("/operator/m6-memory-superiority")
+async def get_operator_m6_memory_superiority(
+    session_id: str | None = Query(default=None),
+    query: str | None = Query(default=None),
+):
+    return await build_m6_memory_superiority_payload(session_id=session_id, query=query)
+
+
+@router.post("/operator/memory-control/{memory_id}")
+async def post_operator_memory_control(memory_id: str, request: MemoryOperatorControlRequest):
+    try:
+        return await apply_memory_operator_control(
+            memory_id=memory_id,
+            action=request.action,
+            note=request.note,
+            content=request.content,
+            summary=request.summary,
+            privacy_boundary=request.privacy_boundary,
+            session_id=request.session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/operator/trust-boundary-benchmark")

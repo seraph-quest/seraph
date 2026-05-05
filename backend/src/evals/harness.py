@@ -79,6 +79,10 @@ from src.db.models import MemoryKind
 from src.llm_runtime import FallbackLiteLLMModel, _reset_target_health, completion_with_fallback_sync
 from src.memory.embedder import _reset_embedder_state, embed
 from src.memory.repository import memory_repository
+from src.memory.superiority_benchmark import (
+    M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
+    M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
+)
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
@@ -5576,6 +5580,224 @@ async def _eval_procedural_memory_adaptation_behavior() -> dict[str, Any]:
         }
 
 
+def _eval_m6_long_horizon_recall_behavior() -> dict[str, Any]:
+    from src.api.operator import _build_engineering_memory_bundles
+
+    workflow_runs = [
+        {
+            "workflow_name": "m6-memory-superiority",
+            "summary": "Finish M6 memory superiority for seraph-quest/seraph#612 after seraph-quest/seraph/pull/640 lands.",
+            "status": "running",
+            "started_at": "2026-02-18T10:00:00Z",
+            "updated_at": "2026-02-18T10:08:00Z",
+            "thread_id": "m6-thread",
+            "thread_label": "M6 memory superiority",
+            "thread_continue_message": "Resume the M6 memory superiority batch for seraph-quest/seraph/pull/640.",
+            "artifact_paths": ["docs/implementation/m6-memory-superiority-receipt.md"],
+        },
+        {
+            "workflow_name": "unrelated-refresh",
+            "summary": "Refresh docs for seraph-quest/seraph.",
+            "status": "completed",
+            "started_at": "2026-04-25T10:00:00Z",
+            "updated_at": "2026-04-25T10:03:00Z",
+            "thread_id": "docs-thread",
+            "thread_label": "Docs refresh",
+            "thread_continue_message": "Continue docs refresh for seraph-quest/seraph.",
+            "artifact_paths": [],
+        },
+    ]
+    pending_approvals = [
+        {
+            "tool_name": "write_file",
+            "summary": "Publish the M6 behavior-change receipt.",
+            "risk_level": "high",
+            "created_at": "2026-02-18T10:06:00Z",
+            "thread_id": "m6-thread",
+            "thread_label": "M6 memory superiority",
+            "resume_message": "Continue publication for seraph-quest/seraph/pull/640.",
+            "approval_scope": {"target": {"reference": "seraph-quest/seraph/pull/640"}},
+        }
+    ]
+    audit_events = [
+        {
+            "event_type": "authenticated_source_mutation",
+            "tool_name": "add_review_to_pr",
+            "summary": "Recorded M6 memory superiority review evidence for seraph-quest/seraph/pull/640.",
+            "created_at": "2026-02-18T10:07:00Z",
+            "session_id": "m6-thread",
+            "details": {"target_reference": "seraph-quest/seraph/pull/640"},
+        }
+    ]
+    session_search_matches = [
+        {
+            "session_id": "m6-thread",
+            "title": "M6 memory superiority",
+            "matched_at": "2026-02-18T10:05:00Z",
+            "snippet": "M6 must ship as one ready PR with behavior-change receipts for seraph-quest/seraph/pull/640.",
+            "source": "message",
+        }
+    ]
+
+    bundles = _build_engineering_memory_bundles(
+        workflow_runs,
+        pending_approvals,
+        audit_events,
+        session_search_matches,
+        normalized_query="640 m6 memory superiority",
+        limit_bundles=4,
+        limit_session_matches=2,
+    )
+    pull_request_bundle = next(
+        bundle for bundle in bundles if bundle["reference"] == "seraph-quest/seraph/pull/640"
+    )
+    return {
+        "long_horizon_reference_recalled": pull_request_bundle["reference"] == "seraph-quest/seraph/pull/640",
+        "weeks_old_workflow_receipt_present": pull_request_bundle["workflow_count"] == 1,
+        "approval_receipt_present": pull_request_bundle["approval_count"] == 1,
+        "artifact_receipt_present": pull_request_bundle["artifact_paths"] == [
+            "docs/implementation/m6-memory-superiority-receipt.md"
+        ],
+        "audit_receipt_present": pull_request_bundle["audit_event_count"] == 1,
+        "session_receipt_present": pull_request_bundle["session_match_count"] == 1,
+        "ranked_ahead_of_repository_bundle": bundles[0]["reference"] == "seraph-quest/seraph/pull/640",
+    }
+
+
+async def _eval_m6_contradiction_handling_behavior() -> dict[str, Any]:
+    details = await _eval_memory_contradiction_ranking_behavior()
+    return {
+        "current_truth_kept": details["keeps_current_truth"],
+        "contradiction_suppressed": details["suppresses_lower_ranked_contradiction"],
+        "suppression_receipt_visible": details["suppressed_contradiction_count"],
+        "ranking_policy_visible": details["ranking_policy_visible"],
+        "winner_receipt_visible": details["suppressed_example_reports_winner"],
+    }
+
+
+async def _eval_m6_stale_memory_override_behavior() -> dict[str, Any]:
+    details = await _eval_memory_provider_stale_evidence_behavior()
+    return {
+        "fresh_project_evidence_kept": details["fresh_project_kept"],
+        "stale_collaborator_suppressed": details["stale_collaborator_suppressed"],
+        "stale_hit_receipt_visible": details["stale_hit_count"],
+        "stale_bucket_receipt_visible": details["stale_collaborator_bucket"],
+        "quality_state_guarded": details["quality_state_guarded"],
+    }
+
+
+def _eval_m6_source_trust_privacy_boundary_behavior() -> dict[str, Any]:
+    from src.memory.providers import MemoryProviderInventoryItem
+    from src.memory.superiority_benchmark import m6_memory_superiority_benchmark_policy_payload
+
+    item = MemoryProviderInventoryItem(
+        name="graph-memory",
+        provider_kind="vector_plugin",
+        description="Additive memory provider",
+        enabled=True,
+        configured=True,
+        runtime_state="ready",
+        capabilities=("retrieval", "user_model"),
+        canonical_memory_owner="seraph",
+        canonical_write_mode="additive_only",
+        extension_id="seraph.graph-memory-pack",
+        reference="connectors/memory/graph-memory.yaml",
+    )
+    payload = item.as_payload()
+    serialized = json.dumps(payload, sort_keys=True)
+    policy = m6_memory_superiority_benchmark_policy_payload()
+    return {
+        "canonical_owner_stays_seraph": payload["canonical_memory_owner"] == "seraph",
+        "guardian_authority_visible": payload["memory_contract"]["authoritative_memory"] == "guardian",
+        "provider_advisory_visible": payload["memory_contract"]["provider_model_provenance"] == "external_advisory",
+        "provider_role_additive": payload["memory_contract"]["provider_role"] == "additive_adapter",
+        "config_secret_not_serialized": "api_key" not in serialized and "secret" not in serialized.lower(),
+        "privacy_policy_visible": policy["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts",
+    }
+
+
+async def _eval_m6_provider_quality_behavior() -> dict[str, Any]:
+    details = await _eval_memory_provider_user_model_behavior()
+    return {
+        "provider_runtime_ready": details["provider_runtime_ready"],
+        "provider_user_model_ready": details["provider_user_model_ready"],
+        "provider_quality_focused": details["memory_provider_quality_focused"],
+        "query_hint_receipt_visible": details["provider_query_hint_without_recent_project"],
+        "authority_receipt_visible": details["memory_provider_diagnostics_show_authority"],
+        "diagnostics_visible": details["memory_provider_diagnostics_visible"],
+    }
+
+
+async def _eval_m6_behavior_change_receipts_behavior() -> dict[str, Any]:
+    details = await _eval_procedural_memory_adaptation_behavior()
+    return {
+        "baseline_has_no_unearned_rule": details["baseline_snapshot_has_no_procedural_rule"],
+        "same_session_snapshot_refreshes": details["same_session_snapshot_refreshes"],
+        "learned_timing_rule_visible": details["adapted_memory_context_has_timing_rule"],
+        "learned_delivery_rule_visible": details["adapted_memory_context_has_delivery_rule"],
+        "bounded_context_receipt_visible": details["adapted_bounded_context_has_timing_rule"],
+        "procedural_memory_written": details["active_procedural_memory_count"] >= 1,
+    }
+
+
+async def _eval_operator_m6_memory_superiority_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_m6_memory_superiority_benchmark
+
+    suite_summary = EvalSummary(
+        results=[
+            types.SimpleNamespace(
+                name="m6_long_horizon_recall_behavior",
+                passed=True,
+                error=None,
+            )
+        ],
+        duration_ms=18,
+    )
+    with patch(
+        "src.api.operator.build_m6_memory_superiority_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
+                    "benchmark_posture": "m6_ci_gated_operator_visible",
+                    "operator_status": "m6_memory_superiority_receipts_visible",
+                    "scenario_count": len(M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES),
+                    "dimension_count": 6,
+                    "failure_mode_count": 6,
+                    "active_failure_count": suite_summary.failed,
+                    "long_horizon_recall_state": "workflow_approval_artifact_audit_session_receipts_ranked",
+                    "contradiction_state": "lower_ranked_contradictions_suppressed",
+                    "stale_override_state": "fresh_canonical_or_focused_provider_evidence_wins",
+                    "source_trust_privacy_state": "guardian_authority_external_advisory_no_secret_receipts",
+                    "provider_quality_state": "usefulness_and_degradation_receipts_visible",
+                    "behavior_change_receipt_state": "procedural_memory_receipts_required",
+                },
+                "scenario_names": list(M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES),
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {"ci_gate_mode": "required_benchmark_suite"},
+                "latest_run": {
+                    "total": suite_summary.total,
+                    "passed": suite_summary.passed,
+                    "failed": suite_summary.failed,
+                    "duration_ms": suite_summary.duration_ms,
+                },
+            }
+        ),
+    ):
+        payload = await get_operator_m6_memory_superiority_benchmark()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "m6_memory_superiority_receipts_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES),
+        "long_horizon_state_visible": payload["summary"]["long_horizon_recall_state"] == "workflow_approval_artifact_audit_session_receipts_ranked",
+        "source_trust_privacy_state_visible": payload["summary"]["source_trust_privacy_state"] == "guardian_authority_external_advisory_no_secret_receipts",
+        "behavior_change_receipt_state_visible": payload["summary"]["behavior_change_receipt_state"] == "procedural_memory_receipts_required",
+        "ci_gate_mode_visible": payload["policy"]["ci_gate_mode"] == "required_benchmark_suite",
+    }
+
+
 async def _eval_session_title_generation_background_audit() -> dict[str, Any]:
     sm = SessionManager()
     mock_log_event = AsyncMock()
@@ -10964,6 +11186,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
+    m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
     return {
@@ -10982,6 +11205,11 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
             channels_suite["scenario_count"] == len(CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES)
         ),
         "m2_execution_suite_present": "execution_artifact_registry_behavior" in m2_execution_suite["scenario_names"],
+        "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
+        "m6_memory_suite_scenario_count_matches": (
+            m6_memory_suite["scenario_count"] == len(M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "m6_memory_suite_axis_matches": m6_memory_suite["benchmark_axis"] == "m6_memory_superiority",
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_preference_diversity_behavior" in governed_suite["scenario_names"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -12931,6 +13159,48 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Feedback-derived procedural memory refreshes same-session bounded recall and surfaces the learned rule text in guardian context.",
         runner=_eval_procedural_memory_adaptation_behavior,
+    ),
+    EvalScenario(
+        name="m6_long_horizon_recall_behavior",
+        category="behavior",
+        description="M6 memory superiority recovers weeks-old workflow, approval, artifact, audit, and session receipts by shared work reference.",
+        runner=_eval_m6_long_horizon_recall_behavior,
+    ),
+    EvalScenario(
+        name="m6_contradiction_handling_behavior",
+        category="behavior",
+        description="M6 memory superiority keeps current guardian truth while exposing lower-ranked contradiction suppression receipts.",
+        runner=_eval_m6_contradiction_handling_behavior,
+    ),
+    EvalScenario(
+        name="m6_stale_memory_override_behavior",
+        category="behavior",
+        description="M6 memory superiority keeps fresh project evidence and suppresses stale provider evidence with bucket-level diagnostics.",
+        runner=_eval_m6_stale_memory_override_behavior,
+    ),
+    EvalScenario(
+        name="m6_source_trust_privacy_boundary_behavior",
+        category="behavior",
+        description="M6 memory superiority keeps provider evidence advisory and prevents provider configuration secrets from entering operator receipts.",
+        runner=_eval_m6_source_trust_privacy_boundary_behavior,
+    ),
+    EvalScenario(
+        name="m6_provider_quality_behavior",
+        category="behavior",
+        description="M6 memory superiority requires provider usefulness, topic-match, authority, and diagnostics receipts before provider context shapes memory.",
+        runner=_eval_m6_provider_quality_behavior,
+    ),
+    EvalScenario(
+        name="m6_behavior_change_receipts_behavior",
+        category="behavior",
+        description="M6 memory superiority requires feedback-derived procedural-memory receipts before learned behavior changes same-session guardian context.",
+        runner=_eval_m6_behavior_change_receipts_behavior,
+    ),
+    EvalScenario(
+        name="operator_m6_memory_superiority_benchmark_surface_behavior",
+        category="behavior",
+        description="Operator surfaces expose the M6 memory superiority benchmark, policy, receipt surfaces, and CI gate state.",
+        runner=_eval_operator_m6_memory_superiority_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="session_title_generation_background_audit",

@@ -27,6 +27,10 @@ from src.extensions.connector_health import (
 )
 from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
 from src.extensions.doctor import doctor_snapshot
+from src.extensions.governance import (
+    assert_governance_allows_lifecycle,
+    build_governance_status,
+)
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import (
     ExtensionManifest,
@@ -54,6 +58,7 @@ from src.extensions.scaffold import validate_extension_package
 from src.extensions.state import (
     connector_enabled_override,
     connector_enabled_overrides,
+    extension_state_entries,
     load_extension_state_payload,
     save_extension_state_payload,
     set_connector_enabled_override,
@@ -179,6 +184,90 @@ def _extension_package_digest(root_path: str | None) -> str | None:
     if not root.exists() or not root.is_dir():
         return None
     return _hash_extension_directory(root)
+
+
+def _extension_governance_status(
+    extension: ExtensionRecord,
+    state_entry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return build_governance_status(
+        extension.manifest,
+        root_path=extension.root_path,
+        state_entry=state_entry,
+    )
+
+
+def _raise_if_governance_blocks_lifecycle(
+    extension: ExtensionRecord,
+    *,
+    action: str,
+    state_entry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return assert_governance_allows_lifecycle(
+        extension.manifest,
+        root_path=extension.root_path,
+        state_entry=state_entry,
+        action=action,
+    )
+
+
+def _verified_governance_blocks_runtime_access(
+    extension: ExtensionRecord,
+    state_entry: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if extension.manifest is None:
+        return None
+    governance = _extension_governance_status(extension, state_entry)
+    if extension.manifest.trust.value != "verified" or not governance.get("fail_closed"):
+        return None
+    return governance
+
+
+def _sync_blocked_verified_extension_runtime_access(
+    extension: ExtensionRecord,
+    *,
+    state_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = state_payload if isinstance(state_payload, dict) else _state_payload()
+    state_by_id = payload.setdefault("extensions", {})
+    state_entry = state_by_id.get(extension.id) if isinstance(state_by_id.get(extension.id), dict) else {}
+    governance = _verified_governance_blocks_runtime_access(extension, state_entry)
+    changed: list[dict[str, Any]] = []
+    if governance is None:
+        return {"blocked": False, "governance": None, "changed": changed}
+
+    for contribution in extension.contributions:
+        if contribution.contribution_type in {"managed_connectors", *_PLANNED_CONNECTOR_CONTRIBUTION_TYPES}:
+            if connector_enabled_override(state_entry, contribution.reference) is not False:
+                set_connector_enabled_override(payload, extension.id, contribution.reference, enabled=False)
+                changed.append({
+                    "type": contribution.contribution_type,
+                    "reference": contribution.reference,
+                    "enabled": False,
+                })
+            continue
+        definition = _mcp_definition_for_contribution(contribution)
+        if definition is None:
+            continue
+        runtime_entry = mcp_manager._config.get(definition.name)
+        if isinstance(runtime_entry, dict) and bool(runtime_entry.get("enabled", True)):
+            mcp_manager.update_server(
+                definition.name,
+                enabled=False,
+                extension_id=extension.id,
+                extension_reference=contribution.reference,
+                extension_display_name=extension.display_name,
+                source="extension",
+            )
+            changed.append({
+                "type": "mcp_servers",
+                "reference": contribution.reference,
+                "name": definition.name,
+                "enabled": False,
+            })
+    if changed:
+        _save_state(payload)
+    return {"blocked": True, "governance": governance, "changed": changed}
 
 
 def _version_relation(candidate_version: str, current_version: str | None) -> str:
@@ -1949,6 +2038,8 @@ def _extension_payload(
     toggles = _toggle_targets(extension)
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
     location = _location_for_extension(extension)
+    package_digest = _extension_package_digest(extension.root_path)
+    governance = _extension_governance_status(extension, state_entry)
     contributions = [
         _contribution_payload(extension, contribution, indexes=indexes, state_entry=state_entry)
         for contribution in extension.contributions
@@ -1996,6 +2087,9 @@ def _extension_payload(
         load_errors=extension_load_errors,
         contributions=contributions,
     )
+    status = "ready" if not issues and not extension_load_errors else "degraded"
+    if governance.get("fail_closed"):
+        status = "blocked"
     return {
         "id": extension.id,
         "display_name": extension.display_name,
@@ -2006,8 +2100,9 @@ def _extension_payload(
         "source": extension.source,
         "location": location,
         "root_path": extension.root_path,
-        "package_digest": _extension_package_digest(extension.root_path),
+        "package_digest": package_digest,
         "manifest_path": extension.manifest_path,
+        "governance": governance,
         "summary": extension.manifest.summary if extension.manifest is not None else None,
         "description": extension.manifest.description if extension.manifest is not None else None,
         "compatibility": compatibility,
@@ -2032,7 +2127,7 @@ def _extension_payload(
         "doctor_ok": bool(getattr(doctor_result, "ok", True)),
         "issues": issues,
         "load_errors": extension_load_errors,
-        "status": "ready" if not issues and not extension_load_errors else "degraded",
+        "status": status,
         "diagnostics_summary": diagnostics_summary,
         "toggle_targets": toggles,
         "toggleable_contribution_types": toggleable_types,
@@ -2062,9 +2157,12 @@ def _extension_payload(
 
 def list_extensions() -> dict[str, Any]:
     snapshot = _registry().snapshot()
+    state_payload = _state_payload()
+    for extension in snapshot.extensions:
+        _sync_blocked_verified_extension_runtime_access(extension, state_payload=state_payload)
     doctor = doctor_snapshot(snapshot)
     doctor_by_id = {result.extension_id: result for result in doctor.results}
-    state_by_id = _state_payload()["extensions"]
+    state_by_id = extension_state_entries(state_payload)
     raw_extensions = [
         _extension_payload(
             extension,
@@ -2308,6 +2406,13 @@ def set_extension_connector_enabled(
     if contribution is None:
         raise KeyError(reference)
     if enabled:
+        state_by_id = _state_payload()["extensions"]
+        state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+        _raise_if_governance_blocks_lifecycle(
+            extension,
+            action="enable connector",
+            state_entry=state_entry,
+        )
         _raise_if_capability_enforcement_blocks_enable(extension, contribution)
     if contribution.contribution_type == "managed_connectors":
         return _set_managed_connector_enabled(extension, contribution, enabled=enabled)
@@ -2424,6 +2529,13 @@ def validate_extension_path(path: str) -> dict[str, Any]:
     existing = _registry().snapshot().get_extension(manifest.id)
     report = validate_extension_package(package_root)
     package_digest = _hash_extension_directory(package_root)
+    state_by_id = _state_payload()["extensions"]
+    state_entry = state_by_id.get(manifest.id, {}) if isinstance(state_by_id.get(manifest.id), dict) else {}
+    governance = build_governance_status(
+        manifest,
+        root_path=package_root,
+        state_entry=state_entry,
+    )
     permission_summary = summarize_extension_permissions(
         extension,
         contribution_profiles=[
@@ -2453,6 +2565,7 @@ def validate_extension_path(path: str) -> dict[str, Any]:
         "path": str(package_root),
         "package_digest": package_digest,
         "manifest_path": str(package_root / "manifest.yaml"),
+        "governance": governance,
         "extension_id": manifest.id,
         "display_name": manifest.display_name,
         "version": manifest.version,
@@ -2548,6 +2661,13 @@ def save_extension_source(extension_id: str, reference: str, content: str) -> di
         raise KeyError(extension_id)
     if _location_for_extension(extension) != "workspace":
         raise ValueError(f"extension '{extension_id}' is read-only")
+    state_by_id = _state_payload()["extensions"]
+    state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+    _raise_if_governance_blocks_lifecycle(
+        extension,
+        action="source-save",
+        state_entry=state_entry,
+    )
 
     contribution_type, resolved_path, _ = _resolve_extension_reference(extension, reference)
     if contribution_type not in {"manifest", *sorted(_EDITABLE_STUDIO_TYPES)}:
@@ -2585,6 +2705,14 @@ def install_extension_path(path: str) -> dict[str, Any]:
     report = validate_extension_package(package_root)
     if not report.ok:
         raise ValueError("extension package failed validation")
+    state_by_id = _state_payload()["extensions"]
+    state_entry = state_by_id.get(manifest.id, {}) if isinstance(state_by_id.get(manifest.id), dict) else {}
+    assert_governance_allows_lifecycle(
+        manifest,
+        root_path=package_root,
+        state_entry=state_entry,
+        action="install",
+    )
 
     existing = _registry().snapshot().get_extension(manifest.id)
     if existing is not None:
@@ -2614,6 +2742,14 @@ def update_extension_path(path: str) -> dict[str, Any]:
     report = validate_extension_package(package_root)
     if not report.ok:
         raise ValueError("extension package failed validation")
+    state_by_id = _state_payload()["extensions"]
+    candidate_state_entry = state_by_id.get(manifest.id, {}) if isinstance(state_by_id.get(manifest.id), dict) else {}
+    assert_governance_allows_lifecycle(
+        manifest,
+        root_path=package_root,
+        state_entry=candidate_state_entry,
+        action="update",
+    )
 
     snapshot = _registry().snapshot()
     existing = snapshot.get_extension(manifest.id)
@@ -2659,6 +2795,13 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     if extension is None:
         raise KeyError(extension_id)
     if enabled:
+        state_by_id = _state_payload()["extensions"]
+        state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+        _raise_if_governance_blocks_lifecycle(
+            extension,
+            action="enable",
+            state_entry=state_entry,
+        )
         doctor_report = doctor_snapshot(snapshot)
         doctor_result = next(
             (result for result in doctor_report.results if result.extension_id == extension_id),
@@ -2871,6 +3014,14 @@ def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, 
         raise KeyError(extension_id)
     if not isinstance(config, dict):
         raise ValueError("extension config must be an object")
+    state_payload = _state_payload()
+    state_by_id = state_payload["extensions"]
+    state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+    _raise_if_governance_blocks_lifecycle(
+        extension,
+        action="configure",
+        state_entry=state_entry,
+    )
     configurable_types = {
         "managed_connectors",
         "memory_providers",
@@ -2911,7 +3062,7 @@ def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, 
             raise ValueError(
                 f"unknown {contribution_type} config entries: " + ", ".join(unknown_names)
             )
-    payload = _state_payload()
+    payload = state_payload
     extensions = payload.setdefault("extensions", {})
     entry = extensions.setdefault(extension_id, {})
     existing_config = entry.get("config")

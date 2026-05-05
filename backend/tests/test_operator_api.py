@@ -1385,12 +1385,55 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 ],
             }
         ),
+    ), patch(
+        "src.api.operator.build_m9_governed_ecosystem_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m9_governed_ecosystem",
+                    "benchmark_posture": "m9_ci_gated_operator_visible",
+                    "operator_status": "m9_governed_ecosystem_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 6,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "manifest_governance_state": "version_compatibility_publisher_trust_and_permissions_visible",
+                    "lifecycle_review_gate_state": "privileged_lifecycle_actions_review_gated",
+                    "connector_health_state": "degraded_connectors_fail_closed_with_operator_repair",
+                    "marketplace_governance_state": "readiness_blockers_trust_and_actions_visible",
+                    "diagnostics_update_triage_state": "repair_review_or_defer_triage_visible",
+                    "claim_boundary": "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security",
+                },
+                "scenario_names": [
+                    "m9_manifest_governance_behavior",
+                    "m9_lifecycle_review_gate_behavior",
+                    "m9_connector_health_degradation_behavior",
+                    "m9_marketplace_governance_flow_behavior",
+                    "m9_diagnostics_update_triage_behavior",
+                    "operator_m9_governed_ecosystem_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "governance_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "connector_health_policy": "degraded_managed_connectors_fail_closed_with_operator_repair_guidance",
+                    "claim_boundary": "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security",
+                    "receipt_surfaces": [
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/m9-governed-ecosystem-benchmark",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+            }
+        ),
     ):
         resp = await client.get("/api/operator/benchmark-proof")
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 15
+    assert payload["summary"]["suite_count"] == 16
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1404,6 +1447,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
+    assert payload["summary"]["m9_governed_ecosystem_benchmark_posture"] == "m9_ci_gated_operator_visible"
+    assert (
+        payload["summary"]["m9_governed_ecosystem_claim_boundary"]
+        == "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
+    )
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -1416,6 +1464,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["governed_improvement"]["recent_receipts"][0]["acceptance_state"] == "ready_for_canary"
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
@@ -1450,6 +1499,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
+    m9_suite = next(item for item in payload["suites"] if item["name"] == "m9_governed_ecosystem")
+    assert "m9_manifest_governance_behavior" in m9_suite["scenario_names"]
+    assert m9_suite["scenario_count"] == 6
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -1471,6 +1523,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
     assert payload["m6_memory_superiority_benchmark"]["policy"]["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts"
+    assert payload["m9_governed_ecosystem_benchmark"]["summary"]["suite_name"] == "m9_governed_ecosystem"
+    assert (
+        payload["m9_governed_ecosystem_benchmark"]["policy"]["claim_boundary"]
+        == "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
+    )
 
 
 @pytest.mark.asyncio
@@ -1486,6 +1543,35 @@ async def test_operator_governed_improvement_benchmark_surface_reports_policy_an
     assert payload["policy"]["preference_diversity_policy"] == "block_preference_collapse_and_watch_single_signal_edits"
     assert payload["policy"]["canary_rollout_policy"] == "saved_review_candidates_remain_canary_only_until_reviewed_promotion"
     assert "/api/operator/governed-improvement-benchmark" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_m9_governed_ecosystem_benchmark_surface_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/m9-governed-ecosystem-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "m9_governed_ecosystem"
+    assert payload["summary"]["operator_status"] == "m9_governed_ecosystem_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["manifest_governance_state"] == "version_compatibility_publisher_trust_and_permissions_visible"
+    assert payload["summary"]["connector_health_state"] == "degraded_connectors_fail_closed_with_operator_repair"
+    assert payload["summary"]["claim_boundary"] == (
+        "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
+    )
+    assert len(payload["dimensions"]) >= 6
+    assert len(payload["failure_taxonomy"]) >= 6
+    assert payload["policy"]["manifest_governance_policy"] == (
+        "packages_must_expose_version_compatibility_publisher_trust_and_declared_permissions"
+    )
+    assert payload["policy"]["connector_health_policy"] == (
+        "degraded_managed_connectors_fail_closed_with_operator_repair_guidance"
+    )
+    assert payload["policy"]["claim_boundary"] == (
+        "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
+    )
+    assert "/api/operator/m9-governed-ecosystem-benchmark" in payload["policy"]["receipt_surfaces"]
+    assert payload["governance_receipts"][0]["scenario_id"] == "m9_manifest_governance_behavior"
 
 
 @pytest.mark.asyncio

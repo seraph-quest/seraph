@@ -406,3 +406,60 @@ contributes:
         )
 
     assert "duplicate path" in str(exc_info.value)
+
+
+def test_parse_rejects_verified_manifest_without_governance_contract():
+    with pytest.raises(ExtensionManifestError) as exc_info:
+        parse_extension_manifest(
+            """
+id: seraph.verified-claim-only
+version: 2026.3.21
+display_name: Verified Claim Only
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: verified
+contributes:
+  skills:
+    - skills/helper.md
+"""
+        )
+
+    assert "verified manifests must include governance provenance and signature" in str(exc_info.value)
+
+
+def test_parse_accepts_verified_manifest_with_provenance_and_signature_contract():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.verified-pack
+version: 2026.3.21
+display_name: Verified Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: verified
+governance:
+  provenance:
+    source: seraph-catalog
+    publisher_id: seraph
+    url: https://example.test/seraph/verified-pack
+  signature:
+    algorithm: seraph-sha256-v1
+    key_id: seraph-root-2026
+    digest: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    signature: seraph-sha256-v1:seraph-root-2026:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+contributes:
+  skills:
+    - skills/helper.md
+"""
+    )
+
+    assert manifest.trust.value == "verified"
+    assert manifest.governance is not None
+    assert manifest.governance.provenance.source == "seraph-catalog"
+    assert manifest.governance.signature is not None
+    assert manifest.governance.signature.key_id == "seraph-root-2026"

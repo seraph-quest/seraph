@@ -226,8 +226,8 @@ Implementation meaning: guardian intelligence should improve which capabilities 
 Implementation meaning: no strategic claim should be considered real unless the implementation, the benchmark, and the operator demo all agree.
 
 - competitive frame: Hermes is strong on terminal ergonomics, background sessions, broad tools, MCP, browser work, memory, and channels; OpenClaw is strong on operator control UI, tool events, health/log/config, multi-agent composition, browser execution, sandboxing, and gateway security; IronClaw is strong on security-first execution, permissions, isolation, routines, hooks, extensions, and multi-surface control; adjacent agents such as Claude Code, Codex, Cursor, Devin-style workers, OpenHands, Aider, Goose, LangGraph-style builders, and browser/computer-use agents prove that the category is moving toward supervised capability composition
-- shipped foundations: deterministic runtime evals, named benchmark suites for memory, workflow endurance, trust boundaries, computer use, M4 channel/device boundary proof, governed improvement, and operator-readable receipts for several key execution seams
-- missing strategic gaps: broader live-provider and real-world integration proof, stronger coverage for future delegated and browser paths, and more repeatable proof surfaces for claims that would otherwise stay aspirational
+- shipped foundations: deterministic runtime evals, named benchmark suites for memory, workflow endurance, trust boundaries, computer use, M4 channel/device boundary proof, M9 governed-ecosystem foundations, governed improvement, and operator-readable receipts for several key execution seams
+- missing strategic gaps: broader live-provider and real-world integration proof, stronger coverage for future delegated and browser paths, production marketplace security proof, and more repeatable proof surfaces for claims that would otherwise stay aspirational
 - proof requirements: every major strategy item needs an explicit benchmark, a concrete operator-visible demo path, and a traceable implementation receipt on `develop`
 
 ## M9 Governed Ecosystem
@@ -235,8 +235,9 @@ Implementation meaning: no strategic claim should be considered real unless the 
 Implementation meaning: extension capability should stay typed, governable, and easy to reason about, with clear core-vs-extension boundaries and a stable capability taxonomy.
 
 - shipped foundations: skills, MCP, starter packs, extension lifecycle, package health, capability discovery, managed connectors, typed source adapters, catalog extensions, and cockpit-visible operator control over packaged capability surfaces
-- missing strategic gaps: stronger typed extension contracts across all extension kinds, more explicit managed-connector governance, clearer version and compatibility semantics, review/verification flows, and a stable taxonomy that keeps core features separate from extension contributions
-- proof requirements: manifest and lifecycle validation, compatibility and enable/disable receipts, connector and extension health proofs, and operator surfaces that show why a capability exists, where it came from, and what trust level it carries
+- shipped in the M9 governed-ecosystem proof slice on this branch: `m9_governed_ecosystem` gates deterministic manifest governance, lifecycle review gates, connector degradation truth, marketplace governance flow, diagnostics/update triage, and `/api/operator/m9-governed-ecosystem-benchmark` operator receipts with an explicit claim boundary: local deterministic governance proof, not competitor superiority or production marketplace security
+- missing strategic gaps: stronger typed extension contracts across all extension kinds, broader managed-connector governance, deeper version and compatibility semantics, review/verification flows, production marketplace security, and a stable taxonomy that keeps core features separate from extension contributions
+- proof requirements: manifest and lifecycle validation, compatibility and enable/disable receipts, connector and extension health proofs, marketplace/review receipts, and operator surfaces that show why a capability exists, where it came from, what trust level it carries, and which claim boundary applies
 
 ## Guardrail Product Boundary Discipline
 

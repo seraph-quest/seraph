@@ -108,6 +108,57 @@ class ExtensionPublisher(BaseModel):
         return value
 
 
+class ExtensionProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    publisher_id: str | None = None
+    url: str | None = None
+    catalog_entry: str | None = None
+
+    @field_validator("source", "publisher_id", "url", "catalog_entry")
+    @classmethod
+    def _validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+
+class ExtensionSignature(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key_id: str
+    digest: str
+    signature: str
+    algorithm: str = "seraph-sha256-v1"
+
+    @field_validator("key_id", "digest", "signature", "algorithm")
+    @classmethod
+    def _validate_non_empty_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        value = value.strip().lower()
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError("must be a lowercase SHA-256 hex digest")
+        return value
+
+
+class ExtensionGovernanceContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provenance: ExtensionProvenance
+    signature: ExtensionSignature | None = None
+
+
 class ExtensionCompatibility(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -235,6 +286,7 @@ class ExtensionManifest(BaseModel):
     trust: ExtensionTrust
     permissions: ExtensionPermissions = Field(default_factory=ExtensionPermissions)
     contributes: ExtensionContributionPaths
+    governance: ExtensionGovernanceContract | None = None
     summary: str | None = None
     description: str | None = None
 
@@ -287,6 +339,12 @@ class ExtensionManifest(BaseModel):
 
         if self.kind == ExtensionKind.CONNECTOR_PACK and not contributions.intersection(_CONNECTOR_FIELDS):
             raise ValueError("connector-pack manifests must contribute at least one connector surface")
+
+        if self.trust == ExtensionTrust.VERIFIED:
+            if self.governance is None:
+                raise ValueError("verified manifests must include governance provenance and signature")
+            if self.governance.signature is None:
+                raise ValueError("verified manifests must include a governance signature")
 
         return self
 

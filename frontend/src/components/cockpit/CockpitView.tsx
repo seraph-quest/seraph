@@ -977,6 +977,64 @@ interface OperatorM7Cockpit {
   };
 }
 
+interface OperatorM8GuardianBrainReceipt {
+  scenario_id: string;
+  action: string;
+  reason: string;
+  signal: string;
+  selected_capability?: {
+    id: string;
+    label: string;
+    lane: string;
+    risk_level: string;
+    requires_approval: boolean;
+    trust_level?: string;
+    channel?: string;
+  } | null;
+  rejected_capabilities: Array<{
+    id: string;
+    label: string;
+    lane: string;
+    risk_level: string;
+  }>;
+  inputs: Record<string, unknown>;
+  scores: {
+    timing?: string;
+    usefulness?: string;
+    false_positive_risk?: string;
+    false_negative_risk?: string;
+    trust_preservation?: string;
+    recovery?: string;
+  };
+  operator_correction: {
+    can_correct_action: boolean;
+    can_correct_capability: boolean;
+    receipt_surface: string;
+  };
+  claim_boundary: string;
+}
+
+interface OperatorM8GuardianBrain {
+  summary: {
+    operator_status: string;
+    decision_count: number;
+    action_count: number;
+    restraint_count: number;
+    capability_choice_count: number;
+    approval_preservation_count: number;
+    score_dimensions: string[];
+    guardian_action_posture: string;
+    intent_resolution: string;
+    claim_boundary: string;
+    receipt_source?: string;
+  };
+  decision_receipts: OperatorM8GuardianBrainReceipt[];
+  capability_choices: NonNullable<OperatorM8GuardianBrainReceipt["selected_capability"]>[];
+  restraint_receipts: OperatorM8GuardianBrainReceipt[];
+  approval_receipts: OperatorM8GuardianBrainReceipt[];
+  proof_receipts: string[];
+}
+
 interface OperatorEngineeringMemorySessionMatch {
   session_id?: string | null;
   title?: string | null;
@@ -4040,6 +4098,115 @@ function normalizeOperatorM7Cockpit(value: unknown): OperatorM7Cockpit | null {
   };
 }
 
+function normalizeOperatorM8GuardianBrain(value: unknown): OperatorM8GuardianBrain | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const normalizeCapability = (entry: unknown) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const capability = entry as Record<string, unknown>;
+    return {
+      id: typeof capability.id === "string" ? capability.id : "capability",
+      label: typeof capability.label === "string" ? capability.label : "Capability",
+      lane: typeof capability.lane === "string" ? capability.lane : "unknown",
+      risk_level: typeof capability.risk_level === "string" ? capability.risk_level : "unknown",
+      requires_approval: Boolean(capability.requires_approval),
+      trust_level: typeof capability.trust_level === "string" ? capability.trust_level : undefined,
+      channel: typeof capability.channel === "string" ? capability.channel : undefined,
+    };
+  };
+  const normalizeReceipt = (entry: unknown): OperatorM8GuardianBrainReceipt[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const receipt = entry as Record<string, unknown>;
+    const scenarioId = typeof receipt.scenario_id === "string" ? receipt.scenario_id : "";
+    if (!scenarioId) return [];
+    const selectedCapability = normalizeCapability(receipt.selected_capability);
+    const scores = receipt.scores && typeof receipt.scores === "object" && !Array.isArray(receipt.scores)
+      ? receipt.scores as Record<string, unknown>
+      : {};
+    const correction = receipt.operator_correction && typeof receipt.operator_correction === "object" && !Array.isArray(receipt.operator_correction)
+      ? receipt.operator_correction as Record<string, unknown>
+      : {};
+    return [{
+      scenario_id: scenarioId,
+      action: typeof receipt.action === "string" ? receipt.action : "unknown",
+      reason: typeof receipt.reason === "string" ? receipt.reason : "unknown",
+      signal: typeof receipt.signal === "string" ? receipt.signal : "",
+      selected_capability: selectedCapability,
+      rejected_capabilities: Array.isArray(receipt.rejected_capabilities)
+        ? receipt.rejected_capabilities.flatMap((item) => {
+          const capability = normalizeCapability(item);
+          return capability ? [capability] : [];
+        })
+        : [],
+      inputs: receipt.inputs && typeof receipt.inputs === "object" && !Array.isArray(receipt.inputs)
+        ? receipt.inputs as Record<string, unknown>
+        : {},
+      scores: {
+        timing: typeof scores.timing === "string" ? scores.timing : undefined,
+        usefulness: typeof scores.usefulness === "string" ? scores.usefulness : undefined,
+        false_positive_risk: typeof scores.false_positive_risk === "string" ? scores.false_positive_risk : undefined,
+        false_negative_risk: typeof scores.false_negative_risk === "string" ? scores.false_negative_risk : undefined,
+        trust_preservation: typeof scores.trust_preservation === "string" ? scores.trust_preservation : undefined,
+        recovery: typeof scores.recovery === "string" ? scores.recovery : undefined,
+      },
+      operator_correction: {
+        can_correct_action: Boolean(correction.can_correct_action),
+        can_correct_capability: Boolean(correction.can_correct_capability),
+        receipt_surface: typeof correction.receipt_surface === "string" ? correction.receipt_surface : "",
+      },
+      claim_boundary: typeof receipt.claim_boundary === "string"
+        ? receipt.claim_boundary
+        : "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+    }];
+  };
+  const decisionReceipts = Array.isArray(record.decision_receipts)
+    ? record.decision_receipts.flatMap(normalizeReceipt)
+    : [];
+  const capabilityChoices = Array.isArray(record.capability_choices)
+    ? record.capability_choices.flatMap((entry) => {
+      const capability = normalizeCapability(entry);
+      return capability ? [capability] : [];
+    })
+    : [];
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      decision_count: numberValue(summaryRecord.decision_count),
+      action_count: numberValue(summaryRecord.action_count),
+      restraint_count: numberValue(summaryRecord.restraint_count),
+      capability_choice_count: numberValue(summaryRecord.capability_choice_count),
+      approval_preservation_count: numberValue(summaryRecord.approval_preservation_count),
+      score_dimensions: stringList(summaryRecord.score_dimensions),
+      guardian_action_posture: typeof summaryRecord.guardian_action_posture === "string" ? summaryRecord.guardian_action_posture : "unknown",
+      intent_resolution: typeof summaryRecord.intent_resolution === "string" ? summaryRecord.intent_resolution : "unknown",
+      claim_boundary: typeof summaryRecord.claim_boundary === "string"
+        ? summaryRecord.claim_boundary
+        : "deterministic_guardian_judgment_receipts_not_live_superiority_claim",
+      receipt_source: typeof summaryRecord.receipt_source === "string" ? summaryRecord.receipt_source : undefined,
+    },
+    decision_receipts: decisionReceipts,
+    capability_choices: capabilityChoices,
+    restraint_receipts: Array.isArray(record.restraint_receipts)
+      ? record.restraint_receipts.flatMap(normalizeReceipt)
+      : [],
+    approval_receipts: Array.isArray(record.approval_receipts)
+      ? record.approval_receipts.flatMap(normalizeReceipt)
+      : [],
+    proof_receipts: stringList(record.proof_receipts),
+  };
+}
+
 function normalizeOperatorEngineeringMemory(value: unknown): OperatorEngineeringMemory | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -5527,6 +5694,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
   const [operatorM6MemorySuperiority, setOperatorM6MemorySuperiority] = useState<OperatorM6MemorySuperiority | null>(null);
   const [operatorM7Cockpit, setOperatorM7Cockpit] = useState<OperatorM7Cockpit | null>(null);
+  const [operatorM8GuardianBrain, setOperatorM8GuardianBrain] = useState<OperatorM8GuardianBrain | null>(null);
   const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
@@ -5711,6 +5879,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       m5OperatingLayerResult,
       m6MemorySuperiorityResult,
       m7CockpitResult,
+      m8GuardianBrainResult,
       engineeringMemoryResult,
       continuityGraphResult,
       workflowRunsResult,
@@ -5735,6 +5904,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
       fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
       fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
@@ -5802,6 +5972,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
     setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
     setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
+    setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
     setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
@@ -12094,6 +12265,63 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   {operatorGuardianState?.explanation.judgment_proof_lines.length
                     ? operatorGuardianState.explanation.judgment_proof_lines.join(" • ")
                     : "No explicit proof lines surfaced yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 guardian brain</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain
+                    ? [
+                      `${operatorM8GuardianBrain.summary.decision_count} decisions`,
+                      `${operatorM8GuardianBrain.summary.capability_choice_count} capability choices`,
+                      `${operatorM8GuardianBrain.summary.restraint_count} restraint receipts`,
+                      `${operatorM8GuardianBrain.summary.approval_preservation_count} approval-preserving paths`,
+                      operatorM8GuardianBrain.summary.receipt_source?.replace(/_/g, " "),
+                    ].filter(Boolean).join(" • ")
+                    : "M8 guardian-brain receipts pending."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 action split</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain?.decision_receipts.length
+                    ? operatorM8GuardianBrain.decision_receipts
+                      .map((receipt) => `${receipt.action.replace(/_/g, " ")}: ${receipt.reason.replace(/_/g, " ")}`)
+                      .join(" • ")
+                    : "No M8 action receipts surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 capability choice</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain?.capability_choices.length
+                    ? operatorM8GuardianBrain.capability_choices
+                      .slice(0, 4)
+                      .map((capability) => [
+                        capability.label,
+                        capability.lane.replace(/_/g, " "),
+                        capability.risk_level.replace(/_/g, " "),
+                        capability.requires_approval ? "approval required" : null,
+                      ].filter(Boolean).join(" · "))
+                      .join(" • ")
+                    : "No M8 capability-choice receipts surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 quality scores</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain?.decision_receipts.length
+                    ? operatorM8GuardianBrain.decision_receipts
+                      .slice(0, 3)
+                      .map((receipt) => [
+                        receipt.scenario_id.replace(/_/g, " "),
+                        receipt.scores.timing ? `timing ${receipt.scores.timing}` : null,
+                        receipt.scores.usefulness ? `usefulness ${receipt.scores.usefulness}` : null,
+                        receipt.scores.trust_preservation ? `trust ${receipt.scores.trust_preservation}` : null,
+                        receipt.scores.recovery ? `recovery ${receipt.scores.recovery}` : null,
+                      ].filter(Boolean).join(" · "))
+                      .join(" • ")
+                    : "No M8 quality-score receipts surfaced."}
                 </div>
               </div>
               <div className="cockpit-context-block">

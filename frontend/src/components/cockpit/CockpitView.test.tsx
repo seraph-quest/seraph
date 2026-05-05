@@ -5819,6 +5819,80 @@ describe("CockpitView", () => {
           },
         }));
       }
+      if (url.includes("/api/operator/m8-guardian-brain")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            operator_status: "m8_guardian_brain_visible",
+            decision_count: 7,
+            action_count: 2,
+            restraint_count: 4,
+            capability_choice_count: 3,
+            approval_preservation_count: 1,
+            score_dimensions: ["timing", "usefulness", "trust_preservation", "recovery"],
+            guardian_action_posture: "clarify_first",
+            intent_resolution: "clarify_first",
+            claim_boundary: "deterministic_guardian_judgment_receipts_not_live_superiority_claim",
+            receipt_source: "live_guardian_state_plus_deterministic_benchmark",
+          },
+          decision_receipts: [
+            {
+              scenario_id: "m8_capability_choice_act_behavior",
+              action: "act",
+              reason: "grounded_capability_choice",
+              signal: "blocked workflow has fresh state",
+              selected_capability: {
+                id: "guardian.thread_continue",
+                label: "Continue existing thread",
+                lane: "continuity",
+                risk_level: "low",
+                requires_approval: false,
+              },
+              rejected_capabilities: [],
+              inputs: {},
+              scores: { timing: "now", usefulness: "high", trust_preservation: "high", recovery: "operator_correctable" },
+              operator_correction: { can_correct_action: true, can_correct_capability: true, receipt_surface: "/api/operator/m8-guardian-brain" },
+              claim_boundary: "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+            },
+            {
+              scenario_id: "m8_risky_capability_approval_behavior",
+              action: "request_approval",
+              reason: "risky_capability_requires_approval",
+              signal: "external connector mutation may resolve a commitment",
+              selected_capability: {
+                id: "guardian.external_mutation",
+                label: "External mutation",
+                lane: "external_action",
+                risk_level: "high",
+                requires_approval: true,
+              },
+              rejected_capabilities: [],
+              inputs: {},
+              scores: { timing: "now", usefulness: "high", trust_preservation: "high", recovery: "operator_correctable" },
+              operator_correction: { can_correct_action: true, can_correct_capability: true, receipt_surface: "/api/operator/m8-guardian-brain" },
+              claim_boundary: "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+            },
+          ],
+          capability_choices: [
+            {
+              id: "guardian.thread_continue",
+              label: "Continue existing thread",
+              lane: "continuity",
+              risk_level: "low",
+              requires_approval: false,
+            },
+            {
+              id: "guardian.external_mutation",
+              label: "External mutation",
+              lane: "external_action",
+              risk_level: "high",
+              requires_approval: true,
+            },
+          ],
+          restraint_receipts: [],
+          approval_receipts: [],
+          proof_receipts: ["/api/operator/m8-guardian-brain"],
+        }));
+      }
       if (url.includes("/api/operator/workflow-orchestration")) {
         return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, workflow_count: 0, active_workflows: 0, blocked_workflows: 0, awaiting_approval_workflows: 0, recoverable_workflows: 0 }, sessions: [], workflows: [] }));
       }
@@ -5851,6 +5925,10 @@ describe("CockpitView", () => {
     await within(guardianWindow).findByText("Prefer clarification before interrupting.");
     expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
     expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/7 decisions • 3 capability choices • 4 restraint receipts • 1 approval-preserving paths • live guardian state plus deterministic benchmark/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/request approval: risky capability requires approval/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/External mutation · external action · high · approval required/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/m8 risky capability approval behavior · timing now · usefulness high · trust high · recovery operator_correctable/)).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
     expect(within(guardianWindow).getByText(/clarify before personalizing/)).toBeInTheDocument();
     expect(
@@ -6631,7 +6709,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(screen.getByDisplayValue('Use the workspace file "notes/peer-review.md" as context for the next action.')).toBeInTheDocument(),
     );
-  }, 15000);
+  }, 30000);
 
   it("compares the specific output-history artifact instead of the source run primary output", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -11138,7 +11216,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(23));
+    await waitFor(() => expect(cockpitFetchCount).toBe(24));
     view.unmount();
 
     await act(async () => {

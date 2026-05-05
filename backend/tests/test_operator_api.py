@@ -713,6 +713,45 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_m5_operating_layer_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m5_jobs_routines_workflows_delegation",
+                    "benchmark_posture": "m5_ci_gated_operator_visible",
+                    "operator_status": "m5_operating_layer_visible",
+                    "scenario_count": 5,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "scheduled_job_run_history_state": "durable_per_run_receipts_visible",
+                    "pause_resume_state": "disabled_jobs_skip_without_firing",
+                    "workflow_projection_state": "audit_projected_claim_boundary_visible",
+                    "delegation_partition_state": "trust_receipts_operator_visible",
+                },
+                "scenario_names": [
+                    "m5_operating_layer_payload_behavior",
+                    "scheduled_job_run_history_behavior",
+                    "scheduled_job_pause_resume_no_fire_behavior",
+                    "delegation_trust_partition_receipt_behavior",
+                    "operator_m5_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "workflow_projection_policy": "workflow_runs_are_audit_projected_until_a_durable_executor_exists",
+                    "ci_gate_mode": "required_benchmark_suite",
+                    "receipt_surfaces": [
+                        "/api/operator/m5-operating-layer",
+                        "/api/operator/m5-operating-layer-benchmark",
+                        "/api/operator/benchmark-proof",
+                    ],
+                },
+                "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_secure_capability_host_benchmark_report",
         AsyncMock(
             return_value={
@@ -931,18 +970,20 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 11
+    assert payload["summary"]["suite_count"] == 12
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -1899,6 +1940,129 @@ async def test_operator_background_sessions_surface_managed_processes_and_branch
     assert second["blocked_workflows"] == 1
     assert second["branch_handoff"]["target_type"] == "workflow_run"
     assert second["continue_message"] == "Resume cleanup after approval."
+
+
+@pytest.mark.asyncio
+async def test_operator_m5_operating_layer_surfaces_jobs_runs_workflows_and_delegation(client):
+    with (
+        patch(
+            "src.api.operator.scheduled_job_repository.list_jobs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "job-brief",
+                        "name": "Morning brief",
+                        "enabled": True,
+                        "trigger_type": "cron",
+                        "trigger_spec": {"cron": "0 9 * * *", "timezone": "UTC"},
+                        "action_type": "deliver_message",
+                        "action_spec": {"content": "Review priorities", "intervention_type": "advisory", "urgency": 3},
+                        "session_id": "session-1",
+                        "created_by_session_id": "session-1",
+                        "last_run_at": "2026-05-05T09:00:00+00:00",
+                        "last_outcome": "delivered",
+                    },
+                    {
+                        "id": "job-workflow",
+                        "name": "Release routine",
+                        "enabled": False,
+                        "trigger_type": "cron",
+                        "trigger_spec": {"cron": "0 13 * * 1", "timezone": "UTC"},
+                        "action_type": "run_workflow",
+                        "action_spec": {"workflow_name": "release-check", "workflow_args": {"project": "Seraph"}},
+                        "session_id": "session-2",
+                        "created_by_session_id": "session-2",
+                        "last_run_at": "2026-05-05T13:00:00+00:00",
+                        "last_outcome": "skipped_disabled",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.scheduled_job_repository.list_run_history",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-brief",
+                        "scheduled_job_id": "job-brief",
+                        "job_name": "Morning brief",
+                        "trigger_type": "cron",
+                        "action_type": "deliver_message",
+                        "session_id": "session-1",
+                        "created_by_session_id": "session-1",
+                        "status": "finished",
+                        "outcome": "delivered",
+                        "error": None,
+                        "approval_id": None,
+                        "started_at": "2026-05-05T09:00:00+00:00",
+                        "finished_at": "2026-05-05T09:00:01+00:00",
+                        "metadata": {"delivery_outcome": "delivered"},
+                    },
+                    {
+                        "id": "run-paused",
+                        "scheduled_job_id": "job-workflow",
+                        "job_name": "Release routine",
+                        "trigger_type": "cron",
+                        "action_type": "run_workflow",
+                        "session_id": "session-2",
+                        "created_by_session_id": "session-2",
+                        "status": "skipped",
+                        "outcome": "skipped_disabled",
+                        "error": None,
+                        "approval_id": None,
+                        "started_at": "2026-05-05T13:00:00+00:00",
+                        "finished_at": "2026-05-05T13:00:00+00:00",
+                        "metadata": {"skip_reason": "job_disabled"},
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "run_identity": "session-1:workflow_release:root",
+                        "root_run_identity": "session-1:workflow_release:root",
+                        "workflow_name": "release-check",
+                        "status": "awaiting_approval",
+                        "availability": "blocked",
+                        "thread_id": "session-1",
+                        "branch_kind": "branch_from_checkpoint",
+                        "branch_depth": 1,
+                        "checkpoint_candidates": [{"step_id": "draft"}],
+                        "retry_from_step_draft": "Retry from draft.",
+                        "replay_allowed": False,
+                        "replay_block_reason": "approval_context_changed",
+                        "pending_approval_count": 1,
+                        "approval_context": {
+                            "delegated_specialists": ["workflow_runner"],
+                            "delegated_tool_names": ["write_file"],
+                            "trust_partition": {"mode": "delegated_specialist", "blocked": False},
+                        },
+                        "step_records": [{"id": "draft", "status": "awaiting_approval", "is_recoverable": True}],
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Release", "updated_at": "2026-05-05T09:01:00Z"}]),
+        ),
+        patch("src.api.operator.process_runtime_manager.list_all_processes", return_value=[]),
+    ):
+        resp = await client.get("/api/operator/m5-operating-layer")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["routine_count"] == 2
+    assert payload["summary"]["scheduled_job_run_count"] == 2
+    assert payload["routines"][1]["latest_run"]["outcome"] == "skipped_disabled"
+    assert payload["workflows"][0]["claim_boundary"] == "audit_projected_workflow_receipt_not_durable_state_machine"
+    assert payload["workflows"][0]["delegation_receipt"]["delegation_present"] is True
+    assert payload["claim_boundaries"]["implemented_triggers"] == ["cron"]
+    assert "heartbeat" in payload["claim_boundaries"]["future_triggers"]
+    assert "full_durable_workflow_state_machine" in payload["claim_boundaries"]["not_claimed"]
 
 
 @pytest.mark.asyncio

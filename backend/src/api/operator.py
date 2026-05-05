@@ -39,8 +39,10 @@ from src.security.benchmark import build_trust_boundary_benchmark_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
+from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.tools.process_tools import process_runtime_manager
-from src.workflows.benchmark import build_workflow_endurance_benchmark_report
+from src.workflows.benchmark import build_m5_operating_layer_benchmark_report, build_workflow_endurance_benchmark_report
+from src.workflows.operating_layer import build_m5_operating_layer_payload
 
 router = APIRouter()
 
@@ -2750,6 +2752,7 @@ async def get_operator_benchmark_proof():
         memory_benchmark,
         user_model_benchmark,
         workflow_endurance_benchmark,
+        m5_operating_layer_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
@@ -2759,6 +2762,7 @@ async def get_operator_benchmark_proof():
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
+        build_m5_operating_layer_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
@@ -2775,6 +2779,7 @@ async def get_operator_benchmark_proof():
         str(memory_benchmark["summary"]["benchmark_posture"]),
         str(user_model_benchmark["summary"]["benchmark_posture"]),
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
+        str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
@@ -2815,6 +2820,7 @@ async def get_operator_benchmark_proof():
             "memory_benchmark_posture": memory_benchmark["summary"]["benchmark_posture"],
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
+            "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
@@ -2825,6 +2831,7 @@ async def get_operator_benchmark_proof():
         "memory_benchmark": memory_benchmark,
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
+        "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
@@ -2851,6 +2858,11 @@ async def get_operator_memory_benchmark():
 @router.get("/operator/workflow-endurance-benchmark")
 async def get_operator_workflow_endurance_benchmark():
     return await build_workflow_endurance_benchmark_report()
+
+
+@router.get("/operator/m5-operating-layer-benchmark")
+async def get_operator_m5_operating_layer_benchmark():
+    return await build_m5_operating_layer_benchmark_report()
 
 
 @router.get("/operator/trust-boundary-benchmark")
@@ -3026,6 +3038,35 @@ async def get_operator_background_sessions(
         },
         "sessions": background_sessions,
     }
+
+
+@router.get("/operator/m5-operating-layer")
+async def get_operator_m5_operating_layer(
+    limit_jobs: int = Query(default=12, ge=1, le=50),
+    limit_runs: int = Query(default=30, ge=1, le=100),
+    limit_workflows: int = Query(default=16, ge=1, le=50),
+    limit_sessions: int = Query(default=8, ge=1, le=20),
+):
+    sessions, workflow_runs, jobs, job_runs = await asyncio.gather(
+        session_manager.list_sessions(),
+        _list_workflow_runs(limit=max(limit_workflows * 4, 60), session_id=None),
+        scheduled_job_repository.list_jobs(include_disabled=True, limit=limit_jobs),
+        scheduled_job_repository.list_run_history(limit=limit_runs),
+    )
+    process_payloads = await asyncio.to_thread(process_runtime_manager.list_all_processes)
+    background_sessions = _background_session_entries(
+        sessions if isinstance(sessions, list) else [],
+        workflow_runs if isinstance(workflow_runs, list) else [],
+        process_payloads if isinstance(process_payloads, list) else [],
+        limit_sessions=limit_sessions,
+        limit_processes=3,
+    )
+    return build_m5_operating_layer_payload(
+        scheduled_jobs=jobs if isinstance(jobs, list) else [],
+        scheduled_job_runs=job_runs if isinstance(job_runs, list) else [],
+        workflow_runs=workflow_runs if isinstance(workflow_runs, list) else [],
+        background_sessions=background_sessions,
+    )
 
 
 @router.get("/operator/engineering-memory")

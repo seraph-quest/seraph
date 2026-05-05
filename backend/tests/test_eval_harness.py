@@ -204,11 +204,13 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 11
+    assert details["suite_count"] == 12
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["workflow_suite_present"] is True
+    assert details["m5_suite_present"] is True
+    assert details["m5_suite_scenario_count_matches"] is True
     assert details["trust_suite_present"] is True
     assert details["secure_host_suite_present"] is True
     assert details["computer_suite_present"] is True
@@ -424,6 +426,21 @@ def test_run_benchmark_suites_executes_channels_presence_device_pairing_suite():
         "device_pairing_revocation_fail_closed",
         "channel_mutation_boundary_behavior",
         "channel_abuse_failure_review_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_m5_jobs_routines_workflows_delegation_suite():
+    summary = asyncio.run(run_benchmark_suites(["m5_jobs_routines_workflows_delegation"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "m5_operating_layer_payload_behavior",
+        "scheduled_job_run_history_behavior",
+        "scheduled_job_pause_resume_no_fire_behavior",
+        "delegation_trust_partition_receipt_behavior",
+        "operator_m5_benchmark_surface_behavior",
     }
 
 
@@ -645,6 +662,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
+    assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
     assert "computer_use_browser_desktop" in captured.out
@@ -657,6 +675,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_user_model_restraint",
         "memory_continuity_workflows",
         "workflow_endurance_and_repair",
+        "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",
         "secure_capability_host",
         "computer_use_browser_desktop",

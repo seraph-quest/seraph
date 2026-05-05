@@ -167,6 +167,25 @@ class ScheduledJob(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class ScheduledJobRun(SQLModel, table=True):
+    __tablename__ = "scheduled_job_runs"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    scheduled_job_id: str = Field(index=True)
+    job_name: str = Field(default="")
+    trigger_type: str = Field(default="cron", index=True)
+    action_type: str = Field(default="deliver_message", index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    created_by_session_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="started", index=True)
+    outcome: Optional[str] = Field(default=None, index=True)
+    error: Optional[str] = Field(default=None)
+    approval_id: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
+
+
 # ─── Memory ──────────────────────────────────────────────
 
 class Memory(SQLModel, table=True):

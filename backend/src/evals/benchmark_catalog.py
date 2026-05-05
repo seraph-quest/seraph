@@ -22,6 +22,8 @@ from src.security.secure_host_benchmark import (
     SECURE_CAPABILITY_HOST_BENCHMARK_SUITE_NAME,
 )
 from src.workflows.benchmark import (
+    M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
+    M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
     WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
     WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
 )
@@ -122,6 +124,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live workload replay and external long-context benchmark parity still remain for future work.",
         scenario_names=WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
+        label="M5 jobs, routines, workflows, and delegation",
+        description=(
+            "Pins durable scheduled-job run history, pause/resume no-fire receipts, "
+            "audit-projected workflow branch and repair state, background churn, and delegated trust partitions."
+        ),
+        benchmark_axis="m5_jobs_routines_workflows_delegation",
+        operator_summary=(
+            "M5 exposes cron-style jobs and routines, workflow projection receipts, background churn, "
+            "and delegation trust partitions without claiming heartbeat triggers or a full durable workflow state machine."
+        ),
+        remaining_gap=(
+            "Heartbeat/reactive triggers and a real durable workflow state machine remain future implementation work."
+        ),
+        scenario_names=M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=TRUST_BOUNDARY_BENCHMARK_SUITE_NAME,

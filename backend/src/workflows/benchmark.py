@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.workflows.operating_layer import (
+    M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
+    M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
+    m5_operating_layer_dimensions,
+    m5_operating_layer_failure_taxonomy,
+    m5_operating_layer_policy_payload,
+)
 
 WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME = "workflow_endurance_and_repair"
 WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES = (
@@ -144,6 +151,78 @@ async def build_workflow_endurance_benchmark_report() -> dict[str, Any]:
         "failure_taxonomy": workflow_endurance_failure_taxonomy(),
         "failure_report": failure_report,
         "policy": workflow_endurance_benchmark_policy_payload(),
+        "latest_run": {
+            "total": summary.total,
+            "passed": summary.passed,
+            "failed": summary.failed,
+            "duration_ms": summary.duration_ms,
+        },
+    }
+
+
+async def _run_m5_operating_layer_benchmark_suite():
+    from src.evals.harness import run_benchmark_suites
+
+    return await run_benchmark_suites([M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME])
+
+
+def _m5_failure_report(summary: Any) -> list[dict[str, str]]:
+    failures: list[dict[str, str]] = []
+    for result in getattr(summary, "results", []):
+        if getattr(result, "passed", True):
+            continue
+        failures.append(
+            {
+                "type": "benchmark_regression",
+                "scenario_name": str(getattr(result, "name", "") or "unknown_scenario"),
+                "summary": str(getattr(result, "error", "") or "M5 operating-layer benchmark scenario failed."),
+                "reason": "deterministic_eval_failure",
+            }
+        )
+    return failures[:6]
+
+
+def _m5_summary_states(healthy: bool) -> dict[str, str]:
+    if healthy:
+        return {
+            "scheduled_job_run_history_state": "durable_per_run_receipts_visible",
+            "pause_resume_state": "disabled_jobs_skip_without_firing",
+            "workflow_projection_state": "audit_projected_claim_boundary_visible",
+            "delegation_partition_state": "trust_receipts_operator_visible",
+        }
+    return {
+        "scheduled_job_run_history_state": "regressions_detected",
+        "pause_resume_state": "regressions_detected",
+        "workflow_projection_state": "regressions_detected",
+        "delegation_partition_state": "regressions_detected",
+    }
+
+
+async def build_m5_operating_layer_benchmark_report() -> dict[str, Any]:
+    summary = await _run_m5_operating_layer_benchmark_suite()
+    failure_report = _m5_failure_report(summary)
+    healthy = summary.failed == 0
+    benchmark_posture = (
+        "m5_ci_gated_operator_visible"
+        if healthy
+        else "m5_ci_regressions_detected_operator_visible"
+    )
+    return {
+        "summary": {
+            "suite_name": M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
+            "benchmark_posture": benchmark_posture,
+            "operator_status": "m5_operating_layer_visible",
+            "scenario_count": len(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
+            "dimension_count": len(m5_operating_layer_dimensions()),
+            "failure_mode_count": len(m5_operating_layer_failure_taxonomy()),
+            "active_failure_count": summary.failed,
+            **_m5_summary_states(healthy),
+        },
+        "scenario_names": list(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
+        "dimensions": m5_operating_layer_dimensions(),
+        "failure_taxonomy": m5_operating_layer_failure_taxonomy(),
+        "failure_report": failure_report,
+        "policy": m5_operating_layer_policy_payload(),
         "latest_run": {
             "total": summary.total,
             "passed": summary.passed,

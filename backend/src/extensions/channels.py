@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 
 _SUPPORTED_CHANNEL_TRANSPORTS = {"websocket", "native_notification"}
 _CHANNEL_TRANSPORT_ORDER = {"websocket": 0, "native_notification": 1}
+_PRESENCE_SURFACE_KINDS = {
+    "channel_adapters": "channel_adapter",
+    "messaging_connectors": "messaging_connector",
+    "node_adapters": "node_adapter",
+}
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,134 @@ class ActiveChannelAdapter:
     reference: str
     resolved_path: str | None
     manifest_root_index: int
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def build_presence_boundary_contract(
+    *,
+    contribution_type: str,
+    extension_id: str,
+    reference: str,
+    metadata: dict[str, Any],
+    status: str,
+    active: bool,
+    ready: bool,
+    pairing: dict[str, Any] | None = None,
+    follow_up_ready: bool | None = None,
+) -> dict[str, Any]:
+    """Build the M4 operator-visible boundary contract for presence surfaces."""
+
+    surface_kind = _PRESENCE_SURFACE_KINDS.get(contribution_type, contribution_type)
+    name = str(metadata.get("name") or "").strip()
+    trust = str(metadata.get("trust") or "unknown").strip() or "unknown"
+    transport = str(metadata.get("transport") or "").strip()
+    platform = str(metadata.get("platform") or "").strip()
+    adapter_kind = str(metadata.get("adapter_kind") or "").strip()
+    capabilities = _string_list(metadata.get("capabilities"))
+    delivery_modes = _string_list(metadata.get("delivery_modes"))
+    requires_network = bool(metadata.get("requires_network", False))
+    requires_daemon = bool(metadata.get("requires_daemon", False))
+    pairing_payload = pairing if isinstance(pairing, dict) else {}
+    pairing_state = str(pairing_payload.get("pairing_state") or "not_applicable").strip()
+    trust_state = str(pairing_payload.get("trust_state") or trust).strip() or trust
+    revoked = pairing_state == "revoked" or trust_state in {"revoked", "untrusted"}
+    effective_follow_up_ready = bool(ready if follow_up_ready is None else follow_up_ready) and not revoked
+    can_notify = (
+        contribution_type in {"channel_adapters", "messaging_connectors"}
+        or "notify" in capabilities
+        or "notification" in adapter_kind
+    )
+    scope_kind = "presence"
+    if contribution_type == "channel_adapters":
+        scope_kind = "operator_channel"
+    elif contribution_type == "messaging_connectors":
+        scope_kind = "external_messaging"
+    elif contribution_type == "node_adapters":
+        scope_kind = "paired_node"
+
+    identity: dict[str, Any] = {
+        "surface_kind": surface_kind,
+        "extension_id": extension_id,
+        "reference": reference,
+        "name": name,
+    }
+    if transport:
+        identity["transport"] = transport
+    if platform:
+        identity["platform"] = platform
+    if adapter_kind:
+        identity["adapter_kind"] = adapter_kind
+
+    mutation_boundary_status = "closed"
+    if effective_follow_up_ready:
+        mutation_boundary_status = "approval_required"
+    mutation_boundaries = {
+        "inbound": {
+            "allowed": effective_follow_up_ready,
+            "live": False,
+        },
+        "outbound": {
+            "allowed": can_notify and effective_follow_up_ready,
+            "live": False,
+        },
+        "reply": {
+            "allowed": contribution_type == "messaging_connectors" and effective_follow_up_ready,
+            "live": False,
+        },
+        "workflow": {
+            "allowed": effective_follow_up_ready,
+            "live": False,
+        },
+        "approval": {
+            "required": True,
+            "status": mutation_boundary_status,
+        },
+        "device_action": {
+            "allowed": contribution_type == "node_adapters" and effective_follow_up_ready,
+            "live": False,
+        },
+    }
+
+    return {
+        "schema": "seraph.m4.presence_boundary.v1",
+        "identity": identity,
+        "trust": {
+            "extension_trust": trust,
+            "trust_state": trust_state,
+            "pairing_state": pairing_state,
+            "trusted": trust_state == "trusted" and not revoked,
+            "revoked": revoked,
+        },
+        "scope": {
+            "kind": scope_kind,
+            "status": status,
+            "active": active,
+            "ready": bool(ready) and not revoked,
+            "capabilities": capabilities,
+            "delivery_modes": delivery_modes,
+            "requires_network": requires_network,
+            "requires_daemon": requires_daemon,
+        },
+        "notification": {
+            "can_notify": can_notify and effective_follow_up_ready,
+            "modes": delivery_modes or ([transport] if transport else []),
+            "requires_operator_confirmation": True,
+        },
+        "mutation": {
+            "boundary": "staged_contract_only",
+            "boundaries": mutation_boundaries,
+            "live_transport_claimed": False,
+            "live_reach_claimed": False,
+            "operator_approval_required": True,
+            "follow_up_ready": effective_follow_up_ready,
+            "unsafe_follow_up_hidden": not effective_follow_up_ready,
+        },
+    }
 
 
 def parse_channel_adapter_definition(payload: Any, *, source: str) -> ChannelAdapterDefinition:

@@ -203,6 +203,16 @@ class ObserverPresenceSurfaceResponse(BaseModel):
     selected: bool = False
     requires_network: bool = False
     requires_daemon: bool = False
+    boundary_posture: str | None = None
+    boundary_scope: str | None = None
+    trust_state: str | None = None
+    pairing_state: str | None = None
+    revocation_state: str | None = None
+    paired: bool | None = None
+    revoked: bool = False
+    requires_pairing: bool = False
+    device_reach_allowed: bool | None = None
+    blocked_reason: str | None = None
 
 
 class ObserverPresenceSummaryResponse(BaseModel):
@@ -210,6 +220,10 @@ class ObserverPresenceSummaryResponse(BaseModel):
     active_surface_count: int
     ready_surface_count: int
     attention_surface_count: int
+    paired_surface_count: int = 0
+    unpaired_surface_count: int = 0
+    revoked_surface_count: int = 0
+    blocked_device_surface_count: int = 0
 
 
 class ObserverPresenceInventoryResponse(BaseModel):
@@ -231,6 +245,10 @@ class ObserverContinuitySummaryResponse(BaseModel):
     attention_family_count: int
     presence_surface_count: int = 0
     attention_presence_surface_count: int = 0
+    paired_presence_surface_count: int = 0
+    unpaired_presence_surface_count: int = 0
+    revoked_presence_surface_count: int = 0
+    blocked_device_surface_count: int = 0
 
 
 class ObserverContinuityThreadResponse(BaseModel):
@@ -263,6 +281,13 @@ class ObserverContinuityRecoveryActionResponse(BaseModel):
     thread_id: str | None = None
     continue_message: str | None = None
     open_thread_available: bool = False
+    boundary_posture: str | None = None
+    boundary_scope: str | None = None
+    trust_state: str | None = None
+    pairing_state: str | None = None
+    revocation_state: str | None = None
+    device_reach_allowed: bool | None = None
+    blocked_reason: str | None = None
 
 
 class ObserverContinuityResponse(BaseModel):
@@ -739,11 +764,124 @@ def _presence_surface_follow_up_prompt(contribution: dict[str, Any]) -> str | No
         return None
     if not _presence_surface_ready(contribution):
         return None
+    if not _presence_surface_allows_follow_up(_presence_surface_boundary_pairing_fields(contribution, kind=_presence_surface_kind(contribution_type))):
+        return None
     label = _presence_surface_label(contribution)
     return (
         f"Plan guarded follow-through for {label}. Confirm the audience, target reference, "
         "channel scope, and approval boundaries before acting."
     )
+
+
+def _record_mapping(value: Any, *keys: str) -> dict[str, Any]:
+    for key in keys:
+        candidate = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _record_string(value: Any, *keys: str) -> str | None:
+    for key in keys:
+        candidate = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+        if isinstance(candidate, list):
+            parts = [str(item).strip() for item in candidate if str(item).strip()]
+            if parts:
+                return ", ".join(parts)
+    return None
+
+
+def _record_bool(value: Any, *keys: str) -> bool | None:
+    for key in keys:
+        candidate = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+        if isinstance(candidate, bool):
+            return candidate
+    return None
+
+
+def _presence_surface_boundary_pairing_fields(source: Any, *, kind: str) -> dict[str, Any]:
+    boundary = _record_mapping(source, "boundary", "channel_boundary", "trust_boundary")
+    pairing = _record_mapping(source, "pairing", "device_pairing")
+    revocation = _record_mapping(source, "revocation", "device_revocation")
+    pairing_state = (
+        _record_string(source, "pairing_state", "device_pairing_state")
+        or _record_string(pairing, "state", "status")
+    )
+    revocation_state = (
+        _record_string(source, "revocation_state", "device_revocation_state")
+        or _record_string(revocation, "state", "status")
+    )
+    trust_state = (
+        _record_string(source, "trust_state")
+        or _record_string(boundary, "trust_state", "trust", "state")
+    )
+    revoked_flag = _record_bool(source, "revoked", "device_revoked")
+    paired_flag = _record_bool(source, "paired", "device_paired")
+    requires_pairing = (
+        _record_bool(source, "requires_pairing", "pairing_required")
+        or _record_bool(pairing, "required", "requires_pairing")
+        or False
+    )
+    normalized_pairing = str(pairing_state or "").strip().lower()
+    normalized_revocation = str(revocation_state or "").strip().lower()
+    revoked = bool(revoked_flag) or normalized_revocation in {"revoked", "revocation_active", "blocked_revoked"}
+    paired = paired_flag
+    if paired is None and normalized_pairing:
+        if normalized_pairing in {"paired", "trusted", "linked", "active", "verified"}:
+            paired = True
+        elif normalized_pairing in {"unpaired", "not_paired", "requires_pairing", "pairing_required", "revoked"}:
+            paired = False
+    device_reach_allowed = _record_bool(source, "device_reach_allowed", "reach_allowed")
+    blocked_reason = _record_string(source, "blocked_reason", "device_blocked_reason")
+    if revoked:
+        device_reach_allowed = False
+        blocked_reason = blocked_reason or "device pairing was revoked"
+    elif paired is False or normalized_pairing in {"unpaired", "not_paired", "requires_pairing", "pairing_required"}:
+        device_reach_allowed = False
+        blocked_reason = blocked_reason or "device is not paired"
+    elif str(trust_state or "").strip().lower() in {"untrusted", "not_trusted", "revoked", "staged"}:
+        device_reach_allowed = False
+        blocked_reason = blocked_reason or "trusted live reach is not confirmed"
+    elif kind in {"messaging_connector", "node_adapter"} and paired is not True:
+        pairing_state = pairing_state or "unreported"
+        requires_pairing = True
+        device_reach_allowed = False
+        blocked_reason = blocked_reason or "live pairing is not confirmed"
+
+    return {
+        "boundary_posture": (
+            _record_string(source, "boundary_posture", "channel_boundary_posture", "trust_boundary_posture")
+            or _record_string(boundary, "posture", "status", "state")
+        ),
+        "boundary_scope": (
+            _record_string(source, "boundary_scope", "channel_boundary", "trust_boundary_scope")
+            or _record_string(boundary, "scope", "name", "boundary")
+        ),
+        "trust_state": trust_state,
+        "pairing_state": pairing_state,
+        "revocation_state": revocation_state,
+        "paired": paired,
+        "revoked": revoked,
+        "requires_pairing": bool(requires_pairing),
+        "device_reach_allowed": device_reach_allowed,
+        "blocked_reason": blocked_reason,
+    }
+
+
+def _presence_surface_allows_follow_up(surface: dict[str, Any]) -> bool:
+    if surface.get("device_reach_allowed") is False:
+        return False
+    if bool(surface.get("revoked")):
+        return False
+    pairing_state = str(surface.get("pairing_state") or "").strip().lower()
+    if pairing_state in {"unpaired", "not_paired", "requires_pairing", "pairing_required", "revoked"}:
+        return False
+    revocation_state = str(surface.get("revocation_state") or "").strip().lower()
+    if revocation_state in {"revoked", "revocation_active", "blocked_revoked"}:
+        return False
+    return True
 
 
 def _browser_provider_surface_detail(item: Any, *, package_label: str) -> str:
@@ -856,6 +994,13 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             active = _extension_contribution_active(contribution)
             ready = _presence_surface_ready(contribution)
             attention = _presence_surface_attention(contribution)
+            boundary_pairing = _presence_surface_boundary_pairing_fields(
+                contribution,
+                kind=_presence_surface_kind(contribution_type),
+            )
+            if boundary_pairing.get("device_reach_allowed") is False:
+                ready = False
+                attention = True
             follow_up_prompt = _presence_surface_follow_up_prompt(contribution)
             if contribution_type in {"browser_providers", "node_adapters"} and status not in {
                 "planned",
@@ -917,6 +1062,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
                 "selected": False,
                 "requires_network": bool(contribution.get("requires_network", False)),
                 "requires_daemon": bool(contribution.get("requires_daemon", False)),
+                **boundary_pairing,
             }
 
     state_payload = load_extension_state_payload()
@@ -939,6 +1085,10 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         runtime_state = str(getattr(item, "runtime_state", "") or "unknown")
         ready = runtime_state == "ready"
         attention = runtime_state in {"requires_config", "disabled", "staged_local_fallback"}
+        boundary_pairing = _presence_surface_boundary_pairing_fields(item, kind="browser_provider")
+        if boundary_pairing.get("device_reach_allowed") is False:
+            ready = False
+            attention = True
         follow_up_prompt = _browser_provider_follow_up_prompt(item)
         package_id = str(getattr(item, "extension_id", "") or "").strip()
         package_label = package_label_by_id.get(package_id, package_id or "Extension package")
@@ -971,6 +1121,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "selected": bool(getattr(item, "selected", False)),
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
+            **boundary_pairing,
         }
 
     node_inventory = list_node_adapter_inventory(
@@ -982,7 +1133,15 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
         runtime_state = str(getattr(item, "runtime_state", "") or "unknown")
         ready = runtime_state in {"staged_link", "staged_canvas"}
         attention = runtime_state in {"requires_config", "disabled"}
-        follow_up_prompt = _node_adapter_follow_up_prompt(item)
+        boundary_pairing = _presence_surface_boundary_pairing_fields(item, kind="node_adapter")
+        if boundary_pairing.get("device_reach_allowed") is False:
+            ready = False
+            attention = True
+        follow_up_prompt = (
+            _node_adapter_follow_up_prompt(item)
+            if _presence_surface_allows_follow_up(boundary_pairing)
+            else None
+        )
         package_id = str(getattr(item, "extension_id", "") or "").strip()
         package_label = package_label_by_id.get(package_id, package_id or "Extension package")
         if not (bool(getattr(item, "enabled", False)) or attention or follow_up_prompt):
@@ -1014,6 +1173,7 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "selected": False,
             "requires_network": bool(getattr(item, "requires_network", False)),
             "requires_daemon": bool(getattr(item, "requires_daemon", False)),
+            **boundary_pairing,
         }
 
     surfaces = sorted(
@@ -1031,6 +1191,10 @@ def _observer_presence_surface_payload() -> dict[str, Any]:
             "active_surface_count": sum(1 for item in surfaces if bool(item.get("active"))),
             "ready_surface_count": sum(1 for item in surfaces if bool(item.get("ready"))),
             "attention_surface_count": sum(1 for item in surfaces if bool(item.get("attention"))),
+            "paired_surface_count": sum(1 for item in surfaces if item.get("paired") is True),
+            "unpaired_surface_count": sum(1 for item in surfaces if item.get("paired") is False),
+            "revoked_surface_count": sum(1 for item in surfaces if bool(item.get("revoked"))),
+            "blocked_device_surface_count": sum(1 for item in surfaces if item.get("device_reach_allowed") is False),
         },
         "surfaces": surfaces,
     }
@@ -1273,6 +1437,15 @@ def _build_continuity_recovery_actions(
         if not isinstance(presence_surface, dict):
             continue
         if bool(presence_surface.get("attention")):
+            boundary_pairing = {
+                "boundary_posture": presence_surface.get("boundary_posture"),
+                "boundary_scope": presence_surface.get("boundary_scope"),
+                "trust_state": presence_surface.get("trust_state"),
+                "pairing_state": presence_surface.get("pairing_state"),
+                "revocation_state": presence_surface.get("revocation_state"),
+                "device_reach_allowed": presence_surface.get("device_reach_allowed"),
+                "blocked_reason": presence_surface.get("blocked_reason"),
+            }
             actions.append({
                 "id": f"presence:{presence_surface.get('id')}",
                 "kind": "presence_repair",
@@ -1285,9 +1458,23 @@ def _build_continuity_recovery_actions(
                 "thread_id": None,
                 "continue_message": None,
                 "open_thread_available": False,
+                **boundary_pairing,
             })
             continue
-        if str(presence_surface.get("kind") or "") in {"channel_adapter", "messaging_connector", "browser_provider", "node_adapter"} and bool(presence_surface.get("follow_up_prompt")):
+        if (
+            str(presence_surface.get("kind") or "") in {"channel_adapter", "messaging_connector", "browser_provider", "node_adapter"}
+            and bool(presence_surface.get("follow_up_prompt"))
+            and _presence_surface_allows_follow_up(presence_surface)
+        ):
+            boundary_pairing = {
+                "boundary_posture": presence_surface.get("boundary_posture"),
+                "boundary_scope": presence_surface.get("boundary_scope"),
+                "trust_state": presence_surface.get("trust_state"),
+                "pairing_state": presence_surface.get("pairing_state"),
+                "revocation_state": presence_surface.get("revocation_state"),
+                "device_reach_allowed": presence_surface.get("device_reach_allowed"),
+                "blocked_reason": presence_surface.get("blocked_reason"),
+            }
             actions.append({
                 "id": f"presence-follow:{presence_surface.get('id')}",
                 "kind": "presence_follow_up",
@@ -1300,6 +1487,7 @@ def _build_continuity_recovery_actions(
                 "thread_id": None,
                 "continue_message": presence_surface.get("follow_up_prompt"),
                 "open_thread_available": False,
+                **boundary_pairing,
             })
 
     for thread in threads:
@@ -1362,6 +1550,48 @@ def _build_continuity_summary(
         for item in presence_surfaces.get("surfaces", [])
         if isinstance(item, dict) and bool(item.get("attention"))
     ]
+    paired_presence_surfaces = [
+        item
+        for item in presence_surfaces.get("surfaces", [])
+        if isinstance(item, dict)
+        and (
+            item.get("paired") is True
+            or str(item.get("pairing_state") or "").strip().lower() in {"paired", "trusted", "linked", "active", "verified"}
+        )
+    ]
+    unpaired_presence_surfaces = [
+        item
+        for item in presence_surfaces.get("surfaces", [])
+        if isinstance(item, dict)
+        and (
+            item.get("paired") is False
+            or str(item.get("pairing_state") or "").strip().lower() in {
+                "unpaired",
+                "not_paired",
+                "requires_pairing",
+                "pairing_required",
+                "revoked",
+            }
+        )
+    ]
+    revoked_presence_surfaces = [
+        item
+        for item in presence_surfaces.get("surfaces", [])
+        if isinstance(item, dict)
+        and (
+            bool(item.get("revoked"))
+            or str(item.get("revocation_state") or "").strip().lower() in {
+                "revoked",
+                "revocation_active",
+                "blocked_revoked",
+            }
+        )
+    ]
+    blocked_device_surfaces = [
+        item
+        for item in presence_surfaces.get("surfaces", [])
+        if isinstance(item, dict) and item.get("device_reach_allowed") is False
+    ]
     ambient_item_count = sum(
         int(item.get("item_count", 0))
         for item in threads
@@ -1420,6 +1650,10 @@ def _build_continuity_summary(
         "attention_family_count": len(attention_families),
         "presence_surface_count": int(presence_surfaces.get("summary", {}).get("surface_count") or 0),
         "attention_presence_surface_count": len(attention_presence_surfaces),
+        "paired_presence_surface_count": len(paired_presence_surfaces),
+        "unpaired_presence_surface_count": len(unpaired_presence_surfaces),
+        "revoked_presence_surface_count": len(revoked_presence_surfaces),
+        "blocked_device_surface_count": len(blocked_device_surfaces),
     }
 
 

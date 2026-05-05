@@ -26,6 +26,15 @@ from src.workflows.benchmark import (
     WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
 )
 
+CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
+CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
+    "channel_identity_boundary_metadata_behavior",
+    "external_channel_continuity_behavior",
+    "device_pairing_revocation_fail_closed",
+    "channel_mutation_boundary_behavior",
+    "channel_abuse_failure_review_behavior",
+)
+
 
 @dataclass(frozen=True)
 class BenchmarkSuiteDefinition:
@@ -154,6 +163,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live website, OS, and mobile task depth still remains for future work.",
         scenario_names=COMPUTER_USE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME,
+        label="M4 channels presence and device pairing",
+        description=(
+            "Pins channel identity boundaries, device pairing and revocation fail-closed posture, "
+            "external-channel continuity, mutation boundaries, and abuse/failure review into one deterministic proof lane."
+        ),
+        benchmark_axis="presence_and_reach_across_surfaces",
+        operator_summary=(
+            "M4 reach now has deterministic proof that identity, pairing, revocation, continuity, mutation, "
+            "and review boundaries stay visible instead of implying broad live channel reach."
+        ),
+        remaining_gap=(
+            "Production-grade live pairing protocols, broader mobile or voice reach, and real external-channel abuse replay still remain future work."
+        ),
+        scenario_names=CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=M2_EXECUTION_BENCHMARK_SUITE_NAME,

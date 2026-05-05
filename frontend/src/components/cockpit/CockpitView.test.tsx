@@ -661,8 +661,12 @@ describe("CockpitView", () => {
             degraded_route_count: 1,
             degraded_source_adapter_count: 1,
             attention_family_count: 1,
-            presence_surface_count: 2,
-            attention_presence_surface_count: 1,
+            presence_surface_count: 4,
+            attention_presence_surface_count: 3,
+            paired_presence_surface_count: 1,
+            unpaired_presence_surface_count: 1,
+            revoked_presence_surface_count: 1,
+            blocked_device_surface_count: 2,
           },
           imported_reach: {
             summary: {
@@ -709,12 +713,64 @@ describe("CockpitView", () => {
           },
           presence_surfaces: {
             summary: {
-              surface_count: 2,
-              active_surface_count: 1,
+              surface_count: 4,
+              active_surface_count: 3,
               ready_surface_count: 1,
-              attention_surface_count: 1,
+              attention_surface_count: 3,
+              paired_surface_count: 1,
+              unpaired_surface_count: 1,
+              revoked_surface_count: 1,
+              blocked_device_surface_count: 2,
             },
             surfaces: [
+              {
+                id: "node_adapters:seraph.device:connectors/nodes/unpaired.yaml",
+                kind: "node_adapter",
+                label: "Atlas companion bridge",
+                package_label: "Seraph Device Pack",
+                package_id: "seraph.device",
+                status: "staged_link",
+                active: true,
+                ready: false,
+                attention: true,
+                detail: "Seraph Device Pack adds Atlas companion bridge for companion device reach (staged link).",
+                repair_hint: null,
+                follow_up_hint: null,
+                follow_up_prompt: null,
+                transport: null,
+                source_type: null,
+                boundary_posture: "device_boundary",
+                boundary_scope: "companion_device",
+                trust_state: "not_trusted",
+                pairing_state: "unpaired",
+                revocation_state: "none",
+                device_reach_allowed: false,
+                blocked_reason: "device is not paired",
+              },
+              {
+                id: "node_adapters:seraph.device:connectors/nodes/revoked.yaml",
+                kind: "node_adapter",
+                label: "Revoked phone bridge",
+                package_label: "Seraph Device Pack",
+                package_id: "seraph.device",
+                status: "staged_link",
+                active: true,
+                ready: false,
+                attention: true,
+                detail: "Seraph Device Pack adds Revoked phone bridge for companion device reach (staged link).",
+                repair_hint: null,
+                follow_up_hint: "Use operator review before routing companion or device follow-through through this surface.",
+                follow_up_prompt: "Plan guarded companion follow-through via Revoked phone bridge.",
+                transport: null,
+                source_type: null,
+                boundary_posture: "device_boundary",
+                boundary_scope: "phone_device",
+                trust_state: "revoked",
+                pairing_state: "paired",
+                revocation_state: "revoked",
+                device_reach_allowed: false,
+                blocked_reason: "device pairing was revoked",
+              },
               {
                 id: "messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
                 kind: "messaging_connector",
@@ -748,6 +804,9 @@ describe("CockpitView", () => {
                 follow_up_prompt: "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
                 transport: "native_notification",
                 source_type: null,
+                boundary_posture: "channel_boundary",
+                boundary_scope: "native_notification",
+                trust_state: "local_daemon",
               },
             ],
           },
@@ -837,32 +896,6 @@ describe("CockpitView", () => {
               open_thread_available: false,
             },
             {
-              id: "presence:observer_definitions:seraph.observer:observers/calendar.yaml",
-              kind: "presence_repair",
-              label: "Review presence surface Calendar observer",
-              detail: "Seraph Observer Pack adds Calendar observer for calendar observation (planned).",
-              status: "planned",
-              surface: "presence",
-              route: "observer_definition",
-              repair_hint: "Enable the packaged contribution and confirm its runtime prerequisites in the operator surface.",
-              thread_id: null,
-              continue_message: null,
-              open_thread_available: false,
-            },
-            {
-              id: "imported:node_adapters",
-              kind: "imported_reach_attention",
-              label: "Review imported node adapters",
-              detail: "1 imported contribution needs attention across 1 package.",
-              status: "attention",
-              surface: "imported_reach",
-              route: null,
-              repair_hint: "Inspect Node Pack in the operator surface.",
-              thread_id: null,
-              continue_message: null,
-              open_thread_available: false,
-            },
-            {
               id: "presence-follow:channel_adapters:seraph.native:channels/native.yaml",
               kind: "presence_follow_up",
               label: "Plan follow-up via native notification channel",
@@ -874,6 +907,30 @@ describe("CockpitView", () => {
               thread_id: null,
               continue_message: "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
               open_thread_available: false,
+              boundary_posture: "channel_boundary",
+              boundary_scope: "native_notification",
+              trust_state: "local_daemon",
+              device_reach_allowed: null,
+            },
+            {
+              id: "presence-follow:node_adapters:seraph.device:connectors/nodes/revoked.yaml",
+              kind: "presence_follow_up",
+              label: "Plan follow-up via Revoked phone bridge",
+              detail: "Seraph Device Pack adds Revoked phone bridge for companion device reach (staged link).",
+              status: "ready",
+              surface: "presence",
+              route: "node_adapter",
+              repair_hint: "Use operator review before routing companion or device follow-through through this surface.",
+              thread_id: null,
+              continue_message: "Plan guarded companion follow-through via Revoked phone bridge.",
+              open_thread_available: false,
+              boundary_posture: "device_boundary",
+              boundary_scope: "phone_device",
+              trust_state: "revoked",
+              pairing_state: "paired",
+              revocation_state: "revoked",
+              device_reach_allowed: false,
+              blocked_reason: "device pairing was revoked",
             },
           ],
           reach: {
@@ -1377,7 +1434,9 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("Desktop shell")).toBeInTheDocument());
     expect(screen.getByText(/continuity degraded · threads 1 · ambient 0/i)).toBeInTheDocument();
     expect(screen.getByText(/typed adapters 0\/1 ready · authenticated 0\/1/i)).toBeInTheDocument();
-    expect(screen.getByText(/presence 1\/2 ready · 1 attention/i)).toBeInTheDocument();
+    expect(screen.getByText(/presence 1\/4 ready · 3 attention · 1 paired · 1 unpaired · 1 revoked · 2 blocked reach/i)).toBeInTheDocument();
+    expect(screen.getByText(/Atlas companion bridge: staged link · Seraph Device Pack · boundary device boundary · scope companion device · trust not trusted · pairing unpaired · revocation none · device reach blocked: device is not paired/i)).toBeInTheDocument();
+    expect(screen.getByText(/Revoked phone bridge: staged link · Seraph Device Pack · boundary device boundary · scope phone device · trust revoked · pairing paired · revocation revoked · device reach blocked: device pairing was revoked/i)).toBeInTheDocument();
     expect(screen.getByText(/imported reach 1\/1 active · 1 attention/i)).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Draft repair" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Continue" }).length).toBeGreaterThan(0);
@@ -1400,7 +1459,12 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(screen.getByDisplayValue(/Plan guarded follow-through for native notification channel/i)).toBeInTheDocument(),
     );
-  }, 30000);
+
+    const revokedFollowUpRow = screen.getByText("Plan follow-up via Revoked phone bridge").closest(".cockpit-row");
+    expect(revokedFollowUpRow).not.toBeNull();
+    expect(within(revokedFollowUpRow as HTMLElement).getByText(/follow-up blocked/i)).toBeInTheDocument();
+    expect(within(revokedFollowUpRow as HTMLElement).queryByRole("button", { name: "Draft follow-up" })).not.toBeInTheDocument();
+  }, 45000);
 
   it("keeps workflow-orchestration controls when the lead run only exists in the orchestration payload", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {

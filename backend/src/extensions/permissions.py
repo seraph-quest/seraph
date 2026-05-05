@@ -22,6 +22,14 @@ LIFECYCLE_APPROVAL_BOUNDARIES = {
     "secret_injection",
     "external_mcp",
 }
+CHANNEL_APPROVAL_BOUNDARY_BY_CONTRIBUTION = {
+    "messaging_connectors": "external_channel",
+    "node_adapters": "device_pairing",
+}
+CHANNEL_APPROVAL_BEHAVIOR_BY_CONTRIBUTION = {
+    "messaging_connectors": "external_channel_policy",
+    "node_adapters": "device_pairing_policy",
+}
 
 
 def _dedupe_strings(values: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
@@ -192,6 +200,19 @@ def _merge_explicit_boundaries_into_profile(
     )
     profile["ok"] = not profile["missing_tools"] and not missing_boundaries and not missing_network
     profile["status"] = "granted" if profile["ok"] else "insufficient"
+    return profile
+
+
+def _apply_channel_presence_policy(profile: dict[str, Any], *, contribution_type: str) -> dict[str, Any]:
+    boundary = CHANNEL_APPROVAL_BOUNDARY_BY_CONTRIBUTION.get(contribution_type)
+    if boundary is None:
+        return profile
+    profile["risk_level"] = _max_risk_level([str(profile.get("risk_level") or "low"), "medium"])
+    profile["approval_behavior"] = CHANNEL_APPROVAL_BEHAVIOR_BY_CONTRIBUTION[contribution_type]
+    profile["requires_approval"] = True
+    profile["lifecycle_approval_boundaries"] = _dedupe_strings(
+        list(profile.get("lifecycle_approval_boundaries", [])) + [boundary]
+    )
     return profile
 
 
@@ -388,10 +409,11 @@ def evaluate_contribution_permissions(
         explicit_boundaries: list[str] = []
         if _password_config_fields_present(metadata):
             explicit_boundaries.append("secret_management")
-        return _merge_explicit_boundaries_into_profile(
+        profile = _merge_explicit_boundaries_into_profile(
             profile,
             explicit_boundaries=explicit_boundaries,
         )
+        return _apply_channel_presence_policy(profile, contribution_type=contribution_type)
 
     requires_network = bool(metadata.get("requires_network"))
     missing_network = bool(

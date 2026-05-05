@@ -182,8 +182,9 @@ TEEs are helpful, but they do not solve prompt injection or unsafe tool executio
 Implementation meaning: Seraph should expand beyond the browser only where the additional channel improves leverage, trust, or continuity.
 
 - shipped foundations: browser-native continuity, desktop presence, messaging and connector surfaces, typed reach/adaptor inventory, native notifications, and channel-routing foundations
-- missing strategic gaps: broader but selective non-browser reach, clearer operator control over active channels, stronger continuity across high-value channels, and safer action cards for external surfaces
-- proof requirements: each added reach surface should justify its trust cost, demonstrate a clear use case, and preserve continuity rather than fragmenting it
+- shipped in the M4 benchmark-proof slice on this branch: the named `channels_presence_device_pairing` suite pins channel identity-boundary metadata, external-channel same-thread continuity, device pairing and revocation fail-closed receipts, channel mutation boundaries, and abuse/failure review visibility
+- missing strategic gaps: live broad mobile and messaging transports remain future work, along with broader but selective non-browser reach, clearer operator control over active channels, production-grade pairing protocols, stronger continuity across high-value channels, and safer action cards for external surfaces
+- proof requirements: each added reach surface should justify its trust cost, demonstrate a clear use case, preserve continuity rather than fragmenting it, and expose identity, pairing, revocation, mutation, and review boundaries before it can be treated as shipped reach
 
 ## M5 Jobs, Routines, Workflows, And Delegation
 
@@ -222,7 +223,7 @@ Implementation meaning: guardian intelligence should improve which capabilities 
 Implementation meaning: no strategic claim should be considered real unless the implementation, the benchmark, and the operator demo all agree.
 
 - competitive frame: Hermes is strong on terminal ergonomics, background sessions, broad tools, MCP, browser work, memory, and channels; OpenClaw is strong on operator control UI, tool events, health/log/config, multi-agent composition, browser execution, sandboxing, and gateway security; IronClaw is strong on security-first execution, permissions, isolation, routines, hooks, extensions, and multi-surface control; adjacent agents such as Claude Code, Codex, Cursor, Devin-style workers, OpenHands, Aider, Goose, LangGraph-style builders, and browser/computer-use agents prove that the category is moving toward supervised capability composition
-- shipped foundations: deterministic runtime evals, named benchmark suites for memory, workflow endurance, trust boundaries, computer use, governed improvement, and operator-readable receipts for several key execution seams
+- shipped foundations: deterministic runtime evals, named benchmark suites for memory, workflow endurance, trust boundaries, computer use, M4 channel/device boundary proof, governed improvement, and operator-readable receipts for several key execution seams
 - missing strategic gaps: broader live-provider and real-world integration proof, stronger coverage for future delegated and browser paths, and more repeatable proof surfaces for claims that would otherwise stay aspirational
 - proof requirements: every major strategy item needs an explicit benchmark, a concrete operator-visible demo path, and a traceable implementation receipt on `develop`
 

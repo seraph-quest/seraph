@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from src.extensions.channels import build_presence_boundary_contract
+from src.extensions.state import node_adapter_pairing_entry
+
 if TYPE_CHECKING:
     from src.extensions.registry import ExtensionContributionRecord
 
@@ -22,6 +25,13 @@ class NodeAdapterInventoryEntry:
     requires_network: bool
     requires_daemon: bool
     runtime_state: str
+    pairing_state: str
+    trust_state: str
+    paired: bool
+    revoked: bool
+    pairing: dict[str, Any]
+    safe_follow_up_ready: bool
+    presence_contract: dict[str, Any]
     reference: str
 
 
@@ -40,6 +50,89 @@ def _required_config_missing(config_fields: list[dict[str, Any]], config_entry: 
         if isinstance(value, str) and not value.strip():
             return True
     return False
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _node_pairing_payload(raw_pairing: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(raw_pairing, dict) or not raw_pairing:
+        return {
+            "pairing_state": "unpaired",
+            "trust_state": "unpaired",
+            "paired": False,
+            "revoked": False,
+            "safe_follow_up_ready": False,
+            "pairing_id": None,
+            "device_id": None,
+            "label": None,
+            "scopes": [],
+            "paired_at": None,
+            "revoked_at": None,
+            "revocation_reason": None,
+        }
+
+    revoked = bool(raw_pairing.get("revoked")) or str(raw_pairing.get("pairing_state") or "") == "revoked"
+    trusted = raw_pairing.get("trusted")
+    trust_state = str(raw_pairing.get("trust_state") or "").strip()
+    if revoked:
+        trust_state = "untrusted"
+    elif trust_state:
+        trust_state = trust_state
+    elif trusted is False:
+        trust_state = "untrusted"
+    else:
+        trust_state = "trusted"
+    pairing_id = raw_pairing.get("pairing_id") or raw_pairing.get("id")
+    device_id = raw_pairing.get("device_id") or raw_pairing.get("node_id")
+    paired = not revoked and (
+        bool(pairing_id)
+        or bool(device_id)
+        or bool(raw_pairing.get("paired_at"))
+        or str(raw_pairing.get("pairing_state") or "") == "paired"
+    )
+    pairing_state = "revoked" if revoked else "paired" if paired else "unpaired"
+    safe_follow_up_ready = pairing_state == "paired" and trust_state == "trusted"
+    return {
+        "pairing_state": pairing_state,
+        "trust_state": trust_state,
+        "paired": paired,
+        "revoked": revoked,
+        "safe_follow_up_ready": safe_follow_up_ready,
+        "pairing_id": str(pairing_id) if pairing_id is not None else None,
+        "device_id": str(device_id) if device_id is not None else None,
+        "label": (
+            str(raw_pairing.get("label") or raw_pairing.get("device_label") or raw_pairing.get("name") or "")
+            or None
+        ),
+        "scopes": _string_list(raw_pairing.get("scopes") or raw_pairing.get("scope")),
+        "paired_at": str(raw_pairing.get("paired_at")) if raw_pairing.get("paired_at") is not None else None,
+        "revoked_at": str(raw_pairing.get("revoked_at")) if raw_pairing.get("revoked_at") is not None else None,
+        "revocation_reason": (
+            str(raw_pairing.get("revocation_reason") or raw_pairing.get("reason") or "") or None
+        ),
+    }
+
+
+def _node_runtime_state(*, enabled: bool, configured: bool, adapter_kind: str, pairing: dict[str, Any]) -> str:
+    if pairing["revoked"]:
+        return "revoked"
+    if pairing["paired"]:
+        return "paired_staged"
+    if adapter_kind in {"device", "camera", "notification"}:
+        return "unpaired_staged"
+    if not enabled:
+        return "disabled"
+    if not configured:
+        return "requires_config"
+    if adapter_kind == "canvas":
+        return "staged_canvas"
+    return "staged_link"
 
 
 def list_node_adapter_inventory(
@@ -77,14 +170,30 @@ def list_node_adapter_inventory(
         config_fields = contribution.metadata.get("config_fields")
         config_field_list = config_fields if isinstance(config_fields, list) else []
         configured = not _required_config_missing(config_field_list, config_entry)
-        if not enabled:
-            runtime_state = "disabled"
-        elif not configured:
-            runtime_state = "requires_config"
-        elif adapter_kind == "canvas":
-            runtime_state = "staged_canvas"
-        else:
-            runtime_state = "staged_link"
+        raw_pairing = node_adapter_pairing_entry(
+            state_entry if isinstance(state_entry, dict) else None,
+            reference=contribution.reference,
+            name=name,
+            create=False,
+        )
+        pairing = _node_pairing_payload(raw_pairing)
+        runtime_state = _node_runtime_state(
+            enabled=enabled,
+            configured=configured,
+            adapter_kind=adapter_kind,
+            pairing=pairing,
+        )
+        presence_contract = build_presence_boundary_contract(
+            contribution_type="node_adapters",
+            extension_id=contribution.extension_id,
+            reference=contribution.reference,
+            metadata=contribution.metadata,
+            status=runtime_state,
+            active=enabled,
+            ready=pairing["safe_follow_up_ready"],
+            pairing=pairing,
+            follow_up_ready=pairing["safe_follow_up_ready"],
+        )
         inventory.append(
             NodeAdapterInventoryEntry(
                 extension_id=contribution.extension_id,
@@ -102,6 +211,13 @@ def list_node_adapter_inventory(
                 requires_network=bool(contribution.metadata.get("requires_network", False)),
                 requires_daemon=bool(contribution.metadata.get("requires_daemon", adapter_kind != "canvas")),
                 runtime_state=runtime_state,
+                pairing_state=pairing["pairing_state"],
+                trust_state=pairing["trust_state"],
+                paired=pairing["paired"],
+                revoked=pairing["revoked"],
+                pairing=pairing,
+                safe_follow_up_ready=pairing["safe_follow_up_ready"],
+                presence_contract=presence_contract,
                 reference=contribution.reference,
             )
         )

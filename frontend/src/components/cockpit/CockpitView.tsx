@@ -970,6 +970,16 @@ interface ObserverPresenceSurface {
   follow_up_prompt?: string | null;
   transport?: string | null;
   source_type?: string | null;
+  boundary_posture?: string | null;
+  boundary_scope?: string | null;
+  trust_state?: string | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  paired?: boolean | null;
+  revoked?: boolean;
+  requires_pairing?: boolean;
+  device_reach_allowed?: boolean | null;
+  blocked_reason?: string | null;
 }
 
 interface ObserverPresenceSurfaceSummary {
@@ -977,6 +987,10 @@ interface ObserverPresenceSurfaceSummary {
   active_surface_count: number;
   ready_surface_count: number;
   attention_surface_count: number;
+  paired_surface_count?: number;
+  unpaired_surface_count?: number;
+  revoked_surface_count?: number;
+  blocked_device_surface_count?: number;
 }
 
 interface ObserverPresenceSurfaceSnapshot {
@@ -998,6 +1012,10 @@ interface ObserverContinuitySummary {
   attention_family_count: number;
   presence_surface_count: number;
   attention_presence_surface_count: number;
+  paired_presence_surface_count?: number;
+  unpaired_presence_surface_count?: number;
+  revoked_presence_surface_count?: number;
+  blocked_device_surface_count?: number;
 }
 
 interface ObserverContinuityThread {
@@ -1030,6 +1048,13 @@ interface ObserverContinuityRecoveryAction {
   thread_id?: string | null;
   continue_message?: string | null;
   open_thread_available: boolean;
+  boundary_posture?: string | null;
+  boundary_scope?: string | null;
+  trust_state?: string | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  device_reach_allowed?: boolean | null;
+  blocked_reason?: string | null;
 }
 
 interface ObserverContinuitySnapshot {
@@ -1904,6 +1929,44 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function formatContinuityLabel(value: string | null | undefined): string {
   return (value || "unknown").replace(/_/g, " ");
+}
+
+function isPresenceReachBlocked(value: {
+  device_reach_allowed?: boolean | null;
+  revoked?: boolean | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  trust_state?: string | null;
+}): boolean {
+  const pairingState = (value.pairing_state ?? "").toLowerCase();
+  const revocationState = (value.revocation_state ?? "").toLowerCase();
+  const trustState = (value.trust_state ?? "").toLowerCase();
+  return value.device_reach_allowed === false
+    || value.revoked === true
+    || ["unpaired", "not_paired", "requires_pairing", "pairing_required", "revoked"].includes(pairingState)
+    || ["revoked", "revocation_active", "blocked_revoked"].includes(revocationState)
+    || ["untrusted", "not_trusted", "revoked", "staged"].includes(trustState);
+}
+
+function continuityBoundaryParts(value: {
+  boundary_posture?: string | null;
+  boundary_scope?: string | null;
+  trust_state?: string | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  device_reach_allowed?: boolean | null;
+  blocked_reason?: string | null;
+}): string[] {
+  return [
+    value.boundary_posture ? `boundary ${formatContinuityLabel(value.boundary_posture)}` : null,
+    value.boundary_scope ? `scope ${formatContinuityLabel(value.boundary_scope)}` : null,
+    value.trust_state ? `trust ${formatContinuityLabel(value.trust_state)}` : null,
+    value.pairing_state ? `pairing ${formatContinuityLabel(value.pairing_state)}` : null,
+    value.revocation_state ? `revocation ${formatContinuityLabel(value.revocation_state)}` : null,
+    value.device_reach_allowed === false
+      ? `device reach blocked${value.blocked_reason ? `: ${value.blocked_reason}` : ""}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
 }
 
 function formatOperatorMode(value: string): string {
@@ -6424,6 +6487,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         || action.kind === "presence_follow_up"
       ))
       .forEach((action) => {
+        const followUpBlocked = action.kind === "presence_follow_up" && isPresenceReachBlocked(action);
         entries.push({
           id: `recovery:${action.id}`,
           kind: "reach",
@@ -6431,6 +6495,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           detail: `${formatContinuityLabel(action.status)} · ${action.detail}`,
           meta: [
             formatContinuityLabel(action.surface),
+            ...continuityBoundaryParts(action),
+            followUpBlocked ? "follow-up blocked" : null,
             action.repair_hint,
           ].filter(Boolean).join(" · "),
           priority: action.kind === "source_adapter_repair"
@@ -6440,7 +6506,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               : action.kind === "presence_follow_up"
                 ? 73
                 : 74,
-          repairDraft: action.kind === "presence_follow_up"
+          repairDraft: followUpBlocked
+            ? undefined
+            : action.kind === "presence_follow_up"
             ? (action.continue_message ?? `Plan follow-up for ${action.label.toLowerCase()}: ${action.detail}`)
             : `Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`,
           draftActionLabel: action.kind === "presence_follow_up" ? "follow-up" : "repair",
@@ -12169,12 +12237,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       {continuityPresenceSurfaces.summary.attention_surface_count
                         ? ` · ${continuityPresenceSurfaces.summary.attention_surface_count} attention`
                         : ""}
+                      {continuityPresenceSurfaces.summary.paired_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.paired_surface_count} paired`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.unpaired_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.unpaired_surface_count} unpaired`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.revoked_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.revoked_surface_count} revoked`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.blocked_device_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.blocked_device_surface_count} blocked reach`
+                        : ""}
                     </div>
                   )}
                   {continuityPresenceSurfaces?.surfaces.slice(0, 2).map((surface) => (
                     <div key={surface.id} className="cockpit-sublist-item">
                       {surface.label}: {formatContinuityLabel(surface.status)}
                       {surface.package_label ? ` · ${surface.package_label}` : ""}
+                      {continuityBoundaryParts(surface).length ? ` · ${continuityBoundaryParts(surface).join(" · ")}` : ""}
                       {surface.repair_hint ? ` · ${surface.repair_hint}` : surface.follow_up_hint ? ` · ${surface.follow_up_hint}` : ""}
                     </div>
                   ))}
@@ -12196,6 +12277,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{action.detail}</div>
                       <div className="cockpit-row-meta">
                         {formatContinuityLabel(action.surface)}
+                        {continuityBoundaryParts(action).length ? ` · ${continuityBoundaryParts(action).join(" · ")}` : ""}
                         {action.repair_hint ? ` · ${action.repair_hint}` : ""}
                       </div>
                       <div className="cockpit-feedback-row">
@@ -12241,12 +12323,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         )}
                         {action.kind === "presence_follow_up" && (
                           <>
-                            <button
-                              className="cockpit-feedback-button"
-                              onClick={() => queueComposerDraft(action.continue_message ?? `Plan follow-up for ${action.label.toLowerCase()}: ${action.detail}`)}
-                            >
-                              Draft follow-up
-                            </button>
+                            {isPresenceReachBlocked(action) ? (
+                              <span className="cockpit-feedback-status">follow-up blocked</span>
+                            ) : (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueComposerDraft(action.continue_message ?? `Plan follow-up for ${action.label.toLowerCase()}: ${action.detail}`)}
+                              >
+                                Draft follow-up
+                              </button>
+                            )}
                             <button
                               className="cockpit-feedback-button"
                               onClick={() => focusPane("operator_surface_pane")}

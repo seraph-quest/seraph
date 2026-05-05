@@ -33,7 +33,12 @@ from src.evals.benchmark_catalog import benchmark_suite_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
-from src.guardian.benchmark import build_guardian_user_model_benchmark_report
+from src.guardian.benchmark import build_guardian_user_model_benchmark_report, build_m8_guardian_brain_benchmark_report
+from src.guardian.brain import (
+    GuardianBrainContext,
+    build_guardian_brain_decision,
+    build_m8_guardian_brain_receipts,
+)
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
@@ -2667,6 +2672,206 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
     }
 
 
+def _m8_guardian_state_text(value: Any, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:limit]
+
+
+def _m8_guardian_state_list(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [
+        _m8_guardian_state_text(item, limit=120)
+        for item in value
+        if _m8_guardian_state_text(item, limit=120)
+    ]
+
+
+def _m8_live_guardian_brain_context(state: Any, *, session_id: str | None) -> GuardianBrainContext:
+    observer_context = getattr(state, "observer_context", None)
+    world_model = getattr(state, "world_model", None)
+    confidence = getattr(state, "confidence", None)
+    action_posture = _m8_guardian_state_text(getattr(state, "action_posture", "act_when_grounded"))
+    intent_resolution = _m8_guardian_state_text(getattr(state, "intent_resolution", "proceed"))
+    intent_uncertainty = _m8_guardian_state_text(getattr(state, "intent_uncertainty_level", "clear"))
+    active_projects = _m8_guardian_state_list(getattr(world_model, "active_projects", ()))
+    active_commitments = _m8_guardian_state_list(getattr(world_model, "active_commitments", ()))
+    active_blockers = _m8_guardian_state_list(getattr(world_model, "active_blockers", ()))
+    next_up = _m8_guardian_state_list(getattr(world_model, "next_up", ()))
+    memory_diagnostics = (
+        _m8_guardian_state_list(getattr(state, "memory_benchmark_diagnostics", ()))
+        + _m8_guardian_state_list(getattr(state, "memory_provider_diagnostics", ()))
+        + _m8_guardian_state_list(getattr(state, "memory_reconciliation_diagnostics", ()))
+    )
+    memory_receipt = getattr(state, "memory_decision_receipt", {}) or {}
+    memory_receipt_text = " ".join(
+        _m8_guardian_state_text(item, limit=80)
+        for item in memory_receipt.values()
+        if isinstance(item, (str, int, float, bool))
+    ).lower()
+    state_text = " ".join([
+        action_posture,
+        intent_resolution,
+        intent_uncertainty,
+        " ".join(memory_diagnostics),
+        memory_receipt_text,
+    ]).lower()
+    observer_project = _m8_guardian_state_text(getattr(observer_context, "active_project", ""))
+    active_goals = _m8_guardian_state_text(getattr(observer_context, "active_goals_summary", ""))
+    content = " | ".join(
+        item
+        for item in [
+            observer_project,
+            active_goals,
+            " ".join(active_projects[:2]),
+            " ".join(active_commitments[:2]),
+            " ".join(active_blockers[:2]),
+            " ".join(next_up[:2]),
+            _m8_guardian_state_text(getattr(state, "recent_execution_summary", "")),
+        ]
+        if item
+    ) or "Guardian state assessment for current operator context."
+    evidence_quality = "grounded"
+    if "clarify" in state_text or intent_uncertainty not in {"", "clear"}:
+        evidence_quality = "ambiguous"
+    if "split" in state_text:
+        evidence_quality = "split"
+    project_state = "aligned" if active_projects or observer_project or active_goals else "unknown"
+    if "ambiguous" in state_text or "clarify" in state_text:
+        project_state = "ambiguous"
+    commitment_state = "clear"
+    if "bundle" in state_text or "conflict" in state_text:
+        commitment_state = "conflicting"
+    elif active_blockers:
+        commitment_state = "blocked"
+    elif active_commitments or next_up:
+        commitment_state = "due_soon"
+    memory_freshness = "stale" if "stale" in state_text or "outdated" in state_text else "fresh"
+    memory_confidence = _m8_guardian_state_text(getattr(confidence, "memory", "")) or "unknown"
+    user_state = _m8_guardian_state_text(getattr(observer_context, "user_state", "")) or "unknown"
+    interruption_mode = _m8_guardian_state_text(getattr(observer_context, "interruption_mode", "")).lower()
+    interruption_cost = "high" if any(token in interruption_mode for token in ("focus", "deep", "busy")) else "medium"
+    if user_state in {"available", "idle"}:
+        interruption_cost = "low"
+    capability_risk = "high" if "approval" in state_text or "external" in state_text else "low"
+    requires_approval = capability_risk == "high"
+    no_action_preferred = any(token in state_text for token in ("stay_silent", "no_action", "do_not_interrupt"))
+    urgency = 4 if active_blockers or "urgent" in state_text or "due" in state_text else 3
+    salience_level = "high" if urgency >= 4 else "medium"
+    if no_action_preferred:
+        urgency = min(urgency, 2)
+        salience_level = "low"
+    return GuardianBrainContext(
+        scenario_id="operator_live_guardian_brain_behavior",
+        signal="live guardian state synthesis for operator session",
+        content=content,
+        urgency=urgency,
+        salience_level=salience_level,
+        evidence_quality=evidence_quality,
+        memory_freshness=memory_freshness,
+        memory_confidence=memory_confidence,
+        project_state=project_state,
+        commitment_state=commitment_state,
+        channel_context="existing_thread",
+        capability_risk=capability_risk,
+        interruption_cost=interruption_cost,
+        user_state=user_state,
+        operator_preference="prefer_existing_thread",
+        recent_feedback_bias="reduce_interruptions" if "reduce_interruptions" in state_text else "neutral",
+        requires_approval=requires_approval,
+        no_action_preferred=no_action_preferred,
+        trust_boundary="operator_visible_guardian_state",
+    )
+
+
+def _m8_live_guardian_brain_receipt(state: Any | None, *, session_id: str | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    context = _m8_live_guardian_brain_context(state, session_id=session_id)
+    receipt = dict(build_guardian_brain_decision(context).receipt)
+    receipt["inputs"] = {
+        **(receipt.get("inputs") if isinstance(receipt.get("inputs"), dict) else {}),
+        "source": "live_guardian_state",
+        "session_id": session_id,
+        "action_posture": getattr(state, "action_posture", "unknown"),
+        "intent_resolution": getattr(state, "intent_resolution", "unknown"),
+        "intent_uncertainty_level": getattr(state, "intent_uncertainty_level", "unknown"),
+    }
+    receipt["operator_correction"] = {
+        **(receipt.get("operator_correction") if isinstance(receipt.get("operator_correction"), dict) else {}),
+        "receipt_surface": "/api/operator/m8-guardian-brain",
+        "can_correct_action": True,
+    }
+    receipt["claim_boundary"] = "live_guardian_state_derived_receipt_not_external_outcome_or_superiority_claim"
+    return receipt
+
+
+def _operator_m8_guardian_brain_payload(state: Any | None, *, session_id: str | None) -> dict[str, Any]:
+    benchmark_receipts = build_m8_guardian_brain_receipts()
+    live_receipt = _m8_live_guardian_brain_receipt(state, session_id=session_id)
+    receipts = ([live_receipt] if live_receipt else []) + benchmark_receipts
+    actions = [str(receipt.get("action") or "") for receipt in receipts]
+    selected_capabilities = [
+        receipt.get("selected_capability")
+        for receipt in receipts
+        if isinstance(receipt.get("selected_capability"), dict)
+    ]
+    no_action_receipts = [
+        receipt
+        for receipt in receipts
+        if receipt.get("action") in {"defer", "clarify", "bundle", "stay_silent"}
+    ]
+    risky_approval_receipts = [
+        receipt
+        for receipt in receipts
+        if receipt.get("action") == "request_approval"
+        or (isinstance(receipt.get("inputs"), dict) and receipt["inputs"].get("capability_risk") == "high")
+    ]
+    score_keys = sorted({
+        str(key)
+        for receipt in receipts
+        for key in (receipt.get("scores") if isinstance(receipt.get("scores"), dict) else {}).keys()
+    })
+    return {
+        "summary": {
+            "operator_status": "m8_guardian_brain_visible",
+            "session_id": session_id,
+            "decision_count": len(receipts),
+            "live_decision_count": 1 if live_receipt else 0,
+            "benchmark_decision_count": len(benchmark_receipts),
+            "action_count": actions.count("act") + actions.count("request_approval"),
+            "restraint_count": len(no_action_receipts),
+            "capability_choice_count": len(selected_capabilities),
+            "approval_preservation_count": len(risky_approval_receipts),
+            "score_dimensions": score_keys,
+            "guardian_action_posture": getattr(state, "action_posture", "unknown") if state else "unknown",
+            "intent_resolution": getattr(state, "intent_resolution", "unknown") if state else "unknown",
+            "claim_boundary": "live_guardian_state_receipt_plus_deterministic_benchmark_receipts_not_superiority_claim",
+            "receipt_source": "live_guardian_state_plus_deterministic_benchmark",
+        },
+        "decision_receipts": receipts,
+        "live_decision_receipt": live_receipt,
+        "benchmark_decision_receipts": benchmark_receipts,
+        "capability_choices": selected_capabilities,
+        "restraint_receipts": no_action_receipts,
+        "approval_receipts": risky_approval_receipts,
+        "proof_receipts": [
+            "/api/operator/m8-guardian-brain",
+            "/api/operator/m8-guardian-intervention-benchmark",
+            "/api/operator/benchmark-proof",
+            "/api/operator/guardian-state",
+        ],
+        "claim_boundaries": {
+            "source": "deterministic_m8_guardian_brain_scenarios_plus_live_guardian_state_posture",
+            "not_claimed": [
+                "superior_guardian_intelligence",
+                "live_external_outcome_study",
+                "automatic_privilege_escalation_from_memory_or_preferences",
+            ],
+        },
+    }
+
+
 def _m7_active_work_items(m5_payload: dict[str, Any], workflow_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     workflow_by_identity = {
         str(run.get("run_identity")): run
@@ -3134,6 +3339,14 @@ async def get_operator_m7_cockpit(
     }
 
 
+@router.get("/operator/m8-guardian-brain")
+async def get_operator_m8_guardian_brain(
+    session_id: str | None = Query(default=None),
+):
+    state = await build_guardian_state(session_id=session_id)
+    return _operator_m8_guardian_brain_payload(state, session_id=session_id)
+
+
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
@@ -3144,6 +3357,7 @@ async def get_operator_benchmark_proof():
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         m7_operator_cockpit_benchmark,
+        m8_guardian_brain_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
@@ -3156,6 +3370,7 @@ async def get_operator_benchmark_proof():
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_m7_operator_cockpit_benchmark_report(),
+        build_m8_guardian_brain_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
@@ -3175,6 +3390,7 @@ async def get_operator_benchmark_proof():
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
+        str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
@@ -3218,6 +3434,7 @@ async def get_operator_benchmark_proof():
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
+            "m8_guardian_brain_benchmark_posture": m8_guardian_brain_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
@@ -3231,6 +3448,7 @@ async def get_operator_benchmark_proof():
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
+        "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
@@ -3316,6 +3534,11 @@ async def get_operator_m2_execution_benchmark():
 @router.get("/operator/m7-cockpit-legibility-benchmark")
 async def get_operator_m7_cockpit_legibility_benchmark():
     return await build_m7_operator_cockpit_benchmark_report()
+
+
+@router.get("/operator/m8-guardian-intervention-benchmark")
+async def get_operator_m8_guardian_intervention_benchmark():
+    return await build_m8_guardian_brain_benchmark_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

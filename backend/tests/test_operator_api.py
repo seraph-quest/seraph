@@ -1208,6 +1208,50 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_m8_guardian_brain_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m8_guardian_intervention_quality",
+                    "benchmark_posture": "m8_ci_gated_operator_visible",
+                    "operator_status": "m8_guardian_brain_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "decision_surface_state": "act_defer_bundle_clarify_approval_and_silence_receipts_visible",
+                    "capability_choice_state": "selected_and_rejected_capability_lanes_visible",
+                    "restraint_state": "stale_ambiguous_conflicting_and_low_value_cases_do_not_silently_act",
+                    "quality_score_state": "timing_usefulness_false_positive_false_negative_trust_and_recovery_visible",
+                    "action_count": 6,
+                },
+                "scenario_names": [
+                    "m8_capability_choice_act_behavior",
+                    "m8_ambiguous_evidence_clarify_behavior",
+                    "m8_stale_memory_defer_behavior",
+                    "m8_conflicting_commitment_bundle_behavior",
+                    "m8_risky_capability_approval_behavior",
+                    "m8_no_action_restraint_behavior",
+                    "operator_m8_guardian_brain_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "decision_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "milestone_contract": "m8_guardian_brain_and_intervention_quality_ship_as_one_ready_pr",
+                    "approval_policy": "high_risk_capability_use_requires_operator_approval_receipt",
+                    "claim_boundary": "deterministic_guardian_judgment_receipts_not_live_superiority_claim",
+                    "receipt_surfaces": [
+                        "/api/operator/m8-guardian-brain",
+                        "/api/operator/m8-guardian-intervention-benchmark",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1346,7 +1390,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 14
+    assert payload["summary"]["suite_count"] == 15
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1358,6 +1402,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
+    assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1399,6 +1444,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m7_suite = next(item for item in payload["suites"] if item["name"] == "m7_operator_cockpit_legibility")
     assert "operator_fast_control_availability_behavior" in m7_suite["scenario_names"]
     assert m7_suite["scenario_count"] == 4
+    m8_suite = next(item for item in payload["suites"] if item["name"] == "m8_guardian_intervention_quality")
+    assert "m8_risky_capability_approval_behavior" in m8_suite["scenario_names"]
+    assert m8_suite["scenario_count"] == 7
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -1419,6 +1467,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["m2_execution_benchmark"]["policy"]["milestone_contract"] == "one_milestone_one_ready_pr"
     assert payload["m7_operator_cockpit_benchmark"]["summary"]["suite_name"] == "m7_operator_cockpit_legibility"
     assert payload["m7_operator_cockpit_benchmark"]["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
+    assert payload["m8_guardian_brain_benchmark"]["summary"]["suite_name"] == "m8_guardian_intervention_quality"
+    assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
     assert payload["m6_memory_superiority_benchmark"]["policy"]["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts"
 
@@ -1453,6 +1503,67 @@ async def test_operator_m7_cockpit_legibility_benchmark_surface_reports_receipts
     assert payload["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
     assert payload["policy"]["claim_boundary"] == "deterministic_operator_surface_receipts_not_live_external_usability_study"
     assert "/api/operator/control-plane" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_m8_guardian_brain_surface_reports_decisions_capabilities_and_restraint(client):
+    with patch(
+        "src.api.operator.build_guardian_state",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                action_posture="guarded_action",
+                intent_resolution="clarify_or_continue",
+                intent_uncertainty_level="ambiguous",
+            )
+        ),
+    ):
+        resp = await client.get("/api/operator/m8-guardian-brain?session_id=session-1")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "m8_guardian_brain_visible"
+    assert payload["summary"]["decision_count"] == 7
+    assert payload["summary"]["live_decision_count"] == 1
+    assert payload["summary"]["benchmark_decision_count"] == 6
+    assert payload["summary"]["receipt_source"] == "live_guardian_state_plus_deterministic_benchmark"
+    assert payload["summary"]["capability_choice_count"] >= 3
+    assert payload["summary"]["approval_preservation_count"] == 1
+    assert "trust_preservation" in payload["summary"]["score_dimensions"]
+    assert payload["live_decision_receipt"]["scenario_id"] == "operator_live_guardian_brain_behavior"
+    assert payload["live_decision_receipt"]["inputs"]["source"] == "live_guardian_state"
+    assert payload["live_decision_receipt"]["inputs"]["intent_resolution"] == "clarify_or_continue"
+    assert payload["live_decision_receipt"]["claim_boundary"] == "live_guardian_state_derived_receipt_not_external_outcome_or_superiority_claim"
+    assert {receipt["action"] for receipt in payload["decision_receipts"]} == {
+        "act",
+        "bundle",
+        "clarify",
+        "defer",
+        "request_approval",
+        "stay_silent",
+    }
+    assert payload["approval_receipts"][0]["action"] == "request_approval"
+    assert payload["approval_receipts"][0]["selected_capability"]["requires_approval"] is True
+    assert payload["claim_boundaries"]["not_claimed"] == [
+        "superior_guardian_intelligence",
+        "live_external_outcome_study",
+        "automatic_privilege_escalation_from_memory_or_preferences",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_operator_m8_guardian_intervention_benchmark_surface_reports_policy_and_receipts(client):
+    resp = await client.get("/api/operator/m8-guardian-intervention-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "m8_guardian_intervention_quality"
+    assert payload["summary"]["operator_status"] == "m8_guardian_brain_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["decision_surface_state"] == "act_defer_bundle_clarify_approval_and_silence_receipts_visible"
+    assert payload["summary"]["capability_choice_state"] == "selected_and_rejected_capability_lanes_visible"
+    assert payload["policy"]["milestone_contract"] == "m8_guardian_brain_and_intervention_quality_ship_as_one_ready_pr"
+    assert payload["policy"]["claim_boundary"] == "deterministic_guardian_judgment_receipts_not_live_superiority_claim"
+    assert "/api/operator/m8-guardian-brain" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

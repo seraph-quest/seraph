@@ -44,6 +44,10 @@ from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.brain import (
+    M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
+    M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
+)
 from src.workflows.operating_layer import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -11413,6 +11417,163 @@ def _eval_operator_cockpit_receipt_legibility_behavior() -> dict[str, Any]:
     }
 
 
+def _m8_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    from src.guardian.brain import build_m8_guardian_brain_receipts
+
+    receipts = build_m8_guardian_brain_receipts()
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in receipts
+        if isinstance(receipt, dict) and receipt.get("scenario_id")
+    }
+
+
+def _eval_m8_capability_choice_act_behavior() -> dict[str, Any]:
+    receipt = _m8_receipts_by_scenario()["m8_capability_choice_act_behavior"]
+    selected = receipt["selected_capability"]
+    return {
+        "action": receipt["action"],
+        "reason": receipt["reason"],
+        "selected_capability_visible": bool(selected and selected["id"] == "guardian.thread_continue"),
+        "rejected_capability_count": len(receipt["rejected_capabilities"]),
+        "timing_score_visible": receipt["scores"]["timing"] == "now",
+        "trust_preservation_visible": receipt["scores"]["trust_preservation"] in {"high", "approval_required"},
+        "operator_correction_visible": receipt["operator_correction"]["can_correct_action"] is True,
+    }
+
+
+def _eval_m8_ambiguous_evidence_clarify_behavior() -> dict[str, Any]:
+    receipt = _m8_receipts_by_scenario()["m8_ambiguous_evidence_clarify_behavior"]
+    return {
+        "action": receipt["action"],
+        "reason": receipt["reason"],
+        "project_state_visible": receipt["inputs"]["project_state"] == "ambiguous",
+        "memory_confidence_visible": receipt["inputs"]["memory_confidence"] == "partial",
+        "no_capability_overselected": receipt["selected_capability"] is None,
+        "false_positive_risk_low": receipt["scores"]["false_positive_risk"] == "low",
+    }
+
+
+def _eval_m8_stale_memory_defer_behavior() -> dict[str, Any]:
+    receipt = _m8_receipts_by_scenario()["m8_stale_memory_defer_behavior"]
+    return {
+        "action": receipt["action"],
+        "reason": receipt["reason"],
+        "stale_memory_visible": receipt["inputs"]["memory_freshness"] == "stale",
+        "defer_preserves_trust": receipt["scores"]["trust_preservation"] == "high",
+        "recovery_visible": receipt["scores"]["recovery"] == "operator_correctable",
+    }
+
+
+def _eval_m8_conflicting_commitment_bundle_behavior() -> dict[str, Any]:
+    receipt = _m8_receipts_by_scenario()["m8_conflicting_commitment_bundle_behavior"]
+    selected = receipt["selected_capability"]
+    return {
+        "action": receipt["action"],
+        "reason": receipt["reason"],
+        "conflict_visible": receipt["inputs"]["commitment_state"] == "conflicting",
+        "interruption_cost_visible": receipt["inputs"]["interruption_cost"] == "high",
+        "capability_choice_visible": bool(selected and selected["lane"] in {"continuity", "workflow"}),
+        "trust_preservation_visible": receipt["scores"]["trust_preservation"] == "high",
+    }
+
+
+def _eval_m8_risky_capability_approval_behavior() -> dict[str, Any]:
+    receipt = _m8_receipts_by_scenario()["m8_risky_capability_approval_behavior"]
+    selected = receipt["selected_capability"]
+    return {
+        "action": receipt["action"],
+        "reason": receipt["reason"],
+        "selected_capability_visible": bool(selected and selected["requires_approval"] is True),
+        "risk_level_visible": receipt["inputs"]["capability_risk"] == "high",
+        "approval_not_lowered_by_guardian_memory": receipt["action"] == "request_approval",
+        "trust_preservation_approval_required": receipt["scores"]["trust_preservation"] == "high",
+        "claim_boundary_visible": receipt["claim_boundary"] == "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+    }
+
+
+def _eval_m8_no_action_restraint_behavior() -> dict[str, Any]:
+    receipt = _m8_receipts_by_scenario()["m8_no_action_restraint_behavior"]
+    return {
+        "action": receipt["action"],
+        "reason": receipt["reason"],
+        "low_salience_visible": receipt["inputs"]["salience_level"] == "low",
+        "no_capability_selected": receipt["selected_capability"] is None,
+        "false_positive_risk_low": receipt["scores"]["false_positive_risk"] == "low",
+        "operator_correction_visible": receipt["operator_correction"]["can_correct_action"] is True,
+    }
+
+
+async def _eval_operator_m8_guardian_brain_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import _operator_m8_guardian_brain_payload
+    from src.guardian.benchmark import build_m8_guardian_brain_benchmark_report
+
+    live_payload = _operator_m8_guardian_brain_payload(
+        types.SimpleNamespace(
+            action_posture="clarify_first",
+            intent_resolution="clarify_before_personalizing",
+            intent_uncertainty_level="ambiguous",
+            observer_context=types.SimpleNamespace(
+                active_project="Atlas release planning",
+                active_goals_summary="Clarify the next blocked release action.",
+                user_state="available",
+                interruption_mode="balanced",
+            ),
+            world_model=types.SimpleNamespace(
+                active_projects=("Atlas release planning",),
+                active_commitments=("Resolve release blocker",),
+                active_blockers=(),
+                next_up=("Ask which Atlas branch should continue",),
+            ),
+            confidence=types.SimpleNamespace(memory="partial"),
+            memory_benchmark_diagnostics=("project anchor is split",),
+            memory_provider_diagnostics=(),
+            memory_reconciliation_diagnostics=(),
+            memory_decision_receipt={},
+            recent_execution_summary="Release repair branch has fresh state.",
+        ),
+        session_id="session-1",
+    )
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="guardian",
+                description="M8 guardian brain benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES
+        ],
+        duration_ms=len(M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.guardian.benchmark._run_m8_guardian_brain_benchmark_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_m8_guardian_brain_benchmark_report()
+    actions = {receipt["action"] for receipt in payload["decision_receipts"]}
+    live_receipt = live_payload["live_decision_receipt"]
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES),
+        "operator_status_visible": payload["summary"]["operator_status"] == "m8_guardian_brain_receipts_visible",
+        "benchmark_posture_green": payload["summary"]["benchmark_posture"] == "m8_ci_gated_operator_visible",
+        "live_state_receipt_visible": live_receipt["scenario_id"] == "operator_live_guardian_brain_behavior",
+        "live_state_source_visible": live_receipt["inputs"]["source"] == "live_guardian_state",
+        "live_state_preserves_claim_boundary": live_receipt["claim_boundary"] == "live_guardian_state_derived_receipt_not_external_outcome_or_superiority_claim",
+        "live_surface_counts_live_and_benchmark": (
+            live_payload["summary"]["live_decision_count"] == 1
+            and live_payload["summary"]["benchmark_decision_count"] == len(M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES) - 1
+        ),
+        "all_actions_visible": actions == {"act", "bundle", "clarify", "defer", "request_approval", "stay_silent"},
+        "capability_choice_state_visible": payload["summary"]["capability_choice_state"] == "selected_and_rejected_capability_lanes_visible",
+        "quality_score_state_visible": payload["summary"]["quality_score_state"] == "timing_usefulness_false_positive_false_negative_trust_and_recovery_visible",
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == "deterministic_guardian_judgment_receipts_not_live_superiority_claim",
+        "receipt_surfaces_visible": "/api/operator/m8-guardian-brain" in payload["policy"]["receipt_surfaces"],
+    }
+
+
 async def _eval_operator_fast_control_availability_behavior() -> dict[str, Any]:
     payload = await _m7_cockpit_endpoint_payload()
     active_work = payload["active_work"]
@@ -11502,6 +11663,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
     m7_operator_cockpit_suite = next(item for item in suites if item["name"] == M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME)
+    m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
@@ -11529,6 +11691,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "m7_operator_cockpit_suite_axis_matches": (
             m7_operator_cockpit_suite["benchmark_axis"] == "m7_operator_cockpit_control_legibility"
+        ),
+        "m8_guardian_brain_suite_present": (
+            "m8_risky_capability_approval_behavior" in m8_guardian_brain_suite["scenario_names"]
+        ),
+        "m8_guardian_brain_suite_scenario_count_matches": (
+            m8_guardian_brain_suite["scenario_count"] == len(M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "m8_guardian_brain_suite_axis_matches": (
+            m8_guardian_brain_suite["benchmark_axis"] == "m8_guardian_intervention_quality"
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -13256,6 +13427,48 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Grounded high-salience observer state can still deliver through high interruption cost, while degraded observer confidence defers before transport.",
         runner=_eval_observer_delivery_salience_confidence_behavior,
+    ),
+    EvalScenario(
+        name="m8_capability_choice_act_behavior",
+        category="guardian",
+        description="M8 guardian brain chooses a grounded continuation capability when memory, project state, commitments, and operator preference align.",
+        runner=_eval_m8_capability_choice_act_behavior,
+    ),
+    EvalScenario(
+        name="m8_ambiguous_evidence_clarify_behavior",
+        category="guardian",
+        description="M8 guardian brain asks for clarification instead of choosing a capability when evidence or project anchors are ambiguous.",
+        runner=_eval_m8_ambiguous_evidence_clarify_behavior,
+    ),
+    EvalScenario(
+        name="m8_stale_memory_defer_behavior",
+        category="guardian",
+        description="M8 guardian brain defers stale memory before action and exposes freshness, trust, and recovery receipts.",
+        runner=_eval_m8_stale_memory_defer_behavior,
+    ),
+    EvalScenario(
+        name="m8_conflicting_commitment_bundle_behavior",
+        category="guardian",
+        description="M8 guardian brain bundles conflicting commitments for operator resolution instead of interrupting with an overconfident action.",
+        runner=_eval_m8_conflicting_commitment_bundle_behavior,
+    ),
+    EvalScenario(
+        name="m8_risky_capability_approval_behavior",
+        category="guardian",
+        description="M8 guardian brain keeps high-risk capability use approval-gated and operator-visible.",
+        runner=_eval_m8_risky_capability_approval_behavior,
+    ),
+    EvalScenario(
+        name="m8_no_action_restraint_behavior",
+        category="guardian",
+        description="M8 guardian brain can choose stay_silent for low-value no-action cases while keeping correction hooks visible.",
+        runner=_eval_m8_no_action_restraint_behavior,
+    ),
+    EvalScenario(
+        name="operator_m8_guardian_brain_surface_behavior",
+        category="guardian",
+        description="Operator surfaces expose the M8 guardian intervention benchmark, decision receipts, score labels, and claim boundary.",
+        runner=_eval_operator_m8_guardian_brain_surface_behavior,
     ),
     EvalScenario(
         name="guardian_feedback_loop",

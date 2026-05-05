@@ -19,6 +19,10 @@ from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.brain import (
+    M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
+    M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
+)
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
 from src.memory.superiority_benchmark import (
     M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
@@ -91,6 +95,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Longer-horizon live replay and broader external user-model benchmarks still remain for future work.",
         scenario_names=GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
+        label="M8 guardian intervention quality",
+        description=(
+            "Pins guardian judgment over the capability substrate across act, defer, bundle, clarify, "
+            "approval, and stay-silent cases with capability-choice receipts and operator correction hooks."
+        ),
+        benchmark_axis="m8_guardian_intervention_quality",
+        operator_summary=(
+            "M8 guardian intelligence is judged by receipted capability choice, restraint, timing, trust preservation, "
+            "and recovery under ambiguous, stale, conflicting, risky, and no-action cases."
+        ),
+        remaining_gap=(
+            "Live long-horizon human outcome studies and external guardian-intelligence superiority claims remain future proof work."
+        ),
+        scenario_names=M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

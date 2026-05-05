@@ -204,7 +204,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 14
+    assert details["suite_count"] == 15
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -220,6 +220,9 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m7_operator_cockpit_suite_present"] is True
     assert details["m7_operator_cockpit_suite_scenario_count_matches"] is True
     assert details["m7_operator_cockpit_suite_axis_matches"] is True
+    assert details["m8_guardian_brain_suite_present"] is True
+    assert details["m8_guardian_brain_suite_scenario_count_matches"] is True
+    assert details["m8_guardian_brain_suite_axis_matches"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -294,6 +297,44 @@ def test_run_benchmark_suites_executes_guardian_user_model_restraint_suite():
         "guardian_judgment_behavior",
         "operator_guardian_state_surface_behavior",
     }
+
+
+def test_run_benchmark_suites_executes_m8_guardian_intervention_quality_suite():
+    summary = asyncio.run(run_benchmark_suites(["m8_guardian_intervention_quality"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "m8_capability_choice_act_behavior",
+        "m8_ambiguous_evidence_clarify_behavior",
+        "m8_stale_memory_defer_behavior",
+        "m8_conflicting_commitment_bundle_behavior",
+        "m8_risky_capability_approval_behavior",
+        "m8_no_action_restraint_behavior",
+        "operator_m8_guardian_brain_surface_behavior",
+    }
+
+
+def test_operator_m8_guardian_brain_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m8_guardian_brain_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["live_state_receipt_visible"] is True
+    assert details["live_state_source_visible"] is True
+    assert details["live_state_preserves_claim_boundary"] is True
+    assert details["live_surface_counts_live_and_benchmark"] is True
+    assert details["all_actions_visible"] is True
+    assert details["capability_choice_state_visible"] is True
+    assert details["quality_score_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
 
 
 def test_workflow_endurance_benchmark_surface_behavior_runtime_eval_details():
@@ -772,11 +813,13 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "channels_presence_device_pairing" in captured.out
     assert "m2_execution_supremacy" in captured.out
     assert "m7_operator_cockpit_legibility" in captured.out
+    assert "m8_guardian_intervention_quality" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert available_benchmark_suites() == (
         "guardian_memory_quality",
         "guardian_user_model_restraint",
+        "m8_guardian_intervention_quality",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "workflow_endurance_and_repair",

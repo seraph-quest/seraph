@@ -217,8 +217,9 @@ Implementation meaning: the operator surface should stay obvious, dense, and fas
 Implementation meaning: guardian intelligence should improve which capabilities Seraph chooses, when it uses them, when it asks, when it waits, and how it follows through.
 
 - shipped foundations: guardian strategy, project and continuity modeling, salience, watchpoints, intervention planning, operator feedback, and memory-backed context
-- missing strategic gaps: stronger act/defer/bundle/clarify/approval/stay-silent judgment, tighter coupling between guardian state and capability selection or restraint, and sharper intervention quality under ambiguity
-- proof requirements: guardian intervention benchmarks with positive and negative cases, repeatable demos that show continuity surviving session churn, and receipts showing guardian state changed capability choice, timing, or suppression appropriately
+- shipped in the M8 guardian-brain slice on this branch: `m8_guardian_intervention_quality` gates deterministic act/defer/bundle/clarify/request-approval/stay-silent scenarios over ambiguous evidence, stale memory, conflicting commitments, interruption cost, risky capability use, and no-action restraint; `/api/operator/m8-guardian-brain` also derives a live state-scoped guardian decision from the current guardian state before appending benchmark receipts, surfacing selected and rejected capability lanes, timing/usefulness/false-positive/false-negative/trust/recovery labels, approval-preserving high-risk paths, and operator correction hooks without claiming live superiority
+- missing strategic gaps: live long-horizon human outcome studies, broader reach-surface intervention replay, and stronger adaptive learning beyond deterministic M8 receipts
+- proof requirements: guardian intervention benchmarks with positive and negative cases, repeatable demos that show continuity surviving session churn, and receipts showing guardian state changed capability choice, timing, or suppression appropriately while preserving approval and trust boundaries
 
 ## Cross-Cutting Benchmark-Grade Proof
 

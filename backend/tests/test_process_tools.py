@@ -79,6 +79,24 @@ def test_run_command_uses_disposable_worker_home_and_cleans_up():
     assert not workers_root.exists() or not any(workers_root.iterdir())
 
 
+def test_run_command_scrubs_ambient_secret_environment(monkeypatch):
+    monkeypatch.setenv("SERAPH_SHOULD_NOT_LEAK", "ambient-secret")
+    script_name = _write_script(
+        "wave3_process_env_scrub.py",
+        """
+        import os
+        print(os.environ.get("SERAPH_SHOULD_NOT_LEAK", "missing"))
+        print(os.environ.get("SERAPH_SANDBOX_ENV", "missing"))
+        """,
+    )
+
+    result = run_command(command="python3", args_json=f'["{script_name}"]')
+
+    assert "ambient-secret" not in result
+    assert "missing" in result
+    assert "allowlisted" in result
+
+
 def test_run_command_rejects_inline_python():
     result = run_command(command="python3", args_json='["-c","print(1)"]')
     assert result == "Error: Inline Python execution belongs in execute_code, not the process runtime."
@@ -215,6 +233,32 @@ def test_start_list_read_and_stop_process():
         if process["process_id"] == process_id
     )
     assert not Path(payload["worker_root"]).exists()
+
+
+def test_start_process_scrubs_ambient_secret_environment(monkeypatch):
+    monkeypatch.setenv("SERAPH_BACKGROUND_SHOULD_NOT_LEAK", "background-secret")
+    script_name = _write_script(
+        "wave3_process_background_env_scrub.py",
+        """
+        import os
+        print(os.environ.get("SERAPH_BACKGROUND_SHOULD_NOT_LEAK", "missing"), flush=True)
+        print(os.environ.get("SERAPH_SANDBOX_ENV", "missing"), flush=True)
+        """,
+    )
+
+    started = start_process(command="python3", args_json=f'["{script_name}"]')
+    process_id = started.split("process=")[1].split(",")[0]
+    output = ""
+    for _ in range(20):
+        output = read_process_output(process_id=process_id)
+        if "allowlisted" in output:
+            break
+        time.sleep(0.05)
+
+    assert "background-secret" not in output
+    assert "missing" in output
+    assert "allowlisted" in output
+    stop_process(process_id=process_id)
 
 
 def test_stop_process_missing_returns_error():

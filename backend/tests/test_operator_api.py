@@ -713,6 +713,49 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_secure_capability_host_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "secure_capability_host",
+                    "benchmark_posture": "secure_host_ci_gated_operator_visible",
+                    "operator_status": "secure_capability_host_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "credential_egress_state": "session_field_host_allowlist_enforced",
+                    "workspace_secret_file_state": "generic_read_patch_blocked",
+                    "process_environment_state": "ambient_secret_env_scrubbed",
+                    "prompt_surface_state": "suspicious_context_quarantined",
+                    "delegation_provider_state": "trust_partition_receipts_visible",
+                },
+                "scenario_names": [
+                    "secure_host_secret_ref_fail_closed_behavior",
+                    "secure_host_workspace_secret_path_boundary_behavior",
+                    "secure_host_process_env_isolation_behavior",
+                    "secure_host_prompt_injection_quarantine_behavior",
+                    "secure_host_delegation_partition_behavior",
+                    "secure_host_provider_fallback_boundary_behavior",
+                    "operator_secure_capability_host_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "credential_egress_policy": "session_bound_field_scoped_destination_host_allowlisted_secret_refs",
+                    "process_environment_policy": "allowlisted_environment_only_for_foreground_and_background_processes",
+                    "claim_boundary": "deterministic_secure_host_choke_points_not_full_host_container_isolation",
+                    "receipt_surfaces": [
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/secure-capability-host-benchmark",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_computer_use_benchmark_report",
         AsyncMock(
             return_value={
@@ -888,13 +931,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 9
+    assert payload["summary"]["suite_count"] == 10
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
@@ -925,6 +969,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     trust_suite = next(item for item in payload["suites"] if item["name"] == "trust_boundary_and_safety_receipts")
     assert "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"]
     assert trust_suite["scenario_count"] >= 7
+    secure_host_suite = next(item for item in payload["suites"] if item["name"] == "secure_capability_host")
+    assert "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"]
+    assert secure_host_suite["scenario_count"] >= 7
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
@@ -939,6 +986,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["workflow_endurance_benchmark"]["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
     assert payload["trust_boundary_benchmark"]["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
+    assert payload["secure_capability_host_benchmark"]["summary"]["suite_name"] == "secure_capability_host"
+    assert payload["secure_capability_host_benchmark"]["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
@@ -1028,6 +1077,24 @@ async def test_operator_trust_boundary_benchmark_surface_reports_policy_and_rece
     assert payload["summary"]["secret_egress_state"] == "field_scoped_egress_allowlist_required"
     assert payload["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+    assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_secure_capability_host_benchmark_surface_reports_policy_and_receipts(client):
+    resp = await client.get("/api/operator/secure-capability-host-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "secure_capability_host"
+    assert payload["summary"]["operator_status"] == "secure_capability_host_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["credential_egress_state"] == "session_field_host_allowlist_enforced"
+    assert payload["summary"]["workspace_secret_file_state"] == "generic_read_patch_blocked"
+    assert payload["summary"]["process_environment_state"] == "ambient_secret_env_scrubbed"
+    assert payload["policy"]["credential_egress_policy"] == "session_bound_field_scoped_destination_host_allowlisted_secret_refs"
+    assert payload["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
+    assert "/api/operator/secure-capability-host-benchmark" in payload["policy"]["receipt_surfaces"]
     assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
 
 

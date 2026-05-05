@@ -55,6 +55,21 @@ class TestFilesystemTool:
         read_result = read_file.forward("test.txt")
         assert read_result == "Hello, Seraph!"
 
+    def test_read_file_blocks_secret_like_workspace_path(self, tmp_path, monkeypatch, async_db):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / ".env").write_text("OPENROUTER_API_KEY=secret\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Secret-like workspace path blocked"):
+            read_file.forward(".env")
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_blocked"]
+
+        events = asyncio.run(_fetch())
+        assert events[0]["details"]["operation"] == "read"
+        assert "Secret-like workspace path" in events[0]["details"]["error"]
+
     def test_write_and_read_file_log_runtime_audit(self, tmp_path, monkeypatch, async_db):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         write_result = write_file.forward("test.txt", "Hello, Seraph!")
@@ -152,6 +167,17 @@ class TestFilesystemTool:
 
         with pytest.raises(ValueError, match="expected_occurrences must be 1"):
             preview_workspace_patch.forward("notes.md", "repeat", "changed", expected_occurrences=2)
+
+    def test_workspace_patch_blocks_secret_like_paths(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "id_rsa").write_text("PRIVATE KEY\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Secret-like workspace path blocked"):
+            preview_workspace_patch.forward("id_rsa", "PRIVATE", "PUBLIC")
+        with pytest.raises(ValueError, match="Secret-like workspace path blocked"):
+            apply_workspace_patch.forward("id_rsa", "PRIVATE", "PUBLIC")
+
+        assert (tmp_path / "id_rsa").read_text(encoding="utf-8") == "PRIVATE KEY\n"
 
     def test_read_file_not_a_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))

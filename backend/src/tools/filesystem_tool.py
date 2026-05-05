@@ -12,6 +12,38 @@ from src.audit.runtime import log_integration_event_sync
 
 logger = logging.getLogger(__name__)
 
+_SECRET_PATH_PARTS = {
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".docker",
+    ".gnupg",
+    ".ssh",
+}
+_SECRET_FILE_NAMES = {
+    ".env",
+    ".env.dev",
+    ".env.local",
+    ".env.production",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.json",
+    "google_credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "known_hosts",
+    "private_key",
+}
+_SECRET_FILE_SUFFIXES = {
+    ".key",
+    ".p12",
+    ".pem",
+    ".pfx",
+}
+
 
 def _filesystem_details(file_path: str, operation: str, **extra: object) -> dict[str, object]:
     return {
@@ -30,6 +62,31 @@ def _safe_resolve(file_path: str) -> Path:
     except ValueError:
         raise ValueError(f"Path traversal blocked: {file_path}")
     return resolved
+
+
+def _is_secret_like_workspace_path(file_path: str) -> bool:
+    normalized = file_path.replace("\\", "/").strip().lower()
+    if not normalized:
+        return False
+    path = Path(normalized)
+    parts = set(path.parts)
+    if parts & _SECRET_PATH_PARTS:
+        return True
+    name = path.name
+    if name in _SECRET_FILE_NAMES:
+        return True
+    if any(name.endswith(suffix) for suffix in _SECRET_FILE_SUFFIXES):
+        return True
+    return any(token in name for token in ("credential", "secret", "token"))
+
+
+def _assert_not_secret_like_path(file_path: str, operation: str) -> None:
+    if not _is_secret_like_workspace_path(file_path):
+        return
+    raise ValueError(
+        f"Secret-like workspace path blocked for {operation}: {file_path}. "
+        "Use the vault or an explicit secret-management path instead."
+    )
 
 
 def _sha256_text(content: str) -> str:
@@ -117,6 +174,7 @@ def read_file(file_path: str) -> str:
         The text contents of the file.
     """
     try:
+        _assert_not_secret_like_path(file_path, "read")
         resolved = _safe_resolve(file_path)
     except ValueError as exc:
         log_integration_event_sync(
@@ -176,6 +234,7 @@ def write_file(file_path: str, content: str) -> str:
         A confirmation message.
     """
     try:
+        _assert_not_secret_like_path(file_path, "write")
         resolved = _safe_resolve(file_path)
     except ValueError as exc:
         log_integration_event_sync(
@@ -226,6 +285,7 @@ def preview_workspace_patch(
         A JSON receipt containing the diff, hashes, and application status.
     """
     try:
+        _assert_not_secret_like_path(file_path, "preview_patch")
         resolved = _safe_resolve(file_path)
         before = resolved.read_text(encoding="utf-8")
         after, occurrence_count = _replace_once(before, old_text, new_text, expected_occurrences)
@@ -291,6 +351,7 @@ def apply_workspace_patch(
         A JSON receipt containing the diff, hashes, and application status.
     """
     try:
+        _assert_not_secret_like_path(file_path, "apply_patch")
         resolved = _safe_resolve(file_path)
         before = resolved.read_text(encoding="utf-8")
         before_sha256 = _sha256_text(before)

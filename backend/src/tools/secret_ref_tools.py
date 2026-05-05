@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from smolagents import Tool, tool
 
 from src.approval.runtime import get_current_session_id
@@ -78,6 +80,12 @@ class SecretRefResolvingTool(Tool):
                     raise ValueError(
                         f"Tool '{self.name}' cannot receive secret references without an explicit credential egress allowlist."
                     )
+                blocked_hosts = _disallowed_credential_destination_hosts(invocation, allowed_hosts)
+                if blocked_hosts:
+                    raise ValueError(
+                        f"Tool '{self.name}' cannot receive secret references for non-allowlisted destination host(s): "
+                        f"{', '.join(blocked_hosts)}."
+                    )
         resolved_invocation = {
             key: (
                 resolve_secret_refs(value, session_id)
@@ -147,6 +155,40 @@ def _contains_secret_ref(value) -> bool:
     if isinstance(value, dict):
         return any(_contains_secret_ref(item) for item in value.values())
     return False
+
+
+def _disallowed_credential_destination_hosts(invocation: dict, allowed_hosts: list[str]) -> list[str]:
+    normalized_allowed = {host.lower().strip() for host in allowed_hosts if isinstance(host, str) and host.strip()}
+    discovered_hosts: set[str] = set()
+    for key, value in invocation.items():
+        if not _looks_like_destination_field(str(key)):
+            continue
+        for host in _extract_url_hosts(value):
+            if host.lower() not in normalized_allowed:
+                discovered_hosts.add(host)
+    return sorted(discovered_hosts)
+
+
+def _looks_like_destination_field(field_name: str) -> bool:
+    lowered = field_name.lower()
+    return lowered in {"url", "uri", "endpoint", "base_url", "request_url", "target_url", "webhook_url"} or lowered.endswith("_url")
+
+
+def _extract_url_hosts(value) -> list[str]:
+    if isinstance(value, str):
+        parsed = urlparse(value)
+        return [parsed.hostname] if parsed.hostname else []
+    if isinstance(value, dict):
+        hosts: list[str] = []
+        for item in value.values():
+            hosts.extend(_extract_url_hosts(item))
+        return hosts
+    if isinstance(value, (list, tuple)):
+        hosts: list[str] = []
+        for item in value:
+            hosts.extend(_extract_url_hosts(item))
+        return hosts
+    return []
 
 
 @tool

@@ -44,6 +44,8 @@ def issue_secret_ref(session_id: str, secret_value: str) -> str:
 def resolve_secret_refs(value, session_id: str | None):
     """Recursively resolve secret references inside nested tool arguments."""
     if session_id is None:
+        if _contains_secret_ref(value):
+            raise ValueError("Secret references require an active session.")
         return value
 
     if isinstance(value, str):
@@ -70,7 +72,19 @@ def _resolve_secret_refs_in_string(value: str, session_id: str) -> str:
         token = match.group(1)
         secret_value = session_refs.get(token)
         if secret_value is None:
-            return match.group(0)
+            raise ValueError("Secret reference is expired, unknown, or belongs to another session.")
         return secret_value[0]
 
     return _REF_RE.sub(_replace, value)
+
+
+def _contains_secret_ref(value) -> bool:
+    if isinstance(value, str):
+        return _REF_PREFIX in value
+    if isinstance(value, list):
+        return any(_contains_secret_ref(item) for item in value)
+    if isinstance(value, tuple):
+        return any(_contains_secret_ref(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_secret_ref(item) for item in value.values())
+    return False

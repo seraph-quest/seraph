@@ -101,6 +101,17 @@ _OUTPUT_CHAR_LIMIT = 12_000
 _PROCESS_OUTPUT_DEFAULT = 4_000
 _PROCESS_OUTPUT_MAX = 24_000
 _COMMAND_TIMEOUT_MAX = 120
+_ENV_ALLOWLIST = {
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TZ",
+    "CI",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+}
 
 
 def _utc_now() -> datetime:
@@ -453,8 +464,13 @@ def _delete_runtime_dir(path: Path) -> None:
 
 
 def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
-    env = os.environ.copy()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _ENV_ALLOWLIST
+    }
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env["SERAPH_SANDBOX_ENV"] = "allowlisted"
     if worker_root is None:
         env["HOME"] = str(_workspace_root())
         return env

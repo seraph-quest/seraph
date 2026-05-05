@@ -170,8 +170,10 @@ M2 batch execution rules:
 Implementation meaning: every capability path needs least privilege, approval behavior, auditability, and fail-closed semantics appropriate to its risk.
 
 - shipped foundations: approvals, audit logging, secret redaction, secret-reference containment, sandboxed execution, background-process partitioning, disposable worker roots, credential-egress allowlists, managed connector boundary metadata, and replay drift blocking on privileged surfaces
-- missing strategic gaps: broader host-grade isolation, stricter enforcement across future delegated/background/browser/provider paths, deeper credential-egress discipline for connector and browser work, and clearer tool/action separation for state-mutating routes
+- shipped in the M3 secure-host batch on this branch: secret references now fail closed across cross-session or expired refs and destination-host egress drift, generic workspace read and patch tools block secret-like files such as `.env`, credential, token, and private-key paths, foreground and background process execution receives an allowlisted environment instead of ambient host credentials, and the `secure_capability_host` benchmark plus `/api/operator/secure-capability-host-benchmark` exposes those receipts
+- missing strategic gaps: broader host/container-grade isolation, stronger browser credential and cookie partitioning, deeper live hostile-provider replay, and stricter enforcement across future connector/browser/provider paths that do not yet carry destination-aware credential policies
 - proof requirements: boundary-specific evals for browser, connector, delegation, background, provider fallback, filesystem, process, and workflow paths; operator-visible audit receipts; fail-closed behavior when a path cannot prove it stayed within its trust envelope
+- claim boundary: this milestone proves deterministic secure-host choke points and operator-visible receipts; it does not claim full host/container isolation, secure-by-default production posture, or complete browser/provider credential isolation
 
 TEEs are helpful, but they do not solve prompt injection or unsafe tool execution by themselves. Existing trust-drift blocking should be deepened and generalized across future delegated/background/browser/provider paths, not treated as a missing foundation.
 

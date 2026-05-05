@@ -1241,6 +1241,47 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    const m7Board = await screen.findByLabelText("M7 command board");
+    await waitFor(() => {
+      expect(within(m7Board).getByText("active work")).toBeInTheDocument();
+      expect(within(m7Board).getByText("2 active · 0 paused")).toBeInTheDocument();
+      expect(within(m7Board).getByText("trust")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/4 boundaries · approval high_risk/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText("approvals")).toBeInTheDocument();
+      expect(within(m7Board).getByText("1 pending · 1 hot")).toBeInTheDocument();
+      expect(within(m7Board).getByText("memory evidence")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/0 receipts · unknown/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText("tool calls")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/0 calls · 0 failures/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText("artifacts")).toBeInTheDocument();
+      expect(within(m7Board).getByText("0 files · notes/brief.md")).toBeInTheDocument();
+      expect(within(m7Board).getByText("next action")).toBeInTheDocument();
+      expect(within(m7Board).getByText("approval: shell_execute")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/artifact notes\/brief.md/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/boundary Atlas companion bridge/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/approve direct backend control/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/repair routed or policy gated control/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/branch operator draft control/i)).toBeInTheDocument();
+    });
+    expect(m7Board.querySelector(".cockpit-m7-signal-grid")).not.toBeNull();
+    expect(m7Board.querySelector(".cockpit-m7-control-strip")).not.toBeNull();
+    expect(within(m7Board).getByLabelText("M7 fast controls")).toBeInTheDocument();
+    expect(within(m7Board).getByRole("button", { name: "Approve top M7 approval" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Deny top M7 approval" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Pause active M7 work" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Resume paused M7 work" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Retry primary M7 workflow" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Repair primary M7 workflow" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Open primary M7 branch" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Compare primary M7 outputs" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Revoke M7 reach target" })).toBeEnabled();
+    fireEvent.click(within(m7Board).getByRole("button", { name: "Pause active M7 work" }));
+    await waitFor(() => expect(screen.getByDisplayValue(/Pause active Seraph work/)).toBeInTheDocument());
+    fireEvent.click(within(m7Board).getByRole("button", { name: "Resume paused M7 work" }));
+    await waitFor(() => expect(screen.getByDisplayValue(/Resume paused Seraph work/)).toBeInTheDocument());
+    fireEvent.click(within(m7Board).getByRole("button", { name: "Revoke M7 reach target" }));
+    await waitFor(() => expect(screen.getByDisplayValue(/Review and revoke reach for "Atlas companion bridge"/)).toBeInTheDocument());
+
     const triage = await screen.findByLabelText("Active triage");
     await waitFor(() => {
       expect(within(triage).getByText("approval: shell_execute")).toBeInTheDocument();
@@ -11097,7 +11138,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(22));
+    await waitFor(() => expect(cockpitFetchCount).toBe(23));
     view.unmount();
 
     await act(async () => {

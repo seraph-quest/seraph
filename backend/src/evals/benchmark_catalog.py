@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 from src.browser.benchmark import COMPUTER_USE_BENCHMARK_SCENARIO_NAMES, COMPUTER_USE_BENCHMARK_SUITE_NAME
+from src.cockpit.benchmark import (
+    M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
+    M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -235,6 +239,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Live hostile-environment replay, deeper remote computer-use providers, and external agent benchmarks still remain after M2.",
         scenario_names=M2_EXECUTION_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
+        label="M7 operator cockpit legibility",
+        description=(
+            "Pins operator-readable receipts, control-mode-labeled fast controls, control-plane handoff state, "
+            "and trust-boundary clarity into one deterministic cockpit proof lane."
+        ),
+        benchmark_axis="m7_operator_cockpit_control_legibility",
+        operator_summary=(
+            "M7 cockpit legibility is judged by readable receipts and direct, routed, or drafted controls staying clearly labeled in operator surfaces, "
+            "not by broad live usability or external superiority claims."
+        ),
+        remaining_gap=(
+            "Live multi-operator usability studies and broader cross-device command latency proof remain future work."
+        ),
+        scenario_names=M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="planning_retrieval_reporting",

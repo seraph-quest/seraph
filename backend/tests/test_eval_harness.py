@@ -204,7 +204,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 13
+    assert details["suite_count"] == 14
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -217,6 +217,9 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
     assert details["m2_execution_suite_present"] is True
+    assert details["m7_operator_cockpit_suite_present"] is True
+    assert details["m7_operator_cockpit_suite_scenario_count_matches"] is True
+    assert details["m7_operator_cockpit_suite_axis_matches"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -480,6 +483,66 @@ def test_run_benchmark_suites_executes_m5_jobs_routines_workflows_delegation_sui
     }
 
 
+def test_run_benchmark_suites_executes_m7_operator_cockpit_legibility_suite():
+    summary = asyncio.run(run_benchmark_suites(["m7_operator_cockpit_legibility"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "operator_cockpit_receipt_legibility_behavior",
+        "operator_fast_control_availability_behavior",
+        "operator_control_plane_handoff_legibility_behavior",
+        "operator_m7_cockpit_benchmark_surface_behavior",
+    }
+
+
+def test_operator_m7_cockpit_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m7_cockpit_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["receipt_legibility_state_visible"] is True
+    assert details["fast_control_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+
+
+def test_m7_cockpit_legibility_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals([
+        "operator_cockpit_receipt_legibility_behavior",
+        "operator_fast_control_availability_behavior",
+        "operator_control_plane_handoff_legibility_behavior",
+    ]))
+
+    assert summary.total == 3
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    receipt_details = details_by_name["operator_cockpit_receipt_legibility_behavior"]
+    assert receipt_details["all_receipts_readable"] is True
+    assert receipt_details["routing_receipt_visible"] is True
+
+    control_details = details_by_name["operator_fast_control_availability_behavior"]
+    assert control_details["endpoint_operator_status_visible"] is True
+    assert control_details["work_item_controls_labeled"] is True
+    assert control_details["work_item_approval_not_overstated"] is True
+    assert control_details["approval_direct_control_visible"] is True
+    assert control_details["repair_control_routed_visible"] is True
+    assert control_details["branch_control_draft_visible"] is True
+    assert control_details["revoke_not_overstated"] is True
+
+    handoff_details = details_by_name["operator_control_plane_handoff_legibility_behavior"]
+    assert handoff_details["workspace_mode_visible"] is True
+    assert handoff_details["connector_boundary_visible"] is True
+    assert handoff_details["blocked_workflow_boundary_visible"] is True
+
+
 def test_channels_presence_device_pairing_runtime_eval_details():
     summary = asyncio.run(run_benchmark_suites(["channels_presence_device_pairing"]))
 
@@ -708,6 +771,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "m2_execution_supremacy" in captured.out
+    assert "m7_operator_cockpit_legibility" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert available_benchmark_suites() == (
@@ -722,6 +786,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "m2_execution_supremacy",
+        "m7_operator_cockpit_legibility",
         "planning_retrieval_reporting",
         "governed_improvement",
     )

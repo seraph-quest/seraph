@@ -944,6 +944,39 @@ interface OperatorM6MemorySuperiority {
   policy: Record<string, unknown>;
 }
 
+interface OperatorM7Control {
+  action: string;
+  enabled: boolean;
+  label: string;
+  target_kind?: string | null;
+  control_mode: string;
+  receipt_required: boolean;
+}
+
+interface OperatorM7Cockpit {
+  summary: {
+    operator_status: string;
+    active_work_count: number;
+    pending_approval_count: number;
+    trust_boundary_count: number;
+    memory_evidence_count: number;
+    tool_call_count: number;
+    artifact_count: number;
+    job_count: number;
+    delegation_count: number;
+    background_session_count: number;
+    recovery_action_count: number;
+    fast_control_count: number;
+    claim_boundary: string;
+  };
+  fast_controls: OperatorM7Control[];
+  proof_receipts: string[];
+  claim_boundaries: {
+    source: string;
+    not_claimed: string[];
+  };
+}
+
 interface OperatorEngineeringMemorySessionMatch {
   session_id?: string | null;
   title?: string | null;
@@ -3948,6 +3981,65 @@ function normalizeOperatorM6MemorySuperiority(value: unknown): OperatorM6MemoryS
   };
 }
 
+function normalizeOperatorM7Cockpit(value: unknown): OperatorM7Cockpit | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const normalizeControl = (entry: unknown): OperatorM7Control[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const control = entry as Record<string, unknown>;
+    const action = typeof control.action === "string" ? control.action : "";
+    if (!action) return [];
+    return [{
+      action,
+      enabled: Boolean(control.enabled),
+      label: typeof control.label === "string" ? control.label : action.replace(/_/g, " "),
+      target_kind: typeof control.target_kind === "string" ? control.target_kind : null,
+      control_mode: typeof control.control_mode === "string" ? control.control_mode : "operator_draft_control",
+      receipt_required: Boolean(control.receipt_required),
+    }];
+  };
+  const claimBoundaries = record.claim_boundaries;
+  const claimBoundaryRecord = claimBoundaries && typeof claimBoundaries === "object" && !Array.isArray(claimBoundaries)
+    ? claimBoundaries as Record<string, unknown>
+    : {};
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      active_work_count: numberValue(summaryRecord.active_work_count),
+      pending_approval_count: numberValue(summaryRecord.pending_approval_count),
+      trust_boundary_count: numberValue(summaryRecord.trust_boundary_count),
+      memory_evidence_count: numberValue(summaryRecord.memory_evidence_count),
+      tool_call_count: numberValue(summaryRecord.tool_call_count),
+      artifact_count: numberValue(summaryRecord.artifact_count),
+      job_count: numberValue(summaryRecord.job_count),
+      delegation_count: numberValue(summaryRecord.delegation_count),
+      background_session_count: numberValue(summaryRecord.background_session_count),
+      recovery_action_count: numberValue(summaryRecord.recovery_action_count),
+      fast_control_count: numberValue(summaryRecord.fast_control_count),
+      claim_boundary: typeof summaryRecord.claim_boundary === "string"
+        ? summaryRecord.claim_boundary
+        : "composed_operator_projection_from_existing_receipts_not_new_executor_state",
+    },
+    fast_controls: Array.isArray(record.fast_controls) ? record.fast_controls.flatMap(normalizeControl) : [],
+    proof_receipts: stringList(record.proof_receipts),
+    claim_boundaries: {
+      source: typeof claimBoundaryRecord.source === "string" ? claimBoundaryRecord.source : "unknown",
+      not_claimed: stringList(claimBoundaryRecord.not_claimed),
+    },
+  };
+}
+
 function normalizeOperatorEngineeringMemory(value: unknown): OperatorEngineeringMemory | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -5434,6 +5526,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
   const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
   const [operatorM6MemorySuperiority, setOperatorM6MemorySuperiority] = useState<OperatorM6MemorySuperiority | null>(null);
+  const [operatorM7Cockpit, setOperatorM7Cockpit] = useState<OperatorM7Cockpit | null>(null);
   const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
@@ -5617,6 +5710,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       backgroundSessionsResult,
       m5OperatingLayerResult,
       m6MemorySuperiorityResult,
+      m7CockpitResult,
       engineeringMemoryResult,
       continuityGraphResult,
       workflowRunsResult,
@@ -5640,6 +5734,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/operator/background-sessions`),
       fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
       fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
       fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
@@ -5706,6 +5801,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
     setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
     setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
+    setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
     setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
@@ -7277,6 +7373,81 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const primaryWorkflowTriageEntry = operatorTriageEntries.find((entry) => entry.workflow) ?? null;
   const primaryEvidenceEntry = operatorEvidenceEntries[0] ?? null;
   const primaryWorkflowSupervisionEntry = operatorWorkflowEntries[0] ?? null;
+  const m7PrimaryWorkflow = operatorTriageEntries.find((entry) => (
+    entry.workflow
+    && ["awaiting_approval", "degraded", "failed"].includes(entry.workflow.status)
+  ))?.workflow
+    ?? primaryWorkflowTriageEntry?.workflow
+    ?? primaryWorkflowSupervisionEntry?.workflow
+    ?? workflowRunsWithArtifacts.find((workflow) => ["running", "awaiting_approval", "degraded", "failed"].includes(workflow.status))
+    ?? workflowRunsWithArtifacts[0]
+    ?? null;
+  const m7PrimaryFailure = m7PrimaryWorkflow ? workflowLatestFailureContext(m7PrimaryWorkflow) : null;
+  const m7PrimaryBranch = m7PrimaryWorkflow ? workflowLatestBranchRun(m7PrimaryWorkflow) : null;
+  const m7BestContinuation = m7PrimaryWorkflow ? workflowBestContinuationRun(m7PrimaryWorkflow) : null;
+  const m7PrimaryOutputPath = m7PrimaryWorkflow ? workflowPrimaryOutputPath(m7PrimaryWorkflow) : null;
+  const m7BestContinuationOutputPath = m7BestContinuation ? workflowPrimaryOutputPath(m7BestContinuation) : null;
+  const m7CanCompare = Boolean(
+    m7PrimaryWorkflow
+    && m7BestContinuation
+    && m7PrimaryOutputPath
+    && m7BestContinuationOutputPath
+    && m7PrimaryOutputPath !== m7BestContinuationOutputPath,
+  );
+  const m7RevocationTarget = continuityPresenceSurfaces?.surfaces.find((surface) => (
+    surface.active
+    && surface.revocation_state !== "revoked"
+    && surface.trust_state !== "revoked"
+  )) ?? continuityPresenceSurfaces?.surfaces.find((surface) => surface.attention) ?? null;
+  const m7Summary = operatorM7Cockpit?.summary ?? null;
+  const m7ActiveWorkCount = (
+    m7Summary?.active_work_count
+    ?? operatorM5OperatingLayer?.summary.active_work_count
+    ?? workflowRunsWithArtifacts.filter((workflow) => ["running", "awaiting_approval", "degraded"].includes(workflow.status)).length
+  );
+  const m7PausedWorkCount = operatorM5OperatingLayer?.summary.paused_work_count ?? 0;
+  const m7ToolCallCount = m7Summary?.tool_call_count
+    ?? activitySummary?.llm_call_count
+    ?? auditEvents.filter((event) => event.event_type === "tool_call").length
+    ?? 0;
+  const m7FallbackTrustBoundaryCount = [
+    approvalMode !== "off" ? "approval" : null,
+    toolPolicyMode !== "unknown" ? "tool policy" : null,
+    mcpPolicyMode !== "unknown" ? "mcp policy" : null,
+    ...(m7RevocationTarget ? [m7RevocationTarget.boundary_scope ?? m7RevocationTarget.boundary_posture ?? "presence"] : []),
+  ].filter(Boolean).length;
+  const m7TrustBoundaryCount = m7Summary?.trust_boundary_count ?? m7FallbackTrustBoundaryCount;
+  const m7MemoryEvidenceCount = operatorM6MemorySuperiority
+    ? (
+      m7Summary?.memory_evidence_count
+      ?? (
+        operatorM6MemorySuperiority.summary.source_receipt_count
+        + operatorM6MemorySuperiority.summary.control_receipt_count
+        + operatorM6MemorySuperiority.summary.behavior_receipt_count
+      )
+    )
+    : m7Summary?.memory_evidence_count ?? operatorEngineeringMemory?.summary.tracked_bundles ?? 0;
+  const m7ArtifactCount = m7Summary?.artifact_count ?? artifacts.length;
+  const m7NextActionLabel = primaryApprovalTriageEntry?.label
+    ?? primaryWorkflowTriageEntry?.label
+    ?? operatorWorkflowOrchestrationEntries[0]?.threadLabel
+    ?? primaryEvidenceEntry?.label
+    ?? "no urgent action";
+  const m7SignalTiles = [
+    { label: "active work", value: `${m7ActiveWorkCount} active · ${m7PausedWorkCount} paused` },
+    { label: "trust", value: `${m7TrustBoundaryCount} boundaries · approval ${approvalMode}` },
+    { label: "approvals", value: `${m7Summary?.pending_approval_count ?? pendingApprovals.length} pending · ${operatorTriageEntries.filter((entry) => entry.approval).length} hot` },
+    { label: "memory evidence", value: `${m7MemoryEvidenceCount} receipts · ${operatorM6MemorySuperiority?.summary.memory_confidence ?? "unknown"}` },
+    { label: "tool calls", value: `${m7ToolCallCount} calls · ${activitySummary?.failure_count ?? 0} failures` },
+    { label: "artifacts", value: `${m7ArtifactCount} files · ${m7PrimaryOutputPath ?? "no primary output"}` },
+    { label: "next action", value: m7NextActionLabel },
+  ];
+  const m7ControlModeByAction = new Map(
+    (operatorM7Cockpit?.fast_controls ?? []).map((control) => [control.action, control.control_mode]),
+  );
+  const m7ControlModeLabel = (action: string, fallback: string) => (
+    m7ControlModeByAction.get(action) ?? fallback
+  ).replace(/_/g, " ");
   function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry) return;
     if (entry.approval) {
@@ -13068,6 +13239,145 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+H inspect top supervised workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
                     </div>
                   </div>
+
+                  <section className="cockpit-operator-section cockpit-m7-board" aria-label="M7 command board">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M7 command board</span>
+                      <span className="cockpit-operator-link">
+                        {m7PrimaryWorkflow
+                          ? `${m7PrimaryWorkflow.workflowName} · ${formatContinuityLabel(m7PrimaryWorkflow.status)}`
+                          : "standing by"}
+                      </span>
+                    </div>
+                    <div className="cockpit-m7-signal-grid">
+                      {m7SignalTiles.map((tile) => (
+                        <div key={tile.label} className="cockpit-m7-signal">
+                          <div className="cockpit-key">{tile.label}</div>
+                          <div className="cockpit-value">{tile.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="cockpit-m7-control-strip" aria-label="M7 fast controls">
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Approve top M7 approval"
+                        disabled={!primaryApprovalTriageEntry}
+                        onClick={() => approveOperatorTriageEntry(primaryApprovalTriageEntry)}
+                      >
+                        approve
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Deny top M7 approval"
+                        disabled={!primaryApprovalTriageEntry?.approval}
+                        onClick={() => {
+                          if (primaryApprovalTriageEntry?.approval) {
+                            void handleApprovalDecision(primaryApprovalTriageEntry.approval, "deny");
+                          }
+                        }}
+                      >
+                        deny
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Pause active M7 work"
+                        onClick={() => queueComposerDraft(
+                          `Pause active Seraph work. Active items: ${m7ActiveWorkCount}. Keep approvals, memory evidence, tool calls, and artifact lineage visible before resuming.`,
+                        )}
+                      >
+                        pause
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Resume paused M7 work"
+                        onClick={() => queueComposerDraft(
+                          `Resume paused Seraph work. Paused items: ${m7PausedWorkCount}. Start with ${m7NextActionLabel}.`,
+                        )}
+                      >
+                        resume
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Retry primary M7 workflow"
+                        disabled={!m7PrimaryWorkflow?.retryFromStepDraft}
+                        onClick={() => {
+                          if (m7PrimaryWorkflow?.retryFromStepDraft) queueComposerDraft(m7PrimaryWorkflow.retryFromStepDraft);
+                        }}
+                      >
+                        retry
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Repair primary M7 workflow"
+                        disabled={!m7PrimaryFailure?.step.recoveryActions?.length}
+                        onClick={() => {
+                          if (m7PrimaryFailure?.step.recoveryActions?.length) {
+                            void runCapabilityActions(
+                              readActionList(m7PrimaryFailure.step.recoveryActions),
+                              `${m7PrimaryFailure.workflow.workflowName} ${m7PrimaryFailure.step.id}`,
+                            );
+                          }
+                        }}
+                      >
+                        repair
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Open primary M7 branch"
+                        disabled={!m7PrimaryBranch}
+                        onClick={() => inspectWorkflowRun(m7PrimaryBranch)}
+                      >
+                        branch
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Compare primary M7 outputs"
+                        disabled={!m7CanCompare || !m7PrimaryWorkflow || !m7BestContinuation || !m7BestContinuationOutputPath}
+                        onClick={() => {
+                          if (m7PrimaryWorkflow && m7BestContinuation && m7BestContinuationOutputPath) {
+                            queueWorkflowOutputComparison(m7PrimaryWorkflow, m7BestContinuation, m7BestContinuationOutputPath);
+                          }
+                        }}
+                      >
+                        compare
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Revoke M7 reach target"
+                        disabled={!m7RevocationTarget}
+                        onClick={() => queueComposerDraft(
+                          m7RevocationTarget
+                            ? `Review and revoke reach for "${m7RevocationTarget.label}". Boundary: ${[
+                              m7RevocationTarget.boundary_posture,
+                              m7RevocationTarget.boundary_scope,
+                              m7RevocationTarget.trust_state,
+                              m7RevocationTarget.pairing_state,
+                            ].filter(Boolean).join(" · ") || "unknown"}.`
+                            : "Review reach targets and revoke any unsafe external or device surface.",
+                        )}
+                      >
+                        revoke
+                      </button>
+                    </div>
+                    <div className="cockpit-m7-evidence-line">
+                      <span>{m7PrimaryWorkflow ? `work ${m7PrimaryWorkflow.summary}` : "no primary workflow loaded"}</span>
+                      <span>{m7PrimaryFailure ? `failure ${workflowStepSummary(m7PrimaryFailure.step)}` : "no active failure"}</span>
+                      <span>{m7PrimaryOutputPath ? `artifact ${m7PrimaryOutputPath}` : "artifact pending"}</span>
+                      <span>{m7RevocationTarget ? `boundary ${m7RevocationTarget.label}` : "no reach revocation target"}</span>
+                      <span>{`approve ${m7ControlModeLabel("approve", "direct_backend_control")}`}</span>
+                      <span>{`repair ${m7ControlModeLabel("repair", "routed_or_policy_gated_control")}`}</span>
+                      <span>{`branch ${m7ControlModeLabel("branch", "operator_draft_control")}`}</span>
+                    </div>
+                  </section>
 
                   <section className="cockpit-operator-section" aria-label="Team control plane">
                     <div className="cockpit-operator-row">

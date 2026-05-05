@@ -207,9 +207,10 @@ Implementation meaning: memory should change behavior and improve outcomes, not 
 
 Implementation meaning: the operator surface should stay obvious, dense, and fast enough that the user can understand what Seraph is doing without hunting across panes.
 
-- shipped foundations: browser cockpit, command surfaces, activity ledger, operator terminal, workflow supervision views, live feed, active triage, approvals, traces, and capability panes
-- missing strategic gaps: denser control over complex flows, better cross-surface explanation of system state, more direct actions for recovery, comparison, and follow-through, and clearer grouping across capability families
-- proof requirements: cockpit tasks should be inspectable without source diving, common operator moves should stay keyboard-first, and the surface should make trust, capability, and execution state legible at a glance
+- shipped foundations: browser cockpit, command surfaces, activity ledger, operator terminal, workflow supervision views, live feed, active triage, approvals, traces, capability panes, team control-plane synthesis, background-session continuity, engineering-memory bundles, continuity graph, workflow operating layer, and the M7 command board that composes active work, trust boundaries, approvals, memory evidence, tool-call receipts, artifacts, recovery state, and fast controls into one operator surface
+- shipped in the M7 cockpit-legibility slice on this branch: `/api/operator/m7-cockpit` now projects active work, approvals, trust boundaries, memory evidence, tool/audit receipts, artifacts, jobs, delegations, background sessions, channels/recovery, and fast controls with explicit control-mode labels for direct backend controls, routed or policy-gated controls, and operator-draft controls; `/api/operator/m7-cockpit-legibility-benchmark` and `m7_operator_cockpit_legibility` gate readable receipts, fast-control availability, handoff legibility, and trust-boundary clarity without claiming live usability superiority
+- missing strategic gaps: deeper step-level execution control, broader direct mutation endpoints for pause/resume/revoke where appropriate, live multi-operator usability evidence, and broader cross-surface command control beyond the shipped M7 projection and command board
+- proof requirements: cockpit tasks should be inspectable without source diving, common operator moves should stay keyboard-first, and the surface should make trust, capability, execution state, claim boundaries, and direct-versus-drafted control modes legible at a glance
 
 ## M8 Guardian Brain Over The Capability Substrate
 

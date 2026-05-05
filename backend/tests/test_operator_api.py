@@ -689,6 +689,247 @@ async def test_operator_control_plane_synthesizes_governance_usage_runtime_and_h
 
 
 @pytest.mark.asyncio
+async def test_operator_m7_cockpit_composes_dense_control_surface(client):
+    with (
+        patch(
+            "src.api.operator._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-1",
+                        "run_identity": "session-1:workflow_release:root",
+                        "root_run_identity": "session-1:workflow_release:root",
+                        "workflow_name": "release-check",
+                        "summary": "Release check is waiting on a guarded write.",
+                        "status": "awaiting_approval",
+                        "availability": "blocked",
+                        "thread_id": "session-1",
+                        "thread_label": "Release",
+                        "started_at": "2026-05-05T10:00:00Z",
+                        "updated_at": "2026-05-05T10:04:00Z",
+                        "artifact_paths": ["artifacts/release-check.md"],
+                        "branch_kind": "branch_from_checkpoint",
+                        "checkpoint_candidates": [{"step_id": "draft", "status": "succeeded"}],
+                        "retry_from_step_draft": "Retry release check from draft.",
+                        "replay_allowed": False,
+                        "replay_block_reason": "approval_context_changed",
+                        "pending_approval_count": 1,
+                        "approval_context": {
+                            "risk_level": "high",
+                            "execution_boundaries": ["workspace_write"],
+                            "delegated_specialists": ["workflow_runner"],
+                            "delegated_tool_names": ["write_file"],
+                            "trust_partition": {"mode": "delegated_specialist"},
+                        },
+                        "step_records": [
+                            {
+                                "id": "draft",
+                                "index": 0,
+                                "tool": "write_file",
+                                "status": "awaiting_approval",
+                                "is_recoverable": True,
+                                "recovery_actions": [{"type": "set_tool_policy"}],
+                            }
+                        ],
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.approval_repository.list_pending",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "approval-1",
+                        "tool_name": "write_file",
+                        "summary": "Approve release artifact write.",
+                        "risk_level": "high",
+                        "thread_id": "session-1",
+                        "session_id": "session-1",
+                        "created_at": "2026-05-05T10:03:00Z",
+                        "resume_message": "Resume the release check after approval.",
+                        "approval_context": {
+                            "risk_level": "high",
+                            "execution_boundaries": ["workspace_write"],
+                            "trust_partition": {"mode": "operator_approved_write"},
+                        },
+                        "approval_scope": {
+                            "target": {
+                                "type": "artifact",
+                                "reference": "artifacts/release-check.md",
+                            }
+                        },
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "presence",
+                        "recommended_focus": "release channel",
+                        "degraded_route_count": 1,
+                        "attention_presence_surface_count": 1,
+                    },
+                    "recovery_actions": [
+                        {
+                            "id": "presence:release",
+                            "kind": "presence_repair",
+                            "label": "Repair release channel",
+                            "detail": "Channel requires operator review.",
+                            "status": "requires_config",
+                            "continue_message": "Plan release channel repair.",
+                        }
+                    ],
+                }
+            ),
+        ),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-1",
+                        "event_type": "tool_failed",
+                        "tool_name": "write_file",
+                        "summary": "write_file failed before approval.",
+                        "created_at": "2026-05-05T10:02:00Z",
+                        "session_id": "session-1",
+                        "risk_level": "high",
+                    },
+                    {
+                        "id": "audit-2",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "runtime",
+                        "summary": "Selected guarded runtime.",
+                        "created_at": "2026-05-05T10:01:00Z",
+                        "session_id": "session-1",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.scheduled_job_repository.list_jobs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "job-release",
+                        "name": "Release routine",
+                        "enabled": False,
+                        "trigger_type": "cron",
+                        "trigger_spec": {"cron": "0 9 * * *", "timezone": "UTC"},
+                        "action_type": "run_workflow",
+                        "action_spec": {"workflow_name": "release-check"},
+                        "session_id": "session-1",
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.scheduled_job_repository.list_run_history",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "job-run-1",
+                        "scheduled_job_id": "job-release",
+                        "job_name": "Release routine",
+                        "trigger_type": "cron",
+                        "action_type": "run_workflow",
+                        "status": "skipped",
+                        "outcome": "skipped_disabled",
+                        "started_at": "2026-05-05T09:00:00Z",
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "src.api.operator.build_m6_memory_superiority_payload",
+            AsyncMock(
+                return_value={
+                    "summary": {"operator_status": "m6_memory_superiority_visible"},
+                    "behavior_receipts": [{"id": "behavior-1", "changed": True}],
+                    "memory_records": [{"id": "memory-1", "summary": "Release preference"}],
+                    "control_receipts": [{"id": "control-1", "action": "audit"}],
+                }
+            ),
+        ),
+        patch(
+            "src.api.operator.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Release"}]),
+        ),
+        patch(
+            "src.api.operator.process_runtime_manager.list_all_processes",
+            return_value=[
+                {
+                    "process_id": "proc-1",
+                    "pid": 123,
+                    "command": "pytest",
+                    "status": "running",
+                    "session_id": "session-1",
+                    "started_at": "2026-05-05T10:00:00Z",
+                    "session_scoped": True,
+                    "worker_disposable": True,
+                    "trust_partition": "session",
+                }
+            ],
+        ),
+    ):
+        resp = await client.get("/api/operator/m7-cockpit", params={"session_id": "session-1"})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "m7_operator_cockpit_visible"
+    assert payload["summary"]["pending_approval_count"] == 1
+    assert payload["summary"]["trust_boundary_count"] >= 3
+    assert payload["summary"]["memory_evidence_count"] == 3
+    assert payload["summary"]["tool_call_count"] == 2
+    assert payload["summary"]["artifact_count"] == 1
+    assert payload["summary"]["job_count"] == 1
+    assert payload["summary"]["background_session_count"] == 1
+    assert payload["active_work"][0]["approval_required"] is True
+    active_controls = {control["action"]: control for control in payload["active_work"][0]["controls"]}
+    assert active_controls["approve"]["enabled"] is True
+    assert active_controls["approve"]["label"] == "Approve"
+    assert active_controls["approve"]["control_mode"] == "direct_backend_control"
+    assert active_controls["repair"]["control_mode"] == "routed_or_policy_gated_control"
+    assert active_controls["branch"]["control_mode"] == "operator_draft_control"
+    assert payload["approvals"][0]["controls"][0]["action"] == "approve"
+    assert payload["approvals"][0]["controls"][0]["control_mode"] == "direct_backend_control"
+    assert payload["trust_boundaries"][0]["claim_boundary"] == "workflow_trust_boundary_receipt"
+    assert payload["memory_evidence"]["claim_boundary"] == "guardian_memory_evidence_receipts_no_secret_values"
+    assert payload["tool_calls"][0]["event_type"] == "tool_failed"
+    assert payload["artifacts"][0]["path"] == "artifacts/release-check.md"
+    assert payload["jobs"][0]["status"] == "paused"
+    assert payload["channels_and_recovery"]["summary"]["recovery_action_count"] == 1
+    fast_controls = {control["action"]: control for control in payload["fast_controls"]}
+    assert list(fast_controls) == ["approve", "deny", "pause", "resume", "retry", "repair", "branch", "compare", "revoke"]
+    assert fast_controls["approve"]["enabled"] is True
+    assert fast_controls["approve"]["target_kind"] == "approval"
+    assert fast_controls["approve"]["control_mode"] == "direct_backend_control"
+    assert fast_controls["deny"]["enabled"] is True
+    assert fast_controls["deny"]["control_mode"] == "direct_backend_control"
+    assert fast_controls["pause"]["target_kind"] == "scheduled_job"
+    assert fast_controls["pause"]["control_mode"] == "routed_or_policy_gated_control"
+    assert fast_controls["resume"]["target_kind"] == "scheduled_job"
+    assert fast_controls["resume"]["control_mode"] == "routed_or_policy_gated_control"
+    assert fast_controls["retry"]["control_mode"] == "routed_or_policy_gated_control"
+    assert fast_controls["repair"]["enabled"] is True
+    assert fast_controls["repair"]["control_mode"] == "routed_or_policy_gated_control"
+    assert fast_controls["branch"]["enabled"] is True
+    assert fast_controls["branch"]["target_kind"] == "workflow_run"
+    assert fast_controls["branch"]["control_mode"] == "operator_draft_control"
+    assert fast_controls["compare"]["enabled"] is True
+    assert fast_controls["compare"]["control_mode"] == "operator_draft_control"
+    assert fast_controls["revoke"]["target_kind"] == "connector_or_channel"
+    assert fast_controls["revoke"]["control_mode"] == "direct_backend_control"
+    assert "/api/operator/m7-cockpit" in payload["proof_receipts"]
+    assert "automatic_control_execution_from_cockpit_payload" in payload["claim_boundaries"]["not_claimed"]
+
+
+@pytest.mark.asyncio
 async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
     with patch(
         "src.api.operator.list_evolution_targets",
@@ -924,6 +1165,46 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_m7_operator_cockpit_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m7_operator_cockpit_legibility",
+                    "benchmark_posture": "m7_ci_gated_operator_visible",
+                    "operator_status": "m7_cockpit_legibility_visible",
+                    "scenario_count": 4,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "receipt_legibility_state": "summary_status_time_and_thread_visible",
+                    "fast_control_state": "continue_repair_and_handoff_controls_visible",
+                    "control_plane_state": "governance_usage_runtime_and_handoff_visible",
+                    "trust_boundary_state": "blocked_controls_preserve_boundary_reason",
+                },
+                "scenario_names": [
+                    "operator_cockpit_receipt_legibility_behavior",
+                    "operator_fast_control_availability_behavior",
+                    "operator_control_plane_handoff_legibility_behavior",
+                    "operator_m7_cockpit_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "receipt_legibility_policy": "operator_receipts_must_expose_summary_status_timestamp_and_thread_context",
+                    "fast_control_policy": "active_handoff_items_must_carry_labeled_continue_or_repair_controls",
+                    "claim_boundary": "deterministic_operator_surface_receipts_not_live_external_usability_study",
+                    "receipt_surfaces": [
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/m7-cockpit-legibility-benchmark",
+                        "/api/operator/control-plane",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1062,7 +1343,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 13
+    assert payload["summary"]["suite_count"] == 14
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1073,6 +1354,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
+    assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1111,6 +1393,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
     m2_suite = next(item for item in payload["suites"] if item["name"] == "m2_execution_supremacy")
     assert "execution_security_gauntlet_behavior" in m2_suite["scenario_names"]
+    m7_suite = next(item for item in payload["suites"] if item["name"] == "m7_operator_cockpit_legibility")
+    assert "operator_fast_control_availability_behavior" in m7_suite["scenario_names"]
+    assert m7_suite["scenario_count"] == 4
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -1129,6 +1414,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
     assert payload["m2_execution_benchmark"]["policy"]["milestone_contract"] == "one_milestone_one_ready_pr"
+    assert payload["m7_operator_cockpit_benchmark"]["summary"]["suite_name"] == "m7_operator_cockpit_legibility"
+    assert payload["m7_operator_cockpit_benchmark"]["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
     assert payload["m6_memory_superiority_benchmark"]["policy"]["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts"
 
@@ -1146,6 +1433,23 @@ async def test_operator_governed_improvement_benchmark_surface_reports_policy_an
     assert payload["policy"]["preference_diversity_policy"] == "block_preference_collapse_and_watch_single_signal_edits"
     assert payload["policy"]["canary_rollout_policy"] == "saved_review_candidates_remain_canary_only_until_reviewed_promotion"
     assert "/api/operator/governed-improvement-benchmark" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_m7_cockpit_legibility_benchmark_surface_reports_receipts_controls_and_claim_boundary(client):
+    resp = await client.get("/api/operator/m7-cockpit-legibility-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "m7_operator_cockpit_legibility"
+    assert payload["summary"]["operator_status"] == "m7_cockpit_legibility_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["receipt_legibility_state"] == "summary_status_time_and_thread_visible"
+    assert payload["summary"]["fast_control_state"] == "continue_repair_and_handoff_controls_visible"
+    assert payload["policy"]["receipt_legibility_policy"] == "operator_receipts_must_expose_summary_status_timestamp_and_thread_context"
+    assert payload["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
+    assert payload["policy"]["claim_boundary"] == "deterministic_operator_surface_receipts_not_live_external_usability_study"
+    assert "/api/operator/control-plane" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

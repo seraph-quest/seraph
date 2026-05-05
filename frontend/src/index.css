@@ -2547,6 +2547,50 @@ body {
   box-shadow: 0 0 0 1px var(--cockpit-state-selected-shadow);
 }
 
+.cockpit-m7-board {
+  border: 1px solid rgba(141, 226, 255, 0.16);
+  padding: 10px;
+  background: rgba(3, 10, 18, 0.42);
+}
+
+.cockpit-m7-signal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 6px;
+}
+
+.cockpit-m7-signal {
+  min-width: 0;
+  border: 1px solid rgba(141, 226, 255, 0.1);
+  padding: 7px 8px;
+  background: rgba(141, 226, 255, 0.035);
+}
+
+.cockpit-m7-control-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cockpit-m7-control-strip .cockpit-operator-button {
+  min-width: 64px;
+  text-align: center;
+}
+
+.cockpit-m7-evidence-line {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px;
+  color: var(--cockpit-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.cockpit-m7-evidence-line span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .cockpit-inspector {
   display: flex;
   flex-direction: column;

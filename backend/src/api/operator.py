@@ -28,6 +28,7 @@ from src.approval.repository import approval_repository
 from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.browser.benchmark import build_computer_use_benchmark_report
+from src.cockpit.benchmark import build_m7_operator_cockpit_benchmark_report
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
@@ -2666,6 +2667,265 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
     }
 
 
+def _m7_active_work_items(m5_payload: dict[str, Any], workflow_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    workflow_by_identity = {
+        str(run.get("run_identity")): run
+        for run in workflow_runs
+        if isinstance(run, dict) and run.get("run_identity")
+    }
+    items: list[dict[str, Any]] = []
+    for item in m5_payload.get("work_queue", []) if isinstance(m5_payload.get("work_queue"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        run_identity = str(item.get("id") or "").removeprefix("workflow:")
+        run = workflow_by_identity.get(run_identity, {})
+        items.append({
+            "id": item.get("id"),
+            "kind": item.get("kind"),
+            "label": item.get("label"),
+            "status": item.get("status"),
+            "priority": item.get("priority"),
+            "detail": item.get("detail"),
+            "thread_id": item.get("thread_id"),
+            "continue_message": item.get("continue_message") or workflow_surface_continue_message(run),
+            "checkpoint_ready": bool(item.get("checkpoint_ready")),
+            "repair_ready": bool(item.get("repair_ready")),
+            "branch_ready": bool(item.get("branch_ready")),
+            "delegation_ready": bool(item.get("delegation_ready")),
+            "approval_required": bool(item.get("approval_required")),
+            "controls": _m7_controls_for_work_item(item),
+        })
+    return sorted(
+        items,
+        key=lambda entry: (
+            bool(entry.get("approval_required")),
+            bool(entry.get("repair_ready")),
+            bool(entry.get("branch_ready")),
+            str(entry.get("priority") or "") == "high",
+        ),
+        reverse=True,
+    )
+
+
+def _m7_controls_for_work_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    controls: list[dict[str, Any]] = [_m7_control("inspect", True, label="Inspect")]
+    if item.get("approval_required"):
+        controls.extend([
+            _m7_control("approve", True, label="Approve"),
+            _m7_control("deny", True, label="Deny"),
+        ])
+    if item.get("kind") == "scheduled_job":
+        status = str(item.get("status") or "")
+        controls.append(_m7_control("resume" if status == "paused" else "pause", True))
+    if item.get("repair_ready"):
+        controls.append(_m7_control("repair", True, label="Repair"))
+    if item.get("branch_ready"):
+        controls.append(_m7_control("branch", True, label="Branch"))
+        controls.append(_m7_control("compare", True, label="Compare"))
+    return controls
+
+
+def _m7_control_mode(action: str) -> str:
+    if action in {"approve", "deny", "revoke"}:
+        return "direct_backend_control"
+    if action in {"pause", "resume", "retry", "repair"}:
+        return "routed_or_policy_gated_control"
+    return "operator_draft_control"
+
+
+def _m7_control(
+    action: str,
+    enabled: bool,
+    *,
+    label: str | None = None,
+    target_kind: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "enabled": bool(enabled),
+        "label": label or action.replace("_", " ").title(),
+        "target_kind": target_kind,
+        "control_mode": _m7_control_mode(action),
+        "receipt_required": action in {"approve", "deny", "retry", "repair", "branch", "revoke"},
+    }
+
+
+def _m7_pending_approvals(pending_approvals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    approvals: list[dict[str, Any]] = []
+    for approval in pending_approvals[:12]:
+        metadata = approval_surface_metadata(approval)
+        approvals.append({
+            "id": approval.get("id"),
+            "tool_name": approval.get("tool_name"),
+            "summary": approval.get("summary"),
+            "risk_level": approval.get("risk_level"),
+            "thread_id": approval.get("thread_id") or approval.get("session_id"),
+            "created_at": approval.get("created_at"),
+            "resume_message": approval.get("resume_message"),
+            "approval_scope": metadata.get("approval_scope"),
+            "approval_context": approval.get("approval_context") if isinstance(approval.get("approval_context"), dict) else {},
+            "controls": [
+                _m7_control("approve", True),
+                _m7_control("deny", True),
+                _m7_control("inspect", True),
+            ],
+        })
+    return approvals
+
+
+def _m7_trust_boundaries(
+    workflow_runs: list[dict[str, Any]],
+    pending_approvals: list[dict[str, Any]],
+    m5_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    boundaries: list[dict[str, Any]] = []
+    for run in workflow_runs:
+        replay_block_reason = str(run.get("replay_block_reason") or "")
+        approval_context = run.get("approval_context") if isinstance(run.get("approval_context"), dict) else {}
+        if replay_block_reason or approval_context:
+            boundaries.append({
+                "id": f"workflow:{run.get('run_identity') or run.get('id')}",
+                "kind": "workflow",
+                "label": run.get("workflow_name"),
+                "status": "blocked" if replay_block_reason else "tracked",
+                "reason": replay_block_reason or None,
+                "thread_id": run.get("thread_id"),
+                "execution_boundaries": approval_context.get("execution_boundaries") if isinstance(approval_context, dict) else [],
+                "trust_partition": approval_context.get("trust_partition") if isinstance(approval_context, dict) else None,
+                "claim_boundary": "workflow_trust_boundary_receipt",
+            })
+    for approval in pending_approvals:
+        context = approval.get("approval_context") if isinstance(approval.get("approval_context"), dict) else {}
+        boundaries.append({
+            "id": f"approval:{approval.get('id')}",
+            "kind": "approval",
+            "label": approval.get("tool_name"),
+            "status": str(approval.get("risk_level") or "pending"),
+            "reason": "pending_operator_decision",
+            "thread_id": approval.get("thread_id") or approval.get("session_id"),
+            "execution_boundaries": context.get("execution_boundaries") if isinstance(context, dict) else [],
+            "trust_partition": context.get("trust_partition") if isinstance(context, dict) else None,
+            "claim_boundary": "pending_approval_receipt",
+        })
+    for delegation in m5_payload.get("delegations", []) if isinstance(m5_payload.get("delegations"), list) else []:
+        if not isinstance(delegation, dict):
+            continue
+        boundaries.append({
+            "id": delegation.get("id") or f"delegation:{delegation.get('specialist')}",
+            "kind": "delegation",
+            "label": delegation.get("specialist"),
+            "status": delegation.get("status"),
+            "reason": "delegation_target_unresolved" if delegation.get("delegation_target_unresolved") else None,
+            "thread_id": None,
+            "execution_boundaries": delegation.get("execution_boundaries") if isinstance(delegation.get("execution_boundaries"), list) else [],
+            "trust_partition": delegation.get("trust_partition"),
+            "claim_boundary": "delegation_trust_partition_receipt",
+        })
+    return boundaries[:20]
+
+
+def _m7_memory_evidence(memory_payload: dict[str, Any]) -> dict[str, Any]:
+    behavior_receipts = memory_payload.get("behavior_receipts") if isinstance(memory_payload.get("behavior_receipts"), list) else []
+    memory_records = memory_payload.get("memory_records") if isinstance(memory_payload.get("memory_records"), list) else []
+    control_receipts = memory_payload.get("control_receipts") if isinstance(memory_payload.get("control_receipts"), list) else []
+    return {
+        "summary": memory_payload.get("summary") if isinstance(memory_payload.get("summary"), dict) else {},
+        "behavior_receipts": behavior_receipts[:4],
+        "memory_records": memory_records[:6],
+        "control_receipts": control_receipts[:4],
+        "claim_boundary": "guardian_memory_evidence_receipts_no_secret_values",
+    }
+
+
+def _m7_tool_call_receipts(audit_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for event in audit_events:
+        event_type = str(event.get("event_type") or "")
+        if not (
+            event_type.startswith("tool_")
+            or event_type.startswith("approval_")
+            or event_type.startswith("integration_")
+            or event_type in {"llm_routing_decision", "llm_target_rerouted"}
+        ):
+            continue
+        receipts.append({
+            "id": event.get("id"),
+            "event_type": event_type,
+            "tool_name": event.get("tool_name"),
+            "summary": event.get("summary"),
+            "status": "failed" if event_type.endswith("_failed") or event_type == "tool_failed" else "recorded",
+            "thread_id": event.get("session_id"),
+            "created_at": event.get("created_at"),
+            "risk_level": event.get("risk_level"),
+        })
+    return receipts[:20]
+
+
+def _m7_artifact_receipts(workflow_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for run in workflow_runs:
+        for path in _workflow_artifact_paths(run):
+            if path in seen:
+                continue
+            seen.add(path)
+            artifacts.append({
+                "id": f"artifact:{path}",
+                "path": path,
+                "workflow_name": run.get("workflow_name"),
+                "run_identity": run.get("run_identity"),
+                "thread_id": run.get("thread_id"),
+                "updated_at": run.get("updated_at") or run.get("started_at"),
+                "controls": [
+                    _m7_control("inspect", True),
+                    _m7_control("compare", bool(run.get("parent_run_identity") or run.get("branch_kind"))),
+                ],
+            })
+    return artifacts[:20]
+
+
+def _m7_recovery_and_channels(continuity_snapshot: dict[str, Any]) -> dict[str, Any]:
+    summary = continuity_snapshot.get("summary") if isinstance(continuity_snapshot.get("summary"), dict) else {}
+    recovery_actions = continuity_snapshot.get("recovery_actions") if isinstance(continuity_snapshot.get("recovery_actions"), list) else []
+    return {
+        "summary": {
+            "continuity_health": summary.get("continuity_health"),
+            "primary_surface": summary.get("primary_surface"),
+            "recommended_focus": summary.get("recommended_focus"),
+            "degraded_route_count": int(summary.get("degraded_route_count") or 0),
+            "attention_presence_surface_count": int(summary.get("attention_presence_surface_count") or 0),
+            "recovery_action_count": len(recovery_actions),
+        },
+        "recovery_actions": recovery_actions[:12],
+        "controls": [
+            {**_m7_control("repair", bool(recovery_actions), target_kind="continuity"), "target": "continuity"},
+            {**_m7_control("revoke", True, target_kind="channel_or_connector"), "target": "channel_or_connector"},
+            {**_m7_control("inspect", True, target_kind="continuity"), "target": "continuity"},
+        ],
+    }
+
+
+def _m7_fast_controls_catalog(
+    *,
+    pending_approval_count: int,
+    paused_work_count: int,
+    repair_ready_count: int,
+    branch_ready_count: int,
+    artifact_count: int,
+) -> list[dict[str, Any]]:
+    return [
+        _m7_control("approve", pending_approval_count > 0, target_kind="approval"),
+        _m7_control("deny", pending_approval_count > 0, target_kind="approval"),
+        _m7_control("pause", True, target_kind="scheduled_job"),
+        _m7_control("resume", paused_work_count > 0, target_kind="scheduled_job"),
+        _m7_control("retry", repair_ready_count > 0, target_kind="workflow_run"),
+        _m7_control("repair", repair_ready_count > 0, target_kind="workflow_run"),
+        _m7_control("branch", branch_ready_count > 0, target_kind="workflow_run"),
+        _m7_control("compare", artifact_count > 1 or branch_ready_count > 0, target_kind="artifact"),
+        _m7_control("revoke", True, target_kind="connector_or_channel"),
+    ]
+
+
 @router.get("/operator/control-plane")
 async def get_operator_control_plane(
     session_id: str | None = Query(default=None),
@@ -2759,6 +3019,120 @@ async def get_operator_control_plane(
     }
 
 
+@router.get("/operator/m7-cockpit")
+async def get_operator_m7_cockpit(
+    session_id: str | None = Query(default=None),
+    window_hours: int = Query(default=24, ge=1, le=168),
+    limit_workflows: int = Query(default=20, ge=1, le=50),
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    workflow_limit = max(limit_workflows * 3, 60)
+    (
+        sessions,
+        workflow_runs,
+        pending_approvals,
+        continuity_snapshot,
+        audit_events,
+        jobs,
+        job_runs,
+        memory_payload,
+    ) = await asyncio.gather(
+        session_manager.list_sessions(),
+        _list_workflow_runs(limit=workflow_limit, session_id=session_id),
+        approval_repository.list_pending(session_id=session_id, limit=40),
+        build_observer_continuity_snapshot(),
+        audit_repository.list_events(limit=120, session_id=session_id, since=cutoff),
+        scheduled_job_repository.list_jobs(include_disabled=True, limit=30),
+        scheduled_job_repository.list_run_history(limit=80),
+        build_m6_memory_superiority_payload(session_id=session_id, query=None),
+    )
+    process_payloads = await asyncio.to_thread(process_runtime_manager.list_all_processes)
+    workflow_runs = workflow_runs if isinstance(workflow_runs, list) else []
+    pending_approvals = pending_approvals if isinstance(pending_approvals, list) else []
+    continuity_snapshot = continuity_snapshot if isinstance(continuity_snapshot, dict) else {}
+    audit_events = audit_events if isinstance(audit_events, list) else []
+    jobs = jobs if isinstance(jobs, list) else []
+    job_runs = job_runs if isinstance(job_runs, list) else []
+    memory_payload = memory_payload if isinstance(memory_payload, dict) else {}
+    background_sessions = _background_session_entries(
+        sessions if isinstance(sessions, list) else [],
+        workflow_runs,
+        process_payloads if isinstance(process_payloads, list) else [],
+        limit_sessions=8,
+        limit_processes=3,
+    )
+    m5_payload = build_m5_operating_layer_payload(
+        scheduled_jobs=jobs,
+        scheduled_job_runs=job_runs,
+        workflow_runs=workflow_runs,
+        background_sessions=background_sessions,
+    )
+    active_work = _m7_active_work_items(m5_payload, workflow_runs)
+    approvals = _m7_pending_approvals(pending_approvals)
+    trust_boundaries = _m7_trust_boundaries(workflow_runs, pending_approvals, m5_payload)
+    memory_evidence = _m7_memory_evidence(memory_payload)
+    tool_calls = _m7_tool_call_receipts(audit_events)
+    artifacts = _m7_artifact_receipts(workflow_runs)
+    recovery_and_channels = _m7_recovery_and_channels(continuity_snapshot)
+    m5_summary = m5_payload.get("summary") if isinstance(m5_payload.get("summary"), dict) else {}
+    fast_controls = _m7_fast_controls_catalog(
+        pending_approval_count=len(approvals),
+        paused_work_count=int(m5_summary.get("paused_work_count") or 0),
+        repair_ready_count=int(m5_summary.get("repair_ready_count") or 0),
+        branch_ready_count=int(m5_summary.get("branch_ready_count") or 0),
+        artifact_count=len(artifacts),
+    )
+    return {
+        "summary": {
+            "operator_status": "m7_operator_cockpit_visible",
+            "session_id": session_id,
+            "window_hours": window_hours,
+            "active_work_count": len(active_work),
+            "pending_approval_count": len(approvals),
+            "trust_boundary_count": len(trust_boundaries),
+            "memory_evidence_count": (
+                len(memory_evidence["behavior_receipts"])
+                + len(memory_evidence["memory_records"])
+                + len(memory_evidence["control_receipts"])
+            ),
+            "tool_call_count": len(tool_calls),
+            "artifact_count": len(artifacts),
+            "job_count": len(jobs),
+            "delegation_count": int(m5_summary.get("delegation_receipt_count") or 0),
+            "background_session_count": len(background_sessions),
+            "recovery_action_count": int(recovery_and_channels["summary"]["recovery_action_count"]),
+            "fast_control_count": len(fast_controls),
+            "claim_boundary": "composed_operator_projection_from_existing_receipts_not_new_executor_state",
+        },
+        "active_work": active_work,
+        "trust_boundaries": trust_boundaries,
+        "approvals": approvals,
+        "memory_evidence": memory_evidence,
+        "tool_calls": tool_calls,
+        "artifacts": artifacts,
+        "jobs": m5_payload.get("jobs", []),
+        "delegations": m5_payload.get("delegations", []),
+        "background_sessions": background_sessions,
+        "channels_and_recovery": recovery_and_channels,
+        "fast_controls": fast_controls,
+        "proof_receipts": [
+            "/api/operator/m7-cockpit",
+            "/api/operator/m5-operating-layer",
+            "/api/operator/m6-memory-superiority",
+            "/api/operator/timeline",
+            "/api/operator/continuity-graph",
+        ],
+        "claim_boundaries": {
+            "source": "composes_existing_operator_receipts",
+            "not_claimed": [
+                "new_durable_workflow_executor",
+                "automatic_control_execution_from_cockpit_payload",
+                "secret_value_disclosure",
+            ],
+        },
+    }
+
+
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
@@ -2768,6 +3142,7 @@ async def get_operator_benchmark_proof():
         workflow_endurance_benchmark,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
+        m7_operator_cockpit_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
@@ -2779,6 +3154,7 @@ async def get_operator_benchmark_proof():
         build_workflow_endurance_benchmark_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
+        build_m7_operator_cockpit_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
@@ -2797,6 +3173,7 @@ async def get_operator_benchmark_proof():
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
+        str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
@@ -2839,6 +3216,7 @@ async def get_operator_benchmark_proof():
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
+            "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
@@ -2851,6 +3229,7 @@ async def get_operator_benchmark_proof():
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
+        "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
@@ -2931,6 +3310,11 @@ async def get_operator_computer_use_benchmark():
 @router.get("/operator/m2-execution-benchmark")
 async def get_operator_m2_execution_benchmark():
     return await build_m2_execution_benchmark_report()
+
+
+@router.get("/operator/m7-cockpit-legibility-benchmark")
+async def get_operator_m7_cockpit_legibility_benchmark():
+    return await build_m7_operator_cockpit_benchmark_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

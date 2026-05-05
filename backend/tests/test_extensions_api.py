@@ -1946,6 +1946,16 @@ async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, 
         assert browser_connector["health"]["supports_enable"] is True
 
         enable_extension = await client.post("/api/extensions/seraph.wave2-pack/enable")
+        assert enable_extension.status_code == 409
+        enable_extension_detail = enable_extension.json()["detail"]
+        assert enable_extension_detail["type"] == "approval_required"
+        enable_extension_approval_id = enable_extension_detail["approval_id"]
+        approve_enable_extension = await client.post(
+            f"/api/approvals/{enable_extension_approval_id}/approve"
+        )
+        assert approve_enable_extension.status_code == 200
+
+        enable_extension = await client.post("/api/extensions/seraph.wave2-pack/enable")
         assert enable_extension.status_code == 200
         enabled_extension = enable_extension.json()["extension"]
         enabled_connectors = {

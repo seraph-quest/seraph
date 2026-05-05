@@ -17,6 +17,10 @@ from src.guardian.benchmark import (
 )
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
 from src.security.benchmark import TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES, TRUST_BOUNDARY_BENCHMARK_SUITE_NAME
+from src.security.secure_host_benchmark import (
+    SECURE_CAPABILITY_HOST_BENCHMARK_SCENARIO_NAMES,
+    SECURE_CAPABILITY_HOST_BENCHMARK_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
     WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
@@ -123,6 +127,20 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live hostile-environment replay and stronger privileged-path isolation still remain for future work.",
         scenario_names=TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_CAPABILITY_HOST_BENCHMARK_SUITE_NAME,
+        label="M3 secure capability host",
+        description=(
+            "Pins concrete secure-host enforcement for secret refs, credential egress, "
+            "workspace secret files, process environments, prompt-surface quarantine, delegation, and provider trust receipts."
+        ),
+        benchmark_axis="m3_secure_capability_host",
+        operator_summary=(
+            "Secure capability-host proof now binds least-privilege decisions to live choke points instead of adding receipt-only policy text."
+        ),
+        remaining_gap="Full host/container isolation, live hostile browser replay, and production provider trust telemetry remain future hardening work.",
+        scenario_names=SECURE_CAPABILITY_HOST_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

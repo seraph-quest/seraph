@@ -36,6 +36,7 @@ from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.security.benchmark import build_trust_boundary_benchmark_report
+from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
 from src.tools.process_tools import process_runtime_manager
@@ -2750,6 +2751,7 @@ async def get_operator_benchmark_proof():
         user_model_benchmark,
         workflow_endurance_benchmark,
         trust_boundary_benchmark,
+        secure_capability_host_benchmark,
         computer_use_benchmark,
         m2_execution_benchmark,
         governed_improvement_benchmark,
@@ -2758,6 +2760,7 @@ async def get_operator_benchmark_proof():
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
         build_trust_boundary_benchmark_report(),
+        build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
         build_m2_execution_benchmark_report(),
         build_governed_improvement_benchmark_report(),
@@ -2773,6 +2776,7 @@ async def get_operator_benchmark_proof():
         str(user_model_benchmark["summary"]["benchmark_posture"]),
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
+        str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
         str(m2_execution_benchmark["summary"]["benchmark_posture"]),
         str(governed_improvement_benchmark["summary"]["benchmark_posture"]),
@@ -2812,6 +2816,7 @@ async def get_operator_benchmark_proof():
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
+            "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
             "m2_execution_benchmark_posture": m2_execution_benchmark["summary"]["benchmark_posture"],
             "governed_improvement_benchmark_posture": governed_improvement_benchmark["summary"]["benchmark_posture"],
@@ -2821,6 +2826,7 @@ async def get_operator_benchmark_proof():
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
+        "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
         "m2_execution_benchmark": m2_execution_benchmark,
         "governed_improvement": {
@@ -2850,6 +2856,11 @@ async def get_operator_workflow_endurance_benchmark():
 @router.get("/operator/trust-boundary-benchmark")
 async def get_operator_trust_boundary_benchmark():
     return await build_trust_boundary_benchmark_report()
+
+
+@router.get("/operator/secure-capability-host-benchmark")
+async def get_operator_secure_capability_host_benchmark():
+    return await build_secure_capability_host_benchmark_report()
 
 
 @router.get("/operator/computer-use-benchmark")

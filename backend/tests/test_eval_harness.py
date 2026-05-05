@@ -204,13 +204,15 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 8
+    assert details["suite_count"] == 10
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["workflow_suite_present"] is True
     assert details["trust_suite_present"] is True
+    assert details["secure_host_suite_present"] is True
     assert details["computer_suite_present"] is True
+    assert details["m2_execution_suite_present"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
     assert details["required_suite_count_matches"] is True
@@ -342,6 +344,39 @@ def test_run_benchmark_suites_executes_trust_boundary_and_safety_receipts_suite(
         "workflow_boundary_blocked_surface_behavior",
         "source_mutation_boundary_behavior",
     }
+
+
+def test_run_benchmark_suites_executes_secure_capability_host_suite():
+    summary = asyncio.run(run_benchmark_suites(["secure_capability_host"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "secure_host_secret_ref_fail_closed_behavior",
+        "secure_host_workspace_secret_path_boundary_behavior",
+        "secure_host_process_env_isolation_behavior",
+        "secure_host_prompt_injection_quarantine_behavior",
+        "secure_host_delegation_partition_behavior",
+        "secure_host_provider_fallback_boundary_behavior",
+        "operator_secure_capability_host_benchmark_surface_behavior",
+    }
+
+
+def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_secure_capability_host_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["credential_egress_state_visible"] is True
+    assert details["process_environment_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
 
 
 def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
@@ -542,7 +577,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "memory_continuity_workflows" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
+    assert "secure_capability_host" in captured.out
     assert "computer_use_browser_desktop" in captured.out
+    assert "m2_execution_supremacy" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert available_benchmark_suites() == (
@@ -551,7 +588,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "memory_continuity_workflows",
         "workflow_endurance_and_repair",
         "trust_boundary_and_safety_receipts",
+        "secure_capability_host",
         "computer_use_browser_desktop",
+        "m2_execution_supremacy",
         "planning_retrieval_reporting",
         "governed_improvement",
     )

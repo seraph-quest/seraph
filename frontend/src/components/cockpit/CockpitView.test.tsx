@@ -5057,8 +5057,8 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 8,
-            scenario_count: 52,
+            suite_count: 9,
+            scenario_count: 59,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
@@ -5067,6 +5067,7 @@ describe("CockpitView", () => {
             user_model_benchmark_posture: "ci_gated_operator_visible",
             workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
             trust_boundary_benchmark_posture: "ci_gated_operator_visible",
+            secure_capability_host_benchmark_posture: "secure_host_ci_gated_operator_visible",
             computer_use_benchmark_posture: "ci_gated_operator_visible",
             governed_improvement_benchmark_posture: "ci_gated_operator_visible",
           },
@@ -5191,6 +5192,39 @@ describe("CockpitView", () => {
               ci_gate_mode: "required_benchmark_suite",
             },
           },
+          secure_capability_host_benchmark: {
+            summary: {
+              suite_name: "secure_capability_host",
+              benchmark_posture: "secure_host_ci_gated_operator_visible",
+              operator_status: "secure_capability_host_receipts_visible",
+              scenario_count: 7,
+              dimension_count: 5,
+              failure_mode_count: 6,
+              active_failure_count: 0,
+              credential_egress_state: "session_field_host_allowlist_enforced",
+              workspace_secret_file_state: "generic_read_patch_blocked",
+              process_environment_state: "ambient_secret_env_scrubbed",
+              prompt_surface_state: "suspicious_context_quarantined",
+              delegation_provider_state: "trust_partition_receipts_visible",
+            },
+            failure_report: [],
+            policy: {
+              credential_egress_policy: "session_bound_field_scoped_destination_host_allowlisted_secret_refs",
+              workspace_secret_file_policy: "generic_read_and_patch_paths_block_secret_like_files",
+              process_environment_policy: "allowlisted_environment_only_for_foreground_and_background_processes",
+              prompt_surface_policy: "suspicious_prompt_bearing_content_quarantined_before_capability_execution",
+              delegation_provider_policy: "delegation_partitions_and_provider_fallback_trust_changes_must_be_explicit_receipts",
+              operator_visibility: "benchmark_proof_plus_secure_host_surface_plus_cockpit_receipts_visible",
+              claim_boundary: "deterministic_secure_host_choke_points_not_full_host_container_isolation",
+              receipt_surfaces: [
+                "/api/operator/benchmark-proof",
+                "/api/operator/secure-capability-host-benchmark",
+                "/api/operator/trust-boundary-benchmark",
+                "/api/activity/ledger",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
           computer_use_benchmark: {
             summary: {
               suite_name: "computer_use_browser_desktop",
@@ -5276,6 +5310,16 @@ describe("CockpitView", () => {
               scenario_names: ["secret_ref_egress_boundary_behavior"],
             },
             {
+              name: "secure_capability_host",
+              label: "M3 secure capability host",
+              description: "Secure-host enforcement suite",
+              benchmark_axis: "m3_secure_capability_host",
+              operator_summary: "Secure capability-host proof binds least-privilege decisions to live choke points.",
+              remaining_gap: "Full host/container isolation still remains.",
+              scenario_count: 7,
+              scenario_names: ["secure_host_secret_ref_fail_closed_behavior"],
+            },
+            {
               name: "computer_use_browser_desktop",
               label: "Computer-use, browser, and desktop execution",
               description: "Browser and desktop suite",
@@ -5313,7 +5357,7 @@ describe("CockpitView", () => {
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 8,
+            required_suite_count: 9,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
@@ -5325,6 +5369,7 @@ describe("CockpitView", () => {
                 "memory_continuity_workflows",
                 "workflow_endurance_and_repair",
                 "trust_boundary_and_safety_receipts",
+                "secure_capability_host",
                 "computer_use_browser_desktop",
                 "planning_retrieval_reporting",
                 "governed_improvement",
@@ -5513,11 +5558,12 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/8 suites · 52 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/9 suites · 59 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Secure capability-host benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Computer-use benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Governed improvement benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getByText(/preference collapse blocked · review candidates canary only · candidate and receipt paths required · saved proposal and benchmark receipts visible/)).toBeInTheDocument();
@@ -5533,12 +5579,15 @@ describe("CockpitView", () => {
     expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/session field host allowlist enforced · generic read patch blocked · ambient secret env scrubbed · suspicious context quarantined · trust partition receipts visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/session bound field scoped destination host allowlisted secret refs · deterministic secure host choke points not full host container isolation · 4 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/extract html and screenshot receipts visible · dismiss poll and ack receipts visible · continuity and operator receipts visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/extract html and screenshot actions require distinct audit receipts · enqueue dismiss poll and ack must remain cross surface replayable · 3 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · desktop notification replay regression · deterministic eval failure/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Workflow endurance, anticipatory repair, and backup branches/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Trust boundaries and safety receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/M3 secure capability host/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Computer-use, browser, and desktop execution/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Planning, retrieval, and reporting/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Governed self-improvement/)).toBeInTheDocument();

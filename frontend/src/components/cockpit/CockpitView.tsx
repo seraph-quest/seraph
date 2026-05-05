@@ -167,6 +167,7 @@ interface OperatorBenchmarkProofSummary {
   user_model_benchmark_posture?: string;
   workflow_endurance_benchmark_posture?: string;
   trust_boundary_benchmark_posture?: string;
+  secure_capability_host_benchmark_posture?: string;
   computer_use_benchmark_posture?: string;
   governed_improvement_benchmark_posture?: string;
 }
@@ -236,6 +237,7 @@ interface OperatorBenchmarkProof {
   user_model_benchmark: OperatorUserModelBenchmark | null;
   workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
   trust_boundary_benchmark: OperatorTrustBoundaryBenchmark | null;
+  secure_capability_host_benchmark: OperatorSecureCapabilityHostBenchmark | null;
   computer_use_benchmark: OperatorComputerUseBenchmark | null;
   governed_improvement: {
     target_count: number;
@@ -318,6 +320,12 @@ interface OperatorTrustBoundaryBenchmarkFailure {
   reason: string;
 }
 
+interface OperatorSecureCapabilityHostBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
 interface OperatorWorkflowEnduranceBenchmark {
   summary: {
     suite_name: string;
@@ -362,6 +370,35 @@ interface OperatorTrustBoundaryBenchmark {
     background_execution_policy: string;
     workflow_replay_policy: string;
     operator_visibility: string;
+    receipt_surfaces: string[];
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorSecureCapabilityHostBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    credential_egress_state: string;
+    workspace_secret_file_state: string;
+    process_environment_state: string;
+    prompt_surface_state: string;
+    delegation_provider_state: string;
+  };
+  failure_report: OperatorSecureCapabilityHostBenchmarkFailure[];
+  policy: {
+    credential_egress_policy: string;
+    workspace_secret_file_policy: string;
+    process_environment_policy: string;
+    prompt_surface_policy: string;
+    delegation_provider_policy: string;
+    operator_visibility: string;
+    claim_boundary: string;
     receipt_surfaces: string[];
     ci_gate_mode: string;
   };
@@ -2420,6 +2457,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const userModelBenchmark = record.user_model_benchmark;
   const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
   const trustBoundaryBenchmark = record.trust_boundary_benchmark;
+  const secureCapabilityHostBenchmark = record.secure_capability_host_benchmark;
   const computerUseBenchmark = record.computer_use_benchmark;
   const governedBenchmarkSummary = governedRecord.summary;
   const governedBenchmarkPolicy = governedRecord.policy;
@@ -2427,6 +2465,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
   let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
+  let normalizedSecureCapabilityHostBenchmark: OperatorSecureCapabilityHostBenchmark | null = null;
   let normalizedComputerUseBenchmark: OperatorComputerUseBenchmark | null = null;
   let normalizedGovernedBenchmarkSummary: OperatorBenchmarkProof["governed_improvement"]["summary"] = null;
   let normalizedGovernedBenchmarkPolicy: OperatorBenchmarkProof["governed_improvement"]["policy"] = null;
@@ -2630,6 +2669,58 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       };
     }
   }
+  if (secureCapabilityHostBenchmark && typeof secureCapabilityHostBenchmark === "object" && !Array.isArray(secureCapabilityHostBenchmark)) {
+    const secureHostRecord = secureCapabilityHostBenchmark as Record<string, unknown>;
+    const secureHostSummary = secureHostRecord.summary;
+    const secureHostPolicy = secureHostRecord.policy;
+    if (
+      secureHostSummary && typeof secureHostSummary === "object" && !Array.isArray(secureHostSummary)
+      && secureHostPolicy && typeof secureHostPolicy === "object" && !Array.isArray(secureHostPolicy)
+    ) {
+      const secureSummaryRecord = secureHostSummary as Record<string, unknown>;
+      const securePolicyRecord = secureHostPolicy as Record<string, unknown>;
+      normalizedSecureCapabilityHostBenchmark = {
+        summary: {
+          suite_name: typeof secureSummaryRecord.suite_name === "string" ? secureSummaryRecord.suite_name : "secure_capability_host",
+          benchmark_posture: typeof secureSummaryRecord.benchmark_posture === "string" ? secureSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof secureSummaryRecord.operator_status === "string" ? secureSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof secureSummaryRecord.scenario_count === "number" ? secureSummaryRecord.scenario_count : 0,
+          dimension_count: typeof secureSummaryRecord.dimension_count === "number" ? secureSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof secureSummaryRecord.failure_mode_count === "number" ? secureSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof secureSummaryRecord.active_failure_count === "number" ? secureSummaryRecord.active_failure_count : 0,
+          credential_egress_state: typeof secureSummaryRecord.credential_egress_state === "string" ? secureSummaryRecord.credential_egress_state : "unknown",
+          workspace_secret_file_state: typeof secureSummaryRecord.workspace_secret_file_state === "string" ? secureSummaryRecord.workspace_secret_file_state : "unknown",
+          process_environment_state: typeof secureSummaryRecord.process_environment_state === "string" ? secureSummaryRecord.process_environment_state : "unknown",
+          prompt_surface_state: typeof secureSummaryRecord.prompt_surface_state === "string" ? secureSummaryRecord.prompt_surface_state : "unknown",
+          delegation_provider_state: typeof secureSummaryRecord.delegation_provider_state === "string" ? secureSummaryRecord.delegation_provider_state : "unknown",
+        },
+        failure_report: Array.isArray(secureHostRecord.failure_report)
+          ? secureHostRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          credential_egress_policy: typeof securePolicyRecord.credential_egress_policy === "string" ? securePolicyRecord.credential_egress_policy : "unknown",
+          workspace_secret_file_policy: typeof securePolicyRecord.workspace_secret_file_policy === "string" ? securePolicyRecord.workspace_secret_file_policy : "unknown",
+          process_environment_policy: typeof securePolicyRecord.process_environment_policy === "string" ? securePolicyRecord.process_environment_policy : "unknown",
+          prompt_surface_policy: typeof securePolicyRecord.prompt_surface_policy === "string" ? securePolicyRecord.prompt_surface_policy : "unknown",
+          delegation_provider_policy: typeof securePolicyRecord.delegation_provider_policy === "string" ? securePolicyRecord.delegation_provider_policy : "unknown",
+          operator_visibility: typeof securePolicyRecord.operator_visibility === "string" ? securePolicyRecord.operator_visibility : "unknown",
+          claim_boundary: typeof securePolicyRecord.claim_boundary === "string" ? securePolicyRecord.claim_boundary : "unknown",
+          receipt_surfaces: Array.isArray(securePolicyRecord.receipt_surfaces)
+            ? securePolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          ci_gate_mode: typeof securePolicyRecord.ci_gate_mode === "string" ? securePolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
   if (computerUseBenchmark && typeof computerUseBenchmark === "object" && !Array.isArray(computerUseBenchmark)) {
     const computerBenchmarkRecord = computerUseBenchmark as Record<string, unknown>;
     const computerSummary = computerBenchmarkRecord.summary;
@@ -2772,6 +2863,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       trust_boundary_benchmark_posture: typeof summaryRecord.trust_boundary_benchmark_posture === "string"
         ? summaryRecord.trust_boundary_benchmark_posture
         : "unknown",
+      secure_capability_host_benchmark_posture: typeof summaryRecord.secure_capability_host_benchmark_posture === "string"
+        ? summaryRecord.secure_capability_host_benchmark_posture
+        : "unknown",
       computer_use_benchmark_posture: typeof summaryRecord.computer_use_benchmark_posture === "string"
         ? summaryRecord.computer_use_benchmark_posture
         : "unknown",
@@ -2801,6 +2895,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
     user_model_benchmark: normalizedUserModelBenchmark,
     workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
     trust_boundary_benchmark: normalizedTrustBoundaryBenchmark,
+    secure_capability_host_benchmark: normalizedSecureCapabilityHostBenchmark,
     computer_use_benchmark: normalizedComputerUseBenchmark,
     governed_improvement: {
       target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
@@ -12691,6 +12786,41 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 ].join(" · ")}
                               </div>
                               {operatorBenchmarkProof.trust_boundary_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.secure_capability_host_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Secure capability-host benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.secure_capability_host_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.secure_capability_host_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.credential_egress_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.workspace_secret_file_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.process_environment_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.prompt_surface_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.delegation_provider_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.policy.credential_egress_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.policy.claim_boundary.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.secure_capability_host_benchmark.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.secure_capability_host_benchmark.failure_report.slice(0, 2).map((failure) => (
                                 <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
                                   {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
                                 </div>

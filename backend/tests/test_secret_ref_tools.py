@@ -13,6 +13,7 @@ class DummyHeaderTool:
     name = "mcp_http_request"
     description = "Dummy request tool"
     inputs = {
+        "url": {"type": "string", "description": "Request URL"},
         "headers": {"type": "object", "description": "Request headers"},
         "body": {"type": "string", "description": "Request body"},
     }
@@ -72,6 +73,7 @@ def test_secret_ref_wrapper_resolves_nested_values_for_current_session():
     tokens = set_runtime_context("s1", "high_risk")
     try:
         result = wrapped(
+            url="https://api.example.com/v1",
             headers={"Authorization": f"Bearer {secret_ref}"},
         )
     finally:
@@ -114,19 +116,35 @@ def test_secret_ref_wrapper_blocks_mcp_refs_without_explicit_egress_allowlist():
         reset_runtime_context(tokens)
 
 
-def test_secret_ref_wrapper_does_not_resolve_other_session_refs():
+def test_secret_ref_wrapper_blocks_destination_hosts_outside_credential_egress_allowlist():
+    wrapped = SecretRefResolvingTool(DummyHeaderTool())
+    secret_ref = _issue_ref_for_session("s1")
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with pytest.raises(ValueError, match="non-allowlisted destination host"):
+            wrapped(
+                url="https://evil.example/v1",
+                headers={"Authorization": f"Bearer {secret_ref}"},
+            )
+    finally:
+        reset_runtime_context(tokens)
+
+
+def test_secret_ref_wrapper_rejects_other_session_refs():
     wrapped = SecretRefResolvingTool(DummyHeaderTool())
     secret_ref = _issue_ref_for_session("s1")
     tokens = set_runtime_context("s2", "high_risk")
     try:
-        result = wrapped(headers={"Authorization": f"Bearer {secret_ref}"})
+        with pytest.raises(ValueError, match="another session"):
+            wrapped(
+                url="https://api.example.com/v1",
+                headers={"Authorization": f"Bearer {secret_ref}"},
+            )
     finally:
         reset_runtime_context(tokens)
 
-    assert result["kwargs"]["headers"]["Authorization"] == f"Bearer {secret_ref}"
 
-
-def test_secret_ref_wrapper_does_not_resolve_expired_refs():
+def test_secret_ref_wrapper_rejects_expired_refs():
     wrapped = SecretRefResolvingTool(DummyHeaderTool())
     with patch("src.vault.refs.time.time", return_value=1_000.0):
         secret_ref = _issue_ref_for_session("s1")
@@ -134,8 +152,10 @@ def test_secret_ref_wrapper_does_not_resolve_expired_refs():
     tokens = set_runtime_context("s1", "high_risk")
     try:
         with patch("src.vault.refs.time.time", return_value=1_000.0 + 3_601):
-            result = wrapped(headers={"Authorization": f"Bearer {secret_ref}"})
+            with pytest.raises(ValueError, match="expired"):
+                wrapped(
+                    url="https://api.example.com/v1",
+                    headers={"Authorization": f"Bearer {secret_ref}"},
+                )
     finally:
         reset_runtime_context(tokens)
-
-    assert result["kwargs"]["headers"]["Authorization"] == f"Bearer {secret_ref}"

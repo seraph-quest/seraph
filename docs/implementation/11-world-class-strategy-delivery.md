@@ -191,8 +191,9 @@ Implementation meaning: Seraph should expand beyond the browser only where the a
 Implementation meaning: Seraph should operate long-running work as a supervised system, not as isolated run executions.
 
 - shipped foundations: workflow history, step records, branch-family supervision, typed artifact handoff, checkpoint-truthful resume/branch control, workspace-level orchestration, live operator timelines, activity ledgers, and background-session continuity
-- missing strategic gaps: deeper step-level control, richer multi-session supervision, clearer delegated-agent ownership, stronger lineage and checkpoint control, durable routines and heartbeat-style work, and stronger recovery/repair surfaces for long-running work
-- proof requirements: deterministic workflow-endurance and supervision evals, inspectable branch and recovery receipts, and operator flows that can continue, compare, repair, delegate, or branch without reconstructing context manually
+- shipped in the M5 operating-layer slice on this branch: cron-style scheduled jobs now persist durable per-run receipts, lifecycle audit events cover create/update/pause/resume/delete/trigger/result, paused jobs record skipped no-fire receipts without executing actions, the cockpit has an operator-visible M5 work layer for jobs, routines, workflow projection, and delegation trust partitions, and the named `m5_jobs_routines_workflows_delegation` benchmark suite gates the payload, run-history, no-fire, delegation, and operator benchmark contracts
+- missing strategic gaps: heartbeat and reactive triggers remain future work, workflows are still audit-projected rather than a full durable workflow state machine, delegated work has trust-partition receipts but not a complete autonomous artifact/review lifecycle, and deeper step-level execution control plus richer multi-session repair remain open
+- proof requirements: deterministic workflow-endurance and M5 operating-layer evals, durable run-history receipts for every scheduled trigger attempt, no-fire receipts for paused work, inspectable branch and recovery receipts, explicit delegation trust boundaries, and operator flows that can continue, compare, repair, delegate, or branch without reconstructing context manually
 
 ## M6 Memory Superiority
 

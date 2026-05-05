@@ -6,6 +6,7 @@ from smolagents import Tool
 from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import get_current_session_id
+from src.audit.repository import audit_repository
 from src.observer.intervention_policy import DeliveryDecision, InterventionAction, InterventionDecision
 from src.scheduler.scheduled_jobs import execute_scheduled_job, scheduled_job_repository
 from src.db.models import ScheduledJob, Session
@@ -83,6 +84,106 @@ async def test_execute_scheduled_job_delivers_message(async_db):
     assert stored["last_run_at"] is not None
     assert mock_deliver.await_args.kwargs["is_scheduled"] is True
     assert mock_deliver.await_args.kwargs["session_id"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_execute_scheduled_job_records_durable_run_history_and_audits_lifecycle(async_db):
+    job = await scheduled_job_repository.create_job(
+        name="Morning check",
+        cron="0 9 * * *",
+        timezone_name="UTC",
+        target_type="message",
+        content="Stand up and review priorities.",
+        intervention_type="advisory",
+        urgency=3,
+        workflow_name="",
+        workflow_args_json="",
+        session_id="s1",
+        created_by_session_id="s1",
+    )
+
+    with patch(
+        "src.scheduler.scheduled_jobs.deliver_or_queue",
+        AsyncMock(
+            return_value=InterventionDecision(
+                action=InterventionAction.act,
+                reason="scheduled",
+                delivery_decision=DeliveryDecision.deliver,
+                should_cost_budget=False,
+            )
+        ),
+    ):
+        await execute_scheduled_job(job["id"])
+
+    runs = await scheduled_job_repository.list_run_history(job_id=job["id"], limit=10)
+    assert len(runs) == 1
+    assert runs[0]["scheduled_job_id"] == job["id"]
+    assert runs[0]["status"] == "finished"
+    assert runs[0]["outcome"] == "delivered"
+    assert runs[0]["metadata"]["delivery_outcome"] == "delivered"
+
+    events = await audit_repository.list_events(limit=20)
+    event_types = {
+        event["event_type"]
+        for event in events
+        if event["tool_name"] == f"user_cron:{job['id']}"
+    }
+    assert "scheduler_job_created" in event_types
+    assert "scheduler_job_triggered" in event_types
+    assert "scheduler_job_succeeded" in event_types
+
+
+@pytest.mark.asyncio
+async def test_paused_scheduled_job_records_no_fire_history_and_resume_fires(async_db):
+    job = await scheduled_job_repository.create_job(
+        name="Morning check",
+        cron="0 9 * * *",
+        timezone_name="UTC",
+        target_type="message",
+        content="Stand up and review priorities.",
+        intervention_type="advisory",
+        urgency=3,
+        workflow_name="",
+        workflow_args_json="",
+        session_id="s1",
+        created_by_session_id="s1",
+    )
+    await scheduled_job_repository.set_enabled(job["id"], False)
+
+    mock_deliver = AsyncMock(
+        return_value=InterventionDecision(
+            action=InterventionAction.act,
+            reason="scheduled",
+            delivery_decision=DeliveryDecision.deliver,
+            should_cost_budget=False,
+        )
+    )
+    with patch("src.scheduler.scheduled_jobs.deliver_or_queue", mock_deliver):
+        await execute_scheduled_job(job["id"])
+
+    mock_deliver.assert_not_awaited()
+    runs = await scheduled_job_repository.list_run_history(job_id=job["id"], limit=10)
+    assert runs[0]["status"] == "skipped"
+    assert runs[0]["outcome"] == "skipped_disabled"
+    assert runs[0]["metadata"]["skip_reason"] == "job_disabled"
+
+    await scheduled_job_repository.set_enabled(job["id"], True)
+    with patch("src.scheduler.scheduled_jobs.deliver_or_queue", mock_deliver):
+        await execute_scheduled_job(job["id"])
+
+    assert mock_deliver.await_count == 1
+    runs = await scheduled_job_repository.list_run_history(job_id=job["id"], limit=10)
+    assert [run["outcome"] for run in runs] == ["delivered", "skipped_disabled"]
+
+    events = await audit_repository.list_events(limit=30)
+    event_types = {
+        event["event_type"]
+        for event in events
+        if event["tool_name"] == f"user_cron:{job['id']}"
+    }
+    assert "scheduler_job_paused" in event_types
+    assert "scheduler_job_skipped" in event_types
+    assert "scheduler_job_resumed" in event_types
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,11 @@ from src.evals.benchmark_catalog import (
     benchmark_suite_report,
     benchmark_suite_scenarios,
 )
+from src.workflows.operating_layer import (
+    M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
+    M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
+    build_m5_operating_layer_payload,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -10719,6 +10724,233 @@ def _eval_channel_abuse_failure_review_behavior() -> dict[str, Any]:
     }
 
 
+def _m5_operating_layer_fixture() -> dict[str, Any]:
+    scheduled_jobs = [
+        {
+            "id": "job-brief",
+            "name": "Morning brief",
+            "enabled": True,
+            "trigger_type": "cron",
+            "trigger_spec": {"cron": "0 9 * * *", "timezone": "UTC"},
+            "action_type": "deliver_message",
+            "action_spec": {"content": "Review priorities", "intervention_type": "advisory", "urgency": 3},
+            "session_id": "session-1",
+            "created_by_session_id": "session-1",
+            "last_run_at": "2026-05-05T09:00:00+00:00",
+            "last_outcome": "delivered",
+            "last_error": None,
+            "last_approval_id": None,
+        },
+        {
+            "id": "job-workflow",
+            "name": "Release routine",
+            "enabled": False,
+            "trigger_type": "cron",
+            "trigger_spec": {"cron": "0 13 * * 1", "timezone": "UTC"},
+            "action_type": "run_workflow",
+            "action_spec": {"workflow_name": "release-check", "workflow_args": {"project": "Seraph"}},
+            "session_id": "session-2",
+            "created_by_session_id": "session-2",
+            "last_run_at": "2026-05-05T13:00:00+00:00",
+            "last_outcome": "skipped_disabled",
+            "last_error": None,
+            "last_approval_id": None,
+        },
+    ]
+    scheduled_job_runs = [
+        {
+            "id": "run-brief",
+            "scheduled_job_id": "job-brief",
+            "job_name": "Morning brief",
+            "trigger_type": "cron",
+            "action_type": "deliver_message",
+            "session_id": "session-1",
+            "created_by_session_id": "session-1",
+            "status": "finished",
+            "outcome": "delivered",
+            "error": None,
+            "approval_id": None,
+            "started_at": "2026-05-05T09:00:00+00:00",
+            "finished_at": "2026-05-05T09:00:01+00:00",
+            "metadata": {"delivery_outcome": "delivered"},
+        },
+        {
+            "id": "run-paused",
+            "scheduled_job_id": "job-workflow",
+            "job_name": "Release routine",
+            "trigger_type": "cron",
+            "action_type": "run_workflow",
+            "session_id": "session-2",
+            "created_by_session_id": "session-2",
+            "status": "skipped",
+            "outcome": "skipped_disabled",
+            "error": None,
+            "approval_id": None,
+            "started_at": "2026-05-05T13:00:00+00:00",
+            "finished_at": "2026-05-05T13:00:00+00:00",
+            "metadata": {"skip_reason": "job_disabled"},
+        },
+    ]
+    workflow_runs = [
+        {
+            "run_identity": "session-1:workflow_release:root",
+            "root_run_identity": "session-1:workflow_release:root",
+            "parent_run_identity": None,
+            "workflow_name": "release-check",
+            "status": "awaiting_approval",
+            "availability": "blocked",
+            "thread_id": "session-1",
+            "branch_kind": "branch_from_checkpoint",
+            "branch_depth": 1,
+            "checkpoint_candidates": [{"step_id": "draft", "kind": "branch_from_checkpoint"}],
+            "retry_from_step_draft": "Retry release-check from draft.",
+            "replay_allowed": False,
+            "replay_block_reason": "approval_context_changed",
+            "pending_approval_count": 1,
+            "approval_context": {
+                "delegated_specialists": ["workflow_runner"],
+                "delegated_tool_names": ["write_file"],
+                "trust_partition": {"mode": "delegated_specialist", "blocked": False},
+            },
+            "step_records": [{"id": "draft", "status": "awaiting_approval", "is_recoverable": True}],
+        }
+    ]
+    background_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "Release",
+            "workflow_count": 1,
+            "active_workflows": 1,
+            "blocked_workflows": 1,
+            "background_process_count": 1,
+            "running_background_process_count": 1,
+            "branch_handoff_available": True,
+            "trust_partition": {"background_process_partitioned": True, "branch_handoff_session_bound": True},
+        }
+    ]
+    delegation_receipts = [
+        {
+            "specialist": "vault",
+            "delegated_specialist": "vault_keeper",
+            "risk_level": "high",
+            "execution_boundaries": ["delegation", "vault"],
+            "accepts_secret_refs": True,
+            "authenticated_source": False,
+            "delegation_target_unresolved": False,
+            "delegated_tool_names": ["store_secret"],
+            "trust_partition": {"mode": "delegated_specialist", "blocked": False},
+        },
+        {
+            "specialist": "missing-specialist",
+            "delegated_specialist": None,
+            "risk_level": "high",
+            "execution_boundaries": ["delegation"],
+            "accepts_secret_refs": True,
+            "authenticated_source": False,
+            "delegation_target_unresolved": True,
+            "delegated_tool_names": [],
+            "trust_partition": {"mode": "unresolved_delegation", "blocked": True},
+        },
+    ]
+    return {
+        "scheduled_jobs": scheduled_jobs,
+        "scheduled_job_runs": scheduled_job_runs,
+        "workflow_runs": workflow_runs,
+        "background_sessions": background_sessions,
+        "delegation_receipts": delegation_receipts,
+    }
+
+
+def _eval_m5_operating_layer_payload_behavior() -> dict[str, Any]:
+    fixture = _m5_operating_layer_fixture()
+    payload = build_m5_operating_layer_payload(**fixture)
+    return {
+        "routine_count": payload["summary"]["routine_count"],
+        "run_history_visible": payload["summary"]["scheduled_job_run_count"] == 2,
+        "workflow_projection_boundary": (
+            payload["claim_boundaries"]["workflow_state_source"] == "audit_projected_workflow_receipts"
+        ),
+        "future_triggers_bounded": "heartbeat" in payload["claim_boundaries"]["future_triggers"],
+        "durable_state_machine_not_claimed": (
+            "full_durable_workflow_state_machine" in payload["claim_boundaries"]["not_claimed"]
+        ),
+        "checkpoint_ready": payload["summary"]["checkpoint_ready_workflow_count"] == 1,
+        "delegation_receipts_visible": payload["summary"]["delegation_receipt_count"] == 2,
+    }
+
+
+def _eval_scheduled_job_run_history_behavior() -> dict[str, Any]:
+    fixture = _m5_operating_layer_fixture()
+    payload = build_m5_operating_layer_payload(**fixture)
+    brief = next(item for item in payload["routines"] if item["id"] == "job-brief")
+    return {
+        "job_has_run_history": brief["run_history_count"] == 1,
+        "latest_run_outcome": brief["latest_run"]["outcome"],
+        "run_outcomes": payload["run_outcomes"],
+        "cron_claim_boundary": brief["claim_boundary"] == "cron_style_job_or_routine",
+    }
+
+
+def _eval_scheduled_job_pause_resume_no_fire_behavior() -> dict[str, Any]:
+    fixture = _m5_operating_layer_fixture()
+    payload = build_m5_operating_layer_payload(**fixture)
+    paused = next(item for item in payload["routines"] if item["id"] == "job-workflow")
+    return {
+        "paused_job_disabled": paused["enabled"] is False,
+        "paused_job_recorded_skip": paused["latest_run"]["outcome"] == "skipped_disabled",
+        "paused_job_did_not_report_success": paused["latest_run"]["outcome"] != "succeeded",
+        "skip_reason_visible": paused["latest_run"]["metadata"]["skip_reason"] == "job_disabled",
+    }
+
+
+def _eval_delegation_trust_partition_receipt_behavior() -> dict[str, Any]:
+    fixture = _m5_operating_layer_fixture()
+    payload = build_m5_operating_layer_payload(**fixture)
+    unresolved = next(item for item in payload["delegation_trust_receipts"] if item["delegation_target_unresolved"])
+    vault = next(item for item in payload["delegation_trust_receipts"] if item["specialist"] == "vault")
+    workflow = payload["workflows"][0]
+    return {
+        "vault_partition_visible": vault["trust_partition"]["mode"] == "delegated_specialist",
+        "unresolved_partition_blocked": unresolved["trust_partition"]["blocked"] is True,
+        "workflow_delegation_receipt_visible": workflow["delegation_receipt"]["delegation_present"] is True,
+        "workflow_claim_boundary": workflow["claim_boundary"] == "audit_projected_workflow_receipt_not_durable_state_machine",
+    }
+
+
+async def _eval_operator_m5_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.workflows.benchmark import build_m5_operating_layer_benchmark_report
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="workflow",
+                description="M5 benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES
+        ],
+        duration_ms=len(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.workflows.benchmark._run_m5_operating_layer_benchmark_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_m5_operating_layer_benchmark_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
+        "operator_status_visible": payload["summary"]["operator_status"] == "m5_operating_layer_visible",
+        "benchmark_posture_green": payload["summary"]["benchmark_posture"] == "m5_ci_gated_operator_visible",
+        "latest_run_green": payload["latest_run"]["failed"] == 0,
+        "receipt_surface_visible": "/api/operator/m5-operating-layer" in payload["policy"]["receipt_surfaces"],
+        "claim_boundary_policy_visible": (
+            payload["policy"]["workflow_projection_policy"] == "workflow_runs_are_audit_projected_until_a_durable_executor_exists"
+        ),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -10726,6 +10958,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     guardian_user_model_suite = next(item for item in suites if item["name"] == "guardian_user_model_restraint")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
     workflow_suite = next(item for item in suites if item["name"] == "workflow_endurance_and_repair")
+    m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
     secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
@@ -10739,6 +10972,8 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "guardian_user_model_suite_present": "guardian_clarification_restraint_behavior" in guardian_user_model_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "workflow_suite_present": "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"],
+        "m5_suite_present": "m5_operating_layer_payload_behavior" in m5_suite["scenario_names"],
+        "m5_suite_scenario_count_matches": m5_suite["scenario_count"] == len(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
         "trust_suite_present": "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"],
         "secure_host_suite_present": "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"],
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
@@ -12174,6 +12409,36 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="M4 channel abuse and failure cases surface operator-visible review receipts before unsafe follow-up can proceed.",
         runner=_eval_channel_abuse_failure_review_behavior,
+    ),
+    EvalScenario(
+        name="m5_operating_layer_payload_behavior",
+        category="workflow",
+        description="M5 operating-layer payload composes cron routines, durable job-run receipts, projected workflow state, background churn, and delegation receipts with explicit claim boundaries.",
+        runner=_eval_m5_operating_layer_payload_behavior,
+    ),
+    EvalScenario(
+        name="scheduled_job_run_history_behavior",
+        category="workflow",
+        description="Scheduled jobs expose per-run history and latest outcomes instead of only last-run fields.",
+        runner=_eval_scheduled_job_run_history_behavior,
+    ),
+    EvalScenario(
+        name="scheduled_job_pause_resume_no_fire_behavior",
+        category="workflow",
+        description="Paused scheduled jobs record skipped no-fire receipts instead of executing their action.",
+        runner=_eval_scheduled_job_pause_resume_no_fire_behavior,
+    ),
+    EvalScenario(
+        name="delegation_trust_partition_receipt_behavior",
+        category="workflow",
+        description="Delegated specialist receipts expose trust partitions, unresolved-target blocking, and projected workflow delegation boundaries.",
+        runner=_eval_delegation_trust_partition_receipt_behavior,
+    ),
+    EvalScenario(
+        name="operator_m5_benchmark_surface_behavior",
+        category="observability",
+        description="Operator M5 benchmark surface exposes run-history, no-fire, workflow projection, delegation partition, and claim-boundary policy.",
+        runner=_eval_operator_m5_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="operator_governed_improvement_benchmark_surface_behavior",

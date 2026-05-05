@@ -767,6 +767,104 @@ interface OperatorBackgroundSessions {
   sessions: OperatorBackgroundSessionEntry[];
 }
 
+interface OperatorM5JobRunReceipt {
+  id: string;
+  status: string;
+  outcome?: string | null;
+  approval_id?: string | null;
+  workflow_run_identity?: string | null;
+  error?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  audit_event_id?: string | null;
+}
+
+interface OperatorM5JobEntry {
+  id: string;
+  name: string;
+  status: string;
+  enabled: boolean;
+  trigger_type: string;
+  trigger_label: string;
+  action_type: string;
+  action_label: string;
+  session_id?: string | null;
+  created_by_session_id?: string | null;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_outcome?: string | null;
+  last_error?: string | null;
+  last_approval_id?: string | null;
+  run_count: number;
+  run_history: OperatorM5JobRunReceipt[];
+  lifecycle_controls: string[];
+  audit_receipts: string[];
+}
+
+interface OperatorM5DelegationPartition {
+  id: string;
+  specialist: string;
+  owner: string;
+  status: string;
+  risk_level: string;
+  task_summary: string;
+  execution_boundaries: string[];
+  delegated_tool_names: string[];
+  artifact_count: number;
+  review_state: string;
+  trust_partition: {
+    mode: string;
+    background_capable: boolean;
+    authenticated_source: boolean;
+    credential_egress_policy_count: number;
+    blocked: boolean;
+  };
+}
+
+interface OperatorM5QueueEntry {
+  id: string;
+  kind: string;
+  label: string;
+  status: string;
+  detail: string;
+  priority: string;
+  thread_id?: string | null;
+  continue_message?: string | null;
+  checkpoint_ready: boolean;
+  repair_ready: boolean;
+  branch_ready: boolean;
+  delegation_ready: boolean;
+  approval_required: boolean;
+  actions: string[];
+}
+
+interface OperatorM5OperatingLayer {
+  summary: {
+    work_item_count: number;
+    scheduled_job_count: number;
+    routine_count: number;
+    workflow_run_count: number;
+    delegation_partition_count: number;
+    active_work_count: number;
+    paused_work_count: number;
+    awaiting_approval_count: number;
+    failed_work_count: number;
+    repair_ready_count: number;
+    checkpoint_ready_count: number;
+    branch_ready_count: number;
+    session_churn_risk_count: number;
+    durable_run_receipt_count: number;
+    operator_status: string;
+    claim_boundary: string;
+  };
+  jobs: OperatorM5JobEntry[];
+  routines: OperatorM5JobEntry[];
+  delegations: OperatorM5DelegationPartition[];
+  work_queue: OperatorM5QueueEntry[];
+  missing_trigger_classes: string[];
+  proof_receipts: string[];
+}
+
 interface OperatorEngineeringMemorySessionMatch {
   session_id?: string | null;
   title?: string | null;
@@ -3509,6 +3607,141 @@ function normalizeOperatorBackgroundSessions(value: unknown): OperatorBackground
   };
 }
 
+function normalizeOperatorM5OperatingLayer(value: unknown): OperatorM5OperatingLayer | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const normalizeJob = (entry: unknown): OperatorM5JobEntry[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const job = entry as Record<string, unknown>;
+    const id = typeof job.id === "string" ? job.id : "";
+    if (!id) return [];
+    return [{
+      id,
+      name: typeof job.name === "string" ? job.name : "Scheduled job",
+      status: typeof job.status === "string" ? job.status : (job.enabled === false ? "paused" : "active"),
+      enabled: typeof job.enabled === "boolean" ? job.enabled : true,
+      trigger_type: typeof job.trigger_type === "string" ? job.trigger_type : "cron",
+      trigger_label: typeof job.trigger_label === "string" ? job.trigger_label : "cron",
+      action_type: typeof job.action_type === "string" ? job.action_type : "unknown",
+      action_label: typeof job.action_label === "string" ? job.action_label : "action",
+      session_id: typeof job.session_id === "string" ? job.session_id : null,
+      created_by_session_id: typeof job.created_by_session_id === "string" ? job.created_by_session_id : null,
+      next_run_at: typeof job.next_run_at === "string" ? job.next_run_at : null,
+      last_run_at: typeof job.last_run_at === "string" ? job.last_run_at : null,
+      last_outcome: typeof job.last_outcome === "string" ? job.last_outcome : null,
+      last_error: typeof job.last_error === "string" ? job.last_error : null,
+      last_approval_id: typeof job.last_approval_id === "string" ? job.last_approval_id : null,
+      run_count: typeof job.run_count === "number" ? job.run_count : 0,
+      run_history: Array.isArray(job.run_history)
+        ? job.run_history.flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const run = item as Record<string, unknown>;
+          return [{
+            id: typeof run.id === "string" ? run.id : "run",
+            status: typeof run.status === "string" ? run.status : "unknown",
+            outcome: typeof run.outcome === "string" ? run.outcome : null,
+            approval_id: typeof run.approval_id === "string" ? run.approval_id : null,
+            workflow_run_identity: typeof run.workflow_run_identity === "string" ? run.workflow_run_identity : null,
+            error: typeof run.error === "string" ? run.error : null,
+            started_at: typeof run.started_at === "string" ? run.started_at : null,
+            finished_at: typeof run.finished_at === "string" ? run.finished_at : null,
+            audit_event_id: typeof run.audit_event_id === "string" ? run.audit_event_id : null,
+          }];
+        })
+        : [],
+      lifecycle_controls: stringList(job.lifecycle_controls),
+      audit_receipts: stringList(job.audit_receipts),
+    }];
+  };
+  const jobs = Array.isArray(record.jobs) ? record.jobs.flatMap(normalizeJob) : [];
+  const routines = Array.isArray(record.routines) ? record.routines.flatMap(normalizeJob) : [];
+  return {
+    summary: {
+      work_item_count: typeof summaryRecord.work_item_count === "number" ? summaryRecord.work_item_count : 0,
+      scheduled_job_count: typeof summaryRecord.scheduled_job_count === "number" ? summaryRecord.scheduled_job_count : jobs.length,
+      routine_count: typeof summaryRecord.routine_count === "number" ? summaryRecord.routine_count : routines.length,
+      workflow_run_count: typeof summaryRecord.workflow_run_count === "number" ? summaryRecord.workflow_run_count : 0,
+      delegation_partition_count: typeof summaryRecord.delegation_partition_count === "number" ? summaryRecord.delegation_partition_count : 0,
+      active_work_count: typeof summaryRecord.active_work_count === "number" ? summaryRecord.active_work_count : 0,
+      paused_work_count: typeof summaryRecord.paused_work_count === "number" ? summaryRecord.paused_work_count : 0,
+      awaiting_approval_count: typeof summaryRecord.awaiting_approval_count === "number" ? summaryRecord.awaiting_approval_count : 0,
+      failed_work_count: typeof summaryRecord.failed_work_count === "number" ? summaryRecord.failed_work_count : 0,
+      repair_ready_count: typeof summaryRecord.repair_ready_count === "number" ? summaryRecord.repair_ready_count : 0,
+      checkpoint_ready_count: typeof summaryRecord.checkpoint_ready_count === "number" ? summaryRecord.checkpoint_ready_count : 0,
+      branch_ready_count: typeof summaryRecord.branch_ready_count === "number" ? summaryRecord.branch_ready_count : 0,
+      session_churn_risk_count: typeof summaryRecord.session_churn_risk_count === "number" ? summaryRecord.session_churn_risk_count : 0,
+      durable_run_receipt_count: typeof summaryRecord.durable_run_receipt_count === "number" ? summaryRecord.durable_run_receipt_count : 0,
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      claim_boundary: typeof summaryRecord.claim_boundary === "string" ? summaryRecord.claim_boundary : "audit_projected_supervision_not_full_durable_executor",
+    },
+    jobs,
+    routines,
+    delegations: Array.isArray(record.delegations)
+      ? record.delegations.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const delegation = entry as Record<string, unknown>;
+        const trustPartition = delegation.trust_partition;
+        const trust = trustPartition && typeof trustPartition === "object" && !Array.isArray(trustPartition)
+          ? trustPartition as Record<string, unknown>
+          : {};
+        return [{
+          id: typeof delegation.id === "string" ? delegation.id : "delegation",
+          specialist: typeof delegation.specialist === "string" ? delegation.specialist : "unknown",
+          owner: typeof delegation.owner === "string" ? delegation.owner : "operator",
+          status: typeof delegation.status === "string" ? delegation.status : "available",
+          risk_level: typeof delegation.risk_level === "string" ? delegation.risk_level : "unknown",
+          task_summary: typeof delegation.task_summary === "string" ? delegation.task_summary : "",
+          execution_boundaries: stringList(delegation.execution_boundaries),
+          delegated_tool_names: stringList(delegation.delegated_tool_names),
+          artifact_count: typeof delegation.artifact_count === "number" ? delegation.artifact_count : 0,
+          review_state: typeof delegation.review_state === "string" ? delegation.review_state : "not_started",
+          trust_partition: {
+            mode: typeof trust.mode === "string" ? trust.mode : "unknown",
+            background_capable: Boolean(trust.background_capable),
+            authenticated_source: Boolean(trust.authenticated_source),
+            credential_egress_policy_count: typeof trust.credential_egress_policy_count === "number" ? trust.credential_egress_policy_count : 0,
+            blocked: Boolean(trust.blocked),
+          },
+        }];
+      })
+      : [],
+    work_queue: Array.isArray(record.work_queue)
+      ? record.work_queue.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        return [{
+          id: typeof item.id === "string" ? item.id : "work",
+          kind: typeof item.kind === "string" ? item.kind : "work",
+          label: typeof item.label === "string" ? item.label : "Work item",
+          status: typeof item.status === "string" ? item.status : "unknown",
+          detail: typeof item.detail === "string" ? item.detail : "",
+          priority: typeof item.priority === "string" ? item.priority : "normal",
+          thread_id: typeof item.thread_id === "string" ? item.thread_id : null,
+          continue_message: typeof item.continue_message === "string" ? item.continue_message : null,
+          checkpoint_ready: Boolean(item.checkpoint_ready),
+          repair_ready: Boolean(item.repair_ready),
+          branch_ready: Boolean(item.branch_ready),
+          delegation_ready: Boolean(item.delegation_ready),
+          approval_required: Boolean(item.approval_required),
+          actions: stringList(item.actions),
+        }];
+      })
+      : [],
+    missing_trigger_classes: stringList(record.missing_trigger_classes),
+    proof_receipts: stringList(record.proof_receipts),
+  };
+}
+
 function normalizeOperatorEngineeringMemory(value: unknown): OperatorEngineeringMemory | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -4993,6 +5226,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorGuardianState, setOperatorGuardianState] = useState<OperatorGuardianState | null>(null);
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
+  const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
   const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
@@ -5174,6 +5408,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       guardianStateResult,
       workflowOrchestrationResult,
       backgroundSessionsResult,
+      m5OperatingLayerResult,
       engineeringMemoryResult,
       continuityGraphResult,
       workflowRunsResult,
@@ -5195,6 +5430,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       fetchJson(`${API_URL}/api/operator/background-sessions`),
+      fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
       fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
       fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
@@ -5259,6 +5495,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
     setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
+    setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
     setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
@@ -13173,6 +13410,149 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     })}
                     {operatorTriageEntries.length === 0 && (
                       <div className="cockpit-empty">No active workflows, approvals, queued guardian items, or reach failures need action.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="M5 operating layer">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M5 operating layer</span>
+                      <span className="cockpit-operator-link">
+                        {operatorM5OperatingLayer
+                          ? `${operatorM5OperatingLayer.summary.work_item_count} work items · ${operatorM5OperatingLayer.summary.scheduled_job_count} jobs · ${operatorM5OperatingLayer.summary.delegation_partition_count} delegations`
+                          : "summary unavailable"}
+                      </span>
+                    </div>
+                    {operatorM5OperatingLayer ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorM5OperatingLayer.summary.operator_status.replace(/_/g, " "),
+                            `${operatorM5OperatingLayer.summary.active_work_count} active`,
+                            `${operatorM5OperatingLayer.summary.paused_work_count} paused`,
+                            `${operatorM5OperatingLayer.summary.awaiting_approval_count} awaiting approval`,
+                            `${operatorM5OperatingLayer.summary.failed_work_count} failed`,
+                            `${operatorM5OperatingLayer.summary.repair_ready_count} repair-ready`,
+                            `${operatorM5OperatingLayer.summary.checkpoint_ready_count} checkpoint-ready`,
+                            `${operatorM5OperatingLayer.summary.branch_ready_count} branch-ready`,
+                            `${operatorM5OperatingLayer.summary.durable_run_receipt_count} run receipts`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorM5OperatingLayer.summary.claim_boundary.replace(/_/g, " "),
+                            operatorM5OperatingLayer.missing_trigger_classes.length
+                              ? `future triggers: ${operatorM5OperatingLayer.missing_trigger_classes.join(", ")}`
+                              : "trigger classes represented",
+                          ].join(" · ")}
+                        </div>
+                        {operatorM5OperatingLayer.work_queue.slice(0, 5).map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <button
+                              type="button"
+                              className="cockpit-operator-details cockpit-operator-details--button"
+                              aria-label={`Inspect M5 work item ${entry.label}`}
+                              onClick={() => setSelectedInspector({
+                                kind: "operator",
+                                entity: {
+                                  entityType: "activity_item",
+                                  name: entry.label,
+                                  meta: `${entry.kind} · ${entry.status} · ${entry.priority}`,
+                                  summary: entry.detail,
+                                  details: entry as unknown as Record<string, unknown>,
+                                },
+                              })}
+                            >
+                              <div className="cockpit-value">{entry.label}</div>
+                              <div className="cockpit-operator-note">{entry.detail || entry.kind}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  entry.status.replace(/_/g, " "),
+                                  entry.checkpoint_ready ? "checkpoint" : null,
+                                  entry.repair_ready ? "repair" : null,
+                                  entry.branch_ready ? "branch" : null,
+                                  entry.delegation_ready ? "delegation" : null,
+                                  entry.approval_required ? "approval" : null,
+                                  entry.actions.join(", "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                            </button>
+                            <div className="cockpit-operator-actions">
+                              {entry.continue_message ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Continue M5 work item ${entry.label}`}
+                                  onClick={() => queueComposerDraft(entry.continue_message ?? "")}
+                                >
+                                  continue
+                                </button>
+                              ) : null}
+                              {entry.thread_id && canOpenLedgerThread(entry.thread_id, sessionId, knownSessionIds) ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Open thread for M5 work item ${entry.label}`}
+                                  onClick={() => void openThread(entry.thread_id)}
+                                >
+                                  open thread
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM5OperatingLayer.jobs.slice(0, 4).map((job) => (
+                          <div key={job.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{job.name}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  job.enabled ? "enabled" : "paused",
+                                  job.trigger_label,
+                                  job.action_label,
+                                  job.last_outcome ? `last ${job.last_outcome}` : "not run yet",
+                                  job.run_count > 0 ? `${job.run_count} runs` : null,
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  job.last_approval_id ? `approval ${shortIdentifier(job.last_approval_id)}` : null,
+                                  job.last_error ? `error ${job.last_error}` : null,
+                                  job.lifecycle_controls.length ? `controls ${job.lifecycle_controls.join(", ")}` : null,
+                                  job.audit_receipts.length ? `${job.audit_receipts.length} receipts` : null,
+                                ].filter(Boolean).join(" · ") || "No run receipt yet."}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM5OperatingLayer.delegations.slice(0, 4).map((delegation) => (
+                          <div key={delegation.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{delegation.specialist}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  delegation.status.replace(/_/g, " "),
+                                  delegation.risk_level,
+                                  delegation.trust_partition.mode.replace(/_/g, " "),
+                                  delegation.trust_partition.blocked ? "blocked" : "available",
+                                  `${delegation.delegated_tool_names.length} tools`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  delegation.task_summary,
+                                  delegation.execution_boundaries.join(", "),
+                                  delegation.review_state.replace(/_/g, " "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM5OperatingLayer.work_queue.length === 0 && operatorM5OperatingLayer.jobs.length === 0 && (
+                          <div className="cockpit-empty">No supervised M5 jobs, routines, or delegated work are surfaced yet.</div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">M5 operating layer summary unavailable.</div>
                     )}
                   </section>
 

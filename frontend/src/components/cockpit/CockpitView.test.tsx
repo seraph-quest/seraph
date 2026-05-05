@@ -10902,7 +10902,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(20));
+    await waitFor(() => expect(cockpitFetchCount).toBe(21));
     view.unmount();
 
     await act(async () => {
@@ -11171,5 +11171,180 @@ describe("CockpitView", () => {
     expect(screen.getByText("Approval requested for write_file")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "continue" }).length).toBeGreaterThan(0);
     expect(controlPlaneUrl).not.toContain("session_id=");
+  });
+
+  it("surfaces M5 jobs, delegated work queue, and claim boundaries in the operator terminal", async () => {
+    let operatingLayerUrl: string | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "2026.4.10",
+          build_id: "SERAPH_PRIME_v2026.4.10",
+          provider: "openrouter",
+          model: "openrouter/openai/gpt-4.1-mini",
+          model_label: "gpt-4.1-mini",
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/m5-operating-layer")) {
+        operatingLayerUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            work_item_count: 3,
+            scheduled_job_count: 1,
+            routine_count: 1,
+            workflow_run_count: 1,
+            delegation_partition_count: 1,
+            active_work_count: 2,
+            paused_work_count: 1,
+            awaiting_approval_count: 1,
+            failed_work_count: 0,
+            repair_ready_count: 1,
+            checkpoint_ready_count: 1,
+            branch_ready_count: 1,
+            session_churn_risk_count: 0,
+            durable_run_receipt_count: 2,
+            operator_status: "supervised_background_work_visible",
+            claim_boundary: "audit_projected_supervision_not_full_durable_executor",
+          },
+          jobs: [
+            {
+              id: "job:nightly-benchmark",
+              name: "Nightly benchmark steward",
+              status: "active",
+              enabled: true,
+              trigger_type: "cron",
+              trigger_label: "daily at 02:00",
+              action_type: "workflow",
+              action_label: "Run benchmark steward",
+              last_outcome: "approval_requested",
+              last_approval_id: "approval_m5_123456",
+              run_count: 2,
+              run_history: [
+                { id: "run:1", status: "finished", outcome: "approval_requested", approval_id: "approval_m5_123456" },
+              ],
+              lifecycle_controls: ["pause", "resume", "cancel"],
+              audit_receipts: ["audit:job-run"],
+            },
+          ],
+          routines: [
+            {
+              id: "routine:morning-repair",
+              name: "Morning repair sweep",
+              enabled: true,
+              trigger_label: "manual routine",
+              action_label: "Repair stale queue",
+              run_count: 0,
+              run_history: [],
+              lifecycle_controls: [],
+              audit_receipts: [],
+            },
+          ],
+          delegations: [
+            {
+              id: "delegation:vault-keeper",
+              specialist: "Vault keeper",
+              owner: "operator",
+              status: "available",
+              risk_level: "high",
+              task_summary: "Handles credential-sensitive background work.",
+              execution_boundaries: ["vault_partition", "approval_required"],
+              delegated_tool_names: ["read_secret_metadata", "request_approval"],
+              artifact_count: 2,
+              review_state: "pending_review",
+              trust_partition: {
+                mode: "vault_and_background_partitioned",
+                background_capable: true,
+                authenticated_source: true,
+                credential_egress_policy_count: 2,
+                blocked: false,
+              },
+            },
+          ],
+          work_queue: [
+            {
+              id: "work:branch-handoff",
+              kind: "branch_handoff",
+              label: "Prepare release branch handoff",
+              status: "awaiting_approval",
+              detail: "Checkpointed M5 work item ready for operator continuation.",
+              priority: "high",
+              thread_id: "session-1",
+              continue_message: "Continue the release branch handoff.",
+              checkpoint_ready: true,
+              repair_ready: true,
+              branch_ready: true,
+              delegation_ready: true,
+              approval_required: true,
+              actions: ["continue", "request_review"],
+            },
+          ],
+          missing_trigger_classes: ["calendar", "external_webhook"],
+          proof_receipts: ["receipt:m5-operating-layer"],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const operatingLayer = await screen.findByRole("region", { name: /m5 operating layer/i });
+    await waitFor(() => expect(operatingLayer).toHaveTextContent(/3 work items · 1 jobs · 1 delegations/i));
+    expect(within(operatingLayer).getByText("Nightly benchmark steward")).toBeInTheDocument();
+    expect(operatingLayer).toHaveTextContent(/daily at 02:00 · Run benchmark steward · last approval_requested · 2 runs/i);
+    expect(within(operatingLayer).getByText("Prepare release branch handoff")).toBeInTheDocument();
+    expect(operatingLayer).toHaveTextContent(/checkpoint · repair · branch · delegation · approval · continue, request_review/i);
+    expect(within(operatingLayer).getByText("Vault keeper")).toBeInTheDocument();
+    expect(operatingLayer).toHaveTextContent(/vault and background partitioned · available · 2 tools/i);
+    expect(operatingLayer).toHaveTextContent(/audit projected supervision not full durable executor/i);
+    expect(operatingLayer).toHaveTextContent(/future triggers: calendar, external_webhook/i);
+    expect(operatingLayerUrl).not.toContain("session_id=");
   });
 });

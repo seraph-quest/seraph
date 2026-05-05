@@ -16,7 +16,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_scheduler_job_event
 from src.db.engine import get_session
-from src.db.models import ScheduledJob
+from src.db.models import ScheduledJob, ScheduledJobRun
 from src.db.session_refs import ensure_sessions_exist
 from src.models.schemas import WSResponse
 from src.observer.delivery import deliver_or_queue
@@ -152,6 +152,24 @@ def _owner_visibility_clause(owner_session_id: str):
 
 
 class ScheduledJobRepository:
+    def _serialize_run(self, run: ScheduledJobRun) -> dict[str, Any]:
+        return {
+            "id": run.id,
+            "scheduled_job_id": run.scheduled_job_id,
+            "job_name": run.job_name,
+            "trigger_type": run.trigger_type,
+            "action_type": run.action_type,
+            "session_id": run.session_id,
+            "created_by_session_id": run.created_by_session_id,
+            "status": run.status,
+            "outcome": run.outcome,
+            "error": run.error,
+            "approval_id": run.approval_id,
+            "started_at": run.started_at.isoformat(),
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "metadata": _loads(run.metadata_json or "{}"),
+        }
+
     async def list_jobs(
         self,
         *,
@@ -220,7 +238,19 @@ class ScheduledJobRepository:
             db.add(job)
             await db.flush()
             await db.refresh(job)
-            return self._serialize(job)
+            serialized = self._serialize(job)
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{serialized['id']}",
+            outcome="created",
+            details={
+                "scheduled_job_id": serialized["id"],
+                "trigger_type": serialized["trigger_type"],
+                "action_type": serialized["action_type"],
+                "session_id": serialized.get("session_id"),
+                "created_by_session_id": serialized.get("created_by_session_id"),
+            },
+        )
+        return serialized
 
     async def update_job(
         self,
@@ -290,7 +320,19 @@ class ScheduledJobRepository:
             job.updated_at = _utc_now()
             await db.flush()
             await db.refresh(job)
-            return self._serialize(job)
+            serialized = self._serialize(job)
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{serialized['id']}",
+            outcome="updated",
+            details={
+                "scheduled_job_id": serialized["id"],
+                "trigger_type": serialized["trigger_type"],
+                "action_type": serialized["action_type"],
+                "session_id": serialized.get("session_id"),
+                "created_by_session_id": serialized.get("created_by_session_id"),
+            },
+        )
+        return serialized
 
     async def set_enabled(
         self,
@@ -311,7 +353,18 @@ class ScheduledJobRepository:
             job.updated_at = _utc_now()
             await db.flush()
             await db.refresh(job)
-            return self._serialize(job)
+            serialized = self._serialize(job)
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{serialized['id']}",
+            outcome="resumed" if enabled else "paused",
+            details={
+                "scheduled_job_id": serialized["id"],
+                "enabled": enabled,
+                "trigger_type": serialized["trigger_type"],
+                "action_type": serialized["action_type"],
+            },
+        )
+        return serialized
 
     async def delete_job(self, job_id: str, *, owner_session_id: str | None = None) -> bool:
         async with get_session() as db:
@@ -322,8 +375,94 @@ class ScheduledJobRepository:
             job = result.scalars().first()
             if job is None:
                 return False
+            serialized = self._serialize(job)
             await db.delete(job)
-            return True
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{job_id}",
+            outcome="deleted",
+            details={
+                "scheduled_job_id": job_id,
+                "trigger_type": serialized["trigger_type"],
+                "action_type": serialized["action_type"],
+                "session_id": serialized.get("session_id"),
+            },
+        )
+        return True
+
+    async def start_run(
+        self,
+        job: dict[str, Any],
+        *,
+        status: str = "started",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with get_session() as db:
+            run = ScheduledJobRun(
+                scheduled_job_id=str(job.get("id") or ""),
+                job_name=str(job.get("name") or ""),
+                trigger_type=str(job.get("trigger_type") or "cron"),
+                action_type=str(job.get("action_type") or ""),
+                session_id=job.get("session_id") if isinstance(job.get("session_id"), str) else None,
+                created_by_session_id=(
+                    job.get("created_by_session_id")
+                    if isinstance(job.get("created_by_session_id"), str)
+                    else None
+                ),
+                status=status,
+                metadata_json=_dumps(metadata or {}),
+            )
+            db.add(run)
+            await db.flush()
+            await db.refresh(run)
+            return self._serialize_run(run)
+
+    async def finish_run(
+        self,
+        run_id: str,
+        *,
+        outcome: str,
+        status: str = "finished",
+        error: str | None = None,
+        approval_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        async with get_session() as db:
+            result = await db.execute(select(ScheduledJobRun).where(ScheduledJobRun.id == run_id))
+            run = result.scalars().first()
+            if run is None:
+                return None
+            run.status = status
+            run.outcome = outcome
+            run.error = error[:400] if isinstance(error, str) and error else None
+            run.approval_id = approval_id
+            run.finished_at = _utc_now()
+            if metadata is not None:
+                run.metadata_json = _dumps(metadata)
+            await db.flush()
+            await db.refresh(run)
+            return self._serialize_run(run)
+
+    async def list_run_history(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int = 20,
+        owner_session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = min(max(int(limit), 1), 100)
+        async with get_session() as db:
+            stmt = select(ScheduledJobRun).order_by(col(ScheduledJobRun.started_at).desc()).limit(limit)
+            if job_id:
+                stmt = stmt.where(ScheduledJobRun.scheduled_job_id == job_id)
+            if owner_session_id:
+                stmt = stmt.where(
+                    or_(
+                        ScheduledJobRun.created_by_session_id == owner_session_id,
+                        ScheduledJobRun.session_id == owner_session_id,
+                    )
+                )
+            result = await db.execute(stmt)
+            return [self._serialize_run(run) for run in result.scalars().all()]
 
     async def record_run(
         self,
@@ -369,7 +508,42 @@ class ScheduledJobRepository:
 
 async def execute_scheduled_job(job_id: str) -> None:
     job = await scheduled_job_repository.get_job(job_id)
-    if job is None or not job.get("enabled", False):
+    if job is None:
+        return
+
+    run = await scheduled_job_repository.start_run(
+        job,
+        metadata={
+            "claim_boundary": "cron_style_scheduled_job_receipt",
+            "trigger_type": job.get("trigger_type"),
+        },
+    )
+    await log_scheduler_job_event(
+        job_name=f"user_cron:{job_id}",
+        outcome="triggered",
+        details={
+            "scheduled_job_id": job_id,
+            "scheduled_job_run_id": run["id"],
+            "action_type": job.get("action_type"),
+            "trigger_type": job.get("trigger_type"),
+        },
+    )
+    if not job.get("enabled", False):
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="skipped_disabled",
+            status="skipped",
+            metadata={"skip_reason": "job_disabled"},
+        )
+        await log_scheduler_job_event(
+            job_name=f"user_cron:{job_id}",
+            outcome="skipped",
+            details={
+                "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
+                "reason": "job_disabled",
+            },
+        )
         return
 
     action_type = str(job.get("action_type") or "")
@@ -399,11 +573,20 @@ async def execute_scheduled_job(job_id: str) -> None:
                 job_id,
                 outcome=delivery_outcome,
             )
+            await scheduled_job_repository.finish_run(
+                run["id"],
+                outcome=delivery_outcome,
+                metadata={
+                    "policy_action": result.action.value,
+                    "delivery_outcome": delivery_outcome,
+                },
+            )
             await log_scheduler_job_event(
                 job_name=f"user_cron:{job_id}",
                 outcome="failed" if delivery_outcome == "failed" else "succeeded",
                 details={
                     "scheduled_job_id": job_id,
+                    "scheduled_job_run_id": run["id"],
                     "action_type": action_type,
                     "delivery_outcome": delivery_outcome,
                     "policy_action": result.action.value,
@@ -414,11 +597,17 @@ async def execute_scheduled_job(job_id: str) -> None:
         if action_type == "run_workflow":
             await _run_scheduled_workflow(job)
             await scheduled_job_repository.record_run(job_id, outcome="succeeded")
+            await scheduled_job_repository.finish_run(
+                run["id"],
+                outcome="succeeded",
+                metadata={"workflow_name": (job.get("action_spec") or {}).get("workflow_name")},
+            )
             await log_scheduler_job_event(
                 job_name=f"user_cron:{job_id}",
                 outcome="succeeded",
                 details={
                     "scheduled_job_id": job_id,
+                    "scheduled_job_run_id": run["id"],
                     "action_type": action_type,
                 },
             )
@@ -431,11 +620,19 @@ async def execute_scheduled_job(job_id: str) -> None:
             outcome="approval_required",
             approval_id=exc.approval_id,
         )
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="approval_required",
+            status="approval_required",
+            approval_id=exc.approval_id,
+            metadata={"tool_name": exc.tool_name},
+        )
         await log_scheduler_job_event(
             job_name=f"user_cron:{job_id}",
             outcome="approval_required",
             details={
                 "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
                 "action_type": action_type,
                 "approval_id": exc.approval_id,
                 "tool_name": exc.tool_name,
@@ -449,11 +646,18 @@ async def execute_scheduled_job(job_id: str) -> None:
             outcome="failed",
             error=safe_error,
         )
+        await scheduled_job_repository.finish_run(
+            run["id"],
+            outcome="failed",
+            status="failed",
+            error=safe_error,
+        )
         await log_scheduler_job_event(
             job_name=f"user_cron:{job_id}",
             outcome="failed",
             details={
                 "scheduled_job_id": job_id,
+                "scheduled_job_run_id": run["id"],
                 "action_type": action_type,
                 "error": safe_error,
             },

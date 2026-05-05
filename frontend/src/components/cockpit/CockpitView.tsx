@@ -1756,6 +1756,13 @@ interface ExtensionPackageInfo {
   permission_summary?: ExtensionPermissionSummary | null;
   approval_profile?: ExtensionApprovalProfile | null;
   connector_summary?: ExtensionConnectorSummary | null;
+  lifecycle_receipt_id?: string | null;
+  rollback_receipt_id?: string | null;
+  rollback_receipt_path?: string | null;
+  rollback_ready?: boolean;
+  review_state?: string | null;
+  revocation_state?: string | null;
+  provenance?: Record<string, unknown> | null;
   contributions: ExtensionContributionInfo[];
   studio_files: ExtensionStudioFileInfo[];
 }
@@ -1826,6 +1833,11 @@ interface CatalogItemInfo {
   issues?: unknown[];
   load_errors?: unknown[];
   diagnostics_summary?: ExtensionDiagnosticsSummary | null;
+  permission_summary?: ExtensionPermissionSummary | null;
+  approval_profile?: ExtensionApprovalProfile | null;
+  risk_level?: string | null;
+  source?: string | null;
+  blocking_reasons?: string[];
   recommended_actions?: CapabilityAction[];
 }
 
@@ -2022,6 +2034,32 @@ interface ExtensionGovernanceSummary {
   status: string;
   detail: string;
   packageInfo: ExtensionPackageInfo;
+}
+
+interface GovernedExtensionConsoleRow {
+  id: string;
+  kind: "installed" | "marketplace";
+  label: string;
+  status: string;
+  source: string;
+  trust: string;
+  publisher: string;
+  version: string;
+  compatibility: string;
+  health: string;
+  permissions: string;
+  risk: string;
+  provenance: string;
+  contributionFamilies: string;
+  actionReadiness: string;
+  actionReady: boolean;
+  rollback: string;
+  rollbackReceipt: string | null;
+  reasons: string[];
+  alternatives: string[];
+  extensionPackage?: ExtensionPackageInfo;
+  catalogItem?: CatalogItemInfo;
+  marketplaceFlow?: MarketplaceFlowInfo;
 }
 
 interface OperatorTriageEntry {
@@ -2285,6 +2323,247 @@ function formatExtensionPublisherLabel(
 ): string | null {
   if (!value?.name?.trim()) return null;
   return `publisher ${value.name.trim()}`;
+}
+
+function formatExtensionPermissionSummary(
+  summary: ExtensionPermissionSummary | null | undefined,
+  contributions: ExtensionContributionInfo[] = [],
+): string {
+  const parts: string[] = [];
+  if (summary) {
+    parts.push(summary.status.replace(/_/g, " "));
+    const missingPermissions = summarizeMissingPermissions(summary);
+    if (missingPermissions.length) {
+      parts.push(`missing ${missingPermissions.join(", ")}`);
+    }
+  }
+  const missingContributionTools = Array.from(new Set(
+    contributions.flatMap((item) => item.permission_profile?.missing_tools ?? []),
+  ));
+  const missingContributionBoundaries = Array.from(new Set(
+    contributions.flatMap((item) => item.permission_profile?.missing_execution_boundaries ?? []),
+  ));
+  if (missingContributionTools.length) {
+    parts.push(`tools ${missingContributionTools.slice(0, 3).join(", ")}`);
+  }
+  if (missingContributionBoundaries.length) {
+    parts.push(`boundaries ${missingContributionBoundaries.slice(0, 3).join(", ")}`);
+  }
+  const approvalCount = contributions.filter((item) => (
+    item.permission_profile?.requires_approval || item.requires_approval || item.approval_behavior === "always"
+  )).length;
+  if (approvalCount) {
+    parts.push(`${approvalCount} approval gated`);
+  }
+  return parts.length ? parts.join(" · ") : "permissions not declared";
+}
+
+function summarizeExtensionContributionFamilies(contributions: ExtensionContributionInfo[]): string {
+  if (!contributions.length) return "no contribution families";
+  const counts = contributions.reduce<Record<string, { total: number; ready: number; attention: number }>>((acc, contribution) => {
+    const key = contribution.type;
+    const current = acc[key] ?? { total: 0, ready: 0, attention: 0 };
+    current.total += 1;
+    if (isContributionActive(contribution)) {
+      current.ready += 1;
+    }
+    const state = (contribution.status ?? contribution.health?.state ?? "").toLowerCase();
+    if (
+      ["blocked", "degraded", "disabled", "invalid", "invalid_config", "requires_config", "revoked", "unloaded"].includes(state)
+      || contribution.loaded === false
+      || contribution.permission_profile?.status === "missing_permissions"
+    ) {
+      current.attention += 1;
+    }
+    acc[key] = current;
+    return acc;
+  }, {});
+  return Object.entries(counts)
+    .map(([type, count]) => {
+      const label = IMPORTED_CAPABILITY_FAMILY_DEFS.find((item) => item.type === type)?.label ?? type.replace(/_/g, " ");
+      return `${label} ${count.ready}/${count.total}${count.attention ? ` · ${count.attention} attention` : ""}`;
+    })
+    .slice(0, 4)
+    .join(" · ");
+}
+
+function summarizeCatalogContributionFamilies(item: CatalogItemInfo, flow: MarketplaceFlowInfo | null): string {
+  const families = item.contribution_types?.length
+    ? item.contribution_types
+    : flow?.contribution_types ?? [];
+  return families.length
+    ? families.slice(0, 4).map((family) => family.replace(/_/g, " ")).join(" · ")
+    : "families pending manifest";
+}
+
+function issueMessageFromUnknown(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const message = typeof record.message === "string"
+    ? record.message
+    : typeof record.detail === "string"
+      ? record.detail
+      : typeof record.code === "string"
+        ? record.code
+        : null;
+  return message?.trim() || null;
+}
+
+function extensionPackageReceipt(extensionPackage: ExtensionPackageInfo): string | null {
+  return extensionPackage.rollback_receipt_id
+    ?? extensionPackage.rollback_receipt_path
+    ?? extensionPackage.lifecycle_receipt_id
+    ?? null;
+}
+
+function extensionPackageRevoked(extensionPackage: ExtensionPackageInfo): boolean {
+  return ["revoked", "removed", "disabled_revoked"].includes(extensionPackage.status)
+    || ["revoked", "revocation_active", "blocked_revoked"].includes(extensionPackage.revocation_state ?? "");
+}
+
+function buildInstalledExtensionConsoleRow(
+  extensionPackage: ExtensionPackageInfo,
+  catalogItem: CatalogItemInfo | null,
+): GovernedExtensionConsoleRow {
+  const receipt = extensionPackageReceipt(extensionPackage);
+  const revoked = extensionPackageRevoked(extensionPackage);
+  const issueReasons = [
+    ...extensionPackage.issues.map((issue) => `${issue.severity}: ${issue.message}`),
+    ...extensionPackage.load_errors.map((error) => `load ${error.phase}: ${error.message}`),
+    ...(extensionPackage.diagnostics_summary?.highlighted_messages ?? []),
+    extensionPackage.compatibility?.compatible === false ? "incompatible with current Seraph build" : null,
+    extensionPackage.permission_summary?.ok === false ? formatExtensionPermissionSummary(extensionPackage.permission_summary, extensionPackage.contributions) : null,
+    extensionPackage.approval_profile?.requires_lifecycle_approval ? "lifecycle review required before privileged change" : null,
+    extensionPackage.approval_profile?.requires_runtime_approval ? `runtime approval ${extensionPackage.approval_profile.runtime_behavior}` : null,
+    revoked ? `revocation ${extensionPackage.revocation_state ?? extensionPackage.status}` : null,
+  ].filter((reason): reason is string => Boolean(reason));
+  const updateReady = Boolean(catalogItem?.update_available);
+  const actionReady = !revoked && extensionPackage.compatibility?.compatible !== false && extensionPackage.status === "ready";
+  const alternatives = [
+    extensionPackage.disable_supported && !revoked ? "disable via studio" : null,
+    extensionPackage.removable && !revoked ? "remove via studio" : null,
+    "draft review",
+  ].filter((item): item is string => Boolean(item));
+  return {
+    id: `installed:${extensionPackage.id}`,
+    kind: "installed",
+    label: extensionPackage.display_name,
+    status: extensionPackage.review_state
+      ? `${extensionPackage.status} · review ${extensionPackage.review_state.replace(/_/g, " ")}`
+      : extensionPackage.status,
+    source: `${extensionPackage.location} · ${extensionPackage.source}`,
+    trust: extensionPackage.trust,
+    publisher: extensionPackage.publisher?.name ?? "publisher unknown",
+    version: catalogItem?.update_available && catalogItem.version
+      ? `${catalogItem.installed_version ?? extensionPackage.version ?? "installed"} -> ${catalogItem.version}`
+      : extensionPackage.version_line ?? extensionPackage.version ?? "version unknown",
+    compatibility: formatExtensionCompatibilityLabel(extensionPackage.compatibility) ?? "compatibility not declared",
+    health: [
+      formatExtensionDiagnosticsSummary(extensionPackage.diagnostics_summary),
+      extensionPackage.connector_summary
+        ? `connectors ${extensionPackage.connector_summary.ready}/${extensionPackage.connector_summary.total} ready`
+        : null,
+      extensionPackage.load_errors.length ? `${extensionPackage.load_errors.length} load errors` : null,
+    ].filter(Boolean).join(" · ") || `${extensionPackage.status} · diagnostics pending`,
+    permissions: formatExtensionPermissionSummary(extensionPackage.permission_summary, extensionPackage.contributions),
+    risk: extensionPackage.permission_summary?.risk_level ?? extensionPackage.approval_profile?.risk_level ?? "risk unknown",
+    provenance: [
+      `manifest ${extensionPackage.kind}`,
+      extensionPackage.location,
+      extensionPackage.provenance?.source ? `source ${String(extensionPackage.provenance.source)}` : null,
+    ].filter(Boolean).join(" · "),
+    contributionFamilies: summarizeExtensionContributionFamilies(extensionPackage.contributions),
+    actionReadiness: revoked
+      ? "revoked · lifecycle actions blocked"
+      : updateReady
+        ? "update ready"
+        : actionReady
+          ? "studio ready"
+          : issueReasons.length
+            ? "guarded · review required"
+            : "action readiness unknown",
+    actionReady: actionReady || updateReady,
+    rollback: receipt
+      ? `rollback ready · receipt ${shortIdentifier(receipt, 18)}`
+      : "rollback unavailable · no backend receipt",
+    rollbackReceipt: receipt,
+    reasons: issueReasons.length ? issueReasons : ["no blocking reasons reported"],
+    alternatives,
+    extensionPackage,
+    catalogItem: catalogItem ?? undefined,
+  };
+}
+
+function buildCatalogExtensionConsoleRow(
+  item: CatalogItemInfo,
+  flow: MarketplaceFlowInfo | null,
+): GovernedExtensionConsoleRow {
+  const issueReasons = [
+    ...(item.issues ?? []).map(issueMessageFromUnknown),
+    ...(item.load_errors ?? []).map(issueMessageFromUnknown).map((message) => (message ? `load error: ${message}` : null)),
+    ...(item.diagnostics_summary?.highlighted_messages ?? []),
+    ...(item.blocking_reasons ?? []),
+    ...(flow?.blocking_reasons ?? []),
+    item.compatibility?.compatible === false ? "incompatible with current Seraph build" : null,
+    item.status && item.status !== "ready" ? `catalog status ${item.status.replace(/_/g, " ")}` : null,
+    item.permission_summary?.ok === false ? formatExtensionPermissionSummary(item.permission_summary) : null,
+    item.approval_profile?.requires_lifecycle_approval ? "lifecycle approval required before install/update" : null,
+  ].filter((reason): reason is string => Boolean(reason));
+  const blocked = item.compatibility?.compatible === false
+    || item.status === "blocked"
+    || item.status === "revoked"
+    || flow?.availability === "blocked";
+  const needsReview = issueReasons.length > 0
+    || item.status === "attention"
+    || item.status === "degraded"
+    || flow?.availability === "attention"
+    || flow?.availability === "partial";
+  const actionReady = !blocked && !needsReview;
+  return {
+    id: `catalog:${item.catalog_id ?? item.name}`,
+    kind: "marketplace",
+    label: item.name,
+    status: [
+      item.installed && item.update_available ? "update" : item.installed ? "installed" : "installable",
+      flow?.availability ? `flow ${flow.availability}` : null,
+      item.status && item.status !== "ready" ? item.status.replace(/_/g, " ") : null,
+    ].filter(Boolean).join(" · "),
+    source: item.source ?? (item.bundled ? "bundled catalog" : "catalog marketplace"),
+    trust: item.trust ?? "trust not declared",
+    publisher: item.publisher?.name ?? "publisher unknown",
+    version: item.installed && item.update_available
+      ? `${item.installed_version ?? "installed"} -> ${item.version ?? "candidate"}`
+      : item.version_line ?? item.version ?? "version unknown",
+    compatibility: formatExtensionCompatibilityLabel(item.compatibility) ?? "compatibility not declared",
+    health: [
+      formatExtensionDiagnosticsSummary(item.diagnostics_summary),
+      item.doctor_ok === false ? "doctor blocked" : null,
+      item.load_errors?.length ? `${item.load_errors.length} load errors` : null,
+    ].filter(Boolean).join(" · ") || "catalog health pending manifest",
+    permissions: formatExtensionPermissionSummary(item.permission_summary),
+    risk: item.risk_level ?? item.permission_summary?.risk_level ?? item.approval_profile?.risk_level ?? "risk unknown",
+    provenance: [
+      item.catalog_id ? `catalog ${item.catalog_id}` : "catalog",
+      item.category ? `category ${item.category}` : null,
+      flow?.id ? `flow ${flow.id}` : null,
+    ].filter(Boolean).join(" · "),
+    contributionFamilies: summarizeCatalogContributionFamilies(item, flow),
+    actionReadiness: blocked
+      ? "blocked · install guarded"
+      : needsReview
+        ? "review required · install guarded"
+        : item.installed && item.update_available
+          ? "update ready"
+          : "install ready",
+    actionReady,
+    rollback: "rollback unavailable · package not installed with receipt",
+    rollbackReceipt: null,
+    reasons: issueReasons.length ? issueReasons : ["no blocking reasons reported"],
+    alternatives: ["draft review", ...(item.recommended_actions?.length ? ["repair action available"] : [])],
+    catalogItem: item,
+    marketplaceFlow: flow ?? undefined,
+  };
 }
 
 function formatLifecyclePlanSummary(preview: ExtensionPathPreview | null | undefined): string | null {
@@ -4491,6 +4770,16 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
     permission_summary: normalizeExtensionPermissionSummary(value.permission_summary),
     approval_profile: normalizeExtensionApprovalProfile(value.approval_profile),
     connector_summary: normalizeExtensionConnectorSummary(value.connector_summary),
+    lifecycle_receipt_id: typeof value.lifecycle_receipt_id === "string" ? value.lifecycle_receipt_id : null,
+    rollback_receipt_id: typeof value.rollback_receipt_id === "string" ? value.rollback_receipt_id : null,
+    rollback_receipt_path: typeof value.rollback_receipt_path === "string" ? value.rollback_receipt_path : null,
+    rollback_ready: typeof value.rollback_ready === "boolean" ? value.rollback_ready : undefined,
+    review_state: typeof value.review_state === "string" ? value.review_state : null,
+    revocation_state: typeof value.revocation_state === "string" ? value.revocation_state : null,
+    provenance:
+      value.provenance && typeof value.provenance === "object" && !Array.isArray(value.provenance)
+        ? value.provenance as Record<string, unknown>
+        : null,
     contributions,
     studio_files: studioFiles,
   };
@@ -8449,6 +8738,60 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       blockedCount > 0 ? `${blockedCount} attention` : null,
     ].filter(Boolean).join(" · ");
   }, [marketplaceFlows]);
+  const marketplaceExtensionFlowsByCatalogId = useMemo(
+    () => new Map(
+      marketplaceFlows
+        .filter((flow) => flow.kind === "extension_pack")
+        .map((flow) => [flow.catalog_id ?? flow.id, flow] as const),
+    ),
+    [marketplaceFlows],
+  );
+  const governedExtensionRows = useMemo<GovernedExtensionConsoleRow[]>(() => {
+    const installedRows = extensionPackages.map((extensionPackage) => (
+      buildInstalledExtensionConsoleRow(
+        extensionPackage,
+        catalogExtensionItemsById.get(extensionPackage.id) ?? null,
+      )
+    ));
+    const installedIds = new Set(extensionPackages.map((extensionPackage) => extensionPackage.id));
+    const marketplaceRows = catalogExtensionItems
+      .filter((item) => {
+        const key = item.catalog_id ?? item.name;
+        return !installedIds.has(key) || item.update_available || !item.installed;
+      })
+      .map((item) => {
+        const key = item.catalog_id ?? item.name;
+        return buildCatalogExtensionConsoleRow(
+          item,
+          marketplaceExtensionFlowsByCatalogId.get(key) ?? marketplaceExtensionFlowsByCatalogId.get(item.name) ?? null,
+        );
+      });
+    return [...installedRows, ...marketplaceRows].sort((left, right) => {
+      const rank = (row: GovernedExtensionConsoleRow) => {
+        if (row.status.includes("revoked")) return 0;
+        if (row.actionReadiness.includes("blocked")) return 1;
+        if (row.actionReadiness.includes("review")) return 2;
+        if (row.actionReadiness.includes("update")) return 3;
+        if (row.kind === "marketplace") return 4;
+        return 5;
+      };
+      return rank(left) - rank(right) || left.label.localeCompare(right.label);
+    });
+  }, [catalogExtensionItems, catalogExtensionItemsById, extensionPackages, marketplaceExtensionFlowsByCatalogId]);
+  const governedExtensionConsoleSummary = useMemo(() => {
+    const blocked = governedExtensionRows.filter((row) => row.actionReadiness.includes("blocked")).length;
+    const review = governedExtensionRows.filter((row) => row.actionReadiness.includes("review")).length;
+    const rollbackReady = governedExtensionRows.filter((row) => row.rollbackReceipt).length;
+    const installed = governedExtensionRows.filter((row) => row.kind === "installed").length;
+    const marketplace = governedExtensionRows.filter((row) => row.kind === "marketplace").length;
+    return [
+      `${installed} installed`,
+      `${marketplace} installable`,
+      blocked > 0 ? `${blocked} blocked` : null,
+      review > 0 ? `${review} review` : null,
+      `${rollbackReady} rollback receipts`,
+    ].filter(Boolean).join(" · ");
+  }, [governedExtensionRows]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     if (workflow.pendingApprovalIds?.length) {
@@ -13470,6 +13813,145 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+H inspect top supervised workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
                     </div>
                   </div>
+
+                  <section className="cockpit-operator-section" aria-label="M9 governed extension console">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M9 governed extensions</span>
+                      <span className="cockpit-operator-link">{governedExtensionConsoleSummary || "no extension rows"}</span>
+                    </div>
+                    <div className="cockpit-sublist-item">
+                      rollback requires backend receipt · blocked/degraded/revoked rows stay guarded
+                    </div>
+                    {governedExtensionRows.slice(0, 10).map((row) => (
+                      <div key={row.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: row.extensionPackage
+                                ? buildExtensionManifestEntity(row.extensionPackage)
+                                : {
+                                  entityType: "extension_manifest",
+                                  name: row.label,
+                                  meta: `${row.kind} · ${row.status}`,
+                                  summary: row.catalogItem?.description ?? row.marketplaceFlow?.summary ?? row.actionReadiness,
+                                  details: {
+                                    source: row.source,
+                                    trust: row.trust,
+                                    publisher: row.publisher,
+                                    version: row.version,
+                                    compatibility: row.compatibility,
+                                    health: row.health,
+                                    permissions: row.permissions,
+                                    risk: row.risk,
+                                    provenance: row.provenance,
+                                    contribution_families: row.contributionFamilies,
+                                    action_readiness: row.actionReadiness,
+                                    rollback: row.rollback,
+                                    reasons: row.reasons,
+                                    alternatives: row.alternatives,
+                                  },
+                                },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{row.label}</div>
+                          <div className="cockpit-operator-note">
+                            {[row.kind, row.status, row.source, row.trust, row.publisher, row.version].filter(Boolean).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            {[row.compatibility, row.health, `risk ${row.risk}`, row.permissions].filter(Boolean).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            {[row.contributionFamilies, row.actionReadiness, row.rollback].filter(Boolean).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            reasons: {row.reasons.slice(0, 3).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            provenance: {row.provenance} · alternatives: {row.alternatives.join(", ") || "none"}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {row.catalogItem && (row.kind === "marketplace" || row.catalogItem.update_available) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={!row.actionReady}
+                              title={row.actionReady ? row.actionReadiness : row.reasons.join(" · ")}
+                              onClick={() => void installCatalogItem(row.catalogItem as CatalogItemInfo)}
+                            >
+                              {row.catalogItem.installed && row.catalogItem.update_available ? "update" : row.actionReady ? "install" : "install guarded"}
+                            </button>
+                          ) : null}
+                          {row.extensionPackage ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${row.extensionPackage?.id}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                          ) : null}
+                          {row.extensionPackage?.disable_supported && !extensionPackageRevoked(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${row.extensionPackage?.id}`) ?? null,
+                              )}
+                            >
+                              disable via studio
+                            </button>
+                          ) : null}
+                          {row.extensionPackage?.removable && !extensionPackageRevoked(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${row.extensionPackage?.id}`) ?? null,
+                              )}
+                            >
+                              remove via studio
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            disabled={!row.rollbackReceipt}
+                            title={row.rollback}
+                            onClick={() => {
+                              if (row.rollbackReceipt) {
+                                queueComposerDraft(
+                                  `Review rollback readiness for extension "${row.label}" using receipt ${row.rollbackReceipt}. Confirm impact, compatibility, and revocation posture before any lifecycle action.`,
+                                );
+                              }
+                            }}
+                          >
+                            {row.rollbackReceipt ? "rollback receipt" : "rollback unavailable"}
+                          </button>
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => queueComposerDraft(
+                              row.extensionPackage
+                                ? buildExtensionPackageReviewDraft(row.extensionPackage, row.catalogItem ?? null)
+                                : `Review install readiness for extension pack "${row.label}". State: ${row.status}. Reasons: ${row.reasons.join("; ")}. Do not install until blocked, degraded, review-required, revoked, compatibility, permission, and rollback-readiness states are resolved or accepted.`,
+                            )}
+                          >
+                            draft review
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {governedExtensionRows.length === 0 ? (
+                      <div className="cockpit-empty">No governed extension payloads loaded.</div>
+                    ) : null}
+                  </section>
 
                   <section className="cockpit-operator-section cockpit-m7-board" aria-label="M7 command board">
                     <div className="cockpit-operator-row">

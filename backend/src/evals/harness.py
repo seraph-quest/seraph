@@ -40,6 +40,10 @@ from src.evals.benchmark_catalog import (
     benchmark_suite_report,
     benchmark_suite_scenarios,
 )
+from src.extensions.benchmark import (
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -11649,6 +11653,421 @@ async def _eval_operator_m7_cockpit_benchmark_surface_behavior() -> dict[str, An
     }
 
 
+def _m9_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    from src.extensions.benchmark import build_m9_governed_ecosystem_receipts
+
+    receipts = build_m9_governed_ecosystem_receipts()
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in receipts
+        if isinstance(receipt.get("scenario_id"), str)
+    }
+
+
+def _write_m9_probe_manifest(digest: str, signature: str) -> str:
+    return (
+        "id: seraph.m9-probe\n"
+        "version: 2026.3.21\n"
+        "display_name: M9 Probe\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: verified\n"
+        "governance:\n"
+        "  provenance:\n"
+        "    source: seraph-catalog\n"
+        "    publisher_id: seraph\n"
+        "  signature:\n"
+        "    algorithm: seraph-sha256-v1\n"
+        "    key_id: seraph-root-2026\n"
+        f"    digest: {digest}\n"
+        f"    signature: {signature}\n"
+        "contributes:\n"
+        "  mcp_servers:\n"
+        "    - mcp/probe.json\n"
+        "  managed_connectors:\n"
+        "    - connectors/managed/probe.yaml\n"
+        "permissions:\n"
+        "  execution_boundaries: [external_mcp]\n"
+        "  audit_events: [mcp_request]\n"
+        "  network: true\n"
+    )
+
+
+def _write_m9_probe_package(extensions_dir: Path) -> tuple[Path, Any]:
+    from src.extensions.governance import governance_package_digest, governance_signature_value
+    from src.extensions.manifest import load_extension_manifest
+
+    package_dir = extensions_dir / "m9-probe"
+    (package_dir / "mcp").mkdir(parents=True)
+    (package_dir / "connectors" / "managed").mkdir(parents=True)
+    (package_dir / "mcp" / "probe.json").write_text(
+        "{\n"
+        '  "name": "m9-probe-mcp",\n'
+        '  "url": "https://example.test/mcp",\n'
+        '  "description": "M9 probe MCP",\n'
+        '  "transport": "streamable-http"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "managed" / "probe.yaml").write_text(
+        "name: m9-probe-managed\n"
+        "provider: m9-probe\n"
+        "description: M9 probe managed connector\n"
+        "auth_kind: api_key\n"
+        "config_fields:\n"
+        "  - key: token\n"
+        "    label: Token\n"
+        "    required: true\n",
+        encoding="utf-8",
+    )
+    zero_digest = "0" * 64
+    (package_dir / "manifest.yaml").write_text(
+        _write_m9_probe_manifest(
+            zero_digest,
+            governance_signature_value(key_id="seraph-root-2026", digest=zero_digest),
+        ),
+        encoding="utf-8",
+    )
+    digest = governance_package_digest(package_dir)
+    assert digest is not None
+    (package_dir / "manifest.yaml").write_text(
+        _write_m9_probe_manifest(
+            digest,
+            governance_signature_value(key_id="seraph-root-2026", digest=digest),
+        ),
+        encoding="utf-8",
+    )
+    return package_dir, load_extension_manifest(package_dir / "manifest.yaml")
+
+
+def _run_m9_lifecycle_fail_closed_probe() -> dict[str, Any]:
+    from src.extensions.governance import extension_permission_fingerprint, governance_package_digest
+    from src.extensions.lifecycle import configure_extension, list_extensions, save_extension_source
+    from src.extensions.registry import default_manifest_roots_for_workspace
+    from src.extensions.state import load_extension_state_payload, save_extension_state_payload
+    from src.runbooks.manager import runbook_manager
+    from src.skills.manager import skill_manager
+    from src.starter_packs.manager import starter_pack_manager
+    from src.tools.mcp_manager import mcp_manager
+    from src.workflows.manager import workflow_manager
+
+    original_workspace_dir = settings.workspace_dir
+    original_skill_manager = (
+        list(skill_manager._skills),
+        list(skill_manager._load_errors),
+        skill_manager._skills_dir,
+        list(skill_manager._manifest_roots),
+        skill_manager._config_path,
+        set(skill_manager._disabled),
+        skill_manager._registry,
+    )
+    original_workflow_manager = (
+        list(workflow_manager._workflows),
+        list(workflow_manager._load_errors),
+        list(workflow_manager._shared_manifest_errors),
+        workflow_manager._workflows_dir,
+        list(workflow_manager._manifest_roots),
+        workflow_manager._config_path,
+        set(workflow_manager._disabled),
+        workflow_manager._registry,
+    )
+    original_runbook_manager = (
+        list(runbook_manager._runbooks),
+        list(runbook_manager._load_errors),
+        list(runbook_manager._shared_manifest_errors),
+        runbook_manager._runbooks_dir,
+        list(runbook_manager._manifest_roots),
+        runbook_manager._registry,
+    )
+    original_starter_pack_manager = (
+        list(starter_pack_manager._packs),
+        list(starter_pack_manager._load_errors),
+        list(starter_pack_manager._shared_manifest_errors),
+        starter_pack_manager._legacy_path,
+        list(starter_pack_manager._manifest_roots),
+        starter_pack_manager._registry,
+    )
+    original_mcp_manager = (
+        dict(mcp_manager._config),
+        dict(mcp_manager._status),
+        dict(mcp_manager._clients),
+        dict(mcp_manager._tools),
+        mcp_manager._config_path,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="seraph-m9-probe-") as temp_root:
+        workspace_dir = Path(temp_root) / "workspace"
+        skills_dir = workspace_dir / "skills"
+        workflows_dir = workspace_dir / "workflows"
+        runbooks_dir = workspace_dir / "runbooks"
+        extensions_dir = workspace_dir / "extensions"
+        skills_dir.mkdir(parents=True)
+        workflows_dir.mkdir()
+        runbooks_dir.mkdir()
+        extensions_dir.mkdir()
+
+        try:
+            settings.workspace_dir = str(workspace_dir)
+            manifest_roots = default_manifest_roots_for_workspace(str(workspace_dir))
+            skill_manager.init(str(skills_dir), manifest_roots=manifest_roots)
+            workflow_manager.init(str(workflows_dir), manifest_roots=manifest_roots)
+            runbook_manager.init(str(runbooks_dir), manifest_roots=manifest_roots)
+            starter_pack_manager.init(str(workspace_dir / "starter-packs.json"), manifest_roots=manifest_roots)
+            mcp_manager.disconnect_all()
+            mcp_manager._config = {}
+            mcp_manager._status = {}
+            mcp_manager._tools = {}
+            mcp_manager._config_path = str(workspace_dir / "mcp-servers.json")
+
+            package_dir, manifest = _write_m9_probe_package(extensions_dir)
+            digest = governance_package_digest(package_dir)
+            assert digest is not None
+            state_entry = {
+                "governance": {
+                    "review_status": "approved",
+                    "reviewed_digest": digest,
+                    "reviewed_key_id": "seraph-root-2026",
+                    "reviewed_permission_fingerprint": extension_permission_fingerprint(manifest),
+                    "revoked": True,
+                    "revocation_reason": "m9 deterministic probe revoked pack",
+                },
+                "connector_state": {
+                    "connectors/managed/probe.yaml": {"enabled": True},
+                },
+            }
+            save_extension_state_payload({"extensions": {manifest.id: state_entry}})
+            mcp_manager._config["m9-probe-mcp"] = {
+                "url": "https://example.test/mcp",
+                "enabled": True,
+                "extension_id": manifest.id,
+                "extension_reference": "mcp/probe.json",
+                "extension_display_name": manifest.display_name,
+                "source": "extension",
+            }
+
+            configure_blocked = False
+            try:
+                configure_extension(manifest.id, {})
+            except Exception as exc:
+                configure_blocked = "governance blocks configure" in str(exc)
+
+            source_save_blocked = False
+            try:
+                save_extension_source(manifest.id, "manifest.yaml", "id: tampered\n")
+            except Exception as exc:
+                source_save_blocked = "governance blocks source-save" in str(exc)
+
+            payload = list_extensions()
+            extension_payload = next(item for item in payload["extensions"] if item["id"] == manifest.id)
+            managed_connector = next(
+                item for item in extension_payload["contributions"] if item["type"] == "managed_connectors"
+            )
+            persisted_state = load_extension_state_payload()["extensions"][manifest.id]
+            mcp_runtime_disabled = mcp_manager._config["m9-probe-mcp"]["enabled"] is False
+            managed_connector_disabled = managed_connector["enabled"] is False
+            persisted_connector_disabled = (
+                persisted_state["connector_state"]["connectors/managed/probe.yaml"]["enabled"] is False
+            )
+            return {
+                "configure_blocked": configure_blocked,
+                "source_save_blocked": source_save_blocked,
+                "mcp_runtime_disabled": mcp_runtime_disabled,
+                "managed_connector_disabled": managed_connector_disabled,
+                "persisted_connector_disabled": persisted_connector_disabled,
+            }
+        finally:
+            settings.workspace_dir = original_workspace_dir
+            (
+                skill_manager._skills,
+                skill_manager._load_errors,
+                skill_manager._skills_dir,
+                skill_manager._manifest_roots,
+                skill_manager._config_path,
+                skill_manager._disabled,
+                skill_manager._registry,
+            ) = original_skill_manager
+            (
+                workflow_manager._workflows,
+                workflow_manager._load_errors,
+                workflow_manager._shared_manifest_errors,
+                workflow_manager._workflows_dir,
+                workflow_manager._manifest_roots,
+                workflow_manager._config_path,
+                workflow_manager._disabled,
+                workflow_manager._registry,
+            ) = original_workflow_manager
+            (
+                runbook_manager._runbooks,
+                runbook_manager._load_errors,
+                runbook_manager._shared_manifest_errors,
+                runbook_manager._runbooks_dir,
+                runbook_manager._manifest_roots,
+                runbook_manager._registry,
+            ) = original_runbook_manager
+            (
+                starter_pack_manager._packs,
+                starter_pack_manager._load_errors,
+                starter_pack_manager._shared_manifest_errors,
+                starter_pack_manager._legacy_path,
+                starter_pack_manager._manifest_roots,
+                starter_pack_manager._registry,
+            ) = original_starter_pack_manager
+            mcp_manager.disconnect_all()
+            (
+                mcp_manager._config,
+                mcp_manager._status,
+                mcp_manager._clients,
+                mcp_manager._tools,
+                mcp_manager._config_path,
+            ) = original_mcp_manager
+
+
+def _eval_m9_manifest_governance_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_manifest_governance_behavior"]
+    required_fields = {
+        "version",
+        "compatibility",
+        "publisher",
+        "trust_tier",
+        "declared_permissions",
+        "contributes",
+    }
+    manifest_fields = set(receipt["manifest_fields"])
+    _require_eval_contract(required_fields <= manifest_fields, "Expected M9 manifest governance fields.")
+    return {
+        "governance_state": receipt["governance_state"],
+        "manifest_fields_present": sorted(required_fields & manifest_fields),
+        "manifest_governance_complete": required_fields <= manifest_fields,
+        "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
+        "claim_boundary_visible": "production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_m9_lifecycle_review_gate_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_lifecycle_review_gate_behavior"]
+    actions = set(receipt["actions"])
+    expected_actions = {"install", "enable", "configure", "update"}
+    _require_eval_contract(expected_actions <= actions, "Expected lifecycle gate actions.")
+    fail_closed_probe = _run_m9_lifecycle_fail_closed_probe()
+    _require_eval_contract(
+        all(bool(value) for value in fail_closed_probe.values()),
+        "Expected M9 lifecycle fail-closed probe to block configure/source-save and disable existing connector runtime access.",
+    )
+    return {
+        "review_gate_state": receipt["review_gate_state"],
+        "blocked_without_review": receipt["blocked_without_review"] is True,
+        "all_lifecycle_actions_gated": expected_actions <= actions,
+        "real_configure_blocked": fail_closed_probe["configure_blocked"],
+        "real_source_save_blocked": fail_closed_probe["source_save_blocked"],
+        "real_mcp_runtime_disabled": fail_closed_probe["mcp_runtime_disabled"],
+        "real_managed_connector_disabled": fail_closed_probe["managed_connector_disabled"],
+        "real_persisted_connector_disabled": fail_closed_probe["persisted_connector_disabled"],
+        "control_plane_surface_visible": "/api/operator/control-plane" in receipt["operator_surfaces"],
+        "claim_boundary_visible": "competitor_superiority" in receipt["claim_boundary"],
+    }
+
+
+def _eval_m9_connector_health_degradation_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_connector_health_degradation_behavior"]
+    _require_eval_contract(receipt["health_state"] == "degraded", "Expected degraded connector fixture.")
+    return {
+        "connector_id": receipt["connector_id"],
+        "health_state": receipt["health_state"],
+        "fail_closed": receipt["fail_closed"] is True,
+        "repair_action_visible": receipt["repair_action"] == "configure_connector_before_authenticated_route",
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in receipt["operator_surfaces"],
+    }
+
+
+def _eval_m9_marketplace_governance_flow_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_marketplace_governance_flow_behavior"]
+    expected_items = {"extension_pack", "starter_pack", "packaged_runbook"}
+    expected_actions = {"install", "update", "repair", "draft_follow_through"}
+    _require_eval_contract(expected_items <= set(receipt["flow_items"]), "Expected M9 marketplace flow items.")
+    return {
+        "readiness_state": receipt["readiness_state"],
+        "flow_items_visible": expected_items <= set(receipt["flow_items"]),
+        "explicit_actions_visible": expected_actions <= set(receipt["explicit_actions"]),
+        "capability_overview_surface_visible": "/api/capabilities/overview" in receipt["operator_surfaces"],
+        "claim_boundary_visible": "deterministic_local_governance_proof" in receipt["claim_boundary"],
+    }
+
+
+def _eval_m9_diagnostics_update_triage_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_diagnostics_update_triage_behavior"]
+    expected_choices = {"repair", "review", "defer"}
+    _require_eval_contract(expected_choices <= set(receipt["triage_choices"]), "Expected M9 triage choices.")
+    return {
+        "diagnostics_state": receipt["diagnostics_state"],
+        "triage_choices_visible": expected_choices <= set(receipt["triage_choices"]),
+        "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in receipt["operator_surfaces"],
+        "claim_boundary_visible": "not_competitor_superiority" in receipt["claim_boundary"],
+    }
+
+
+async def _eval_operator_m9_governed_ecosystem_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import (
+        M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
+        build_m9_governed_ecosystem_benchmark_report,
+    )
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="extensions",
+                description="M9 governed ecosystem benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
+        ],
+        duration_ms=len(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.extensions.benchmark._run_m9_governed_ecosystem_benchmark_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_m9_governed_ecosystem_benchmark_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "m9_governed_ecosystem_receipts_visible",
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "benchmark_posture_green": payload["summary"]["benchmark_posture"] == "m9_ci_gated_operator_visible",
+        "manifest_governance_state_visible": (
+            payload["summary"]["manifest_governance_state"]
+            == "version_compatibility_publisher_trust_and_permissions_visible"
+        ),
+        "connector_health_state_visible": (
+            payload["summary"]["connector_health_state"] == "degraded_connectors_fail_closed_with_operator_repair"
+        ),
+        "marketplace_governance_state_visible": (
+            payload["summary"]["marketplace_governance_state"] == "readiness_blockers_trust_and_actions_visible"
+        ),
+        "diagnostics_update_triage_state_visible": (
+            payload["summary"]["diagnostics_update_triage_state"] == "repair_review_or_defer_triage_visible"
+        ),
+        "dimensions_visible": len(payload["dimensions"]) >= 6,
+        "failure_taxonomy_visible": len(payload["failure_taxonomy"]) >= 6,
+        "policy_visible": (
+            payload["policy"]["connector_health_policy"]
+            == "degraded_managed_connectors_fail_closed_with_operator_repair_guidance"
+        ),
+        "receipt_surfaces_visible": (
+            "/api/operator/m9-governed-ecosystem-benchmark" in payload["policy"]["receipt_surfaces"]
+            and "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+        ),
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
+        "receipt_count_matches": len(payload["governance_receipts"]) == 5,
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -11667,6 +12086,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
+    m9_governed_ecosystem_suite = next(
+        item for item in suites if item["name"] == M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME
+    )
     return {
         "suite_count": len(suites),
         "guardian_memory_suite_present": "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"],
@@ -11708,6 +12130,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "m6_memory_suite_axis_matches": m6_memory_suite["benchmark_axis"] == "m6_memory_superiority",
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_preference_diversity_behavior" in governed_suite["scenario_names"],
+        "m9_governed_ecosystem_suite_present": (
+            "m9_manifest_governance_behavior" in m9_governed_ecosystem_suite["scenario_names"]
+        ),
+        "m9_governed_ecosystem_suite_scenario_count_matches": (
+            m9_governed_ecosystem_suite["scenario_count"] == len(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "m9_governed_ecosystem_suite_axis_matches": (
+            m9_governed_ecosystem_suite["benchmark_axis"] == "m9_governed_ecosystem"
+        ),
+        "m9_governed_ecosystem_gate_required": (
+            M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
         "gate_requires_review": bool(gate_policy["requires_human_review"]),
         "gate_blocks_constraint_failure": bool(gate_policy["blocks_on_constraint_failure"]),
@@ -13469,6 +13903,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Operator surfaces expose the M8 guardian intervention benchmark, decision receipts, score labels, and claim boundary.",
         runner=_eval_operator_m8_guardian_brain_surface_behavior,
+    ),
+    EvalScenario(
+        name="m9_manifest_governance_behavior",
+        category="extensions",
+        description="M9 ecosystem packages expose manifest governance fields before capability breadth is treated as governed.",
+        runner=_eval_m9_manifest_governance_behavior,
+    ),
+    EvalScenario(
+        name="m9_lifecycle_review_gate_behavior",
+        category="extensions",
+        description="M9 lifecycle actions keep privileged install, enable, configure, and update paths review-gated.",
+        runner=_eval_m9_lifecycle_review_gate_behavior,
+    ),
+    EvalScenario(
+        name="m9_connector_health_degradation_behavior",
+        category="extensions",
+        description="M9 managed connector degradation fails closed and surfaces repair guidance instead of overstating access.",
+        runner=_eval_m9_connector_health_degradation_behavior,
+    ),
+    EvalScenario(
+        name="m9_marketplace_governance_flow_behavior",
+        category="extensions",
+        description="M9 marketplace flows expose readiness, blockers, trust tier, and explicit install/update/repair actions.",
+        runner=_eval_m9_marketplace_governance_flow_behavior,
+    ),
+    EvalScenario(
+        name="m9_diagnostics_update_triage_behavior",
+        category="extensions",
+        description="M9 diagnostics and update posture support repair, review, or defer triage.",
+        runner=_eval_m9_diagnostics_update_triage_behavior,
+    ),
+    EvalScenario(
+        name="operator_m9_governed_ecosystem_benchmark_surface_behavior",
+        category="extensions",
+        description="Operator surfaces expose the M9 governed ecosystem benchmark, policy, receipts, and claim boundary.",
+        runner=_eval_operator_m9_governed_ecosystem_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="guardian_feedback_loop",

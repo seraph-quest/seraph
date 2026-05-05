@@ -15,6 +15,10 @@ from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
     GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
 )
+from src.extensions.benchmark import (
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -312,6 +316,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live adoption telemetry and longer-horizon candidate diversity replay still remain for future work.",
         scenario_names=GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
+        label="M9 governed ecosystem",
+        description=(
+            "Pins manifest governance, lifecycle review gates, connector degradation truth, marketplace governance flow, "
+            "diagnostics/update triage, and the operator-visible M9 benchmark surface into one deterministic proof lane."
+        ),
+        benchmark_axis="m9_governed_ecosystem",
+        operator_summary=(
+            "M9 ecosystem proof is judged by local governance foundations for extension packages, managed connectors, "
+            "marketplace flows, diagnostics, and update triage, not by competitor superiority or production marketplace security claims."
+        ),
+        remaining_gap=(
+            "Production marketplace security, external package verification networks, and broader third-party ecosystem operations remain future work."
+        ),
+        scenario_names=M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     ),
 )
 

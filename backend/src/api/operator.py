@@ -33,6 +33,7 @@ from src.evals.benchmark_catalog import benchmark_suite_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
+from src.extensions.benchmark import build_m9_governed_ecosystem_benchmark_report
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report, build_m8_guardian_brain_benchmark_report
 from src.guardian.brain import (
     GuardianBrainContext,
@@ -3363,6 +3364,7 @@ async def get_operator_benchmark_proof():
         computer_use_benchmark,
         m2_execution_benchmark,
         governed_improvement_benchmark,
+        m9_governed_ecosystem_benchmark,
     ) = await asyncio.gather(
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
@@ -3376,6 +3378,7 @@ async def get_operator_benchmark_proof():
         build_computer_use_benchmark_report(),
         build_m2_execution_benchmark_report(),
         build_governed_improvement_benchmark_report(),
+        build_m9_governed_ecosystem_benchmark_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -3396,6 +3399,7 @@ async def get_operator_benchmark_proof():
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
         str(m2_execution_benchmark["summary"]["benchmark_posture"]),
         str(governed_improvement_benchmark["summary"]["benchmark_posture"]),
+        str(m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -3440,6 +3444,8 @@ async def get_operator_benchmark_proof():
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
             "m2_execution_benchmark_posture": m2_execution_benchmark["summary"]["benchmark_posture"],
             "governed_improvement_benchmark_posture": governed_improvement_benchmark["summary"]["benchmark_posture"],
+            "m9_governed_ecosystem_benchmark_posture": m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"],
+            "m9_governed_ecosystem_claim_boundary": m9_governed_ecosystem_benchmark["policy"]["claim_boundary"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
@@ -3453,6 +3459,7 @@ async def get_operator_benchmark_proof():
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
         "m2_execution_benchmark": m2_execution_benchmark,
+        "m9_governed_ecosystem_benchmark": m9_governed_ecosystem_benchmark,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -3539,6 +3546,11 @@ async def get_operator_m7_cockpit_legibility_benchmark():
 @router.get("/operator/m8-guardian-intervention-benchmark")
 async def get_operator_m8_guardian_intervention_benchmark():
     return await build_m8_guardian_brain_benchmark_report()
+
+
+@router.get("/operator/m9-governed-ecosystem-benchmark")
+async def get_operator_m9_governed_ecosystem_benchmark():
+    return await build_m9_governed_ecosystem_benchmark_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

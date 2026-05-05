@@ -68,6 +68,82 @@ def extension_state_entry(
     return entry
 
 
+def extension_governance_entry(
+    state_entry: dict[str, Any] | None,
+    *,
+    create: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(state_entry, dict):
+        return None
+    governance = state_entry.get("governance")
+    if isinstance(governance, dict):
+        return governance
+    if not create:
+        return None
+    governance = {}
+    state_entry["governance"] = governance
+    return governance
+
+
+def mark_extension_governance_reviewed(
+    payload: dict[str, Any],
+    extension_id: str,
+    *,
+    digest: str,
+    key_id: str,
+    permission_fingerprint: str | None = None,
+    reviewed_by: str | None = None,
+    reviewed_at: str | None = None,
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    governance = extension_governance_entry(state_entry, create=True)
+    assert governance is not None
+    governance["review_status"] = "approved"
+    governance["reviewed_digest"] = digest
+    governance["reviewed_key_id"] = key_id
+    if permission_fingerprint:
+        governance["reviewed_permission_fingerprint"] = permission_fingerprint
+    if reviewed_by:
+        governance["reviewed_by"] = reviewed_by
+    if reviewed_at:
+        governance["reviewed_at"] = reviewed_at
+    governance.pop("revoked", None)
+    return governance
+
+
+def revoke_extension_governance(
+    payload: dict[str, Any],
+    extension_id: str,
+    *,
+    digest: str | None = None,
+    key_id: str | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    governance = extension_governance_entry(state_entry, create=True)
+    assert governance is not None
+    governance["revoked"] = True
+    if digest:
+        revoked_digests = governance.get("revoked_digests")
+        if not isinstance(revoked_digests, list):
+            revoked_digests = []
+            governance["revoked_digests"] = revoked_digests
+        if digest not in revoked_digests:
+            revoked_digests.append(digest)
+    if key_id:
+        revoked_key_ids = governance.get("revoked_key_ids")
+        if not isinstance(revoked_key_ids, list):
+            revoked_key_ids = []
+            governance["revoked_key_ids"] = revoked_key_ids
+        if key_id not in revoked_key_ids:
+            revoked_key_ids.append(key_id)
+    if reason:
+        governance["revocation_reason"] = reason
+    return governance
+
+
 def connector_state_entry(
     state_entry: dict[str, Any] | None,
     reference: str,

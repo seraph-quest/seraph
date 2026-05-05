@@ -16,6 +16,84 @@ function mockResponse(data: unknown, ok = true, status = ok ? 200 : 500) {
   };
 }
 
+function emptyCapabilityOverview(overrides: Record<string, unknown> = {}) {
+  return {
+    tool_policy_mode: "balanced",
+    mcp_policy_mode: "approval",
+    approval_mode: "high_risk",
+    summary: {
+      native_tools_ready: 0,
+      native_tools_total: 0,
+      skills_ready: 0,
+      skills_total: 0,
+      workflows_ready: 0,
+      workflows_total: 0,
+      starter_packs_ready: 0,
+      starter_packs_total: 0,
+      mcp_servers_ready: 0,
+      mcp_servers_total: 0,
+    },
+    native_tools: [],
+    skills: [],
+    workflows: [],
+    mcp_servers: [],
+    starter_packs: [],
+    catalog_items: [],
+    recommendations: [],
+    runbooks: [],
+    marketplace_flows: [],
+    ...overrides,
+  };
+}
+
+function mockCockpitBaselineFetch(
+  fetchMock: ReturnType<typeof vi.fn>,
+  options: {
+    capabilities?: Record<string, unknown>;
+    extensions?: Record<string, unknown>;
+  },
+) {
+  fetchMock.mockImplementation((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/goals/dashboard")) {
+      return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+    }
+    if (url.includes("/api/runtime/status")) {
+      return Promise.resolve(mockResponse({
+        version: "test",
+        build_id: "test",
+        provider: "test",
+        model: "test",
+        model_label: "test",
+      }));
+    }
+    if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+    if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/observer/continuity")) {
+      return Promise.resolve(mockResponse({
+        daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+        notifications: [],
+        queued_insights: [],
+        queued_insight_count: 0,
+        recent_interventions: [],
+        reach: { route_statuses: [] },
+      }));
+    }
+    if (url.includes("/api/capabilities/overview")) {
+      return Promise.resolve(mockResponse(options.capabilities ?? emptyCapabilityOverview()));
+    }
+    if (url.includes("/api/extensions")) return Promise.resolve(mockResponse(options.extensions ?? { extensions: [] }));
+    if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+    if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+    if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+    if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+    return Promise.resolve(mockResponse({}));
+  });
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -60,6 +138,193 @@ describe("CockpitView", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("renders a governed marketplace extension row with action readiness", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      capabilities: emptyCapabilityOverview({
+        catalog_items: [
+          {
+            name: "Atlas Marketplace Pack",
+            catalog_id: "atlas.marketplace",
+            type: "extension_pack",
+            description: "Governed installable extension pack",
+            category: "operations",
+            bundled: false,
+            installed: false,
+            source: "marketplace",
+            trust: "verified",
+            version: "1.2.0",
+            publisher: { name: "Seraph Labs" },
+            contribution_types: ["toolset_presets", "messaging_connectors"],
+            compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+            diagnostics_summary: {
+              issue_count: 0,
+              error_issue_count: 0,
+              warning_issue_count: 0,
+              load_error_count: 0,
+              degraded_contribution_count: 0,
+              degraded_connector_count: 0,
+              state_counts: { catalog: 1 },
+              highlighted_messages: [],
+            },
+            permission_summary: {
+              status: "review_ready",
+              ok: true,
+              required: {},
+              missing: {},
+              risk_level: "medium",
+            },
+          },
+        ],
+        marketplace_flows: [
+          {
+            id: "flow-atlas-marketplace",
+            label: "Atlas Marketplace Pack",
+            kind: "extension_pack",
+            availability: "ready",
+            summary: "Install flow ready",
+            detail: "2/2 governed steps ready",
+            ready_count: 2,
+            total_count: 2,
+            catalog_id: "atlas.marketplace",
+            contribution_types: ["toolset_presets", "messaging_connectors"],
+            trust: "verified",
+            publisher: { name: "Seraph Labs" },
+            compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+          },
+        ],
+      }),
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    expect(within(consoleRegion).getByText("Atlas Marketplace Pack")).toBeInTheDocument();
+    expect(consoleRegion).toHaveTextContent(/0 installed · 1 installable · 0 rollback receipts/i);
+    expect(consoleRegion).toHaveTextContent(/marketplace · installable · flow ready · marketplace · verified · Seraph Labs · 1.2.0/i);
+    expect(consoleRegion).toHaveTextContent(/compatible · Seraph >=0.9.0 · current 0.9.1/i);
+    expect(consoleRegion).toHaveTextContent(/toolset presets · messaging connectors · install ready · rollback unavailable/i);
+    expect(within(consoleRegion).getByRole("button", { name: "install" })).toBeEnabled();
+  });
+
+  it("renders degraded revoked extension state with rollback unavailable and guarded alternatives", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      extensions: {
+        extensions: [
+          {
+            id: "seraph.revoked",
+            display_name: "Revoked Device Bridge Pack",
+            version: "0.4.0",
+            kind: "extension_pack",
+            trust: "workspace",
+            source: "workspace",
+            location: "workspace",
+            status: "revoked",
+            revocation_state: "revoked",
+            review_state: "required",
+            publisher: { name: "Bridge Ops" },
+            compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+            diagnostics_summary: {
+              issue_count: 1,
+              error_issue_count: 1,
+              warning_issue_count: 0,
+              load_error_count: 1,
+              degraded_contribution_count: 1,
+              degraded_connector_count: 1,
+              state_counts: { revoked: 1, degraded: 1 },
+              highlighted_messages: ["device pairing was revoked"],
+            },
+            issues: [
+              {
+                code: "connector_revoked",
+                severity: "error",
+                message: "Device connector is revoked",
+                contribution_type: "node_adapters",
+              },
+            ],
+            load_errors: [
+              {
+                source: "connectors/device.yaml",
+                phase: "load",
+                message: "Cannot load revoked connector",
+                details: [],
+              },
+            ],
+            permission_summary: {
+              status: "missing_permissions",
+              ok: false,
+              required: {},
+              missing: { network: true, tools: ["device_reach"], execution_boundaries: ["device_boundary"] },
+              risk_level: "high",
+            },
+            approval_profile: {
+              requires_runtime_approval: true,
+              runtime_behavior: "always",
+              requires_lifecycle_approval: true,
+              lifecycle_boundaries: ["device_boundary"],
+              risk_level: "high",
+            },
+            connector_summary: { total: 1, ready: 0, states: { revoked: 1 } },
+            disable_supported: true,
+            removable: true,
+            enable_supported: false,
+            enabled_scope: "extension",
+            configurable: true,
+            metadata_supported: true,
+            config_scope: "extension",
+            contributions: [
+              {
+                type: "node_adapters",
+                reference: "connectors/device.yaml",
+                name: "Revoked phone bridge",
+                status: "revoked",
+                loaded: false,
+                enabled: false,
+                health: { state: "revoked", ready: false, enabled: false, summary: "Revoked by operator" },
+                permission_profile: {
+                  status: "missing_permissions",
+                  requires_network: true,
+                  missing_network: true,
+                  requires_approval: true,
+                  approval_behavior: "always",
+                  missing_tools: ["device_reach"],
+                  missing_execution_boundaries: ["device_boundary"],
+                },
+              },
+            ],
+            studio_files: [
+              {
+                key: "manifest",
+                role: "manifest",
+                reference: "manifest.yaml",
+                label: "manifest.yaml",
+                display_type: "manifest",
+                format: "yaml",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    expect(within(consoleRegion).getByText("Revoked Device Bridge Pack")).toBeInTheDocument();
+    expect(consoleRegion).toHaveTextContent(/revoked · review required/i);
+    expect(consoleRegion).toHaveTextContent(/revoked · lifecycle actions blocked/i);
+    expect(consoleRegion).toHaveTextContent(/rollback unavailable · no backend receipt/i);
+    expect(consoleRegion).toHaveTextContent(/error: Device connector is revoked/i);
+    expect(consoleRegion).toHaveTextContent(/missing network, 1 tool, 1 boundary/i);
+    expect(within(consoleRegion).getByRole("button", { name: "rollback unavailable" })).toBeDisabled();
+    expect(within(consoleRegion).getByRole("button", { name: "draft review" })).toBeEnabled();
+    expect(within(consoleRegion).queryByRole("button", { name: "disable via studio" })).not.toBeInTheDocument();
+    expect(within(consoleRegion).queryByRole("button", { name: "remove via studio" })).not.toBeInTheDocument();
   });
 
   it("surfaces workflow runs in the cockpit inspector", async () => {

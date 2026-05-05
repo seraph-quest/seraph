@@ -609,8 +609,23 @@ class TestCatalogAPI:
             "/api/extensions/seraph.hermes-telegram-relay/connectors/enabled",
             json={"reference": "connectors/messaging/telegram.yaml", "enabled": True},
         )
+        assert enable_connector.status_code == 409
+        enable_approval_id = enable_connector.json()["detail"]["approval_id"]
+        approve_enable = await client.post(f"/api/approvals/{enable_approval_id}/approve")
+        assert approve_enable.status_code == 200
+
+        enable_connector = await client.post(
+            "/api/extensions/seraph.hermes-telegram-relay/connectors/enabled",
+            json={"reference": "connectors/messaging/telegram.yaml", "enabled": True},
+        )
         assert enable_connector.status_code == 200
         assert enable_connector.json()["connector"]["status"] == "planned"
+
+        enable_extension = await client.post("/api/extensions/seraph.hermes-telegram-relay/enable")
+        assert enable_extension.status_code == 409
+        extension_enable_approval_id = enable_extension.json()["detail"]["approval_id"]
+        approve_extension_enable = await client.post(f"/api/approvals/{extension_enable_approval_id}/approve")
+        assert approve_extension_enable.status_code == 200
 
         enable_extension = await client.post("/api/extensions/seraph.hermes-telegram-relay/enable")
         assert enable_extension.status_code == 200
@@ -696,6 +711,15 @@ class TestCatalogAPI:
             json={"config": {"messaging_connectors": {connector_name: config}}},
         )
         assert configure.status_code == 200
+
+        enable_connector = await client.post(
+            f"/api/extensions/{catalog_id}/connectors/enabled",
+            json={"reference": reference, "enabled": True},
+        )
+        assert enable_connector.status_code == 409
+        enable_approval_id = enable_connector.json()["detail"]["approval_id"]
+        approve_enable = await client.post(f"/api/approvals/{enable_approval_id}/approve")
+        assert approve_enable.status_code == 200
 
         enable_connector = await client.post(
             f"/api/extensions/{catalog_id}/connectors/enabled",
@@ -887,6 +911,17 @@ class TestCatalogAPI:
         companion_install = await client.post("/api/catalog/install/seraph.openclaw-companion-node")
         device_install = await client.post("/api/catalog/install/seraph.openclaw-device-bridge")
 
+        assert companion_install.status_code == 409
+        assert device_install.status_code == 409
+        companion_approval_id = companion_install.json()["detail"]["approval_id"]
+        device_approval_id = device_install.json()["detail"]["approval_id"]
+        companion_approve = await client.post(f"/api/approvals/{companion_approval_id}/approve")
+        device_approve = await client.post(f"/api/approvals/{device_approval_id}/approve")
+        assert companion_approve.status_code == 200
+        assert device_approve.status_code == 200
+
+        companion_install = await client.post("/api/catalog/install/seraph.openclaw-companion-node")
+        device_install = await client.post("/api/catalog/install/seraph.openclaw-device-bridge")
         assert companion_install.status_code == 201
         assert device_install.status_code == 201
 

@@ -157,11 +157,13 @@ Implementation meaning: Seraph should be excellent at real work across terminal,
 
 M2 batch execution rules:
 
+- M2 is a milestone, not a time box or a series of small PR slices. The whole M2 completion claim must ship as one ready PR that closes #427 and #435 together.
 - execution depth must land as capability contract surface area, runnable tool behavior, operator-visible receipts, and deterministic tests together
 - file work needs first-class patch preview/apply behavior, not only raw file overwrite
 - terminal, process, browser, HTTP, sandbox, filesystem, patch, and background-session surfaces should expose operation modes, session model, persistence, artifact contract, health, controls, and recovery actions
 - M2 cannot claim parity or excellence if #435 trust-boundary checks are left as follow-up work; SSRF, DNS-resolution preflight for private addresses, redirect-to-internal, path traversal, secret egress, replay drift, delegation, and prompt/extension permission creep must stay in the acceptance frame
 - previous failed PR tests are part of the batch acceptance burden when they affect the same milestone surfaces, especially deterministic benchmark and engineering-memory proof
+- The implementation gate for this batch is `m2_execution_supremacy` plus the dedicated `/api/operator/m2-execution-benchmark` surface. If that suite or any prior failed shard regresses, M2 stays blocked.
 
 ## M3 Trusted Execution Boundaries
 

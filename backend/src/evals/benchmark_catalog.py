@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 from src.browser.benchmark import COMPUTER_USE_BENCHMARK_SCENARIO_NAMES, COMPUTER_USE_BENCHMARK_SUITE_NAME
+from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
     GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
@@ -135,6 +136,20 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live website, OS, and mobile task depth still remains for future work.",
         scenario_names=COMPUTER_USE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=M2_EXECUTION_BENCHMARK_SUITE_NAME,
+        label="M2 execution supremacy completion",
+        description=(
+            "Pins the whole M2 execution milestone across terminal/process, browser/HTTP, sandbox, "
+            "filesystem patches, artifact registry, operator receipts, and the #435 adversarial security gauntlet."
+        ),
+        benchmark_axis="m2_execution_completion",
+        operator_summary=(
+            "M2 execution readiness now has a single completion lane instead of being inferred from smaller execution slices."
+        ),
+        remaining_gap="Live hostile-environment replay, deeper remote computer-use providers, and external agent benchmarks still remain after M2.",
+        scenario_names=M2_EXECUTION_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="planning_retrieval_reporting",

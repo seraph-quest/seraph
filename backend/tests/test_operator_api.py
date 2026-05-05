@@ -755,6 +755,40 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_m2_execution_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m2_execution_supremacy",
+                    "benchmark_posture": "m2_completion_ci_gated_operator_visible",
+                    "operator_status": "m2_execution_readiness_visible",
+                    "scenario_count": 11,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "terminal_process_state": "bounded_with_recovery_receipts",
+                    "browser_http_state": "dns_redirect_and_subrequest_guarded",
+                    "artifact_registry_state": "stable_ids_hashes_boundaries_and_recovery_hints_visible",
+                    "security_gauntlet_state": "m2_435_threats_pinned",
+                    "milestone_completion_state": "ready_to_close_m2",
+                },
+                "scenario_names": [
+                    "execution_artifact_registry_behavior",
+                    "execution_security_gauntlet_behavior",
+                    "filesystem_patch_receipt_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "milestone_contract": "one_milestone_one_ready_pr",
+                    "completion_policy": "all_execution_families_and_435_security_gauntlet_must_pass",
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 11, "passed": 11, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -854,7 +888,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 8
+    assert payload["summary"]["suite_count"] == 9
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -862,6 +896,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
+    assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
@@ -892,6 +928,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
+    m2_suite = next(item for item in payload["suites"] if item["name"] == "m2_execution_supremacy")
+    assert "execution_security_gauntlet_behavior" in m2_suite["scenario_names"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -903,6 +941,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
+    assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
+    assert payload["m2_execution_benchmark"]["policy"]["milestone_contract"] == "one_milestone_one_ready_pr"
 
 
 @pytest.mark.asyncio
@@ -1035,6 +1075,23 @@ async def test_operator_computer_use_benchmark_surface_reports_policy_and_receip
 
 
 @pytest.mark.asyncio
+async def test_operator_m2_execution_benchmark_surface_reports_completion_policy(client):
+    resp = await client.get("/api/operator/m2-execution-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "m2_execution_supremacy"
+    assert payload["summary"]["operator_status"] == "m2_execution_readiness_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["milestone_completion_state"] == "ready_to_close_m2"
+    assert payload["policy"]["milestone_contract"] == "one_milestone_one_ready_pr"
+    assert payload["policy"]["completion_policy"] == "all_execution_families_and_435_security_gauntlet_must_pass"
+    assert "/api/operator/m2-execution-benchmark" in payload["policy"]["receipt_surfaces"]
+    assert "execution_artifact_registry_behavior" in payload["scenario_names"]
+    assert "execution_security_gauntlet_behavior" in payload["scenario_names"]
+
+
+@pytest.mark.asyncio
 async def test_operator_computer_use_benchmark_surface_degrades_summary_on_failures(client):
     failing_summary = SimpleNamespace(
         total=7,
@@ -1100,6 +1157,36 @@ async def test_operator_benchmark_proof_degrades_top_level_posture_when_child_be
                     "ci_gate_mode": "required_benchmark_suite",
                 },
                 "latest_run": {"total": 7, "passed": 6, "failed": 1, "duration_ms": 100},
+            }
+        ),
+    ), patch(
+        "src.api.operator.build_m2_execution_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "m2_execution_supremacy",
+                    "benchmark_posture": "m2_completion_ci_gated_operator_visible",
+                    "operator_status": "m2_execution_readiness_visible",
+                    "scenario_count": 11,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "terminal_process_state": "bounded_with_recovery_receipts",
+                    "browser_http_state": "dns_redirect_and_subrequest_guarded",
+                    "artifact_registry_state": "stable_ids_hashes_boundaries_and_recovery_hints_visible",
+                    "security_gauntlet_state": "m2_435_threats_pinned",
+                    "milestone_completion_state": "ready_to_close_m2",
+                },
+                "scenario_names": ["execution_security_gauntlet_behavior"],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "milestone_contract": "one_milestone_one_ready_pr",
+                    "completion_policy": "all_execution_families_and_435_security_gauntlet_must_pass",
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 11, "passed": 11, "failed": 0, "duration_ms": 100},
             }
         ),
     ):

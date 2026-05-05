@@ -204,13 +204,15 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 8
+    assert details["suite_count"] == 10
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["workflow_suite_present"] is True
     assert details["trust_suite_present"] is True
+    assert details["secure_host_suite_present"] is True
     assert details["computer_suite_present"] is True
+    assert details["m2_execution_suite_present"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
     assert details["required_suite_count_matches"] is True
@@ -575,7 +577,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "memory_continuity_workflows" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
+    assert "secure_capability_host" in captured.out
     assert "computer_use_browser_desktop" in captured.out
+    assert "m2_execution_supremacy" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert available_benchmark_suites() == (
@@ -584,7 +588,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "memory_continuity_workflows",
         "workflow_endurance_and_repair",
         "trust_boundary_and_safety_receipts",
+        "secure_capability_host",
         "computer_use_browser_desktop",
+        "m2_execution_supremacy",
         "planning_retrieval_reporting",
         "governed_improvement",
     )

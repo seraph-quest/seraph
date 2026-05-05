@@ -10370,7 +10370,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
     workflow_suite = next(item for item in suites if item["name"] == "workflow_endurance_and_repair")
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
+    secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
+    m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
     return {
@@ -10380,7 +10382,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "workflow_suite_present": "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"],
         "trust_suite_present": "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"],
+        "secure_host_suite_present": "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"],
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
+        "m2_execution_suite_present": "execution_artifact_registry_behavior" in m2_execution_suite["scenario_names"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_preference_diversity_behavior" in governed_suite["scenario_names"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),

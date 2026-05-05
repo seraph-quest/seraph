@@ -33,6 +33,8 @@ from starlette.testclient import TestClient
 
 from config.settings import settings
 from src.evals.benchmark_catalog import (
+    CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES,
+    CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME,
     benchmark_suite_definitions,
     benchmark_suite_names,
     benchmark_suite_report,
@@ -10362,6 +10364,361 @@ async def _eval_operator_governed_improvement_benchmark_surface_behavior() -> di
     }
 
 
+def _m4_channel_proof_fixture() -> dict[str, Any]:
+    channel_surfaces = [
+        {
+            "id": "builtin:websocket:live_delivery",
+            "kind": "browser_session",
+            "label": "Browser websocket",
+            "route": "live_delivery",
+            "transport": "websocket",
+            "status": "ready",
+            "boundary_metadata": {
+                "trust_boundary": "workspace_browser_session",
+                "identity_scope": "workspace_session",
+                "identity_subject": "browser-session:m4-thread",
+                "credential_scope": "session_cookie_partition",
+                "external_surface": False,
+                "approval_required": False,
+                "continuity_scope": "session_thread",
+                "mutation_boundary": "local_thread_control_only",
+                "direct_external_mutation_allowed": False,
+                "operator_visible": True,
+            },
+        },
+        {
+            "id": "builtin:native:alert_delivery",
+            "kind": "native_notification",
+            "label": "Native notification",
+            "route": "alert_delivery",
+            "transport": "native_notification",
+            "status": "paired",
+            "boundary_metadata": {
+                "trust_boundary": "local_daemon_device_pair",
+                "identity_scope": "paired_local_device",
+                "identity_subject": "device:macbook-pro-local",
+                "credential_scope": "daemon_local_transport",
+                "external_surface": False,
+                "approval_required": False,
+                "continuity_scope": "session_thread",
+                "mutation_boundary": "notification_ack_dismiss_only",
+                "direct_external_mutation_allowed": False,
+                "operator_visible": True,
+            },
+            "pairing": {
+                "device_id": "macbook-pro-local",
+                "state": "paired",
+                "paired_at": "2026-05-05T09:00:00+00:00",
+                "revoked_at": None,
+                "operator_visible": True,
+            },
+        },
+        {
+            "id": "messaging_connectors:seraph.relay:telegram",
+            "kind": "messaging_connector",
+            "label": "Telegram relay",
+            "route": "external_follow_up",
+            "transport": "telegram",
+            "status": "requires_config",
+            "boundary_metadata": {
+                "trust_boundary": "external_messaging_connector",
+                "identity_scope": "approved_external_target",
+                "identity_subject": "telegram:operator-approved-chat",
+                "credential_scope": "connector_token_ref_only",
+                "external_surface": True,
+                "approval_required": True,
+                "continuity_scope": "approved_target_thread",
+                "mutation_boundary": "approved_message_target_only",
+                "direct_external_mutation_allowed": False,
+                "operator_visible": True,
+            },
+        },
+        {
+            "id": "node_adapters:seraph.device:atlas-companion",
+            "kind": "node_adapter",
+            "label": "Atlas companion bridge",
+            "route": "device_follow_up",
+            "transport": "companion_node",
+            "status": "paired",
+            "boundary_metadata": {
+                "trust_boundary": "paired_device_node",
+                "identity_scope": "paired_device",
+                "identity_subject": "device:atlas-companion-1",
+                "credential_scope": "pairing_handle_only",
+                "external_surface": True,
+                "approval_required": True,
+                "continuity_scope": "device_pair_thread",
+                "mutation_boundary": "approved_device_action_only",
+                "direct_external_mutation_allowed": False,
+                "operator_visible": True,
+            },
+            "pairing": {
+                "device_id": "atlas-companion-1",
+                "state": "paired",
+                "paired_at": "2026-05-05T09:04:00+00:00",
+                "revoked_at": None,
+                "operator_visible": True,
+            },
+        },
+    ]
+    pairing_events = [
+        {
+            "device_id": "atlas-companion-1",
+            "surface_id": "node_adapters:seraph.device:atlas-companion",
+            "state": "paired",
+            "operator_status": "visible",
+            "revocation_visible": False,
+            "can_receive_follow_up": True,
+        },
+        {
+            "device_id": "tablet-revoked-1",
+            "surface_id": "node_adapters:seraph.device:tablet",
+            "state": "revoked",
+            "operator_status": "visible",
+            "revocation_visible": True,
+            "revoked_at": "2026-05-05T09:12:00+00:00",
+            "can_receive_follow_up": False,
+            "blocked_reason": "device_pairing_revoked",
+        },
+    ]
+    follow_ups = [
+        {
+            "source_surface_id": "builtin:native:alert_delivery",
+            "target_surface_id": "node_adapters:seraph.device:atlas-companion",
+            "thread_id": "m4-thread-1",
+            "original_thread_id": "m4-thread-1",
+            "continuation_mode": "resume_thread",
+            "resume_message": "Continue from M4 channel follow-up in m4-thread-1.",
+            "boundary_metadata_preserved": True,
+            "requires_operator_review": True,
+        },
+        {
+            "source_surface_id": "messaging_connectors:seraph.relay:telegram",
+            "target_surface_id": "builtin:websocket:live_delivery",
+            "thread_id": "m4-thread-2",
+            "original_thread_id": "m4-thread-2",
+            "continuation_mode": "resume_thread",
+            "resume_message": "Continue from approved Telegram follow-up in m4-thread-2.",
+            "boundary_metadata_preserved": True,
+            "requires_operator_review": True,
+        },
+    ]
+    review_cases = [
+        {
+            "case_id": "revoked-device-follow-up",
+            "surface_id": "node_adapters:seraph.device:tablet",
+            "trigger": "follow_up_to_revoked_pair",
+            "action": "blocked",
+            "review_state": "failure_review_visible",
+            "operator_receipt_visible": True,
+            "reason": "device_pairing_revoked",
+        },
+        {
+            "case_id": "external-message-abuse",
+            "surface_id": "messaging_connectors:seraph.relay:telegram",
+            "trigger": "external_channel_high_risk_action",
+            "action": "requires_review",
+            "review_state": "abuse_review_visible",
+            "operator_receipt_visible": True,
+            "reason": "external_surface_requires_operator_review",
+        },
+        {
+            "case_id": "daemon-delivery-failure",
+            "surface_id": "builtin:native:alert_delivery",
+            "trigger": "native_daemon_offline",
+            "action": "reroute_or_queue",
+            "review_state": "failure_review_visible",
+            "operator_receipt_visible": True,
+            "reason": "local_daemon_unavailable",
+        },
+    ]
+    return {
+        "channel_surfaces": channel_surfaces,
+        "pairing_events": pairing_events,
+        "follow_ups": follow_ups,
+        "review_cases": review_cases,
+    }
+
+
+def _require_eval_contract(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def _eval_channel_identity_boundary_metadata_behavior() -> dict[str, Any]:
+    fixture = _m4_channel_proof_fixture()
+    surfaces = fixture["channel_surfaces"]
+    required_metadata = {
+        "trust_boundary",
+        "identity_scope",
+        "identity_subject",
+        "credential_scope",
+        "external_surface",
+        "approval_required",
+        "continuity_scope",
+        "mutation_boundary",
+        "direct_external_mutation_allowed",
+        "operator_visible",
+    }
+    missing_metadata = [
+        surface["id"]
+        for surface in surfaces
+        if not required_metadata.issubset(set(surface.get("boundary_metadata", {})))
+    ]
+    external_surfaces = [
+        surface for surface in surfaces
+        if surface["boundary_metadata"]["external_surface"]
+    ]
+    _require_eval_contract(not missing_metadata, f"Missing boundary metadata on {missing_metadata}")
+    _require_eval_contract(
+        all(surface["boundary_metadata"]["approval_required"] for surface in external_surfaces),
+        "External channel surfaces must require operator approval.",
+    )
+    _require_eval_contract(
+        all(surface["boundary_metadata"]["operator_visible"] for surface in surfaces),
+        "Every channel boundary must be operator-visible.",
+    )
+    return {
+        "surface_count": len(surfaces),
+        "boundary_metadata_complete": not missing_metadata,
+        "external_surface_count": len(external_surfaces),
+        "external_surfaces_require_approval": all(
+            surface["boundary_metadata"]["approval_required"] for surface in external_surfaces
+        ),
+        "identity_scopes": sorted({surface["boundary_metadata"]["identity_scope"] for surface in surfaces}),
+        "mutation_boundaries": sorted({surface["boundary_metadata"]["mutation_boundary"] for surface in surfaces}),
+        "trust_boundaries": sorted({surface["boundary_metadata"]["trust_boundary"] for surface in surfaces}),
+        "operator_visible": all(surface["boundary_metadata"]["operator_visible"] for surface in surfaces),
+    }
+
+
+def _eval_device_pairing_revocation_fail_closed_behavior() -> dict[str, Any]:
+    fixture = _m4_channel_proof_fixture()
+    pairing_events = fixture["pairing_events"]
+    active_pairs = [event for event in pairing_events if event["state"] == "paired"]
+    revoked_pairs = [event for event in pairing_events if event["state"] == "revoked"]
+    _require_eval_contract(active_pairs, "Expected at least one active paired device.")
+    _require_eval_contract(revoked_pairs, "Expected at least one revoked paired device.")
+    _require_eval_contract(
+        all(event["operator_status"] == "visible" for event in pairing_events),
+        "Pairing and revocation state must stay operator-visible.",
+    )
+    _require_eval_contract(
+        all(not event["can_receive_follow_up"] for event in revoked_pairs),
+        "Revoked devices must not receive follow-up.",
+    )
+    return {
+        "pairing_event_count": len(pairing_events),
+        "active_pair_count": len(active_pairs),
+        "revoked_pair_count": len(revoked_pairs),
+        "revocation_visible": all(event.get("revocation_visible", False) for event in revoked_pairs),
+        "revoked_state_visible": all(event["operator_status"] == "visible" for event in revoked_pairs),
+        "revoked_follow_up_blocked": all(not event["can_receive_follow_up"] for event in revoked_pairs),
+        "active_follow_up_allowed": all(event["can_receive_follow_up"] for event in active_pairs),
+        "blocked_reasons": sorted(
+            event["blocked_reason"] for event in revoked_pairs if event.get("blocked_reason")
+        ),
+    }
+
+
+def _eval_external_channel_continuity_behavior() -> dict[str, Any]:
+    fixture = _m4_channel_proof_fixture()
+    follow_ups = fixture["follow_ups"]
+    surfaces = {surface["id"]: surface for surface in fixture["channel_surfaces"]}
+    external_follow_ups = [
+        item for item in follow_ups
+        if surfaces[item["source_surface_id"]]["boundary_metadata"]["external_surface"]
+        or surfaces[item["target_surface_id"]]["boundary_metadata"]["external_surface"]
+    ]
+    _require_eval_contract(follow_ups, "Expected channel follow-up receipts.")
+    _require_eval_contract(external_follow_ups, "Expected external channel follow-up receipts.")
+    _require_eval_contract(
+        all(item["thread_id"] == item["original_thread_id"] for item in external_follow_ups),
+        "Follow-up receipts must preserve the originating thread.",
+    )
+    _require_eval_contract(
+        all(item["continuation_mode"] == "resume_thread" for item in external_follow_ups),
+        "Follow-up receipts must resume rather than fork continuity.",
+    )
+    _require_eval_contract(
+        all(item["boundary_metadata_preserved"] for item in external_follow_ups),
+        "Follow-up receipts must preserve source boundary metadata.",
+    )
+    return {
+        "follow_up_count": len(external_follow_ups),
+        "same_thread_follow_up": all(item["thread_id"] == item["original_thread_id"] for item in external_follow_ups),
+        "continuation_modes": sorted({item["continuation_mode"] for item in external_follow_ups}),
+        "boundary_metadata_preserved": all(item["boundary_metadata_preserved"] for item in external_follow_ups),
+        "operator_review_required_count": sum(1 for item in external_follow_ups if item["requires_operator_review"]),
+        "resume_messages_present": all(bool(item["resume_message"]) for item in external_follow_ups),
+    }
+
+
+def _eval_channel_mutation_boundary_behavior() -> dict[str, Any]:
+    fixture = _m4_channel_proof_fixture()
+    surfaces = fixture["channel_surfaces"]
+    external_surfaces = [
+        surface for surface in surfaces
+        if surface["boundary_metadata"]["external_surface"]
+    ]
+    revoked_pairs = [
+        event for event in fixture["pairing_events"]
+        if event["state"] == "revoked"
+    ]
+    _require_eval_contract(external_surfaces, "Expected external channel surfaces.")
+    _require_eval_contract(
+        all(not surface["boundary_metadata"]["direct_external_mutation_allowed"] for surface in external_surfaces),
+        "External channel surfaces must not allow direct mutation from benchmark receipts.",
+    )
+    _require_eval_contract(
+        all(surface["boundary_metadata"]["approval_required"] for surface in external_surfaces),
+        "External mutation-capable surfaces must be approval-gated.",
+    )
+    _require_eval_contract(
+        all(not event["can_receive_follow_up"] for event in revoked_pairs),
+        "Revoked device identities must block mutation and follow-up.",
+    )
+    return {
+        "external_surface_count": len(external_surfaces),
+        "direct_external_mutation_allowed": any(
+            surface["boundary_metadata"]["direct_external_mutation_allowed"] for surface in external_surfaces
+        ),
+        "approval_gated_external_boundaries": all(
+            surface["boundary_metadata"]["approval_required"] for surface in external_surfaces
+        ),
+        "mutation_boundaries": sorted({surface["boundary_metadata"]["mutation_boundary"] for surface in surfaces}),
+        "revoked_identity_mutation_blocked": all(not event["can_receive_follow_up"] for event in revoked_pairs),
+        "claim_boundary": "deterministic_receipts_only_not_live_broad_transport_mutation",
+    }
+
+
+def _eval_channel_abuse_failure_review_behavior() -> dict[str, Any]:
+    fixture = _m4_channel_proof_fixture()
+    review_cases = fixture["review_cases"]
+    review_states = {case["review_state"] for case in review_cases}
+    _require_eval_contract(review_cases, "Expected abuse and failure review receipts.")
+    _require_eval_contract(
+        {"abuse_review_visible", "failure_review_visible"}.issubset(review_states),
+        "Expected both abuse and failure review states.",
+    )
+    _require_eval_contract(
+        all(case["operator_receipt_visible"] for case in review_cases),
+        "Every abuse/failure review case must be operator-visible.",
+    )
+    _require_eval_contract(
+        any(case["action"] == "blocked" for case in review_cases),
+        "At least one unsafe or revoked-channel case must fail closed.",
+    )
+    return {
+        "review_case_count": len(review_cases),
+        "abuse_review_visible": "abuse_review_visible" in review_states,
+        "failure_review_visible": "failure_review_visible" in review_states,
+        "operator_receipts_visible": all(case["operator_receipt_visible"] for case in review_cases),
+        "blocked_case_count": sum(1 for case in review_cases if case["action"] == "blocked"),
+        "review_reasons": sorted({case["reason"] for case in review_cases}),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -10372,6 +10729,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
     secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
+    channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
@@ -10384,6 +10742,10 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "trust_suite_present": "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"],
         "secure_host_suite_present": "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"],
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
+        "channels_suite_present": "device_pairing_revocation_fail_closed" in channels_suite["scenario_names"],
+        "channels_suite_scenario_count_matches": (
+            channels_suite["scenario_count"] == len(CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES)
+        ),
         "m2_execution_suite_present": "execution_artifact_registry_behavior" in m2_execution_suite["scenario_names"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_preference_diversity_behavior" in governed_suite["scenario_names"],
@@ -11782,6 +12144,36 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Operator computer-use benchmark surface exposes replay posture, failure taxonomy, and cross-surface receipt policy directly.",
         runner=_eval_operator_computer_use_benchmark_surface_behavior,
+    ),
+    EvalScenario(
+        name="channel_identity_boundary_metadata_behavior",
+        category="presence",
+        description="M4 channel surfaces expose identity, boundary, credential-scope, approval, mutation, continuity, and operator-visibility metadata.",
+        runner=_eval_channel_identity_boundary_metadata_behavior,
+    ),
+    EvalScenario(
+        name="external_channel_continuity_behavior",
+        category="presence",
+        description="M4 external-channel follow-up receipts preserve same-thread continuity and boundary metadata.",
+        runner=_eval_external_channel_continuity_behavior,
+    ),
+    EvalScenario(
+        name="device_pairing_revocation_fail_closed",
+        category="presence",
+        description="M4 device pairing receipts keep active and revoked pair state visible, and revoked devices fail closed for follow-up.",
+        runner=_eval_device_pairing_revocation_fail_closed_behavior,
+    ),
+    EvalScenario(
+        name="channel_mutation_boundary_behavior",
+        category="presence",
+        description="M4 external channel mutation boundaries stay approval-gated and revoked device identities cannot mutate or receive follow-up.",
+        runner=_eval_channel_mutation_boundary_behavior,
+    ),
+    EvalScenario(
+        name="channel_abuse_failure_review_behavior",
+        category="presence",
+        description="M4 channel abuse and failure cases surface operator-visible review receipts before unsafe follow-up can proceed.",
+        runner=_eval_channel_abuse_failure_review_behavior,
     ),
     EvalScenario(
         name="operator_governed_improvement_benchmark_surface_behavior",

@@ -631,10 +631,14 @@ class TestObserverAPI:
                 "src.api.observer._observer_presence_surface_payload",
                 return_value={
                     "summary": {
-                        "surface_count": 2,
-                        "active_surface_count": 1,
+                        "surface_count": 3,
+                        "active_surface_count": 2,
                         "ready_surface_count": 1,
                         "attention_surface_count": 1,
+                        "paired_surface_count": 1,
+                        "unpaired_surface_count": 0,
+                        "revoked_surface_count": 1,
+                        "blocked_device_surface_count": 1,
                     },
                     "surfaces": [
                         {
@@ -670,6 +674,37 @@ class TestObserverAPI:
                             "follow_up_prompt": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
                             "transport": "native_notification",
                             "source_type": None,
+                            "boundary_posture": "channel_boundary",
+                            "boundary_scope": "native_notification",
+                            "trust_state": "local_daemon",
+                            "pairing_state": None,
+                            "revocation_state": None,
+                            "device_reach_allowed": None,
+                            "blocked_reason": None,
+                        },
+                        {
+                            "id": "node_adapters:seraph.device:connectors/nodes/revoked.yaml",
+                            "kind": "node_adapter",
+                            "label": "revoked companion bridge",
+                            "package_label": "Seraph Device Pack",
+                            "package_id": "seraph.device",
+                            "status": "staged_link",
+                            "active": True,
+                            "ready": True,
+                            "attention": False,
+                            "detail": "Seraph Device Pack adds revoked companion bridge for companion device or companion reach (staged link).",
+                            "repair_hint": None,
+                            "follow_up_hint": "Use operator review before routing companion or device follow-through through this surface.",
+                            "follow_up_prompt": "Plan guarded companion follow-through via revoked companion bridge.",
+                            "transport": None,
+                            "source_type": None,
+                            "boundary_posture": "device_boundary",
+                            "boundary_scope": "companion_device",
+                            "trust_state": "revoked",
+                            "pairing_state": "paired",
+                            "revocation_state": "revoked",
+                            "device_reach_allowed": False,
+                            "blocked_reason": "device pairing was revoked",
                         },
                     ],
                 },
@@ -685,9 +720,11 @@ class TestObserverAPI:
         payload = resp.json()
         assert payload["imported_reach"]["summary"]["attention_family_count"] == 1
         assert payload["source_adapters"]["summary"]["degraded_adapter_count"] == 1
-        assert payload["presence_surfaces"]["summary"]["surface_count"] == 2
-        assert payload["summary"]["presence_surface_count"] == 2
+        assert payload["presence_surfaces"]["summary"]["surface_count"] == 3
+        assert payload["summary"]["presence_surface_count"] == 3
         assert payload["summary"]["attention_presence_surface_count"] == 1
+        assert payload["summary"]["revoked_presence_surface_count"] == 1
+        assert payload["summary"]["blocked_device_surface_count"] == 1
         assert payload["summary"]["continuity_health"] == "attention"
         assert payload["summary"]["primary_surface"] == "source_adapter"
         assert payload["summary"]["recommended_focus"] == "github-managed"
@@ -713,6 +750,12 @@ class TestObserverAPI:
             item["kind"] == "presence_follow_up"
             and item["surface"] == "presence"
             and item["label"] == "Plan follow-up via native notification channel"
+            and item["boundary_posture"] == "channel_boundary"
+            for item in payload["recovery_actions"]
+        )
+        assert not any(
+            item["kind"] == "presence_follow_up"
+            and item["label"] == "Plan follow-up via revoked companion bridge"
             for item in payload["recovery_actions"]
         )
 
@@ -1122,8 +1165,9 @@ class TestObserverAPI:
             payload = _observer_presence_surface_payload()
 
         assert payload["summary"]["surface_count"] == 2
-        assert payload["summary"]["ready_surface_count"] == 1
-        assert payload["summary"]["attention_surface_count"] == 1
+        assert payload["summary"]["ready_surface_count"] == 0
+        assert payload["summary"]["attention_surface_count"] == 2
+        assert payload["summary"]["blocked_device_surface_count"] == 1
 
         browser_follow_up = next(
             item for item in payload["surfaces"] if item["id"] == "browser_providers:seraph.browserbase:connectors/browser/browserbase.yaml"
@@ -1143,7 +1187,82 @@ class TestObserverAPI:
         assert node_follow_up["adapter_kind"] == "companion"
         assert node_follow_up["requires_network"] is True
         assert node_follow_up["requires_daemon"] is True
-        assert node_follow_up["follow_up_prompt"].startswith("Plan guarded companion follow-through via Atlas companion bridge")
+        assert node_follow_up["pairing_state"] == "unreported"
+        assert node_follow_up["device_reach_allowed"] is False
+        assert node_follow_up["blocked_reason"] == "live pairing is not confirmed"
+        assert node_follow_up["follow_up_prompt"] is None
+
+    def test_observer_presence_surface_payload_blocks_unpaired_and_revoked_device_follow_up(self):
+        registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])
+        registry_instance = SimpleNamespace(snapshot=lambda: registry_snapshot)
+        with (
+            patch(
+                "src.extensions.lifecycle.list_extensions",
+                return_value={
+                    "extensions": [
+                        {"id": "seraph.device", "display_name": "Device Pack", "contributions": []},
+                    ]
+                },
+            ),
+            patch("src.extensions.state.load_extension_state_payload", return_value={"extensions": {}}),
+            patch("src.extensions.state.connector_enabled_overrides", return_value={}),
+            patch("src.extensions.registry.default_manifest_roots_for_workspace", return_value=[]),
+            patch("src.extensions.registry.ExtensionRegistry", return_value=registry_instance),
+            patch("src.extensions.browser_providers.list_browser_provider_inventory", return_value=[]),
+            patch(
+                "src.extensions.node_adapters.list_node_adapter_inventory",
+                return_value=[
+                    SimpleNamespace(
+                        extension_id="seraph.device",
+                        name="Unpaired bridge",
+                        adapter_kind="device",
+                        enabled=True,
+                        requires_network=True,
+                        requires_daemon=True,
+                        runtime_state="staged_link",
+                        reference="connectors/nodes/unpaired.yaml",
+                        pairing_state="unpaired",
+                        revocation_state="none",
+                        boundary_posture="device_boundary",
+                        trust_state="not_trusted",
+                    ),
+                    SimpleNamespace(
+                        extension_id="seraph.device",
+                        name="Revoked bridge",
+                        adapter_kind="device",
+                        enabled=True,
+                        requires_network=True,
+                        requires_daemon=True,
+                        runtime_state="staged_link",
+                        reference="connectors/nodes/revoked.yaml",
+                        pairing_state="paired",
+                        revocation_state="revoked",
+                        boundary_posture="device_boundary",
+                        trust_state="revoked",
+                    ),
+                ],
+            ),
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["attention_surface_count"] == 2
+        assert payload["summary"]["blocked_device_surface_count"] == 2
+        assert payload["summary"]["unpaired_surface_count"] == 1
+        assert payload["summary"]["revoked_surface_count"] == 1
+        assert all(item["follow_up_prompt"] is None for item in payload["surfaces"])
+
+        unpaired = next(item for item in payload["surfaces"] if item["label"] == "Unpaired bridge")
+        assert unpaired["boundary_posture"] == "device_boundary"
+        assert unpaired["pairing_state"] == "unpaired"
+        assert unpaired["device_reach_allowed"] is False
+        assert unpaired["blocked_reason"] == "device is not paired"
+
+        revoked = next(item for item in payload["surfaces"] if item["label"] == "Revoked bridge")
+        assert revoked["revocation_state"] == "revoked"
+        assert revoked["revoked"] is True
+        assert revoked["device_reach_allowed"] is False
+        assert revoked["blocked_reason"] == "device pairing was revoked"
 
     def test_observer_presence_surface_payload_keeps_browser_provider_and_node_adapter_fallback_attention(self):
         registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])

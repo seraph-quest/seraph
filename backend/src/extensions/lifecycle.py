@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from config.settings import settings
 from packaging.version import Version
 from src.agent.factory import get_base_tools_and_active_skills
-from src.extensions.channels import select_active_channel_adapters
+from src.extensions.channels import build_presence_boundary_contract, select_active_channel_adapters
 from src.extensions.connector_health import (
     ConnectorHealthSnapshot,
     managed_connector_health,
@@ -1567,6 +1567,24 @@ def _contribution_payload(
             payload["configured"] = configured and not config_errors
             payload["health"] = health.as_payload()
             payload["status"] = str(payload["health"].get("state") or "planned")
+        if contribution.contribution_type in {"messaging_connectors", "node_adapters"}:
+            status = str(payload.get("status") or "planned")
+            pairing = (
+                {"pairing_state": "unpaired", "trust_state": "unpaired"}
+                if contribution.contribution_type == "node_adapters"
+                else None
+            )
+            payload["presence_contract"] = build_presence_boundary_contract(
+                contribution_type=contribution.contribution_type,
+                extension_id=extension.id,
+                reference=contribution.reference,
+                metadata=contribution.metadata,
+                status=status,
+                active=enabled,
+                ready=False,
+                pairing=pairing,
+                follow_up_ready=False,
+            )
         return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "observer_definitions":
         active_definition = (
@@ -1696,6 +1714,16 @@ def _contribution_payload(
             payload["health"] = health.as_payload()
             if daemon_connected is not None:
                 payload["health"]["connected"] = daemon_connected
+        payload["presence_contract"] = build_presence_boundary_contract(
+            contribution_type=contribution.contribution_type,
+            extension_id=extension.id,
+            reference=contribution.reference,
+            metadata=contribution.metadata,
+            status=str(payload.get("status") or "unknown"),
+            active=bool(payload.get("enabled")),
+            ready=bool(payload.get("health", {}).get("ready")) if isinstance(payload.get("health"), dict) else False,
+            follow_up_ready=bool(payload.get("health", {}).get("ready")) if isinstance(payload.get("health"), dict) else False,
+        )
         return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type in {"observer_connectors", "workspace_adapters"}:
         payload = {

@@ -136,3 +136,130 @@ def connector_enabled_overrides(
             if isinstance(enabled, bool):
                 overrides[(extension_id, reference)] = enabled
     return overrides
+
+
+def node_adapter_pairing_entry(
+    state_entry: dict[str, Any] | None,
+    *,
+    reference: str,
+    name: str,
+    create: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(state_entry, dict):
+        return None
+    pairings = state_entry.get("node_pairings")
+    if not isinstance(pairings, dict):
+        if not create:
+            return _legacy_node_adapter_pairing_entry(state_entry, reference=reference, name=name)
+        pairings = {}
+        state_entry["node_pairings"] = pairings
+    for key in (reference, name):
+        entry = pairings.get(key)
+        if isinstance(entry, dict):
+            return entry
+    if not create:
+        return _legacy_node_adapter_pairing_entry(state_entry, reference=reference, name=name)
+    entry: dict[str, Any] = {"name": name, "reference": reference}
+    pairings[reference] = entry
+    return entry
+
+
+def _legacy_node_adapter_pairing_entry(
+    state_entry: dict[str, Any],
+    *,
+    reference: str,
+    name: str,
+) -> dict[str, Any] | None:
+    pairings = state_entry.get("pairings")
+    if isinstance(pairings, dict):
+        node_pairings = pairings.get("node_adapters")
+        if isinstance(node_pairings, dict):
+            for key in (reference, name):
+                entry = node_pairings.get(key)
+                if isinstance(entry, dict):
+                    return entry
+    connector_state = state_entry.get("connector_state")
+    if isinstance(connector_state, dict):
+        connector_entry = connector_state.get(reference)
+        if isinstance(connector_entry, dict) and isinstance(connector_entry.get("pairing"), dict):
+            return connector_entry["pairing"]
+    return None
+
+
+def set_node_adapter_pairing_entry(
+    payload: dict[str, Any],
+    *,
+    extension_id: str,
+    reference: str,
+    name: str,
+    pairing: dict[str, Any],
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    entry = node_adapter_pairing_entry(state_entry, reference=reference, name=name, create=True)
+    assert entry is not None
+    entry.clear()
+    entry.update(pairing)
+    entry.setdefault("name", name)
+    entry.setdefault("reference", reference)
+    return entry
+
+
+def revoke_node_adapter_pairing_entry(
+    payload: dict[str, Any],
+    *,
+    extension_id: str,
+    reference: str,
+    name: str,
+    reason: str = "",
+    revoked_at: str = "",
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    entry = node_adapter_pairing_entry(state_entry, reference=reference, name=name, create=True)
+    assert entry is not None
+    entry.setdefault("name", name)
+    entry.setdefault("reference", reference)
+    entry["revoked"] = True
+    entry["trusted"] = False
+    entry["trust_state"] = "untrusted"
+    entry["pairing_state"] = "revoked"
+    if reason:
+        entry["revocation_reason"] = reason
+    if revoked_at:
+        entry["revoked_at"] = revoked_at
+    return entry
+
+
+def clear_node_adapter_pairing_entry(
+    payload: dict[str, Any],
+    *,
+    extension_id: str,
+    reference: str,
+    name: str,
+) -> bool:
+    state_entry = extension_state_entry(payload, extension_id, create=False)
+    if not isinstance(state_entry, dict):
+        return False
+    removed = False
+    pairings = state_entry.get("node_pairings")
+    if isinstance(pairings, dict):
+        for key in (reference, name):
+            if key in pairings:
+                pairings.pop(key, None)
+                removed = True
+    legacy_pairings = state_entry.get("pairings")
+    if isinstance(legacy_pairings, dict):
+        node_pairings = legacy_pairings.get("node_adapters")
+        if isinstance(node_pairings, dict):
+            for key in (reference, name):
+                if key in node_pairings:
+                    node_pairings.pop(key, None)
+                    removed = True
+    connector_state = state_entry.get("connector_state")
+    if isinstance(connector_state, dict):
+        connector_entry = connector_state.get(reference)
+        if isinstance(connector_entry, dict) and "pairing" in connector_entry:
+            connector_entry.pop("pairing", None)
+            removed = True
+    return removed

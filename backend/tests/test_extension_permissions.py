@@ -163,3 +163,69 @@ permissions:
     assert contract["permissions"]["missing"]["network"] is False
     assert contract["enforcement"]["status"] == "rejected"
     assert contract["enforcement"]["action"] == "reject"
+
+
+def test_messaging_connector_requires_external_channel_policy_behavior():
+    extension = _extension_record_for_manifest(
+        """
+id: seraph.messaging-contract-test
+version: 2026.5.5
+display_name: Messaging Contract Test
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  messaging_connectors:
+    - connectors/messaging/signal.yaml
+permissions:
+  network: true
+"""
+    )
+
+    profile = evaluate_contribution_permissions(
+        extension,
+        contribution_type="messaging_connectors",
+        metadata={"name": "Signal", "requires_network": True},
+    )
+
+    assert profile["ok"] is True
+    assert profile["risk_level"] == "medium"
+    assert profile["requires_approval"] is True
+    assert profile["approval_behavior"] == "external_channel_policy"
+    assert profile["lifecycle_approval_boundaries"] == ["external_channel"]
+
+
+def test_node_adapter_requires_device_pairing_policy_behavior():
+    extension = _extension_record_for_manifest(
+        """
+id: seraph.node-contract-test
+version: 2026.5.5
+display_name: Node Contract Test
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  node_adapters:
+    - connectors/nodes/companion.yaml
+permissions:
+  network: true
+"""
+    )
+
+    profile = evaluate_contribution_permissions(
+        extension,
+        contribution_type="node_adapters",
+        metadata={"name": "Companion device", "requires_network": True},
+    )
+
+    assert profile["ok"] is True
+    assert profile["risk_level"] == "medium"
+    assert profile["requires_approval"] is True
+    assert profile["approval_behavior"] == "device_pairing_policy"
+    assert profile["lifecycle_approval_boundaries"] == ["device_pairing"]

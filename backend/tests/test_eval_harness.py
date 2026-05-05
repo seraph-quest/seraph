@@ -204,7 +204,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 10
+    assert details["suite_count"] == 11
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -212,6 +212,8 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["trust_suite_present"] is True
     assert details["secure_host_suite_present"] is True
     assert details["computer_suite_present"] is True
+    assert details["channels_suite_present"] is True
+    assert details["channels_suite_scenario_count_matches"] is True
     assert details["m2_execution_suite_present"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
@@ -410,6 +412,68 @@ def test_run_benchmark_suites_executes_computer_use_browser_desktop_suite():
     }
 
 
+def test_run_benchmark_suites_executes_channels_presence_device_pairing_suite():
+    summary = asyncio.run(run_benchmark_suites(["channels_presence_device_pairing"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "channel_identity_boundary_metadata_behavior",
+        "external_channel_continuity_behavior",
+        "device_pairing_revocation_fail_closed",
+        "channel_mutation_boundary_behavior",
+        "channel_abuse_failure_review_behavior",
+    }
+
+
+def test_channels_presence_device_pairing_runtime_eval_details():
+    summary = asyncio.run(run_benchmark_suites(["channels_presence_device_pairing"]))
+
+    assert summary.total == 5
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    boundary = details_by_name["channel_identity_boundary_metadata_behavior"]
+    assert boundary["surface_count"] == 4
+    assert boundary["boundary_metadata_complete"] is True
+    assert boundary["external_surfaces_require_approval"] is True
+    assert boundary["operator_visible"] is True
+    assert "paired_device" in boundary["identity_scopes"]
+    assert "approved_device_action_only" in boundary["mutation_boundaries"]
+    assert "paired_device_node" in boundary["trust_boundaries"]
+
+    pairing = details_by_name["device_pairing_revocation_fail_closed"]
+    assert pairing["active_pair_count"] == 1
+    assert pairing["revoked_pair_count"] == 1
+    assert pairing["revocation_visible"] is True
+    assert pairing["revoked_state_visible"] is True
+    assert pairing["revoked_follow_up_blocked"] is True
+    assert pairing["blocked_reasons"] == ["device_pairing_revoked"]
+
+    continuity = details_by_name["external_channel_continuity_behavior"]
+    assert continuity["follow_up_count"] == 2
+    assert continuity["same_thread_follow_up"] is True
+    assert continuity["continuation_modes"] == ["resume_thread"]
+    assert continuity["boundary_metadata_preserved"] is True
+    assert continuity["resume_messages_present"] is True
+
+    mutation = details_by_name["channel_mutation_boundary_behavior"]
+    assert mutation["external_surface_count"] == 2
+    assert mutation["direct_external_mutation_allowed"] is False
+    assert mutation["approval_gated_external_boundaries"] is True
+    assert mutation["revoked_identity_mutation_blocked"] is True
+    assert mutation["claim_boundary"] == "deterministic_receipts_only_not_live_broad_transport_mutation"
+
+    review = details_by_name["channel_abuse_failure_review_behavior"]
+    assert review["review_case_count"] == 3
+    assert review["abuse_review_visible"] is True
+    assert review["failure_review_visible"] is True
+    assert review["operator_receipts_visible"] is True
+    assert review["blocked_case_count"] == 1
+
+
 def test_browser_execution_task_replay_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["browser_execution_task_replay_behavior"]))
 
@@ -523,6 +587,11 @@ def test_main_lists_available_scenarios(capsys):
     assert "operator_workflow_endurance_benchmark_surface_behavior" in captured.out
     assert "operator_trust_boundary_benchmark_surface_behavior" in captured.out
     assert "operator_computer_use_benchmark_surface_behavior" in captured.out
+    assert "channel_identity_boundary_metadata_behavior" in captured.out
+    assert "external_channel_continuity_behavior" in captured.out
+    assert "device_pairing_revocation_fail_closed" in captured.out
+    assert "channel_mutation_boundary_behavior" in captured.out
+    assert "channel_abuse_failure_review_behavior" in captured.out
     assert "operator_governed_improvement_benchmark_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
@@ -579,6 +648,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
     assert "computer_use_browser_desktop" in captured.out
+    assert "channels_presence_device_pairing" in captured.out
     assert "m2_execution_supremacy" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -590,6 +660,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "trust_boundary_and_safety_receipts",
         "secure_capability_host",
         "computer_use_browser_desktop",
+        "channels_presence_device_pairing",
         "m2_execution_supremacy",
         "planning_retrieval_reporting",
         "governed_improvement",

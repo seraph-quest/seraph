@@ -27,6 +27,7 @@
 - [x] cross-surface continuity now also lands in an explicit operator continuity graph that ties notification and deferred-guardian follow-through back to session, workflow, approval, artifact, and intervention state instead of leaving the thread graph implicit across APIs
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 - [x] browser and desktop execution proof now also has a dedicated benchmark lane: replayable browser-task receipts, desktop notification-action replay, cross-surface continuity, and operator-visible computer-use failure taxonomy now live in the named `computer_use_browser_desktop` suite plus the operator computer-use benchmark surface instead of staying spread across isolated continuity or daemon seams
+- [x] M4 channel proof now also has a named deterministic benchmark lane, `channels_presence_device_pairing`, covering channel identity boundaries, device pairing and revocation fail-closed visibility, external-channel continuity, mutation boundaries, and abuse/failure review receipts; this is benchmark proof of boundary posture, not a claim that broad live mobile or messaging transports are production-ready
 
 ## Working On Now
 
@@ -42,10 +43,12 @@
 - [x] this workstream now also ships `reach-evals-and-integration-hardening-v2`
 - [x] this workstream now also ships `cross-surface-presence-contracts-v1`
 - [x] this workstream now also ships `broader-reach-inventory-continuity-v2`
+- [x] this workstream now also ships `m4-channels-presence-device-pairing-benchmark-proof-v1`
 
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell, imported capability reach, and typed source-adapter continuity layer
+- [ ] live broad mobile and messaging transports remain future work; the current M4 proof only pins deterministic identity, pairing, revocation, mutation-boundary, continuity, and review receipts
 - [ ] broader external communication channels
 - [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new synthesized continuity summary, imported reach/source-adapter recovery, thread groups, recovery actions, action-card continuation model, and desktop-shell follow-through controls
 
@@ -65,6 +68,8 @@
 - [x] browser and native continuity now also share one explicit continuation contract plus runtime route-health state instead of reconstructing thread or fallback semantics per surface
 - [x] the cockpit now exposes a first actionable desktop shell surface for pending alerts, queued items, and recent interventions
 - [x] native continuation payloads can now resume work back into the cockpit instead of only showing a passive notification
+- [x] M4 benchmark proof names identity, pairing, revocation, mutation, external-continuity, and abuse/failure review boundaries for channel/device reach
+- [ ] live broad mobile or messaging transport execution is not claimed by this proof lane
 
 ## Batch I Branch Review Log
 

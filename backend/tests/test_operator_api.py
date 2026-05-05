@@ -891,9 +891,11 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
     assert payload["summary"]["background_session_count"] == 1
     assert payload["active_work"][0]["approval_required"] is True
     active_controls = {control["action"]: control for control in payload["active_work"][0]["controls"]}
-    assert active_controls["approve"]["enabled"] is True
-    assert active_controls["approve"]["label"] == "Approve"
-    assert active_controls["approve"]["control_mode"] == "direct_backend_control"
+    assert active_controls["approve"]["enabled"] is False
+    assert active_controls["approve"]["label"] == "Approve from approvals"
+    assert active_controls["approve"]["target_kind"] == "approval_lookup"
+    assert active_controls["approve"]["control_mode"] == "operator_draft_control"
+    assert active_controls["deny"]["control_mode"] == "operator_draft_control"
     assert active_controls["repair"]["control_mode"] == "routed_or_policy_gated_control"
     assert active_controls["branch"]["control_mode"] == "operator_draft_control"
     assert payload["approvals"][0]["controls"][0]["action"] == "approve"
@@ -923,8 +925,9 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
     assert fast_controls["branch"]["control_mode"] == "operator_draft_control"
     assert fast_controls["compare"]["enabled"] is True
     assert fast_controls["compare"]["control_mode"] == "operator_draft_control"
+    assert fast_controls["revoke"]["enabled"] is False
     assert fast_controls["revoke"]["target_kind"] == "connector_or_channel"
-    assert fast_controls["revoke"]["control_mode"] == "direct_backend_control"
+    assert fast_controls["revoke"]["control_mode"] == "operator_draft_control"
     assert "/api/operator/m7-cockpit" in payload["proof_receipts"]
     assert "automatic_control_execution_from_cockpit_payload" in payload["claim_boundaries"]["not_claimed"]
 

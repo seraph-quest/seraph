@@ -2711,8 +2711,8 @@ def _m7_controls_for_work_item(item: dict[str, Any]) -> list[dict[str, Any]]:
     controls: list[dict[str, Any]] = [_m7_control("inspect", True, label="Inspect")]
     if item.get("approval_required"):
         controls.extend([
-            _m7_control("approve", True, label="Approve"),
-            _m7_control("deny", True, label="Deny"),
+            _m7_control("approve", False, label="Approve from approvals", target_kind="approval_lookup", control_mode="operator_draft_control"),
+            _m7_control("deny", False, label="Deny from approvals", target_kind="approval_lookup", control_mode="operator_draft_control"),
         ])
     if item.get("kind") == "scheduled_job":
         status = str(item.get("status") or "")
@@ -2726,7 +2726,7 @@ def _m7_controls_for_work_item(item: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _m7_control_mode(action: str) -> str:
-    if action in {"approve", "deny", "revoke"}:
+    if action in {"approve", "deny"}:
         return "direct_backend_control"
     if action in {"pause", "resume", "retry", "repair"}:
         return "routed_or_policy_gated_control"
@@ -2739,13 +2739,14 @@ def _m7_control(
     *,
     label: str | None = None,
     target_kind: str | None = None,
+    control_mode: str | None = None,
 ) -> dict[str, Any]:
     return {
         "action": action,
         "enabled": bool(enabled),
         "label": label or action.replace("_", " ").title(),
         "target_kind": target_kind,
-        "control_mode": _m7_control_mode(action),
+        "control_mode": control_mode or _m7_control_mode(action),
         "receipt_required": action in {"approve", "deny", "retry", "repair", "branch", "revoke"},
     }
 
@@ -2922,7 +2923,7 @@ def _m7_fast_controls_catalog(
         _m7_control("repair", repair_ready_count > 0, target_kind="workflow_run"),
         _m7_control("branch", branch_ready_count > 0, target_kind="workflow_run"),
         _m7_control("compare", artifact_count > 1 or branch_ready_count > 0, target_kind="artifact"),
-        _m7_control("revoke", True, target_kind="connector_or_channel"),
+        _m7_control("revoke", False, target_kind="connector_or_channel"),
     ]
 
 

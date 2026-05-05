@@ -7442,11 +7442,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     { label: "artifacts", value: `${m7ArtifactCount} files · ${m7PrimaryOutputPath ?? "no primary output"}` },
     { label: "next action", value: m7NextActionLabel },
   ];
-  const m7ControlModeByAction = new Map(
-    (operatorM7Cockpit?.fast_controls ?? []).map((control) => [control.action, control.control_mode]),
+  const m7ControlByAction = new Map(
+    (operatorM7Cockpit?.fast_controls ?? []).map((control) => [control.action, control]),
+  );
+  const m7ControlEnabled = (action: string, fallback: boolean) => (
+    m7ControlByAction.get(action)?.enabled ?? fallback
   );
   const m7ControlModeLabel = (action: string, fallback: string) => (
-    m7ControlModeByAction.get(action) ?? fallback
+    m7ControlByAction.get(action)?.control_mode ?? fallback
   ).replace(/_/g, " ");
   function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry) return;
@@ -13262,7 +13265,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Approve top M7 approval"
-                        disabled={!primaryApprovalTriageEntry}
+                        disabled={!primaryApprovalTriageEntry || !m7ControlEnabled("approve", Boolean(primaryApprovalTriageEntry))}
                         onClick={() => approveOperatorTriageEntry(primaryApprovalTriageEntry)}
                       >
                         approve
@@ -13271,7 +13274,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Deny top M7 approval"
-                        disabled={!primaryApprovalTriageEntry?.approval}
+                        disabled={!primaryApprovalTriageEntry?.approval || !m7ControlEnabled("deny", Boolean(primaryApprovalTriageEntry?.approval))}
                         onClick={() => {
                           if (primaryApprovalTriageEntry?.approval) {
                             void handleApprovalDecision(primaryApprovalTriageEntry.approval, "deny");
@@ -13284,6 +13287,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Pause active M7 work"
+                        disabled={!m7ControlEnabled("pause", true)}
                         onClick={() => queueComposerDraft(
                           `Pause active Seraph work. Active items: ${m7ActiveWorkCount}. Keep approvals, memory evidence, tool calls, and artifact lineage visible before resuming.`,
                         )}
@@ -13294,6 +13298,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Resume paused M7 work"
+                        disabled={!m7ControlEnabled("resume", true)}
                         onClick={() => queueComposerDraft(
                           `Resume paused Seraph work. Paused items: ${m7PausedWorkCount}. Start with ${m7NextActionLabel}.`,
                         )}
@@ -13304,7 +13309,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Retry primary M7 workflow"
-                        disabled={!m7PrimaryWorkflow?.retryFromStepDraft}
+                        disabled={!m7PrimaryWorkflow?.retryFromStepDraft || !m7ControlEnabled("retry", Boolean(m7PrimaryWorkflow?.retryFromStepDraft))}
                         onClick={() => {
                           if (m7PrimaryWorkflow?.retryFromStepDraft) queueComposerDraft(m7PrimaryWorkflow.retryFromStepDraft);
                         }}
@@ -13315,7 +13320,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Repair primary M7 workflow"
-                        disabled={!m7PrimaryFailure?.step.recoveryActions?.length}
+                        disabled={!m7PrimaryFailure?.step.recoveryActions?.length || !m7ControlEnabled("repair", Boolean(m7PrimaryFailure?.step.recoveryActions?.length))}
                         onClick={() => {
                           if (m7PrimaryFailure?.step.recoveryActions?.length) {
                             void runCapabilityActions(
@@ -13331,7 +13336,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Open primary M7 branch"
-                        disabled={!m7PrimaryBranch}
+                        disabled={!m7PrimaryBranch || !m7ControlEnabled("branch", Boolean(m7PrimaryBranch))}
                         onClick={() => inspectWorkflowRun(m7PrimaryBranch)}
                       >
                         branch
@@ -13340,7 +13345,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Compare primary M7 outputs"
-                        disabled={!m7CanCompare || !m7PrimaryWorkflow || !m7BestContinuation || !m7BestContinuationOutputPath}
+                        disabled={
+                          !m7CanCompare
+                          || !m7PrimaryWorkflow
+                          || !m7BestContinuation
+                          || !m7BestContinuationOutputPath
+                          || !m7ControlEnabled("compare", m7CanCompare)
+                        }
                         onClick={() => {
                           if (m7PrimaryWorkflow && m7BestContinuation && m7BestContinuationOutputPath) {
                             queueWorkflowOutputComparison(m7PrimaryWorkflow, m7BestContinuation, m7BestContinuationOutputPath);
@@ -13353,7 +13364,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         type="button"
                         className="cockpit-operator-button"
                         aria-label="Revoke M7 reach target"
-                        disabled={!m7RevocationTarget}
+                        disabled={!m7RevocationTarget || !m7ControlEnabled("revoke", Boolean(m7RevocationTarget))}
                         onClick={() => queueComposerDraft(
                           m7RevocationTarget
                             ? `Review and revoke reach for "${m7RevocationTarget.label}". Boundary: ${[

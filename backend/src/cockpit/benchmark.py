@@ -22,7 +22,7 @@ def m7_operator_cockpit_benchmark_dimensions() -> list[dict[str, str]]:
         {
             "name": "fast_controls",
             "label": "Fast control availability",
-            "summary": "Active approvals, blocked workflows, and continuity follow-ups should carry direct continuation or repair controls.",
+            "summary": "Active approvals, blocked workflows, and continuity follow-ups should carry enabled-state and control-mode metadata for continuation or repair controls.",
         },
         {
             "name": "control_plane_handoff",
@@ -52,7 +52,7 @@ def m7_operator_cockpit_failure_taxonomy() -> list[dict[str, str]]:
         {
             "name": "missing_fast_control",
             "severity": "high",
-            "summary": "An approval, blocked workflow, or continuity follow-up is visible but lacks direct continuation or repair affordance metadata.",
+            "summary": "An approval, blocked workflow, or continuity follow-up is visible but lacks enabled-state or control-mode metadata for continuation or repair affordances.",
         },
         {
             "name": "hidden_trust_boundary",

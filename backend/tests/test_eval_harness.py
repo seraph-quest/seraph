@@ -529,10 +529,13 @@ def test_m7_cockpit_legibility_runtime_eval_details():
     assert receipt_details["routing_receipt_visible"] is True
 
     control_details = details_by_name["operator_fast_control_availability_behavior"]
-    assert control_details["all_active_items_have_continue_control"] is True
-    assert control_details["approval_control_visible"] is True
-    assert control_details["blocked_workflow_control_visible"] is True
-    assert control_details["continuity_repair_control_visible"] is True
+    assert control_details["endpoint_operator_status_visible"] is True
+    assert control_details["work_item_controls_labeled"] is True
+    assert control_details["work_item_approval_not_overstated"] is True
+    assert control_details["approval_direct_control_visible"] is True
+    assert control_details["repair_control_routed_visible"] is True
+    assert control_details["branch_control_draft_visible"] is True
+    assert control_details["revoke_not_overstated"] is True
 
     handoff_details = details_by_name["operator_control_plane_handoff_legibility_behavior"]
     assert handoff_details["workspace_mode_visible"] is True

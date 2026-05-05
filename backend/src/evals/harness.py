@@ -11289,6 +11289,109 @@ def _m7_control_plane_payload() -> dict[str, Any]:
     }
 
 
+async def _m7_cockpit_endpoint_payload() -> dict[str, Any]:
+    from src.api.operator import get_operator_m7_cockpit
+
+    workflow_run = {
+        "id": "run-review",
+        "run_identity": "session-1:repo-review:root",
+        "workflow_name": "repo-review",
+        "summary": "Workflow is blocked by approval context drift.",
+        "status": "awaiting_approval",
+        "availability": "blocked",
+        "thread_id": "session-1",
+        "thread_label": "Release review",
+        "updated_at": "2026-05-05T10:05:00Z",
+        "artifact_paths": ["docs/implementation/STATUS.md"],
+        "branch_kind": "branch_from_checkpoint",
+        "checkpoint_candidates": [{"step_id": "write", "status": "succeeded"}],
+        "retry_from_step_draft": "Retry repo-review from write.",
+        "replay_block_reason": "approval_context_changed",
+        "pending_approval_count": 1,
+        "approval_context": {
+            "risk_level": "high",
+            "execution_boundaries": ["workspace_write"],
+            "trust_partition": {"mode": "operator_approved_write"},
+        },
+        "step_records": [
+            {
+                "id": "write",
+                "index": 0,
+                "tool": "write_file",
+                "status": "awaiting_approval",
+                "is_recoverable": True,
+                "recovery_actions": [{"type": "set_tool_policy"}],
+            }
+        ],
+    }
+    pending_approval = {
+        "id": "approval-1",
+        "tool_name": "write_file",
+        "summary": "Approve guarded write to docs/implementation/STATUS.md.",
+        "risk_level": "high",
+        "session_id": "session-1",
+        "thread_id": "session-1",
+        "resume_message": "Resume the docs write after approval.",
+        "approval_context": {
+            "risk_level": "high",
+            "execution_boundaries": ["workspace_write"],
+            "trust_partition": {"mode": "operator_approved_write"},
+        },
+    }
+    with (
+        patch("src.api.operator.session_manager.list_sessions", AsyncMock(return_value=[{"id": "session-1"}])),
+        patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[workflow_run])),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[pending_approval])),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "summary": {"continuity_health": "attention", "recommended_focus": "slack relay"},
+                    "recovery_actions": [{"id": "presence:slack", "label": "Repair Slack relay"}],
+                }
+            ),
+        ),
+        patch(
+            "src.api.operator.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-1",
+                        "event_type": "approval_requested",
+                        "tool_name": "write_file",
+                        "summary": "Approval requested for write_file.",
+                        "created_at": "2026-05-05T10:00:00Z",
+                        "session_id": "session-1",
+                    },
+                    {
+                        "id": "audit-2",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "runtime_router",
+                        "summary": "Runtime chose guarded model route.",
+                        "created_at": "2026-05-05T10:01:00Z",
+                        "session_id": "session-1",
+                    },
+                ]
+            ),
+        ),
+        patch("src.api.operator.scheduled_job_repository.list_jobs", AsyncMock(return_value=[])),
+        patch("src.api.operator.scheduled_job_repository.list_run_history", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.build_m6_memory_superiority_payload",
+            AsyncMock(
+                return_value={
+                    "summary": {"operator_status": "m6_memory_superiority_visible"},
+                    "behavior_receipts": [{"id": "behavior-1"}],
+                    "memory_records": [{"id": "memory-1"}],
+                    "control_receipts": [{"id": "control-1"}],
+                }
+            ),
+        ),
+        patch("src.api.operator.process_runtime_manager.list_all_processes", return_value=[]),
+    ):
+        return await get_operator_m7_cockpit(session_id="session-1", window_hours=24, limit_workflows=20)
+
+
 def _eval_operator_cockpit_receipt_legibility_behavior() -> dict[str, Any]:
     payload = _m7_control_plane_payload()
     receipts = payload["handoff"]["review_receipts"]
@@ -11310,23 +11413,29 @@ def _eval_operator_cockpit_receipt_legibility_behavior() -> dict[str, Any]:
     }
 
 
-def _eval_operator_fast_control_availability_behavior() -> dict[str, Any]:
-    payload = _m7_control_plane_payload()
-    handoff = payload["handoff"]
-    active_items = [
-        *handoff["pending_approvals"],
-        *handoff["blocked_workflows"],
-        *handoff["follow_ups"],
-    ]
-    _require_eval_contract(active_items, "Expected active cockpit handoff controls.")
+async def _eval_operator_fast_control_availability_behavior() -> dict[str, Any]:
+    payload = await _m7_cockpit_endpoint_payload()
+    active_work = payload["active_work"]
+    approvals = payload["approvals"]
+    fast_controls = {control["action"]: control for control in payload["fast_controls"]}
+    active_controls = {control["action"]: control for control in active_work[0]["controls"]}
+    _require_eval_contract(active_work and approvals and fast_controls, "Expected M7 cockpit endpoint controls.")
     return {
-        "active_control_count": len(active_items),
-        "all_active_items_have_continue_control": all(bool(item.get("continue_message")) for item in active_items),
-        "approval_control_visible": handoff["pending_approvals"][0]["continue_message"] == "Resume the docs write after approval.",
-        "blocked_workflow_control_visible": (
-            handoff["blocked_workflows"][0]["continue_message"] == "Open a fresh guarded recovery path for repo-review."
+        "endpoint_operator_status_visible": payload["summary"]["operator_status"] == "m7_operator_cockpit_visible",
+        "active_control_count": len(fast_controls),
+        "work_item_controls_labeled": all(control.get("control_mode") for control in active_controls.values()),
+        "work_item_approval_not_overstated": (
+            active_controls["approve"]["enabled"] is False
+            and active_controls["approve"]["target_kind"] == "approval_lookup"
+            and active_controls["approve"]["control_mode"] == "operator_draft_control"
         ),
-        "continuity_repair_control_visible": handoff["follow_ups"][0]["continue_message"] == "Plan the Slack relay repair.",
+        "approval_direct_control_visible": approvals[0]["controls"][0]["control_mode"] == "direct_backend_control",
+        "repair_control_routed_visible": fast_controls["repair"]["control_mode"] == "routed_or_policy_gated_control",
+        "branch_control_draft_visible": fast_controls["branch"]["control_mode"] == "operator_draft_control",
+        "revoke_not_overstated": (
+            fast_controls["revoke"]["enabled"] is False
+            and fast_controls["revoke"]["control_mode"] == "operator_draft_control"
+        ),
     }
 
 
@@ -12893,7 +13002,7 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
     EvalScenario(
         name="operator_fast_control_availability_behavior",
         category="cockpit",
-        description="M7 active handoff items preserve direct continuation or repair controls.",
+        description="M7 cockpit endpoint preserves enabled-state and control-mode metadata for continuation or repair controls.",
         runner=_eval_operator_fast_control_availability_behavior,
     ),
     EvalScenario(

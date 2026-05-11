@@ -113,6 +113,31 @@ Legend for the checklist column:
 - [ ] Seraph is still behind the strongest reference systems on capability marketplace depth, deeper memory-provider ecosystems beyond the first governed diagnostics/writeback-quality pass, cleaner adapter-first external capability surfaces, broader long-running workflow control, stronger long-horizon intervention learning beyond the first multi-day and scheduled-outcome watchpoint pass, broader multi-surface reach beyond the hardened browser/native layer, and deeper execution hardening.
 - [ ] No workstream is complete yet.
 
+## Next Strategic Batch Stack
+
+This stack is the roadmap-level ordering for the next large batches after the merged M0-M9 foundation work. It is not a calendar plan and not a live queue mirror; the GitHub Project, parent issues, and PRs remain the execution source of truth. The ordering reflects the current proof and trust dependency: normalize the board and claim gates first, deepen trusted execution and live replay proof next, then expand memory, workflow, reach, guardian learning, and ecosystem depth.
+
+1. [ ] `m0-board-proof-and-p1-wave-normalization`:
+   normalize the active Project fields, stale merged-item PR/review states, parent-batch linkage, and proof/claim gates before the next wave starts claiming readiness.
+2. [ ] `secure-execution-host-v1`:
+   deepen host/container isolation strategy, browser credential and cookie partitioning, workspace escape defenses, hostile-provider replay, and fail-closed privileged-path receipts without claiming production-secure execution.
+3. [ ] `live-long-horizon-eval-replay-v1`:
+   add a replayable proof substrate with live-ish fake providers, cross-surface failure taxonomy, CI receipts, and operator-visible evidence across memory, workflow, reach, security, and cockpit flows.
+4. [ ] `cockpit-operator-efficiency-benchmark`:
+   execute #439 as a measured operator benchmark for inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, and audit flows using real workflow and memory scenarios.
+5. [ ] `memory-provider-quality-gate`:
+   execute #441 so external memory evidence must declare provenance, confidence, privacy boundary, freshness, conflict behavior, and suppression rules before entering guardian context.
+6. [ ] `workflow-endurance-canary`:
+   execute #440 as a multi-session canary covering checkpoint, branch, failure injection, recovery, delegated ownership, artifact comparison, approval preservation, and audit receipts.
+7. [ ] `durable-workflow-engine-v1`:
+   promote workflow control from audit-projected receipts toward a minimal durable state kernel with crash-safe resume, heartbeat or reactive triggers, repair, retry, and delegated artifact review lifecycle.
+8. [ ] `one-excellent-reach-channel-canary`:
+   execute #438 for a single selected external channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
+9. [ ] `guardian-world-model-learning-quality-v2`:
+   deepen multi-signal learning, stale and conflicting evidence arbitration, salience and confidence calibration, and false-positive or false-negative accounting with live-ish intervention replay.
+10. [ ] `governed-extension-marketplace-hardening-foundations`:
+   strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics as production-oriented foundations, not production marketplace security claims.
+
 ## Completed 10-PR Batches
 
 Completed batches stay visible instead of being deleted as later programs land.

@@ -102,6 +102,31 @@ The first execution wave underneath that spine is:
 - [#441 P1: Memory provider quality gate](https://github.com/seraph-quest/seraph/issues/441)
 - [#440 P1: Live workflow endurance canary](https://github.com/seraph-quest/seraph/issues/440)
 
+## Current Next-Batch Order
+
+The next implementation program should stay milestone-sized, proof-led, and branch-scoped. The Project remains the execution source of truth; this section records the strategy ordering and acceptance frame so future issues and PRs do not drift back into time-boxed or surface-area-first planning.
+
+| Order | Batch | Primary milestone | Existing issue | Acceptance frame |
+|---:|---|---|---|---|
+| 1 | Board, proof, and P1 wave normalization | M0 | [#422](https://github.com/seraph-quest/seraph/issues/422) | active Project fields are complete, stale merged-item PR/review fields are corrected, #438-#441 remain tied to the parent execution wave, and proof/claim gates are explicit before implementation starts |
+| 2 | Secure execution host v1 | M3 | new or parented under #422 | privileged execution, browser credential/cookie, workspace, provider, and connector paths fail closed with adversarial receipts; claim boundary remains stronger isolation foundations, not production secure-by-default execution |
+| 3 | Live long-horizon eval replay v1 | M0 / cross-cutting proof | new or parented under #422 | live-ish fake providers, replay fixtures, failure taxonomy, CI receipts, and operator-visible proof cover memory, workflow, reach, security, and cockpit flows before stronger quality claims |
+| 4 | Cockpit operator efficiency benchmark | M7 | [#439](https://github.com/seraph-quest/seraph/issues/439) | real operator tasks measure speed, clicks or keystrokes, error detectability, recovery, confidence, and receipts rather than only cockpit density |
+| 5 | Memory provider quality gate | M6 / M9 | [#441](https://github.com/seraph-quest/seraph/issues/441) | provider evidence declares provenance, confidence, privacy, freshness, conflict handling, and suppression; noisy or stale evidence is blocked before guardian context |
+| 6 | Workflow endurance canary | M5 | [#440](https://github.com/seraph-quest/seraph/issues/440) | multi-session interruption, checkpoint, branch, recovery, delegated ownership, artifact comparison, approval preservation, and audit trail are replayable without calling the workflow engine durable yet |
+| 7 | Durable workflow engine v1 | M5 | new or parented under #422 | workflow state moves from audit-projected receipts toward a minimal durable state kernel with crash-safe resume, heartbeat or reactive triggers, retry, repair, and delegated artifact review lifecycle |
+| 8 | One excellent reach channel canary | M4 | [#438](https://github.com/seraph-quest/seraph/issues/438) | one selected channel proves pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded UI, and audit receipts with explicit anti-sprawl scope |
+| 9 | Guardian world-model learning quality v2 | M8 | new or parented under #422 | multi-signal learning, stale/conflicting evidence arbitration, salience/confidence calibration, and false-positive/false-negative accounting are proven with live-ish intervention replay |
+| 10 | Governed extension marketplace hardening foundations | M9 | new or parented under #422 | pack review/verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics improve production-oriented foundations without claiming production marketplace security |
+
+Critic/contrarian gate for this ordering:
+
+- accepted: trust and proof substrate must precede memory-provider breadth, reach expansion, and marketplace hardening
+- accepted: #439 should benchmark real workflow and memory scenarios rather than stand alone as synthetic UI proof
+- accepted: #440 can begin as an endurance canary, but durable-workflow claims wait for the durable state-machine batch
+- accepted: #438 remains later in the stack unless the single channel, rejection criteria, and anti-sprawl scope are explicit
+- accepted: capability/trust regression coverage should be folded into the M0/M3/proof batches so every capability class carries owner, permission, mutation, credential-egress, browser/session, audit, and operator-proof semantics
+
 ## M0 Competition Truth And Execution Governance
 
 Implementation meaning: strategy, delivery, competitive evidence, and active execution must not drift.

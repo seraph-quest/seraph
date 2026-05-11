@@ -8,12 +8,13 @@ import os
 import tempfile
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import select
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
+from src.approval.runtime import get_current_session_id, reset_runtime_context, set_runtime_context
 from src.api.catalog import (
     catalog_skill_by_name,
     install_catalog_item_by_name,
@@ -152,17 +153,46 @@ class WorkflowDraftRequest(BaseModel):
 
 
 @router.post("/capabilities/source-evidence")
-async def source_evidence(req: SourceEvidenceRequest):
-    return collect_source_evidence_bundle(
-        contract=req.contract,
-        source=req.source,
-        query=req.query,
-        url=req.url,
-        ref=req.ref,
-        session_id=req.session_id,
-        owner_session_id=req.owner_session_id,
-        max_results=req.max_results,
-    )
+async def source_evidence(req: SourceEvidenceRequest, x_seraph_session_id: str | None = Header(default=None)):
+    active_session_id = (x_seraph_session_id or "").strip()
+    existing_session_id = get_current_session_id()
+    if existing_session_id and active_session_id and existing_session_id != active_session_id:
+        return {
+            "status": "failed",
+            "request": {
+                "contract": req.contract,
+                "source": req.source,
+                "query": req.query,
+                "url": req.url,
+                "ref": req.ref,
+                "session_id": req.session_id,
+                "owner_session_id": req.owner_session_id,
+                "max_results": req.max_results,
+            },
+            "adapter": None,
+            "items": [],
+            "warnings": ["source evidence session header does not match the active runtime session."],
+            "next_best_sources": [],
+            "summary": {"item_count": 0, "contract": req.contract},
+        }
+
+    tokens = None
+    if active_session_id and not existing_session_id:
+        tokens = set_runtime_context(active_session_id, context_manager.get_context().approval_mode)
+    try:
+        return collect_source_evidence_bundle(
+            contract=req.contract,
+            source=req.source,
+            query=req.query,
+            url=req.url,
+            ref=req.ref,
+            session_id=req.session_id,
+            owner_session_id=req.owner_session_id,
+            max_results=req.max_results,
+        )
+    finally:
+        if tokens is not None:
+            reset_runtime_context(tokens)
 
 
 @router.post("/capabilities/source-review-plan")

@@ -2,6 +2,12 @@ name: browserbase
 description: Browserbase-style provider definition that currently stages credentials and uses the local browser runtime as fallback for browsing work.
 provider_kind: browserbase
 enabled: false
+credential_surface: provider_api_key
+cookie_scope: provider_browser_context
+profile_persistence: provider_managed_ephemeral
+owner_scope: runtime_session
+remote_transport: provider_api
+fallback_policy: local_extract_only
 capabilities:
   - staged_remote_provider
   - local_fallback

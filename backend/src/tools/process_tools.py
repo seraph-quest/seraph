@@ -101,6 +101,44 @@ _OUTPUT_CHAR_LIMIT = 12_000
 _PROCESS_OUTPUT_DEFAULT = 4_000
 _PROCESS_OUTPUT_MAX = 24_000
 _COMMAND_TIMEOUT_MAX = 120
+_SECRET_FILE_NAMES = {
+    ".env",
+    ".envrc",
+    ".dockerconfigjson",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.json",
+    "google_credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "known_hosts",
+    "private_key",
+    "secrets.json",
+}
+_SECRET_FILE_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+)
+_SECRET_PATH_PARTS = {
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".docker",
+    ".gnupg",
+    ".ssh",
+}
+_DANGEROUS_FIND_ACTIONS = {
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+}
 _ENV_ALLOWLIST = {
     "PATH",
     "LANG",
@@ -179,6 +217,54 @@ def _ensure_workspace_scoped_path(raw_path: str, cwd: Path, *, label: str) -> No
         raise ValueError(f"{label} must stay within the workspace.") from exc
 
 
+def _is_secret_like_workspace_path(path: Path) -> bool:
+    workspace_relative = path.relative_to(_workspace_root())
+    normalized_parts = tuple(part.lower() for part in workspace_relative.parts)
+    normalized_posix = "/".join(normalized_parts)
+    if any(
+        normalized_posix == secret_part or normalized_posix.startswith(f"{secret_part}/")
+        for secret_part in _SECRET_PATH_PARTS
+    ):
+        return True
+
+    name = path.name.lower()
+    if name in _SECRET_FILE_NAMES or name.startswith(".env."):
+        return True
+    if any(name.endswith(suffix) for suffix in _SECRET_FILE_SUFFIXES):
+        return True
+    return any(token in name for token in ("credential", "secret", "token"))
+
+
+def _directory_contains_secret_like_workspace_path(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    for candidate in path.rglob("*"):
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(_workspace_root())
+        except (OSError, ValueError):
+            return True
+        if _is_secret_like_workspace_path(resolved):
+            return True
+    return False
+
+
+def _ensure_process_accessible_path(raw_path: str, cwd: Path, *, label: str) -> None:
+    _ensure_workspace_scoped_path(raw_path, cwd, label=label)
+    candidate = (raw_path or "").strip()
+    resolved = (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).resolve()
+    if _is_secret_like_workspace_path(resolved):
+        raise ValueError(f"{label} cannot target secret-like workspace files.")
+
+
+def _ensure_process_search_path(raw_path: str, cwd: Path, *, label: str) -> None:
+    _ensure_process_accessible_path(raw_path, cwd, label=label)
+    candidate = (raw_path or "").strip()
+    resolved = (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).resolve()
+    if _directory_contains_secret_like_workspace_path(resolved):
+        raise ValueError(f"{label} cannot recursively search workspace paths containing secret-like files.")
+
+
 def _normalize_command(command: str) -> str:
     normalized = (command or "").strip()
     if not normalized:
@@ -247,13 +333,13 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if arg in {"-C", "--git-dir", "--work-tree"}:
                 if index + 1 >= len(args):
                     raise ValueError(f"{arg} requires a path argument.")
-                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
                 index += 2
                 continue
             if arg.startswith("--git-dir="):
-                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--git-dir path")
+                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--git-dir path")
             elif arg.startswith("--work-tree="):
-                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--work-tree path")
+                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--work-tree path")
             index += 1
         return
 
@@ -263,22 +349,29 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
                 break
             if arg.startswith("-"):
                 continue
-            _ensure_workspace_scoped_path(arg, cwd, label="script path")
+            _ensure_process_accessible_path(arg, cwd, label="script path")
             break
         return
 
     if command_name == "find":
         for arg in args:
+            if arg in _DANGEROUS_FIND_ACTIONS:
+                raise ValueError(f"find action {arg} is blocked in the process runtime.")
+        search_path_checked = False
+        for arg in args:
             if arg.startswith("-") or arg in {"!", "(", ")"}:
                 break
-            _ensure_workspace_scoped_path(arg, cwd, label="search path")
+            _ensure_process_search_path(arg, cwd, label="search path")
+            search_path_checked = True
+        if not search_path_checked:
+            _ensure_process_search_path(".", cwd, label="search path")
         return
 
     if command_name in {"cat", "ls"}:
         for arg in args:
             if arg.startswith("-"):
                 continue
-            _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+            _ensure_process_accessible_path(arg, cwd, label="path argument")
         return
 
     if command_name in {"head", "tail"}:
@@ -291,7 +384,7 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if arg.startswith("-"):
                 index += 1
                 continue
-            _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+            _ensure_process_accessible_path(arg, cwd, label="path argument")
             index += 1
         return
 
@@ -305,12 +398,18 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if arg.startswith("-"):
                 index += 1
                 continue
-            _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+            _ensure_process_accessible_path(arg, cwd, label="path argument")
             index += 1
         return
 
     if command_name in {"grep", "rg", "sed"}:
         pattern_consumed = False
+        path_argument_checked = False
+        recursive_search = command_name == "rg" or any(
+            arg in {"-r", "-R", "--recursive", "--dereference-recursive"}
+            or (arg.startswith("-") and not arg.startswith("--") and any(flag in arg[1:] for flag in ("r", "R")))
+            for arg in args
+        )
         index = 0
         while index < len(args):
             arg = args[index]
@@ -323,45 +422,45 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if arg in {"-f", "--file"}:
                 if index + 1 >= len(args):
                     raise ValueError(f"{arg} requires a path argument.")
-                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
                 pattern_consumed = True
                 index += 2
                 continue
             if arg.startswith("-f") and arg != "-f" and not arg.startswith("--"):
-                _ensure_workspace_scoped_path(arg[2:], cwd, label="-f path")
+                _ensure_process_accessible_path(arg[2:], cwd, label="-f path")
                 pattern_consumed = True
                 index += 1
                 continue
             if arg.startswith("-") and not arg.startswith("--"):
                 short_flag_operand_index = arg.find("f", 1)
                 if 1 <= short_flag_operand_index < len(arg) - 1:
-                    _ensure_workspace_scoped_path(arg[short_flag_operand_index + 1 :], cwd, label="-f path")
+                    _ensure_process_accessible_path(arg[short_flag_operand_index + 1 :], cwd, label="-f path")
                     pattern_consumed = True
                     index += 1
                     continue
             if arg.startswith("--file="):
-                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--file path")
+                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--file path")
                 pattern_consumed = True
                 index += 1
                 continue
             if command_name == "grep" and arg in {"--exclude-from"}:
                 if index + 1 >= len(args):
                     raise ValueError(f"{arg} requires a path argument.")
-                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
                 index += 2
                 continue
             if command_name == "grep" and arg.startswith("--exclude-from="):
-                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--exclude-from path")
+                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--exclude-from path")
                 index += 1
                 continue
             if command_name == "rg" and arg in {"--ignore-file"}:
                 if index + 1 >= len(args):
                     raise ValueError(f"{arg} requires a path argument.")
-                _ensure_workspace_scoped_path(args[index + 1], cwd, label=f"{arg} path")
+                _ensure_process_accessible_path(args[index + 1], cwd, label=f"{arg} path")
                 index += 2
                 continue
             if command_name == "rg" and arg.startswith("--ignore-file="):
-                _ensure_workspace_scoped_path(arg.split("=", 1)[1], cwd, label="--ignore-file path")
+                _ensure_process_accessible_path(arg.split("=", 1)[1], cwd, label="--ignore-file path")
                 index += 1
                 continue
             if arg.startswith("-"):
@@ -370,8 +469,14 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if not pattern_consumed and command_name in {"grep", "rg", "sed"}:
                 pattern_consumed = True
             else:
-                _ensure_workspace_scoped_path(arg, cwd, label="path argument")
+                if recursive_search:
+                    _ensure_process_search_path(arg, cwd, label="path argument")
+                else:
+                    _ensure_process_accessible_path(arg, cwd, label="path argument")
+                path_argument_checked = True
             index += 1
+        if recursive_search and not path_argument_checked:
+            _ensure_process_search_path(".", cwd, label="path argument")
 
 
 def _normalize_timeout_seconds(raw_timeout: int | None) -> int:
@@ -426,6 +531,9 @@ def _process_approval_context(
         "accepts_secret_refs": False,
         "command_allowlist_enforced": True,
         "workspace_scoped_paths_only": True,
+        "secret_like_path_arguments_blocked": True,
+        "recursive_secret_like_search_paths_blocked": True,
+        "dangerous_find_actions_blocked": True,
         "runtime_log_storage": "temp_runtime_outside_workspace",
         "runtime_worker_storage": "temp_runtime_outside_workspace",
         "disposable_worker_runtime": True,

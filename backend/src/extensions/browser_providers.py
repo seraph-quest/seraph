@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from src.extensions.connectors import load_connector_payload
 
 if TYPE_CHECKING:
     from src.extensions.registry import ExtensionContributionRecord
@@ -32,6 +35,12 @@ class ActiveBrowserProvider:
     requires_network: bool
     requires_daemon: bool
     capabilities: tuple[str, ...]
+    credential_surface: str
+    cookie_scope: str
+    profile_persistence: str
+    owner_scope: str
+    remote_transport: str
+    fallback_policy: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,12 @@ class BrowserProviderInventoryEntry:
     execution_mode: str
     runtime_state: str
     selected: bool
+    credential_surface: str
+    cookie_scope: str
+    profile_persistence: str
+    owner_scope: str
+    remote_transport: str
+    fallback_policy: str
 
 
 _LOCAL_PROVIDER_ENTRY = BrowserProviderInventoryEntry(
@@ -73,6 +88,21 @@ _LOCAL_PROVIDER_ENTRY = BrowserProviderInventoryEntry(
     execution_mode="local_runtime",
     runtime_state="ready",
     selected=False,
+    credential_surface="local_runtime",
+    cookie_scope="local_profile",
+    profile_persistence="ephemeral_session",
+    owner_scope="runtime_session",
+    remote_transport="none",
+    fallback_policy="not_applicable",
+)
+
+_REQUIRED_NON_LOCAL_BOUNDARY_FIELDS = (
+    "credential_surface",
+    "cookie_scope",
+    "profile_persistence",
+    "owner_scope",
+    "remote_transport",
+    "fallback_policy",
 )
 
 
@@ -91,6 +121,28 @@ def _required_config_missing(config_fields: list[dict[str, Any]], config_entry: 
         if isinstance(value, str) and not value.strip():
             return True
     return False
+
+
+def _provider_definition_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    resolved_path = metadata.get("resolved_path")
+    if not isinstance(resolved_path, str) or not resolved_path:
+        return {}
+    try:
+        payload = load_connector_payload(Path(resolved_path))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _metadata_string(metadata: dict[str, Any], key: str, raw_payload: dict[str, Any] | None = None) -> str:
+    value = metadata.get(key)
+    if value is None and raw_payload is not None:
+        value = raw_payload.get(key)
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def _has_required_non_local_boundary_metadata(metadata: dict[str, Any], raw_payload: dict[str, Any]) -> bool:
+    return all(_metadata_string(metadata, key, raw_payload) for key in _REQUIRED_NON_LOCAL_BOUNDARY_FIELDS)
 
 
 def _provider_inventory_entry(
@@ -128,6 +180,8 @@ def _provider_inventory_entry(
     config_fields = contribution.metadata.get("config_fields")
     config_field_list = config_fields if isinstance(config_fields, list) else []
     configured = not _required_config_missing(config_field_list, config_entry)
+    raw_payload = _provider_definition_payload(contribution.metadata) if provider_kind != "local" else {}
+    boundary_metadata_ready = provider_kind == "local" or _has_required_non_local_boundary_metadata(contribution.metadata, raw_payload)
     execution_mode = "local_runtime" if provider_kind == "local" else "local_fallback"
     if not enabled:
         runtime_state = "disabled"
@@ -135,6 +189,9 @@ def _provider_inventory_entry(
         runtime_state = "requires_config"
     elif provider_kind == "local":
         runtime_state = "ready"
+    elif not boundary_metadata_ready:
+        runtime_state = "requires_boundary_contract"
+        execution_mode = "boundary_contract_required"
     else:
         runtime_state = "staged_local_fallback"
 
@@ -164,6 +221,12 @@ def _provider_inventory_entry(
         execution_mode=execution_mode,
         runtime_state=runtime_state,
         selected=selected_name == name,
+        credential_surface=_metadata_string(contribution.metadata, "credential_surface", raw_payload),
+        cookie_scope=_metadata_string(contribution.metadata, "cookie_scope", raw_payload),
+        profile_persistence=_metadata_string(contribution.metadata, "profile_persistence", raw_payload),
+        owner_scope=_metadata_string(contribution.metadata, "owner_scope", raw_payload),
+        remote_transport=_metadata_string(contribution.metadata, "remote_transport", raw_payload),
+        fallback_policy=_metadata_string(contribution.metadata, "fallback_policy", raw_payload),
     )
 
 
@@ -234,6 +297,8 @@ def _select_active_provider_from_inventory(
             continue
         if not item.enabled or not item.configured:
             continue
+        if item.provider_kind != "local" and item.runtime_state != "staged_local_fallback":
+            continue
         candidate = ActiveBrowserProvider(
             extension_id=item.extension_id,
             name=item.name,
@@ -248,6 +313,12 @@ def _select_active_provider_from_inventory(
             requires_network=item.requires_network,
             requires_daemon=item.requires_daemon,
             capabilities=item.capabilities,
+            credential_surface=item.credential_surface,
+            cookie_scope=item.cookie_scope,
+            profile_persistence=item.profile_persistence,
+            owner_scope=item.owner_scope,
+            remote_transport=item.remote_transport,
+            fallback_policy=item.fallback_policy,
         )
         if selected is None:
             selected = candidate

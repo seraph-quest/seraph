@@ -2,6 +2,12 @@ name: extension-relay
 description: Browser-extension relay provider for staged session capture through a paired browser surface.
 provider_kind: extension_relay
 enabled: false
+credential_surface: relay_token
+cookie_scope: paired_browser_profile
+profile_persistence: operator_managed_profile
+owner_scope: paired_runtime_session
+remote_transport: extension_relay
+fallback_policy: no_credential_fallback
 capabilities:
   - browser_mode_matrix
   - extension_relay

@@ -35,6 +35,12 @@ async def test_browser_provider_inventory_endpoint_lists_staged_remote_modes(cli
         "description: Remote CDP provider.\n"
         "provider_kind: remote_cdp\n"
         "enabled: false\n"
+        "credential_surface: remote_cdp_endpoint\n"
+        "cookie_scope: remote_profile\n"
+        "profile_persistence: provider_managed_ephemeral\n"
+        "owner_scope: runtime_session\n"
+        "remote_transport: cdp_websocket\n"
+        "fallback_policy: local_extract_only\n"
         "config_fields:\n"
         "  - key: ws_endpoint\n"
         "    label: CDP WebSocket Endpoint\n"
@@ -114,6 +120,16 @@ async def test_browser_provider_inventory_endpoint_lists_staged_remote_modes(cli
     assert remote_cdp["provider_kind"] == "remote_cdp"
     assert remote_cdp["runtime_state"] == "staged_local_fallback"
     assert remote_cdp["execution_mode"] == "local_fallback"
+    assert remote_cdp["credential_surface"] == "remote_cdp_endpoint"
+    assert remote_cdp["cookie_scope"] == "remote_profile"
+    assert remote_cdp["profile_persistence"] == "provider_managed_ephemeral"
+    assert remote_cdp["owner_scope"] == "runtime_session"
+    assert remote_cdp["remote_transport"] == "cdp_websocket"
+    assert remote_cdp["fallback_policy"] == "local_extract_only"
+    extension_relay = next(item for item in providers if item["name"] == "extension-relay")
+    assert extension_relay["provider_kind"] == "extension_relay"
+    assert extension_relay["runtime_state"] == "requires_boundary_contract"
+    assert extension_relay["execution_mode"] == "boundary_contract_required"
 
 
 @pytest.mark.asyncio

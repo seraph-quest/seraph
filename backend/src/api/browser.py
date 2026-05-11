@@ -44,6 +44,12 @@ async def list_browser_providers():
                 "requires_daemon": item.requires_daemon,
                 "capabilities": list(item.capabilities),
                 "reference": item.reference,
+                "credential_surface": item.credential_surface,
+                "cookie_scope": item.cookie_scope,
+                "profile_persistence": item.profile_persistence,
+                "owner_scope": item.owner_scope,
+                "remote_transport": item.remote_transport,
+                "fallback_policy": item.fallback_policy,
             }
             for item in inventory
         ]

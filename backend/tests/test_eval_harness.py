@@ -474,11 +474,17 @@ def test_run_benchmark_suites_executes_secure_capability_host_suite():
     assert summary.failed == 0
     assert result_names == {
         "secure_host_secret_ref_fail_closed_behavior",
+        "secure_host_isolation_strategy_report_behavior",
+        "secure_host_browser_cookie_session_partition_behavior",
         "secure_host_workspace_secret_path_boundary_behavior",
+        "secure_host_workspace_escape_boundary_behavior",
         "secure_host_process_env_isolation_behavior",
         "secure_host_prompt_injection_quarantine_behavior",
         "secure_host_delegation_partition_behavior",
         "secure_host_provider_fallback_boundary_behavior",
+        "secure_host_hostile_provider_replay_behavior",
+        "secure_host_capability_trust_matrix_behavior",
+        "secure_host_receipt_surface_completeness_behavior",
         "operator_secure_capability_host_benchmark_surface_behavior",
     }
 
@@ -493,8 +499,14 @@ def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval
     assert details["suite_name_visible"] is True
     assert details["operator_status_visible"] is True
     assert details["scenario_count_matches"] is True
+    assert details["host_isolation_state_visible"] is True
     assert details["credential_egress_state_visible"] is True
+    assert details["workspace_escape_state_visible"] is True
     assert details["process_environment_state_visible"] is True
+    assert details["browser_cookie_session_state_visible"] is True
+    assert details["hostile_provider_replay_state_visible"] is True
+    assert details["capability_trust_matrix_visible"] is True
+    assert details["receipt_surface_completeness_visible"] is True
     assert details["claim_boundary_visible"] is True
     assert details["receipt_surfaces_visible"] is True
 

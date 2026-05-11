@@ -152,6 +152,7 @@ async def test_source_evidence_endpoint_reads_existing_browser_snapshot():
     async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.post(
             "/api/capabilities/source-evidence",
+            headers={"X-Seraph-Session-Id": "session-1"},
             json={
                 "contract": "webpage.read",
                 "source": "browser_session",
@@ -166,6 +167,39 @@ async def test_source_evidence_endpoint_reads_existing_browser_snapshot():
     assert result["adapter"]["name"] == "browser_session"
     assert result["items"][0]["kind"] == "browser_snapshot"
     assert result["items"][0]["metadata"]["ref"] == payload["latest_ref"]
+
+
+@pytest.mark.asyncio
+async def test_source_evidence_endpoint_denies_cross_session_browser_snapshot_owner():
+    payload = browser_session_runtime.open_session(
+        owner_session_id="session-1",
+        url="https://example.com/context",
+        provider_name="local-browser",
+        provider_kind="local",
+        execution_mode="local_runtime",
+        capture="extract",
+        content="Snapshot content from another browser session.",
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as client:
+        response = await client.post(
+            "/api/capabilities/source-evidence",
+            headers={"X-Seraph-Session-Id": "session-2"},
+            json={
+                "contract": "webpage.read",
+                "source": "browser_session",
+                "owner_session_id": "session-1",
+                "ref": payload["latest_ref"],
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "failed"
+    assert result["items"] == []
+    assert result["warnings"] == [
+        "browser_session evidence collection owner_session_id does not match the active runtime session."
+    ]
 
 
 @pytest.mark.asyncio

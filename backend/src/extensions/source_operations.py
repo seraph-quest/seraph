@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from src.approval.runtime import get_current_session_id
 from src.browser.sessions import browser_session_runtime
 from src.extensions.source_capabilities import list_source_capability_inventory
 from src.audit.runtime import log_integration_event_sync
@@ -1954,12 +1955,20 @@ def collect_source_evidence_bundle(
         response["items"] = [_build_page_item(url.strip(), str(content), source_name)]
         response["status"] = "ok"
     elif source_name == "browser_session":
-        if not owner_session_id.strip():
+        runtime_owner_session_id = get_current_session_id()
+        requested_owner_session_id = owner_session_id.strip()
+        if not runtime_owner_session_id:
             response["status"] = "failed"
-            response["warnings"].append("browser_session evidence collection requires owner_session_id.")
+            response["warnings"].append("browser_session evidence collection requires an active runtime session.")
+            return response
+        if requested_owner_session_id and requested_owner_session_id != runtime_owner_session_id:
+            response["status"] = "failed"
+            response["warnings"].append(
+                "browser_session evidence collection owner_session_id does not match the active runtime session."
+            )
             return response
         payload = _browser_session_payload(
-            owner_session_id=owner_session_id.strip(),
+            owner_session_id=runtime_owner_session_id,
             ref=ref.strip(),
             session_id=session_id.strip(),
         )

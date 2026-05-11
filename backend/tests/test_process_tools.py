@@ -40,6 +40,15 @@ def _write_script(name: str, body: str) -> str:
     return script_path.name
 
 
+def _write_workspace_file(name: str, body: str) -> str:
+    root = Path(settings.workspace_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    file_path = root / name
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(body, encoding="utf-8")
+    return name
+
+
 def test_run_command_success():
     script_name = _write_script(
         "wave1_process_echo.py",
@@ -122,6 +131,50 @@ def test_run_command_rejects_grep_file_argument_outside_workspace():
     assert result == "Error: path argument must stay within the workspace."
 
 
+def test_run_command_rejects_cat_secret_like_workspace_file():
+    _write_workspace_file(".env", "SERAPH_TEST_SECRET=do-not-read\n")
+
+    result = run_command(command="cat", args_json='[".env"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_cat_filesystem_secret_name():
+    _write_workspace_file("id_rsa", "PRIVATE KEY\n")
+
+    result = run_command(command="cat", args_json='["id_rsa"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+@pytest.mark.parametrize("command", ["grep", "rg"])
+def test_run_command_rejects_search_of_secret_like_workspace_file(command):
+    _write_workspace_file(".env.local", "SERAPH_TEST_SECRET=do-not-search\n")
+
+    result = run_command(command=command, args_json='["SERAPH_TEST_SECRET",".env.local"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+@pytest.mark.parametrize(
+    ("command", "args_json", "label"),
+    [
+        ("grep", '["-R","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["-R","SERAPH_TEST_SECRET"]', "path argument"),
+        ("rg", '["SERAPH_TEST_SECRET","."]', "path argument"),
+        ("rg", '["SERAPH_TEST_SECRET"]', "path argument"),
+        ("find", '[".","-name",".env","-print"]', "search path"),
+        ("find", '[]', "search path"),
+    ],
+)
+def test_run_command_rejects_recursive_search_paths_containing_secret_like_files(command, args_json, label):
+    _write_workspace_file(".env", "SERAPH_TEST_SECRET=do-not-search\n")
+
+    result = run_command(command=command, args_json=args_json)
+
+    assert result == f"Error: {label} cannot recursively search workspace paths containing secret-like files."
+
+
 def test_run_command_rejects_grep_exclude_from_outside_workspace():
     result = run_command(command="grep", args_json='["--exclude-from","/etc/hosts","localhost","hosts.txt"]')
     assert result == "Error: --exclude-from path must stay within the workspace."
@@ -155,6 +208,32 @@ def test_run_command_rejects_grep_clustered_file_flag_outside_workspace():
 def test_run_command_rejects_sed_clustered_file_flag_outside_workspace():
     result = run_command(command="sed", args_json='["-nf/etc/hosts","hosts.txt"]')
     assert result == "Error: -f path must stay within the workspace."
+
+
+@pytest.mark.parametrize("find_action", ["-exec", "-ok"])
+def test_run_command_rejects_dangerous_find_exec_and_ok_actions(find_action):
+    result = run_command(command="find", args_json=f'[".","-name","*.py","{find_action}","cat","{{}}",";"]')
+
+    assert result == f"Error: find action {find_action} is blocked in the process runtime."
+
+
+@pytest.mark.parametrize(
+    ("command", "args_json"),
+    [
+        ("cat", '["outside-link.txt"]'),
+        ("grep", '["needle","outside-link.txt"]'),
+    ],
+)
+def test_run_command_rejects_symlink_to_outside_workspace_path_arguments(tmp_path, command, args_json):
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("needle\n", encoding="utf-8")
+    workspace_link = Path(settings.workspace_dir) / "outside-link.txt"
+    workspace_link.unlink(missing_ok=True)
+    workspace_link.symlink_to(outside_file)
+
+    result = run_command(command=command, args_json=args_json)
+
+    assert result == "Error: path argument must stay within the workspace."
 
 
 def test_start_process_rejects_absolute_script_path_outside_workspace():

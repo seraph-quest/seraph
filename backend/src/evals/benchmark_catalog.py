@@ -32,6 +32,7 @@ from src.memory.superiority_benchmark import (
     M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
     M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
 )
+from src.replay.benchmark import LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES, LIVE_REPLAY_BENCHMARK_SUITE_NAME
 from src.security.benchmark import TRUST_BOUNDARY_BENCHMARK_SCENARIO_NAMES, TRUST_BOUNDARY_BENCHMARK_SUITE_NAME
 from src.security.secure_host_benchmark import (
     SECURE_CAPABILITY_HOST_BENCHMARK_SCENARIO_NAMES,
@@ -175,6 +176,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live workload replay and external long-context benchmark parity still remain for future work.",
         scenario_names=WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,
+        label="Live-ish long-horizon eval replay",
+        description=(
+            "Pins fake-provider, time-stable replay receipts across memory, workflow, reach, security, "
+            "and cockpit/operator surfaces before stronger live long-horizon quality claims."
+        ),
+        benchmark_axis="live_long_horizon_eval_replay",
+        operator_summary=(
+            "Long-horizon proof now has a replay substrate with failure taxonomy and operator receipts instead of "
+            "depending on broad local shards or live provider behavior."
+        ),
+        remaining_gap=(
+            "Live human-outcome studies, real provider attestation, and production external-channel replay remain future proof work."
+        ),
+        scenario_names=LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,

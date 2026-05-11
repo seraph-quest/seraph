@@ -973,6 +973,49 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_live_replay_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "live_long_horizon_eval_replay_v1",
+                    "benchmark_posture": "live_replay_ci_gated_operator_visible",
+                    "operator_status": "live_replay_receipts_visible",
+                    "scenario_count": 5,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "fixture_state": "time_stable_fake_provider_replays",
+                    "coverage_state": "memory_workflow_reach_security_cockpit_covered",
+                    "taxonomy_state": "surface_failure_recovery_claim_boundary_visible",
+                    "operator_receipt_state": "benchmark_activity_workflow_guardian_receipts_visible",
+                    "claim_boundary": "deterministic_liveish_replay_proof_not_live_human_outcome_or_provider_attestation",
+                },
+                "scenario_names": [
+                    "live_replay_fixture_contract_behavior",
+                    "live_replay_cross_surface_failure_taxonomy_behavior",
+                    "live_replay_surface_coverage_behavior",
+                    "live_replay_operator_receipt_behavior",
+                    "operator_live_replay_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "replay_fixtures": [],
+                "failure_report": [],
+                "policy": {
+                    "fixture_policy": "fake_providers_and_explicit_time_anchors_required",
+                    "coverage_policy": "memory_workflow_reach_security_and_cockpit_surfaces_must_all_have_replay_receipts",
+                    "failure_taxonomy_policy": "surface_failure_recovery_and_claim_boundary_must_be_operator_visible",
+                    "claim_boundary": "deterministic_liveish_replay_proof_not_live_human_outcome_or_provider_attestation",
+                    "receipt_surfaces": [
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/live-long-horizon-replay-benchmark",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_trust_boundary_benchmark_report",
         AsyncMock(
             return_value={
@@ -1454,7 +1497,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 16
+    assert payload["summary"]["suite_count"] == 17
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1467,6 +1510,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
+    assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert payload["summary"]["m9_governed_ecosystem_benchmark_posture"] == "m9_ci_gated_operator_visible"
     assert (
@@ -1500,6 +1544,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     workflow_suite = next(item for item in payload["suites"] if item["name"] == "workflow_endurance_and_repair")
     assert "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"]
     assert workflow_suite["scenario_count"] >= 4
+    live_replay_suite = next(item for item in payload["suites"] if item["name"] == "live_long_horizon_eval_replay_v1")
+    assert "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"]
+    assert live_replay_suite["scenario_count"] == 5
     trust_suite = next(item for item in payload["suites"] if item["name"] == "trust_boundary_and_safety_receipts")
     assert "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"]
     assert trust_suite["scenario_count"] >= 7
@@ -1543,6 +1590,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["m7_operator_cockpit_benchmark"]["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
     assert payload["m8_guardian_brain_benchmark"]["summary"]["suite_name"] == "m8_guardian_intervention_quality"
     assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
+    assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
+    assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
     assert payload["m6_memory_superiority_benchmark"]["policy"]["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts"
     assert payload["m9_governed_ecosystem_benchmark"]["summary"]["suite_name"] == "m9_governed_ecosystem"
@@ -1672,6 +1721,59 @@ async def test_operator_m8_guardian_intervention_benchmark_surface_reports_polic
     assert payload["policy"]["milestone_contract"] == "m8_guardian_brain_and_intervention_quality_ship_as_one_ready_pr"
     assert payload["policy"]["claim_boundary"] == "deterministic_guardian_judgment_receipts_not_live_superiority_claim"
     assert "/api/operator/m8-guardian-brain" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_live_replay_benchmark_surface_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/live-long-horizon-replay-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
+    assert payload["summary"]["operator_status"] == "live_replay_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["fixture_state"] == "time_stable_fake_provider_replays"
+    assert payload["summary"]["coverage_state"] == "memory_workflow_reach_security_cockpit_covered"
+    assert payload["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
+    assert (
+        payload["policy"]["claim_boundary"]
+        == "deterministic_liveish_replay_proof_not_live_human_outcome_or_provider_attestation"
+    )
+    assert "/api/operator/live-long-horizon-replay-benchmark" in payload["policy"]["receipt_surfaces"]
+    assert {fixture["surface"] for fixture in payload["replay_fixtures"]} == {
+        "memory",
+        "workflow",
+        "reach",
+        "security",
+        "cockpit",
+    }
+
+
+@pytest.mark.asyncio
+async def test_operator_live_replay_benchmark_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=5,
+        passed=4,
+        failed=1,
+        duration_ms=100,
+        results=[
+            SimpleNamespace(
+                name="live_replay_surface_coverage_behavior",
+                passed=False,
+                error="missing reach replay",
+            )
+        ],
+    )
+
+    with patch("src.replay.benchmark._run_live_replay_benchmark_suite", AsyncMock(return_value=failing_summary)):
+        resp = await client.get("/api/operator/live-long-horizon-replay-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "live_replay_ci_regressions_detected_operator_visible"
+    assert payload["summary"]["active_failure_count"] == 1
+    assert payload["summary"]["coverage_state"] == "regressions_detected"
+    assert payload["failure_report"][0]["scenario_name"] == "live_replay_surface_coverage_behavior"
 
 
 @pytest.mark.asyncio

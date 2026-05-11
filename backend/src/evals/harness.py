@@ -96,6 +96,13 @@ from src.memory.superiority_benchmark import (
     M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
     M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
 )
+from src.replay.benchmark import (
+    LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES,
+    LIVE_REPLAY_BENCHMARK_SUITE_NAME,
+    live_replay_failure_taxonomy,
+    live_replay_fixture_bundle,
+    live_replay_policy_payload,
+)
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
@@ -2045,6 +2052,97 @@ def _eval_secure_host_receipt_surface_completeness_behavior() -> dict[str, Any]:
         "activity_source_visible": activity_receipt["source"] == "provider_replay",
         "activity_destination_visible": isinstance(activity_receipt["destination"], list),
         "activity_recovery_posture_visible": activity_receipt["recovery_posture"] == "recoverable",
+    }
+
+
+def _eval_live_replay_fixture_contract_behavior() -> dict[str, Any]:
+    fixtures = live_replay_fixture_bundle()
+    policy = live_replay_policy_payload()
+    surfaces = {fixture["surface"] for fixture in fixtures}
+    return {
+        "fixed_time_anchor": all(fixture["time_anchor"] == "2026-03-18T09:00:00+00:00" for fixture in fixtures),
+        "fake_providers_only": all(str(fixture["fake_provider"]).endswith("_fixture") for fixture in fixtures),
+        "deterministic_receipts": all(fixture["deterministic"] is True for fixture in fixtures),
+        "all_required_surfaces_present": {"memory", "workflow", "reach", "security", "cockpit"}.issubset(surfaces),
+        "claim_boundary_visible": all(fixture["claim_boundary"] == policy["claim_boundary"] for fixture in fixtures),
+    }
+
+
+def _eval_live_replay_cross_surface_failure_taxonomy_behavior() -> dict[str, Any]:
+    taxonomy = live_replay_failure_taxonomy()
+    names = {item["name"] for item in taxonomy}
+    surfaces = {item["surface"] for item in taxonomy}
+    return {
+        "memory_failure_visible": "memory_replay_drift" in names,
+        "workflow_failure_visible": "workflow_replay_drift" in names,
+        "reach_failure_visible": "reach_replay_gap" in names,
+        "security_failure_visible": "security_replay_violation" in names,
+        "cockpit_failure_visible": "cockpit_receipt_gap" in names,
+        "provider_failure_visible": "provider_nondeterminism" in names,
+        "all_items_have_severity": all(bool(item.get("severity")) for item in taxonomy),
+        "required_surfaces_present": {"memory", "workflow", "reach", "security", "cockpit", "provider"}.issubset(
+            surfaces
+        ),
+    }
+
+
+def _eval_live_replay_surface_coverage_behavior() -> dict[str, Any]:
+    fixtures = live_replay_fixture_bundle()
+    by_surface = {fixture["surface"]: fixture for fixture in fixtures}
+    return {
+        "memory_replay_has_provider_conflict_evidence": "stale_external_provider_hint"
+        in by_surface["memory"]["evidence"],
+        "workflow_replay_has_checkpoint_evidence": "checkpoint_receipt" in by_surface["workflow"]["evidence"],
+        "reach_replay_has_thread_continuity_evidence": "thread_reference" in by_surface["reach"]["evidence"],
+        "security_replay_has_hostile_provider_evidence": "trust_expansion_attempt" in by_surface["security"]["evidence"],
+        "cockpit_replay_has_operator_drilldown_evidence": "benchmark_card" in by_surface["cockpit"]["evidence"],
+        "all_replays_have_recovery_posture": all(bool(fixture["recovery_posture"]) for fixture in fixtures),
+    }
+
+
+def _eval_live_replay_operator_receipt_behavior() -> dict[str, Any]:
+    policy = live_replay_policy_payload()
+    fixtures = live_replay_fixture_bundle()
+    required_surfaces = set(policy["receipt_surfaces"])
+    return {
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in required_surfaces,
+        "dedicated_surface_visible": "/api/operator/live-long-horizon-replay-benchmark" in required_surfaces,
+        "activity_surface_visible": "/api/operator/activity-ledger" in required_surfaces,
+        "workflow_surface_visible": "/api/operator/workflow-orchestration" in required_surfaces,
+        "guardian_state_surface_visible": "/api/operator/guardian-state" in required_surfaces,
+        "ci_gate_visible": policy["ci_gate_mode"] == "required_benchmark_suite",
+        "operator_visible_receipts": all(fixture["operator_visible"] is True for fixture in fixtures),
+    }
+
+
+async def _eval_operator_live_replay_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.replay.benchmark import build_live_replay_benchmark_report
+
+    scenario_names = list(LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES)
+    summary = types.SimpleNamespace(
+        total=len(scenario_names),
+        passed=len(scenario_names),
+        failed=0,
+        duration_ms=42,
+        results=[types.SimpleNamespace(name=name, passed=True, error="") for name in scenario_names],
+    )
+    with patch(
+        "src.replay.benchmark._run_live_replay_benchmark_suite",
+        AsyncMock(return_value=summary),
+    ):
+        payload = await build_live_replay_benchmark_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "live_replay_receipts_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES),
+        "fixture_state_visible": payload["summary"]["fixture_state"] == "time_stable_fake_provider_replays",
+        "coverage_state_visible": payload["summary"]["coverage_state"] == "memory_workflow_reach_security_cockpit_covered",
+        "taxonomy_state_visible": payload["summary"]["taxonomy_state"]
+        == "surface_failure_recovery_claim_boundary_visible",
+        "operator_receipt_state_visible": payload["summary"]["operator_receipt_state"]
+        == "benchmark_activity_workflow_guardian_receipts_visible",
+        "claim_boundary_visible": payload["summary"]["claim_boundary"] == payload["policy"]["claim_boundary"],
+        "fixture_count_matches_surfaces": len(payload["replay_fixtures"]) == 5,
     }
 
 
@@ -12286,6 +12384,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     guardian_user_model_suite = next(item for item in suites if item["name"] == "guardian_user_model_restraint")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
     workflow_suite = next(item for item in suites if item["name"] == "workflow_endurance_and_repair")
+    live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
     secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
@@ -12306,6 +12405,11 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "guardian_user_model_suite_present": "guardian_clarification_restraint_behavior" in guardian_user_model_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "workflow_suite_present": "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"],
+        "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
+        "live_replay_suite_scenario_count_matches": (
+            live_replay_suite["scenario_count"] == len(LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "live_replay_suite_axis_matches": live_replay_suite["benchmark_axis"] == "live_long_horizon_eval_replay",
         "m5_suite_present": "m5_operating_layer_payload_behavior" in m5_suite["scenario_names"],
         "m5_suite_scenario_count_matches": m5_suite["scenario_count"] == len(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
         "trust_suite_present": "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"],
@@ -12353,6 +12457,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "m9_governed_ecosystem_gate_required": (
             M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
+        "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
         "gate_requires_review": bool(gate_policy["requires_human_review"]),
         "gate_blocks_constraint_failure": bool(gate_policy["blocks_on_constraint_failure"]),
@@ -13648,6 +13753,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_workflow_multi_session_endurance_behavior,
     ),
     EvalScenario(
+        name="live_replay_fixture_contract_behavior",
+        category="observability",
+        description="Live-ish replay fixtures use fixed timestamps, fake providers, deterministic receipts, and explicit claim boundaries.",
+        runner=_eval_live_replay_fixture_contract_behavior,
+    ),
+    EvalScenario(
+        name="live_replay_cross_surface_failure_taxonomy_behavior",
+        category="observability",
+        description="Live-ish replay proof carries a cross-surface failure taxonomy for memory, workflow, reach, security, cockpit, and provider drift.",
+        runner=_eval_live_replay_cross_surface_failure_taxonomy_behavior,
+    ),
+    EvalScenario(
+        name="live_replay_surface_coverage_behavior",
+        category="behavior",
+        description="Live-ish replay fixtures cover memory, workflow, reach, security, and cockpit evidence in one deterministic substrate.",
+        runner=_eval_live_replay_surface_coverage_behavior,
+    ),
+    EvalScenario(
+        name="live_replay_operator_receipt_behavior",
+        category="observability",
+        description="Live-ish replay receipts are visible through benchmark, activity, workflow, and guardian-state operator surfaces.",
+        runner=_eval_live_replay_operator_receipt_behavior,
+    ),
+    EvalScenario(
         name="engineering_memory_bundle_behavior",
         category="behavior",
         description="Operator engineering memory groups repository and pull-request continuity into searchable bundles instead of scattering the context across sessions, approvals, and audit rows.",
@@ -13742,6 +13871,12 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Operator secure capability-host benchmark surface exposes live least-privilege enforcement, claim boundaries, and receipt surfaces directly.",
         runner=_eval_operator_secure_capability_host_benchmark_surface_behavior,
+    ),
+    EvalScenario(
+        name="operator_live_replay_benchmark_surface_behavior",
+        category="observability",
+        description="Operator live long-horizon replay benchmark surface exposes fixture, coverage, taxonomy, receipt, and claim-boundary posture directly.",
+        runner=_eval_operator_live_replay_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="operator_computer_use_benchmark_surface_behavior",

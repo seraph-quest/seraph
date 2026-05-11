@@ -5,16 +5,22 @@
 **Never commit directly to `develop` or `main`.**
 **Never create draft pull requests.**
 **Pull requests should complete whole milestones or batch-sized work, not tiny slices.**
+**When the user directs a stacked batch train, do all selected board batches as stacked ready PRs and report back only when the stack is complete.**
 
-1. **Feature/fix branches**: Always create a `feat/` or `fix/` branch off `develop` for your work.
-2. **Merge to develop**: Once the feature branch is ready, merge it into `develop` (typically via PR).
-3. **Merge to main**: Only merge `develop` into `main` when explicitly requested by the user.
-4. **Ready PRs only**: Pull requests must be opened ready for review unless the user explicitly requests a draft.
-5. **Batch scope**: Default PR scope is a complete milestone or substantial batch. Use issue checklists, child issues, and internal commits for slices, but keep the team working until the batch acceptance criteria are complete.
+1. **Feature/fix branches**: Always create a `feat/` or `fix/` branch for your work. By default branch from `develop`.
+2. **Stacked batch trains**: If the user explicitly asks to stack board batches, create the first batch branch from `develop`, then create each following batch branch from the previous batch branch. Open each PR against the previous branch so the stack can be reviewed and merged in order.
+3. **Merge to develop**: For normal unstacked work, merge the feature branch into `develop` via PR. For stacked trains, merge the stack in order until the first branch lands in `develop`.
+4. **Merge to main**: Only merge `develop` into `main` when explicitly requested by the user.
+5. **Ready PRs only**: Pull requests must be opened ready for review unless the user explicitly requests a draft.
+6. **Batch scope**: Default PR scope is a complete milestone or substantial batch. Use issue checklists, child issues, and internal commits for slices, but keep the team working until the batch acceptance criteria are complete.
 
 ```
 feat/my-feature  →  develop  →  main
 fix/my-bugfix    →  develop  →  main
+
+feat/batch-one  →  develop
+feat/batch-two  →  feat/batch-one
+feat/batch-three → feat/batch-two
 ```
 
 ## Docs And Execution Contract

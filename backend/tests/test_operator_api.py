@@ -1056,31 +1056,52 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                     "suite_name": "secure_capability_host",
                     "benchmark_posture": "secure_host_ci_gated_operator_visible",
                     "operator_status": "secure_capability_host_receipts_visible",
-                    "scenario_count": 7,
-                    "dimension_count": 5,
-                    "failure_mode_count": 6,
+                    "scenario_count": 13,
+                    "dimension_count": 9,
+                    "failure_mode_count": 9,
                     "active_failure_count": 0,
+                    "host_isolation_state": "deterministic_choke_points_claim_bounded",
                     "credential_egress_state": "session_field_host_allowlist_enforced",
                     "workspace_secret_file_state": "generic_read_patch_blocked",
+                    "workspace_escape_state": "workspace_relative_paths_enforced",
                     "process_environment_state": "ambient_secret_env_scrubbed",
+                    "browser_cookie_session_state": "per_run_context_no_storage_state_receipts",
                     "prompt_surface_state": "suspicious_context_quarantined",
                     "delegation_provider_state": "trust_partition_receipts_visible",
+                    "hostile_provider_replay_state": "trust_expanding_replay_blocked",
+                    "capability_trust_matrix_state": "owner_boundary_credential_mutation_receipts_visible",
+                    "receipt_surface_completeness_state": "required_secure_host_surfaces_visible",
                 },
                 "scenario_names": [
                     "secure_host_secret_ref_fail_closed_behavior",
+                    "secure_host_isolation_strategy_report_behavior",
+                    "secure_host_browser_cookie_session_partition_behavior",
                     "secure_host_workspace_secret_path_boundary_behavior",
+                    "secure_host_workspace_escape_boundary_behavior",
                     "secure_host_process_env_isolation_behavior",
                     "secure_host_prompt_injection_quarantine_behavior",
                     "secure_host_delegation_partition_behavior",
                     "secure_host_provider_fallback_boundary_behavior",
+                    "secure_host_hostile_provider_replay_behavior",
+                    "secure_host_capability_trust_matrix_behavior",
+                    "secure_host_receipt_surface_completeness_behavior",
                     "operator_secure_capability_host_benchmark_surface_behavior",
                 ],
                 "dimensions": [],
                 "failure_taxonomy": [],
                 "failure_report": [],
+                "isolation_strategy": {},
+                "browser_partition_policy": {},
+                "capability_trust_regression_matrix": [],
+                "receipt_surface_completeness": {},
                 "policy": {
+                    "host_isolation_policy": "deterministic_choke_points_with_explicit_non_container_claim_boundary",
                     "credential_egress_policy": "session_bound_field_scoped_destination_host_allowlisted_secret_refs",
+                    "workspace_escape_policy": "workspace_relative_paths_and_disposable_worker_roots_must_not_escape",
                     "process_environment_policy": "allowlisted_environment_only_for_foreground_and_background_processes",
+                    "browser_cookie_session_policy": "per_run_browser_contexts_without_persisted_cookie_or_storage_state",
+                    "hostile_provider_replay_policy": "provider_replay_or_fallback_must_not_expand_trust_class_or_reuse_sensitive_context",
+                    "capability_trust_regression_policy": "capability_classes_require_owner_boundary_credential_mutation_audit_receipts",
                     "claim_boundary": "deterministic_secure_host_choke_points_not_full_host_container_isolation",
                     "receipt_surfaces": [
                         "/api/operator/benchmark-proof",
@@ -1484,7 +1505,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert trust_suite["scenario_count"] >= 7
     secure_host_suite = next(item for item in payload["suites"] if item["name"] == "secure_capability_host")
     assert "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"]
-    assert secure_host_suite["scenario_count"] >= 7
+    assert "secure_host_capability_trust_matrix_behavior" in secure_host_suite["scenario_names"]
+    assert secure_host_suite["scenario_count"] >= 13
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
@@ -1747,10 +1769,27 @@ async def test_operator_secure_capability_host_benchmark_surface_reports_policy_
     assert payload["summary"]["suite_name"] == "secure_capability_host"
     assert payload["summary"]["operator_status"] == "secure_capability_host_receipts_visible"
     assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["host_isolation_state"] == "deterministic_choke_points_claim_bounded"
     assert payload["summary"]["credential_egress_state"] == "session_field_host_allowlist_enforced"
     assert payload["summary"]["workspace_secret_file_state"] == "generic_read_patch_blocked"
+    assert payload["summary"]["workspace_escape_state"] == "workspace_relative_paths_enforced"
     assert payload["summary"]["process_environment_state"] == "ambient_secret_env_scrubbed"
+    assert payload["summary"]["browser_cookie_session_state"] == "per_run_context_no_storage_state_receipts"
+    assert payload["summary"]["hostile_provider_replay_state"] == "trust_expanding_replay_blocked"
+    assert payload["summary"]["capability_trust_matrix_state"] == "owner_boundary_credential_mutation_receipts_visible"
+    assert "secure_host_workspace_escape_boundary_behavior" in payload["scenario_names"]
+    assert "secure_host_receipt_surface_completeness_behavior" in payload["scenario_names"]
+    assert "full_host_container_isolation" in payload["isolation_strategy"]["not_claimed"]
+    assert payload["browser_partition_policy"]["claim_boundary"] == (
+        "deterministic_browser_partition_strategy_not_complete_authenticated_browser_isolation"
+    )
+    assert len(payload["capability_trust_regression_matrix"]) >= 7
+    assert "/api/activity/ledger" in payload["receipt_surface_completeness"]["required_surfaces"]
+    assert "claim_boundary" in payload["receipt_surface_completeness"]["required_receipt_fields"]
+    assert payload["policy"]["host_isolation_policy"] == "deterministic_choke_points_with_explicit_non_container_claim_boundary"
     assert payload["policy"]["credential_egress_policy"] == "session_bound_field_scoped_destination_host_allowlisted_secret_refs"
+    assert payload["policy"]["browser_cookie_session_policy"] == "per_run_browser_contexts_without_persisted_cookie_or_storage_state"
+    assert payload["policy"]["hostile_provider_replay_policy"] == "provider_replay_or_fallback_must_not_expand_trust_class_or_reuse_sensitive_context"
     assert payload["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
     assert "/api/operator/secure-capability-host-benchmark" in payload["policy"]["receipt_surfaces"]
     assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"

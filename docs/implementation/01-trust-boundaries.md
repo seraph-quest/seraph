@@ -30,7 +30,7 @@
 - [x] tool metadata and runtime secret-ref handling now fail closed to explicit field-level injection surfaces, and connector-backed authenticated mutation bundles now reject undeclared payload fields instead of passing arbitrary write arguments through to external runtimes
 - [x] managed execution now also uses disposable worker roots outside the workspace for direct command and background-process runtime state, MCP secret-ref resolution now requires an explicit credential-egress allowlist, and delegated/workflow/operator trust receipts now preserve connector-egress plus branch-handoff trust partitions instead of flattening privileged execution back to a generic session boundary
 - [x] trust posture now also has a named deterministic benchmark surface: `trust_boundary_and_safety_receipts` pins secret-egress controls, delegation/background partitioning, workflow replay drift blocking, and operator-visible safety receipts into one explicit operator report instead of leaving trust proof spread across raw eval names and isolated API receipts
-- [x] the M3 secure-host batch now adds live enforcement at concrete choke points: secret refs fail closed when they are expired, cross-session, or pointed at a non-allowlisted destination host; generic workspace read and patch tools block secret-like files; process execution receives an allowlisted environment; and `secure_capability_host` exposes those receipts through benchmark-proof, a dedicated operator endpoint, and the cockpit
+- [x] the M3 secure-host batch now adds live enforcement at concrete choke points: secret refs fail closed when they are expired, cross-session, or pointed at a non-allowlisted destination host; generic workspace read and patch tools block secret-like files; process execution receives an allowlisted environment; workspace escape attempts fail closed; and `secure_capability_host` exposes host-isolation strategy, browser cookie/session partition strategy, hostile-provider replay blocking, capability/trust regression matrix, and receipt-surface completeness through benchmark-proof, a dedicated operator endpoint, and the cockpit
 
 ## Working On Now
 
@@ -49,12 +49,12 @@
 - [x] this workstream now also ships the first Batch BA aggregate for explicit background-process confirmation policy and session-partitioned process trust metadata, so `start_process` no longer inherits the generic high-risk approval path and process-runtime approvals/audit receipts now carry the narrower managed-process boundary contract
 - [x] this workstream now also ships the second Batch BA aggregate for disposable worker runtime isolation, explicit credential-egress allowlists for secret-bearing MCP execution, and preserved trust-partition receipts across delegated, workflow, and background-handoff surfaces
 - [x] this workstream now also ships Batch BK for adversarial trust-boundary evals and operator safety receipts, so trust posture is CI-gated through a named suite and exposed directly through benchmark-proof and trust-boundary benchmark operator surfaces
-- [x] this workstream now also ships the M3 secure capability-host batch for `#428`, with live secret-ref, filesystem, process-environment, prompt-surface, delegation, and provider-fallback proof in one benchmark lane
+- [x] this workstream now also ships the Batch BO secure capability-host proof for `#455`, with live secret-ref, filesystem, workspace-escape, process-environment, prompt-surface, delegation, provider-fallback, hostile-provider replay, browser partition-strategy, capability/trust matrix, and receipt-surface completeness coverage in one benchmark lane
 
 ## Still To Do On `develop`
 
-- [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, disposable worker roots, credential-egress policy, operator-visible trust benchmark, secure-host benchmark, and specialist-surface hardening passes
-- [ ] add deeper policy distinctions inside MCP, browser, provider fallback, and external execution paths
+- [ ] tighten isolation between planning, privileged execution, connector credential use, approval replay, and future workflow layers beyond the current metadata, disposable worker roots, credential-egress policy, browser partition strategy, operator-visible trust benchmark, secure-host benchmark, and specialist-surface hardening passes
+- [ ] add deeper live policy enforcement inside MCP, authenticated browser, provider fallback, and external execution paths beyond the deterministic Batch BO choke-point proof
 - [ ] keep trust UX strict without making approvals noisy or unusable
 
 ## Non-Goals
@@ -68,6 +68,7 @@
 - [x] high-risk actions are pauseable and resumable with audit visibility
 - [x] secret references are now scoped to explicit injection-safe execution surfaces instead of resolving across the whole tool surface
 - [x] secret-like workspace files are blocked from generic read and patch paths
+- [x] workspace escape, browser session-partition strategy, hostile provider replay, capability/trust regression, and receipt-surface completeness are covered by `secure_capability_host`
 - [ ] secret use is fully scoped and auditable end to end across browser/provider credential surfaces
 
 ## Current Slice Record

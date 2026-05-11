@@ -203,6 +203,57 @@ def build_secure_capability_receipt(
     }
 
 
+_TRUST_CLASS_ORDER = {
+    "local": 0,
+    "same_or_narrower_trust_class": 0,
+    "workspace": 1,
+    "managed_connector": 2,
+    "remote_provider": 3,
+    "external_untrusted": 4,
+}
+
+
+def build_provider_replay_receipt(
+    *,
+    selected_provider: str,
+    provider_output: Any,
+    sensitive_values: list[str] | tuple[str, ...] | None = None,
+    source_trust_class: str = "local",
+    target_trust_class: str = "remote_provider",
+    prompt_content: str | None = None,
+) -> dict[str, Any]:
+    """Build a secure-host receipt for provider replay or fallback attempts."""
+    _redacted, secret_echo_detected = redact_secret_values_from_payload(provider_output, sensitive_values or [])
+    prompt_receipt = prompt_injection_receipt(prompt_content)
+    source_rank = _TRUST_CLASS_ORDER.get(str(source_trust_class), 999)
+    target_rank = _TRUST_CLASS_ORDER.get(str(target_trust_class), 999)
+    trust_expansion = target_rank > source_rank
+    blocked = secret_echo_detected or prompt_receipt["status"] == "blocked" or trust_expansion
+    receipt = build_secure_capability_receipt(
+        tool_name="completion_with_fallback",
+        source="provider_replay",
+        prompt_content=prompt_content,
+        provider_route={
+            "selected_provider": selected_provider,
+            "fallback_used": True,
+            "fallback_blocked": blocked,
+            "policy_violation": "hostile_provider_replay" if blocked else "",
+            "trust_state": "hostile_provider_replay_trust_expansion"
+            if trust_expansion
+            else "same_or_narrower_trust_class",
+        },
+    )
+    receipt["provider_replay"] = {
+        "secret_echo_detected": secret_echo_detected,
+        "prompt_injection_detected": prompt_receipt["status"] == "blocked",
+        "trust_expansion": trust_expansion,
+        "source_trust_class": source_trust_class,
+        "target_trust_class": target_trust_class,
+        "selected_provider": selected_provider,
+    }
+    return receipt
+
+
 def redact_secret_values_from_payload(value: Any, secret_values: list[str] | tuple[str, ...]) -> tuple[Any, bool]:
     """Recursively redact known secret values from tool output payloads."""
     filtered_values = sorted(

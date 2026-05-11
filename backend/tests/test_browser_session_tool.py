@@ -88,6 +88,12 @@ def test_browser_session_uses_configured_browser_provider_with_local_fallback(tm
         "description: Browserbase provider\n"
         "provider_kind: browserbase\n"
         "enabled: true\n"
+        "credential_surface: provider_api_key\n"
+        "cookie_scope: provider_browser_context\n"
+        "profile_persistence: provider_managed_ephemeral\n"
+        "owner_scope: runtime_session\n"
+        "remote_transport: provider_api\n"
+        "fallback_policy: local_extract_only\n"
         "config_fields:\n"
         "  - key: api_key\n"
         "    label: Browserbase API Key\n"
@@ -153,6 +159,12 @@ def test_browser_session_lists_staged_provider_inventory(tmp_path, browser_runti
         "description: Managed Browserbase-style browser provider.\n"
         "provider_kind: browserbase\n"
         "enabled: true\n"
+        "credential_surface: provider_api_key\n"
+        "cookie_scope: provider_browser_context\n"
+        "profile_persistence: provider_managed_ephemeral\n"
+        "owner_scope: runtime_session\n"
+        "remote_transport: provider_api\n"
+        "fallback_policy: local_extract_only\n"
         "config_fields:\n"
         "  - key: api_key\n"
         "    label: Browserbase API Key\n"
@@ -186,6 +198,65 @@ def test_browser_session_lists_staged_provider_inventory(tmp_path, browser_runti
     assert "local-browser · local · ready · local_runtime · enabled" in providers
     assert "browserbase · browserbase · staged_local_fallback · local_fallback · selected" in providers
     assert "Managed Browserbase-style browser provider" in providers
+
+
+def test_browser_session_keeps_remote_provider_without_boundary_contract_degraded(tmp_path, browser_runtime_session):
+    workspace = tmp_path / "workspace"
+    extension_dir = workspace / "extensions" / "browserbase-pack"
+    state_path = workspace / "extensions-state.json"
+    (extension_dir / "connectors" / "browser").mkdir(parents=True)
+    workspace.mkdir(exist_ok=True)
+    (extension_dir / "manifest.yaml").write_text(
+        "id: seraph.boundaryless-browserbase\n"
+        "version: 2026.3.24\n"
+        "display_name: Boundaryless Browserbase\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  browser_providers:\n"
+        "    - connectors/browser/browserbase.yaml\n",
+        encoding="utf-8",
+    )
+    (extension_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
+        "name: browserbase\n"
+        "description: Browserbase provider without boundary contract.\n"
+        "provider_kind: browserbase\n"
+        "enabled: true\n"
+        "config_fields:\n"
+        "  - key: api_key\n"
+        "    label: Browserbase API Key\n"
+        "    input: password\n"
+        "    required: true\n",
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "extensions": {
+                    "seraph.boundaryless-browserbase": {
+                        "config": {
+                            "browser_providers": {
+                                "browserbase": {"api_key": "secret"},
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.object(settings, "workspace_dir", str(workspace)):
+        providers = browser_session(action="providers")
+        opened = browser_session(action="open", url="https://example.com", provider="browserbase")
+
+    assert "local-browser · local · ready · local_runtime · selected" in providers
+    assert "browserbase · browserbase · requires_boundary_contract · boundary_contract_required · enabled" in providers
+    assert opened == "Error: Browser provider 'browserbase' is not enabled and configured."
 
 
 def test_browser_session_errors_for_missing_requested_provider(tmp_path, browser_runtime_session):

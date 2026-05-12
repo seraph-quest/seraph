@@ -72,6 +72,15 @@ from src.workflows.operating_layer import (
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
     build_m5_operating_layer_payload,
 )
+from src.workflows.endurance_canary import (
+    LIVE_WORKFLOW_ENDURANCE_CANARY_CLAIM_BOUNDARY,
+    LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
+    LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME,
+    build_live_workflow_endurance_canary_report,
+    live_workflow_endurance_canary_policy_payload,
+    live_workflow_endurance_canary_protocol,
+    live_workflow_endurance_canary_runs,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -9879,6 +9888,111 @@ async def _eval_operator_workflow_endurance_benchmark_surface_behavior() -> dict
     }
 
 
+async def _eval_live_workflow_canary_protocol_behavior() -> dict[str, Any]:
+    policy = live_workflow_endurance_canary_policy_payload()
+    protocol = live_workflow_endurance_canary_protocol()
+    runs = live_workflow_endurance_canary_runs()
+    required_receipts = set(policy["required_receipts"])
+    first_run = runs[0]
+    receipt_fields = {
+        "run_identity",
+        "thread_id",
+        "checkpoint_id" if first_run.get("checkpoint_candidates") else "",
+        "branch_lineage" if any(run.get("parent_run_identity") for run in runs) else "",
+        "delegated_owner"
+        if any(
+            (run.get("approval_context") or {}).get("delegated_specialists")
+            for run in runs
+            if isinstance(run.get("approval_context"), dict)
+        )
+        else "",
+        "artifact_comparison" if any(isinstance(run.get("artifact_comparison"), dict) for run in runs) else "",
+        "audit_trail" if all(run.get("audit_receipts") for run in runs) else "",
+    }
+    return {
+        "suite_name_visible": protocol["replay_command"].find(LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME) >= 0,
+        "fixed_time_anchor_visible": protocol["time_anchor"] == "2026-05-11T09:00:00Z",
+        "claim_boundary_visible": policy["claim_boundary"] == LIVE_WORKFLOW_ENDURANCE_CANARY_CLAIM_BOUNDARY,
+        "durable_engine_not_claimed": "durable_workflow_state_machine" in policy["not_claimed"],
+        "receipt_contract_covers_core_fields": required_receipts.issuperset(receipt_fields - {""}),
+    }
+
+
+async def _eval_live_workflow_canary_failure_recovery_behavior() -> dict[str, Any]:
+    runs = live_workflow_endurance_canary_runs()
+    branch_runs = [run for run in runs if run.get("parent_run_identity")]
+    failure_run = next(run for run in runs if isinstance(run.get("failure_injection"), dict))
+    recovery_run = next(run for run in runs if isinstance(run.get("recovery_action"), dict))
+    comparison_runs = [
+        run for run in runs
+        if isinstance(run.get("artifact_comparison"), dict)
+        and run["artifact_comparison"].get("comparison_id")
+    ]
+    return {
+        "multi_session_visible": len({run.get("thread_id") for run in runs}) >= 2,
+        "branch_lineage_visible": bool(branch_runs)
+        and all(run.get("root_run_identity") for run in branch_runs),
+        "failure_injection_visible": failure_run["failure_injection"]["step_id"] == "publish",
+        "retry_recovery_visible": recovery_run["recovery_action"]["from_step"] == "publish"
+        and recovery_run["recovery_action"]["result"] == "succeeded",
+        "artifact_comparison_visible": bool(comparison_runs),
+        "audit_receipts_visible": all(run.get("audit_receipts") for run in runs),
+    }
+
+
+async def _eval_live_workflow_canary_approval_preservation_behavior() -> dict[str, Any]:
+    runs = live_workflow_endurance_canary_runs()
+    preserved = [
+        run for run in runs
+        if isinstance(run.get("approval_preservation"), dict)
+    ]
+    drift_blocked = [
+        run for run in runs
+        if run.get("approval_context_mismatch") is True
+        and run.get("replay_block_reason") == "approval_context_changed"
+    ]
+    preservation = preserved[0]["approval_preservation"]
+    return {
+        "approval_preservation_visible": bool(preserved),
+        "fingerprint_preserved": preservation["fingerprint_before"] == preservation["fingerprint_after"],
+        "approval_laundering_blocked": preservation["laundering_blocked"] is True,
+        "trust_boundary_drift_blocks_replay": bool(drift_blocked),
+        "drift_checkpoint_suppressed": drift_blocked[0]["checkpoint_candidates"] == [],
+    }
+
+
+async def _eval_operator_live_workflow_canary_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_live_workflow_endurance_canary
+
+    fake_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="observability",
+                description="Live workflow canary fixture",
+                passed=True,
+                duration_ms=1,
+                details={"fixture": "live_workflow_canary"},
+            )
+            for name in LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES
+        ],
+        duration_ms=len(LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.workflows.endurance_canary._run_live_workflow_endurance_canary_suite",
+        AsyncMock(return_value=fake_summary),
+    ):
+        payload = await get_operator_live_workflow_endurance_canary()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "live_workflow_canary_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES),
+        "claim_boundary_visible": payload["summary"]["claim_boundary"] == LIVE_WORKFLOW_ENDURANCE_CANARY_CLAIM_BOUNDARY,
+        "operator_story_complete": all(payload["operator_story"].values()),
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"],
+    }
+
+
 async def _eval_operator_trust_boundary_benchmark_surface_behavior() -> dict[str, Any]:
     from src.api.operator import get_operator_trust_boundary_benchmark
 
@@ -12893,6 +13007,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     guardian_user_model_suite = next(item for item in suites if item["name"] == "guardian_user_model_restraint")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
     workflow_suite = next(item for item in suites if item["name"] == "workflow_endurance_and_repair")
+    live_workflow_canary_suite = next(
+        item for item in suites if item["name"] == LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
@@ -12916,6 +13033,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "guardian_user_model_suite_present": "guardian_clarification_restraint_behavior" in guardian_user_model_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
         "workflow_suite_present": "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"],
+        "live_workflow_canary_suite_present": (
+            "live_workflow_canary_protocol_behavior" in live_workflow_canary_suite["scenario_names"]
+        ),
+        "live_workflow_canary_suite_scenario_count_matches": (
+            live_workflow_canary_suite["scenario_count"] == len(LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES)
+        ),
+        "live_workflow_canary_suite_axis_matches": (
+            live_workflow_canary_suite["benchmark_axis"] == "live_workflow_endurance_canary"
+        ),
+        "live_workflow_canary_gate_required": (
+            LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
             live_replay_suite["scenario_count"] == len(LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES)
@@ -14284,6 +14413,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Multi-session workflow orchestration preserves distinct queue posture, repair state, and backup-branch readiness across active threads.",
         runner=_eval_workflow_multi_session_endurance_behavior,
+    ),
+    EvalScenario(
+        name="live_workflow_canary_protocol_behavior",
+        category="observability",
+        description="Live workflow endurance canary defines a deterministic replay protocol, receipt contract, and durable-engine claim boundary.",
+        runner=_eval_live_workflow_canary_protocol_behavior,
+    ),
+    EvalScenario(
+        name="live_workflow_canary_failure_recovery_behavior",
+        category="behavior",
+        description="Live workflow endurance canary preserves multi-session branch lineage through checkpoint, injected failure, repair, artifact comparison, and audit receipts.",
+        runner=_eval_live_workflow_canary_failure_recovery_behavior,
+    ),
+    EvalScenario(
+        name="live_workflow_canary_approval_preservation_behavior",
+        category="behavior",
+        description="Live workflow endurance canary preserves approval fingerprints and fails closed when recovery changes the trust boundary.",
+        runner=_eval_live_workflow_canary_approval_preservation_behavior,
+    ),
+    EvalScenario(
+        name="operator_live_workflow_canary_surface_behavior",
+        category="observability",
+        description="Operator live-workflow canary surface exposes the complete canary story without source diving.",
+        runner=_eval_operator_live_workflow_canary_surface_behavior,
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

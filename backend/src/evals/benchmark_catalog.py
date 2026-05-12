@@ -52,6 +52,10 @@ from src.workflows.benchmark import (
     WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
     WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,
 )
+from src.workflows.endurance_canary import (
+    LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
+    LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -200,6 +204,25 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader live workload replay and external long-context benchmark parity still remain for future work.",
         scenario_names=WORKFLOW_ENDURANCE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME,
+        label="Live workflow endurance canary",
+        description=(
+            "Pins a replayable canary receipt for multi-session workflow endurance across delegated ownership, "
+            "checkpoint branching, injected failure, recovery, artifact comparison, approval preservation, "
+            "trust-boundary blocking, and final audit trail."
+        ),
+        benchmark_axis="live_workflow_endurance_canary",
+        operator_summary=(
+            "Long-running workflow endurance now has an operator-visible canary receipt over audit-projected state, "
+            "without claiming a durable workflow engine."
+        ),
+        remaining_gap=(
+            "Crash-safe durable workflow execution, heartbeat or reactive triggers, and production live workload studies "
+            "remain future proof work."
+        ),
+        scenario_names=LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

@@ -132,8 +132,8 @@ This stack is the roadmap-level ordering for the next large batches after the me
    execute #440 as a multi-session canary covering checkpoint, branch, failure injection, recovery, delegated ownership, artifact comparison, approval preservation, and audit receipts.
 7. [ ] `durable-workflow-engine-v1`:
    promote workflow control from audit-projected receipts toward a minimal durable state kernel with crash-safe resume, heartbeat or reactive triggers, repair, retry, and delegated artifact review lifecycle.
-8. [ ] `one-excellent-reach-channel-canary`:
-   execute #438 for a single selected external channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
+8. [x] `one-excellent-reach-channel-canary`:
+   execute #438 for the selected native-notification channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
 9. [ ] `guardian-world-model-learning-quality-v2`:
    deepen multi-signal learning, stale and conflicting evidence arbitration, salience and confidence calibration, and false-positive or false-negative accounting with live-ish intervention replay.
 10. [ ] `governed-extension-marketplace-hardening-foundations`:

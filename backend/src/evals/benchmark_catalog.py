@@ -23,6 +23,10 @@ from src.extensions.benchmark import (
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
 )
+from src.extensions.reach_channel_canary import (
+    ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
+    ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -315,6 +319,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Production-grade live pairing protocols, broader mobile or voice reach, and real external-channel abuse replay still remain future work."
         ),
         scenario_names=CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+        label="One excellent reach channel canary",
+        description=(
+            "Pins the selected native-notification canary across pairing, revocation, health, retry, "
+            "thread and memory continuity, approval handoff, audit receipts, degraded-state UI, "
+            "and one-channel scope control."
+        ),
+        benchmark_axis="one_excellent_reach_channel_canary",
+        operator_summary=(
+            "Seraph now proves one native-notification reach path deeply before claiming broader external-channel reach."
+        ),
+        remaining_gap=(
+            "Real Slack, Discord, Telegram, email, mobile, voice, and production pairing coverage remain future work."
+        ),
+        scenario_names=ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=M2_EXECUTION_BENCHMARK_SUITE_NAME,

@@ -40,6 +40,7 @@ from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
 from src.extensions.benchmark import build_m9_governed_ecosystem_benchmark_report
+from src.extensions.reach_channel_canary import build_one_reach_channel_canary_report
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report, build_m8_guardian_brain_benchmark_report
 from src.guardian.brain import (
     GuardianBrainContext,
@@ -3388,6 +3389,7 @@ async def get_operator_benchmark_proof():
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
+        one_reach_channel_canary,
         m2_execution_benchmark,
         governed_improvement_benchmark,
         m9_governed_ecosystem_benchmark,
@@ -3406,6 +3408,7 @@ async def get_operator_benchmark_proof():
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
+        build_one_reach_channel_canary_report(),
         build_m2_execution_benchmark_report(),
         build_governed_improvement_benchmark_report(),
         build_m9_governed_ecosystem_benchmark_report(),
@@ -3431,6 +3434,7 @@ async def get_operator_benchmark_proof():
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
+        str(one_reach_channel_canary["summary"]["benchmark_posture"]),
         str(m2_execution_benchmark["summary"]["benchmark_posture"]),
         str(governed_improvement_benchmark["summary"]["benchmark_posture"]),
         str(m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"]),
@@ -3480,6 +3484,7 @@ async def get_operator_benchmark_proof():
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
+            "one_reach_channel_canary_posture": one_reach_channel_canary["summary"]["benchmark_posture"],
             "m2_execution_benchmark_posture": m2_execution_benchmark["summary"]["benchmark_posture"],
             "governed_improvement_benchmark_posture": governed_improvement_benchmark["summary"]["benchmark_posture"],
             "m9_governed_ecosystem_benchmark_posture": m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"],
@@ -3500,6 +3505,7 @@ async def get_operator_benchmark_proof():
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
+        "one_reach_channel_canary": one_reach_channel_canary,
         "m2_execution_benchmark": m2_execution_benchmark,
         "m9_governed_ecosystem_benchmark": m9_governed_ecosystem_benchmark,
         "governed_improvement": {
@@ -3549,6 +3555,11 @@ async def get_operator_memory_provider_quality_gate():
 @router.get("/operator/live-long-horizon-replay-benchmark")
 async def get_operator_live_long_horizon_replay_benchmark():
     return await build_live_replay_benchmark_report()
+
+
+@router.get("/operator/one-reach-channel-canary")
+async def get_operator_one_reach_channel_canary():
+    return await build_one_reach_channel_canary_report()
 
 
 @router.get("/operator/m6-memory-superiority")

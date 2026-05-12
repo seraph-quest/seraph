@@ -45,6 +45,14 @@ from src.extensions.benchmark import (
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
 )
+from src.extensions.reach_channel_canary import (
+    ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
+    ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
+    ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+    build_one_reach_channel_canary_report,
+    one_reach_channel_canary_policy_payload,
+    one_reach_channel_canary_receipt,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -11803,6 +11811,106 @@ def _eval_channel_abuse_failure_review_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_one_reach_channel_selection_scope_behavior() -> dict[str, Any]:
+    policy = one_reach_channel_canary_policy_payload()
+    receipt = one_reach_channel_canary_receipt()
+    selected = receipt["selected_channel"]
+    rejected = set(selected["rejected_channel_sprawl"])
+    _require_eval_contract(selected["transport"] == "native_notification", "Expected native notification canary.")
+    _require_eval_contract(rejected >= {"slack", "discord", "telegram"}, "Expected channel sprawl rejection.")
+    return {
+        "selected_channel": selected["transport"],
+        "native_notification_selected": selected["transport"] == "native_notification",
+        "channel_sprawl_rejected": rejected >= {"slack", "discord", "telegram"},
+        "claim_boundary_visible": policy["claim_boundary"] == ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
+        "broad_live_reach_not_claimed": "live_slack_discord_telegram_delivery" in policy["not_claimed"],
+    }
+
+
+def _eval_native_notification_pairing_revocation_behavior() -> dict[str, Any]:
+    receipt = one_reach_channel_canary_receipt()
+    pairing = receipt["pairing"]
+    revocation = receipt["revocation_probe"]
+    return {
+        "pairing_state_visible": pairing["pairing_state"] == "paired",
+        "pairing_trusted": pairing["trust_state"] == "trusted",
+        "pairing_scopes_visible": {"notify", "reply_action", "approval_handoff"} <= set(pairing["scopes"]),
+        "revocation_state_visible": revocation["pairing_state"] == "revoked",
+        "revoked_follow_up_hidden": revocation["safe_follow_up_hidden"] is True,
+        "revocation_audit_visible": bool(revocation["audit_receipt_id"]),
+    }
+
+
+def _eval_native_notification_health_retry_degraded_behavior() -> dict[str, Any]:
+    receipt = one_reach_channel_canary_receipt()
+    health = receipt["health"]
+    degraded_ui = receipt["degraded_state_ui"]
+    return {
+        "ready_health_visible": health["ready_probe"]["status"] == "ready",
+        "degraded_health_visible": health["degraded_probe"]["status"] == "daemon_offline",
+        "degraded_repair_hint_visible": bool(health["degraded_probe"]["degraded_state_ui"]),
+        "retry_policy_visible": health["retry_policy"]["max_attempts"] == 3,
+        "fallback_transport_visible": health["retry_policy"]["fallback_transport"] == "websocket",
+        "unsafe_follow_up_hidden": degraded_ui["unsafe_follow_up_hidden"] is True,
+    }
+
+
+def _eval_native_notification_continuity_approval_audit_behavior() -> dict[str, Any]:
+    receipt = one_reach_channel_canary_receipt()
+    continuity = receipt["continuity"]
+    e2e_steps = [step["step"] for step in receipt["e2e_flow"]]
+    approval = receipt["approval_handoff"]
+    return {
+        "thread_continuity_visible": bool(continuity["thread_id"])
+        and bool(continuity["channel_thread_key"]),
+        "memory_context_visible": bool(continuity["memory_context_id"]),
+        "context_receipts_visible": len(continuity["context_receipts"]) >= 3,
+        "approval_handoff_visible": approval["status"] == "pending_operator_approval",
+        "mutation_paused_before_approval": approval["mutation_boundary"] == "response_draft_only_until_approved",
+        "audit_receipts_visible": len(receipt["audit_receipts"]) >= 6,
+        "e2e_flow_visible": e2e_steps == [
+            "external_message_received",
+            "seraph_decision",
+            "approval_handoff",
+            "audited_response",
+        ],
+        "content_redacted": receipt["e2e_flow"][0]["content_redacted"] is True,
+    }
+
+
+async def _eval_operator_one_reach_channel_canary_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_one_reach_channel_canary
+
+    fake_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="presence",
+                description="One reach channel canary fixture",
+                passed=True,
+                duration_ms=1,
+                details={"fixture": "one_reach_channel_canary"},
+            )
+            for name in ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES
+        ],
+        duration_ms=len(ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.extensions.reach_channel_canary._run_one_reach_channel_canary_suite",
+        AsyncMock(return_value=fake_summary),
+    ):
+        payload = await get_operator_one_reach_channel_canary()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "one_reach_channel_canary_visible",
+        "selected_channel_visible": payload["summary"]["selected_channel"] == "native_notification",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES),
+        "operator_story_complete": all(payload["operator_story"].values()),
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"],
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -13016,6 +13124,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
+    one_reach_channel_suite = next(item for item in suites if item["name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME)
     m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
     m7_operator_cockpit_suite = next(item for item in suites if item["name"] == M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME)
     cockpit_efficiency_suite = next(item for item in suites if item["name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME)
@@ -13059,6 +13168,16 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "channels_suite_scenario_count_matches": (
             channels_suite["scenario_count"] == len(CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES)
         ),
+        "one_reach_channel_suite_present": (
+            "one_reach_channel_selection_scope_behavior" in one_reach_channel_suite["scenario_names"]
+        ),
+        "one_reach_channel_suite_scenario_count_matches": (
+            one_reach_channel_suite["scenario_count"] == len(ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES)
+        ),
+        "one_reach_channel_suite_axis_matches": (
+            one_reach_channel_suite["benchmark_axis"] == "one_excellent_reach_channel_canary"
+        ),
+        "one_reach_channel_gate_required": ONE_REACH_CHANNEL_CANARY_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "m2_execution_suite_present": "execution_artifact_registry_behavior" in m2_execution_suite["scenario_names"],
         "m7_operator_cockpit_suite_present": (
             "operator_fast_control_availability_behavior" in m7_operator_cockpit_suite["scenario_names"]
@@ -14599,6 +14718,36 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="M4 channel abuse and failure cases surface operator-visible review receipts before unsafe follow-up can proceed.",
         runner=_eval_channel_abuse_failure_review_behavior,
+    ),
+    EvalScenario(
+        name="one_reach_channel_selection_scope_behavior",
+        category="presence",
+        description="One-channel reach canary selects native notifications and explicitly rejects channel sprawl.",
+        runner=_eval_one_reach_channel_selection_scope_behavior,
+    ),
+    EvalScenario(
+        name="native_notification_pairing_revocation_behavior",
+        category="presence",
+        description="Native notification canary exposes paired trusted state and revoked fail-closed follow-up state.",
+        runner=_eval_native_notification_pairing_revocation_behavior,
+    ),
+    EvalScenario(
+        name="native_notification_health_retry_degraded_behavior",
+        category="presence",
+        description="Native notification canary exposes ready, retry, fallback, daemon-offline, and degraded-state UI receipts.",
+        runner=_eval_native_notification_health_retry_degraded_behavior,
+    ),
+    EvalScenario(
+        name="native_notification_continuity_approval_audit_behavior",
+        category="presence",
+        description="Native notification canary preserves thread and memory continuity, pauses mutation through approval handoff, and records audit receipts.",
+        runner=_eval_native_notification_continuity_approval_audit_behavior,
+    ),
+    EvalScenario(
+        name="operator_one_reach_channel_canary_surface_behavior",
+        category="observability",
+        description="Operator one-reach-channel canary surface exposes the selected native notification canary story without source diving.",
+        runner=_eval_operator_one_reach_channel_canary_surface_behavior,
     ),
     EvalScenario(
         name="m5_operating_layer_payload_behavior",

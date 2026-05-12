@@ -1260,6 +1260,66 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_one_reach_channel_canary_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "one_excellent_reach_channel_canary",
+                    "benchmark_posture": "one_reach_channel_canary_ci_gated_operator_visible",
+                    "operator_status": "one_reach_channel_canary_visible",
+                    "selected_channel": "native_notification",
+                    "scenario_count": 5,
+                    "active_failure_count": 0,
+                    "pairing_state": "paired",
+                    "revocation_state": "revoked",
+                    "health_state": "ready",
+                    "degraded_state": "daemon_offline",
+                    "retry_state": "bounded_retry_with_fallback_visible",
+                    "thread_continuity_state": "channel_thread_session_and_memory_context_linked",
+                    "approval_handoff_state": "pending_operator_approval",
+                    "audit_receipt_count": 7,
+                    "e2e_step_count": 4,
+                    "channel_sprawl_state": "rejected_until_native_notification_canary_meets_bar",
+                    "claim_boundary": "deterministic_native_notification_canary_not_broad_live_channel_reach",
+                },
+                "scenario_names": [
+                    "one_reach_channel_selection_scope_behavior",
+                    "native_notification_pairing_revocation_behavior",
+                    "native_notification_health_retry_degraded_behavior",
+                    "native_notification_continuity_approval_audit_behavior",
+                    "operator_one_reach_channel_canary_surface_behavior",
+                ],
+                "protocol": {"replay_command": "uv run python -m src.evals.harness --benchmark-suite one_excellent_reach_channel_canary --indent 0"},
+                "policy": {
+                    "selected_channel": "native_notification",
+                    "claim_boundary": "deterministic_native_notification_canary_not_broad_live_channel_reach",
+                    "not_claimed": ["live_slack_discord_telegram_delivery"],
+                    "receipt_surfaces": [
+                        "/api/operator/one-reach-channel-canary",
+                        "/api/operator/control-plane",
+                        "/api/operator/benchmark-proof",
+                    ],
+                },
+                "receipt": {},
+                "operator_story": {
+                    "single_channel_selected": True,
+                    "channel_sprawl_rejected": True,
+                    "pairing_visible": True,
+                    "revocation_fail_closed_visible": True,
+                    "health_visible": True,
+                    "retry_visible": True,
+                    "thread_continuity_visible": True,
+                    "memory_context_visible": True,
+                    "approval_handoff_visible": True,
+                    "audit_trail_visible": True,
+                    "degraded_state_ui_visible": True,
+                    "e2e_flow_visible": True,
+                },
+                "failure_report": [],
+                "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_m2_execution_benchmark_report",
         AsyncMock(
             return_value={
@@ -1653,7 +1713,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 20
+    assert payload["summary"]["suite_count"] == 21
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1667,6 +1727,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["cockpit_efficiency_benchmark_posture"] == "cockpit_efficiency_ci_gated_operator_visible"
@@ -1696,6 +1757,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "one_excellent_reach_channel_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
@@ -1726,6 +1788,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
+    one_reach_channel_suite = next(item for item in payload["suites"] if item["name"] == "one_excellent_reach_channel_canary")
+    assert "one_reach_channel_selection_scope_behavior" in one_reach_channel_suite["scenario_names"]
+    assert one_reach_channel_suite["scenario_count"] == 5
     m2_suite = next(item for item in payload["suites"] if item["name"] == "m2_execution_supremacy")
     assert "execution_security_gauntlet_behavior" in m2_suite["scenario_names"]
     m7_suite = next(item for item in payload["suites"] if item["name"] == "m7_operator_cockpit_legibility")
@@ -1758,6 +1823,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["live_workflow_endurance_canary"]["summary"]["suite_name"] == "live_workflow_endurance_canary"
     assert payload["live_workflow_endurance_canary"]["policy"]["claim_boundary"] == (
         "audit_projected_replayable_canary_not_durable_workflow_engine"
+    )
+    assert payload["one_reach_channel_canary"]["summary"]["suite_name"] == "one_excellent_reach_channel_canary"
+    assert payload["one_reach_channel_canary"]["summary"]["selected_channel"] == "native_notification"
+    assert payload["one_reach_channel_canary"]["policy"]["claim_boundary"] == (
+        "deterministic_native_notification_canary_not_broad_live_channel_reach"
     )
     assert payload["trust_boundary_benchmark"]["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
@@ -2193,6 +2263,59 @@ async def test_operator_live_workflow_endurance_canary_surface_degrades_summary_
     assert payload["summary"]["benchmark_posture"] == "live_workflow_canary_regressions_detected_operator_visible"
     assert payload["summary"]["active_failure_count"] == 1
     assert payload["failure_report"][0]["scenario_name"] == "live_workflow_canary_approval_preservation_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_one_reach_channel_canary_surface_reports_story_and_claim_boundary(client):
+    resp = await client.get("/api/operator/one-reach-channel-canary")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "one_excellent_reach_channel_canary"
+    assert payload["summary"]["operator_status"] == "one_reach_channel_canary_visible"
+    assert payload["summary"]["selected_channel"] == "native_notification"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["pairing_state"] == "paired"
+    assert payload["summary"]["revocation_state"] == "revoked"
+    assert payload["summary"]["degraded_state"] == "daemon_offline"
+    assert payload["summary"]["approval_handoff_state"] == "pending_operator_approval"
+    assert payload["operator_story"]["single_channel_selected"] is True
+    assert payload["operator_story"]["channel_sprawl_rejected"] is True
+    assert payload["operator_story"]["revocation_fail_closed_visible"] is True
+    assert payload["operator_story"]["memory_context_visible"] is True
+    assert payload["operator_story"]["degraded_state_ui_visible"] is True
+    assert payload["operator_story"]["e2e_flow_visible"] is True
+    assert payload["policy"]["claim_boundary"] == "deterministic_native_notification_canary_not_broad_live_channel_reach"
+    assert "live_slack_discord_telegram_delivery" in payload["policy"]["not_claimed"]
+
+
+@pytest.mark.asyncio
+async def test_operator_one_reach_channel_canary_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=5,
+        passed=4,
+        failed=1,
+        duration_ms=13,
+        results=[
+            SimpleNamespace(
+                passed=False,
+                name="native_notification_health_retry_degraded_behavior",
+                error="retry receipt regression",
+            )
+        ],
+    )
+
+    with patch(
+        "src.extensions.reach_channel_canary._run_one_reach_channel_canary_suite",
+        AsyncMock(return_value=failing_summary),
+    ):
+        resp = await client.get("/api/operator/one-reach-channel-canary")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "one_reach_channel_canary_regressions_detected_operator_visible"
+    assert payload["summary"]["active_failure_count"] == 1
+    assert payload["failure_report"][0]["scenario_name"] == "native_notification_health_retry_degraded_behavior"
 
 
 @pytest.mark.asyncio

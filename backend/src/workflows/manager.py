@@ -25,7 +25,8 @@ from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
 from src.tools.policy import get_tool_source_context, tool_accepts_secret_refs
 from src.workflows.loader import Workflow, scan_workflow_paths
-from src.workflows.run_identity import parse_workflow_run_identity
+from src.workflows.durable_state import workflow_state_repository
+from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,14 @@ _WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
 
 def _run_async(coro):
     return asyncio.run(coro)
+
+
+def _run_durable_state_write(coro) -> Any | None:
+    try:
+        return _run_async(coro)
+    except Exception as exc:  # pragma: no cover - defensive fail-soft path for partially migrated/local DBs.
+        logger.warning("Durable workflow state write skipped: %s", exc)
+        return None
 
 
 def _resolve_context_expr(expr: str, context: dict[str, Any]) -> Any:
@@ -523,7 +532,43 @@ def _checkpoint_context_allowed(approval_context: dict[str, Any] | None) -> bool
     )
 
 
+def _durable_redacted_payload(value: Any) -> dict[str, Any]:
+    argument_keys: list[str] = []
+    if isinstance(value, dict):
+        argument_keys = sorted(str(key) for key in value.keys())
+    return {
+        "redacted": True,
+        "reason": "checkpoint_context_disallowed",
+        "argument_keys": argument_keys,
+    }
+
+
+def _durable_arguments(value: Any, *, checkpoint_context_allowed: bool) -> dict[str, Any]:
+    if checkpoint_context_allowed:
+        return value if isinstance(value, dict) else {}
+    return _durable_redacted_payload(value)
+
+
+def _durable_result(value: Any, *, checkpoint_context_allowed: bool) -> Any | None:
+    if checkpoint_context_allowed:
+        return value
+    return None
+
+
+def _durable_checkpoint(value: Any, *, checkpoint_context_allowed: bool) -> Any | None:
+    if checkpoint_context_allowed:
+        return _json_safe_value(value)
+    return None
+
+
 async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any] | None:
+    try:
+        durable_payload = await workflow_state_repository.get_checkpoint_payload(run_identity)
+    except Exception as exc:  # pragma: no cover - defensive fail-soft path for partially migrated/local DBs.
+        logger.warning("Durable workflow checkpoint lookup skipped: %s", exc)
+        durable_payload = None
+    if durable_payload is not None:
+        return durable_payload
     try:
         session_id, tool_name, run_fingerprint, run_discriminator = parse_workflow_run_identity(run_identity)
     except ValueError:
@@ -704,12 +749,31 @@ class WorkflowTool(Tool):
         workflow_inputs, control_inputs = self._normalize_inputs(args, kwargs)
         audit_arguments = {**workflow_inputs, **control_inputs}
         approval_context = self.get_approval_context(workflow_inputs)
+        checkpoint_context_allowed = _checkpoint_context_allowed(approval_context)
         run_fingerprint = fingerprint_tool_call(
             self.name,
             audit_arguments,
             approval_context=approval_context,
         )
         current_session_id = get_current_session_id()
+        durable_run_identity = build_workflow_run_identity(
+            current_session_id,
+            self.name,
+            run_fingerprint,
+        )
+        _run_durable_state_write(workflow_state_repository.create_run(
+            run_identity=durable_run_identity,
+            workflow_name=self.workflow.name,
+            tool_name=self.name,
+            session_id=current_session_id,
+            run_fingerprint=run_fingerprint,
+            arguments=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
+            approval_context=approval_context,
+            parent_run_identity=control_inputs.get("_seraph_parent_run_identity"),
+            root_run_identity=control_inputs.get("_seraph_root_run_identity") or durable_run_identity,
+            branch_kind=control_inputs.get("_seraph_branch_kind"),
+            branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
+        ))
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -720,7 +784,6 @@ class WorkflowTool(Tool):
         artifact_paths = _collect_artifact_paths(workflow_inputs)
         step_records: list[dict[str, Any]] = []
         canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
-        checkpoint_context_allowed = _checkpoint_context_allowed(approval_context)
         checkpoint_context: dict[str, dict[str, Any]] = {}
         start_index = 0
         if control_inputs.get("_seraph_resume_from_step"):
@@ -749,6 +812,14 @@ class WorkflowTool(Tool):
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
                 )
             rendered_arguments = _render_value(step.arguments, context)
+            _run_durable_state_write(workflow_state_repository.record_step_started(
+                run_identity=durable_run_identity,
+                workflow_name=self.workflow.name,
+                step_id=step.id,
+                step_index=len(step_records) + 1,
+                tool_name=canonical_step_tool,
+                arguments=_durable_arguments(rendered_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
+            ))
             step_artifact_paths = _collect_artifact_paths(rendered_arguments)
             step_status = "succeeded"
             error_kind: str | None = None
@@ -782,6 +853,17 @@ class WorkflowTool(Tool):
                         "completed_at": step_completed_at,
                         "duration_ms": duration_ms,
                     })
+                    _run_durable_state_write(workflow_state_repository.record_step_failed(
+                        run_identity=durable_run_identity,
+                        step_id=step.id,
+                        status="failed",
+                        result=None,
+                        result_summary=None,
+                        artifact_paths=step_artifact_paths,
+                        checkpoint=None,
+                        error_kind=type(exc).__name__,
+                        error_summary=str(exc).strip()[:160] or type(exc).__name__,
+                    ))
                     self._last_audit_failure_payload = self._build_audit_payload(
                         status="failed",
                         run_fingerprint=run_fingerprint,
@@ -795,7 +877,25 @@ class WorkflowTool(Tool):
                         checkpoint_context_allowed=checkpoint_context_allowed,
                         control_inputs=control_inputs,
                         error=str(exc),
+                        durable_run_identity=durable_run_identity,
                     )
+                    _run_durable_state_write(workflow_state_repository.finish_run(
+                        run_identity=durable_run_identity,
+                        status="failed",
+                        checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
+                        artifact_paths=artifact_paths,
+                        continued_error_steps=continued_error_steps,
+                        last_completed_step_id=next(
+                            (
+                                str(record["id"])
+                                for record in reversed(step_records)
+                                if record.get("id") and str(record.get("status") or "") not in {"failed", "continued_error"}
+                            ),
+                            None,
+                        ),
+                        error=str(exc),
+                        metadata={"summary": f"{self.name} failed"},
+                    ))
                     raise
                 result = f"Error: {exc}"
                 continued_error_steps.append(step.id)
@@ -835,6 +935,20 @@ class WorkflowTool(Tool):
                 "completed_at": step_completed_at,
                 "duration_ms": duration_ms,
             })
+            _run_durable_state_write(workflow_state_repository.record_step_completed(
+                run_identity=durable_run_identity,
+                step_id=step.id,
+                status=step_status,
+                result=_durable_result(result, checkpoint_context_allowed=checkpoint_context_allowed),
+                result_summary=_summarize_value_shape(result),
+                artifact_paths=step_artifact_paths,
+                checkpoint=_durable_checkpoint(
+                    context["steps"][step.id],
+                    checkpoint_context_allowed=checkpoint_context_allowed,
+                ),
+                error_kind=error_kind,
+                error_summary=error_summary,
+            ))
 
         result_text = ""
         if self.workflow.result_template:
@@ -868,7 +982,28 @@ class WorkflowTool(Tool):
             checkpoint_context_allowed=checkpoint_context_allowed,
             control_inputs=control_inputs,
             summary=summary,
+            durable_run_identity=durable_run_identity,
         )
+        _run_durable_state_write(workflow_state_repository.finish_run(
+            run_identity=durable_run_identity,
+            status=status,
+            checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
+            artifact_paths=artifact_paths,
+            continued_error_steps=continued_error_steps,
+            last_completed_step_id=next(
+                (
+                    str(record["id"])
+                    for record in reversed(step_records)
+                    if record.get("id") and str(record.get("status") or "") not in {"failed", "continued_error"}
+                ),
+                None,
+            ),
+            metadata={
+                "summary": summary,
+                "canvas_output": _redact_canvas_output(canvas_output),
+                "content_redacted": True,
+            },
+        ))
         if current_session_id:
             flush_session_memory_sync(
                 session_id=current_session_id,
@@ -946,11 +1081,13 @@ class WorkflowTool(Tool):
         control_inputs: dict[str, Any],
         summary: str | None = None,
         error: str | None = None,
+        durable_run_identity: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         payload_summary = summary or f"{self.name} {status}"
         payload = {
             "workflow_name": self.workflow.name,
             "run_fingerprint": run_fingerprint,
+            "durable_run_identity": durable_run_identity,
             "approval_context": approval_context,
             "step_count": len(self.workflow.steps),
             "step_tools": canonical_step_tools,

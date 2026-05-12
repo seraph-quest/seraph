@@ -61,6 +61,7 @@ from src.observer.native_notification_queue import native_notification_queue
 from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.tools.process_tools import process_runtime_manager
 from src.workflows.benchmark import build_m5_operating_layer_benchmark_report, build_workflow_endurance_benchmark_report
+from src.workflows.durable_state import build_durable_workflow_state_report
 from src.workflows.endurance_canary import build_live_workflow_endurance_canary_report
 from src.workflows.operating_layer import build_m5_operating_layer_payload
 
@@ -3378,6 +3379,7 @@ async def get_operator_benchmark_proof():
         user_model_benchmark,
         workflow_endurance_benchmark,
         live_workflow_endurance_canary,
+        durable_workflow_engine,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         memory_provider_quality_gate_benchmark,
@@ -3396,6 +3398,7 @@ async def get_operator_benchmark_proof():
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
         build_live_workflow_endurance_canary_report(),
+        build_durable_workflow_state_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_memory_provider_quality_gate_report(),
@@ -3421,6 +3424,7 @@ async def get_operator_benchmark_proof():
         str(user_model_benchmark["summary"]["benchmark_posture"]),
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(live_workflow_endurance_canary["summary"]["benchmark_posture"]),
+        str(durable_workflow_engine["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"]),
@@ -3470,6 +3474,7 @@ async def get_operator_benchmark_proof():
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "live_workflow_endurance_canary_posture": live_workflow_endurance_canary["summary"]["benchmark_posture"],
+            "durable_workflow_engine_posture": durable_workflow_engine["summary"]["benchmark_posture"],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "memory_provider_quality_gate_benchmark_posture": memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"],
@@ -3490,6 +3495,7 @@ async def get_operator_benchmark_proof():
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "live_workflow_endurance_canary": live_workflow_endurance_canary,
+        "durable_workflow_engine": durable_workflow_engine,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "memory_provider_quality_gate_benchmark": memory_provider_quality_gate_benchmark,
@@ -3529,6 +3535,11 @@ async def get_operator_workflow_endurance_benchmark():
 @router.get("/operator/live-workflow-endurance-canary")
 async def get_operator_live_workflow_endurance_canary():
     return await build_live_workflow_endurance_canary_report()
+
+
+@router.get("/operator/durable-workflow-engine")
+async def get_operator_durable_workflow_engine():
+    return await build_durable_workflow_state_report()
 
 
 @router.get("/operator/m5-operating-layer-benchmark")

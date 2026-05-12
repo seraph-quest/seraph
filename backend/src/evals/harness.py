@@ -81,6 +81,13 @@ from src.workflows.endurance_canary import (
     live_workflow_endurance_canary_protocol,
     live_workflow_endurance_canary_runs,
 )
+from src.workflows.durable_state import (
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+    DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
+    build_durable_workflow_state_report,
+    build_durable_workflow_state_kernel,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -13010,6 +13017,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     live_workflow_canary_suite = next(
         item for item in suites if item["name"] == LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME
     )
+    durable_workflow_engine_suite = next(
+        item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
@@ -13044,6 +13054,21 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "live_workflow_canary_gate_required": (
             LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "durable_workflow_engine_suite_present": (
+            any(
+                name in durable_workflow_engine_suite["scenario_names"]
+                for name in DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
+            )
+        ),
+        "durable_workflow_engine_suite_scenario_count_matches": (
+            durable_workflow_engine_suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "durable_workflow_engine_suite_axis_matches": (
+            durable_workflow_engine_suite["benchmark_axis"] == "durable_workflow_engine_v1"
+        ),
+        "durable_workflow_engine_gate_required": (
+            DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
@@ -13124,6 +13149,46 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "gate_requires_review": bool(gate_policy["requires_human_review"]),
         "gate_blocks_constraint_failure": bool(gate_policy["blocks_on_constraint_failure"]),
         "proof_contract": gate_policy["proof_contract"],
+    }
+
+
+async def _eval_durable_workflow_engine_report_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    suite = next(item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME)
+    kernel = build_durable_workflow_state_kernel()
+    states = kernel["states"]
+    state_phases = {state["phase"] for state in states}
+    resume_receipts = [state["resume"] for state in states]
+    trigger_receipts = [trigger for state in states for trigger in state["triggers"]]
+    artifact_review_receipts = [
+        receipt
+        for state in states
+        for receipt in state["artifact_review"]["receipts"]
+    ]
+    return {
+        "suite_name_visible": suite["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+        "scenario_count_matches": suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+        "scenario_names_match_constants": list(suite["scenario_names"])
+        == list(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+        "benchmark_axis_visible": suite["benchmark_axis"] == "durable_workflow_engine_v1",
+        "operator_summary_visible": bool(suite["operator_summary"]),
+        "report_builder_available": callable(build_durable_workflow_state_report),
+        "durable_state_kernel_visible": kernel["summary"]["state_count"] >= 2
+        and kernel["summary"]["transition_count"] >= 2,
+        "crash_safe_resume_receipt_visible": any(receipt["crash_safe"] for receipt in resume_receipts),
+        "heartbeat_reactive_receipts_visible": {"heartbeat", "reactive_signal"}
+        <= {receipt["kind"] for receipt in trigger_receipts},
+        "retry_repair_transition_visible": "repairable_failure" in state_phases
+        and any(transition["reason"] == "retry_failed_step" for transition in kernel["transitions"]),
+        "delegated_artifact_review_visible": any(
+            receipt["approval_handoff"] and receipt["review_state"] == "pending_operator_review"
+            for receipt in artifact_review_receipts
+        ),
+        "claim_boundary_visible": kernel["policy"]["claim_boundary"] == DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
+        "receipt_surface_visible": "/api/operator/durable-workflow-engine" in kernel["policy"]["receipt_surfaces"],
+        "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in kernel["policy"]["receipt_surfaces"],
+        "ci_gate_required": DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
     }
 
 
@@ -14437,6 +14502,15 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Operator live-workflow canary surface exposes the complete canary story without source diving.",
         runner=_eval_operator_live_workflow_canary_surface_behavior,
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description="Durable workflow engine v1 report exposes durable state, recovery, trigger, and operator receipt posture.",
+            runner=_eval_durable_workflow_engine_report_behavior,
+        )
+        for name in DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

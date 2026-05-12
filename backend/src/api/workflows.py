@@ -29,6 +29,7 @@ from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import approval_context_requires_tracked_lineage, workflow_manager
+from src.workflows.durable_state import workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 router = APIRouter()
@@ -1912,6 +1913,35 @@ async def _list_workflow_runs(
                 run["checkpoint_candidates"] = []
                 run["resume_plan"] = None
             completed.append(run)
+
+    try:
+        durable_runs = await workflow_state_repository.list_runs(limit=limit, session_id=session_id)
+    except Exception:
+        durable_runs = []
+    completed_by_identity = {
+        str(run.get("run_identity") or run.get("id")): run
+        for run in completed
+        if run.get("run_identity") or run.get("id")
+    }
+    for durable_run in durable_runs:
+        run_identity = str(durable_run.get("run_identity") or durable_run.get("id"))
+        if not run_identity:
+            continue
+        existing = completed_by_identity.get(run_identity, {})
+        merged = {
+            **existing,
+            **durable_run,
+            "status": durable_run.get("status") or existing.get("status"),
+            "availability": existing.get("availability") or "ready",
+            "checkpoint_candidates": existing.get("checkpoint_candidates") or [],
+            "resume_plan": existing.get("resume_plan"),
+            "replay_allowed": existing.get("replay_allowed", True),
+            "replay_block_reason": existing.get("replay_block_reason"),
+            "state_source": "durable_workflow_state",
+            "audit_projection_available": bool(existing),
+        }
+        completed_by_identity[run_identity] = merged
+    completed = list(completed_by_identity.values())
 
     completed.sort(
         key=lambda item: datetime.fromisoformat(str(item["updated_at"]).replace("Z", "+00:00")),

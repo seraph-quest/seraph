@@ -205,7 +205,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 18
+    assert details["suite_count"] == 19
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -234,6 +234,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
+    assert details["memory_provider_gate_suite_present"] is True
+    assert details["memory_provider_gate_suite_scenario_count_matches"] is True
+    assert details["memory_provider_gate_suite_axis_matches"] is True
+    assert details["memory_provider_gate_required"] is True
     assert details["planning_suite_present"] is True
     assert details["governed_suite_present"] is True
     assert details["m9_governed_ecosystem_suite_present"] is True
@@ -727,6 +731,56 @@ def test_cockpit_efficiency_runtime_eval_details():
     assert boundary_details["claim_boundary_visible"] is True
 
 
+def test_run_benchmark_suites_executes_memory_provider_quality_gate_suite():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_quality_gate"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "memory_provider_quality_gate_contract_behavior",
+        "memory_provider_quality_gate_improvement_behavior",
+        "memory_provider_quality_gate_suppression_behavior",
+        "operator_memory_provider_quality_gate_surface_behavior",
+    }
+
+
+def test_memory_provider_quality_gate_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals([
+        "memory_provider_quality_gate_contract_behavior",
+        "memory_provider_quality_gate_improvement_behavior",
+        "memory_provider_quality_gate_suppression_behavior",
+        "operator_memory_provider_quality_gate_surface_behavior",
+    ]))
+
+    assert summary.total == 4
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    contract = details_by_name["memory_provider_quality_gate_contract_behavior"]
+    assert contract["provider_declaration_complete"] is True
+    assert contract["provider_declares_suppression_rules"] is True
+    assert contract["quality_controls_declaration_complete"] is True
+
+    improvement = details_by_name["memory_provider_quality_gate_improvement_behavior"]
+    assert improvement["baseline_without_provider_would_be_empty"] is True
+    assert improvement["provider_improved_recall"] is True
+    assert improvement["provider_secret_redacted_from_summary"] is True
+    assert improvement["provider_secret_redacted_from_notes"] is True
+
+    suppression = details_by_name["memory_provider_quality_gate_suppression_behavior"]
+    assert suppression["low_confidence_suppressed"] is True
+    assert suppression["unsafe_privacy_suppressed"] is True
+    assert suppression["conflict_policy_drift_suppressed"] is True
+    assert suppression["suppressed_before_context"] is True
+
+    surface = details_by_name["operator_memory_provider_quality_gate_surface_behavior"]
+    assert surface["suite_name_visible"] is True
+    assert surface["suppression_state_visible"] is True
+    assert surface["policy_requires_declarations"] is True
+    assert surface["claim_boundary_visible"] is True
+
+
 def test_m7_cockpit_legibility_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals([
         "operator_cockpit_receipt_legibility_behavior",
@@ -978,6 +1032,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
     assert "m6_memory_superiority" in captured.out
+    assert "memory_provider_quality_gate" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
@@ -998,6 +1053,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "m8_guardian_intervention_quality",
         "memory_continuity_workflows",
         "m6_memory_superiority",
+        "memory_provider_quality_gate",
         "workflow_endurance_and_repair",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",

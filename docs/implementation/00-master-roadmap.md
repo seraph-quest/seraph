@@ -125,8 +125,8 @@ This stack is the roadmap-level ordering for the next large batches after the me
    add a replayable proof substrate with live-ish fake providers, cross-surface failure taxonomy, CI receipts, and operator-visible evidence across memory, workflow, reach, security, and cockpit flows.
 4. [ ] `cockpit-operator-efficiency-benchmark`:
    execute #439 as a measured operator benchmark for inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, and audit flows using real workflow and memory scenarios.
-5. [ ] `memory-provider-quality-gate`:
-   execute #441 so external memory evidence must declare provenance, confidence, privacy boundary, freshness, conflict behavior, and suppression rules before entering guardian context.
+5. [x] `memory-provider-quality-gate`:
+   execute #441 so external memory evidence must declare provenance, confidence, privacy boundary, freshness, conflict behavior, evidence IDs, and suppression rules before entering guardian context.
 6. [ ] `workflow-endurance-canary`:
    execute #440 as a multi-session canary covering checkpoint, branch, failure injection, recovery, delegated ownership, artifact comparison, approval preservation, and audit receipts.
 7. [ ] `durable-workflow-engine-v1`:

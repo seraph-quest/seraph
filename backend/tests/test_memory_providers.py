@@ -30,6 +30,29 @@ from src.memory.retrieval_planner import plan_memory_retrieval
 from src.memory.types import ConsolidatedMemoryItem, kind_to_category, normalize_memory_kind
 
 
+def _quality_hit(
+    *,
+    text: str,
+    score: float,
+    bucket: str = "external_memory",
+    evidence_id: str | None = None,
+    created_at: datetime | None = None,
+) -> MemoryProviderHit:
+    return MemoryProviderHit(
+        text=text,
+        score=score,
+        provider_name="graph-memory",
+        evidence_id=evidence_id or f"graph-memory:{bucket}:{abs(hash((text, score, bucket))) % 100000}",
+        bucket=bucket,
+        created_at=created_at or datetime.now(timezone.utc),
+        confidence=score,
+        privacy_boundary="standard",
+        provenance="external_advisory",
+        conflict_behavior="guardian_wins",
+        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
+    )
+
+
 @dataclass
 class FakeMemoryProviderAdapter:
     name: str = "graph-memory"
@@ -57,6 +80,13 @@ class FakeMemoryProviderAdapter:
                     text=f"Provider recall for {query}",
                     score=0.61,
                     provider_name=self.name,
+                    evidence_id=f"{self.name}:retrieval:{query or 'default'}",
+                    created_at=datetime.now(timezone.utc),
+                    confidence=0.72,
+                    privacy_boundary="standard",
+                    provenance="external_advisory",
+                    conflict_behavior="guardian_wins",
+                    suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                 ),
             ),
             degraded=self.degraded,
@@ -75,13 +105,27 @@ class FakeMemoryProviderAdapter:
                     text=f"{active_project} remains the live project anchor.",
                     score=0.63,
                     provider_name=self.name,
+                    evidence_id=f"{self.name}:project:{active_project}",
                     bucket="project",
+                    created_at=datetime.now(timezone.utc),
+                    confidence=0.7,
+                    privacy_boundary="standard",
+                    provenance="external_advisory",
+                    conflict_behavior="guardian_wins",
+                    suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                 ),
                 MemoryProviderHit(
                     text=f"Alice owns {active_project} communications.",
                     score=0.72,
                     provider_name=self.name,
+                    evidence_id=f"{self.name}:collaborator:{active_project}",
                     bucket="collaborator",
+                    created_at=datetime.now(timezone.utc),
+                    confidence=0.78,
+                    privacy_boundary="standard",
+                    provenance="external_advisory",
+                    conflict_behavior="guardian_wins",
+                    suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                 ),
             )
         return MemoryProviderRetrievalResult(
@@ -162,6 +206,17 @@ def _write_memory_provider_extension(
             + "".join(f"  - {capability}\n" for capability in capabilities)
             + "canonical_memory_owner: seraph\n"
             + "canonical_write_mode: additive_only\n"
+            + "quality_declaration:\n"
+            + "  provenance: external_advisory\n"
+            + "  confidence: provider_confidence_score\n"
+            + "  privacy_boundary: standard_or_shared_only\n"
+            + "  freshness: created_at_required\n"
+            + "  conflict_behavior: guardian_wins\n"
+            + "  suppression_rules:\n"
+            + "    - stale_provider_evidence\n"
+            + "    - irrelevant_provider_evidence\n"
+            + "    - low_confidence_provider_evidence\n"
+            + "    - provider_conflict_yields_to_canonical_memory\n"
             + "config_fields:\n"
             + "  - key: api_key\n"
             + "    label: API Key\n"
@@ -401,22 +456,19 @@ async def test_plan_memory_retrieval_uses_provider_user_model_for_active_project
     adapter = FakeMemoryProviderAdapter(
         capabilities=("user_model",),
         model_hits=(
-            MemoryProviderHit(
+            _quality_hit(
                 text="Atlas launch remains the live project anchor.",
                 score=0.71,
-                provider_name="graph-memory",
                 bucket="project",
             ),
-            MemoryProviderHit(
+            _quality_hit(
                 text="Alice owns Atlas launch communications.",
                 score=0.83,
-                provider_name="graph-memory",
                 bucket="collaborator",
             ),
-            MemoryProviderHit(
+            _quality_hit(
                 text="Atlas launch timeline ends on Friday.",
                 score=0.64,
-                provider_name="graph-memory",
                 bucket="timeline",
             ),
         ),
@@ -451,16 +503,14 @@ async def test_plan_memory_retrieval_uses_query_matched_project_hint_for_provide
     adapter = FakeMemoryProviderAdapter(
         capabilities=("user_model",),
         model_hits=(
-            MemoryProviderHit(
+            _quality_hit(
                 text="Atlas launch remains the live project anchor.",
                 score=0.71,
-                provider_name="graph-memory",
                 bucket="project",
             ),
-            MemoryProviderHit(
+            _quality_hit(
                 text="Alice owns Atlas launch communications.",
                 score=0.83,
-                provider_name="graph-memory",
                 bucket="collaborator",
             ),
         ),
@@ -546,12 +596,11 @@ async def test_plan_memory_retrieval_keeps_high_value_user_model_hits_when_retri
     async def crowded_retrieve(*, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
         return MemoryProviderRetrievalResult(
             hits=tuple(
-                MemoryProviderHit(
-                    text=f"Provider recall item {index} for {query}",
-                    score=0.4 + (index * 0.01),
-                    provider_name="graph-memory",
-                    bucket="project",
-                )
+                    _quality_hit(
+                        text=f"Provider recall item {index} for {query}",
+                        score=0.62 + (index * 0.01),
+                        bucket="project",
+                    )
                 for index in range(8)
             ),
             summary="Provider-assisted retrieval available.",
@@ -560,10 +609,9 @@ async def test_plan_memory_retrieval_keeps_high_value_user_model_hits_when_retri
     async def high_value_model(*, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
         return MemoryProviderRetrievalResult(
             hits=(
-                MemoryProviderHit(
+                _quality_hit(
                     text="Alice owns Atlas launch communications.",
                     score=0.99,
-                    provider_name="graph-memory",
                     bucket="collaborator",
                 ),
             ),
@@ -610,10 +658,9 @@ async def test_plan_memory_retrieval_suppresses_stale_provider_retrieval_hits(tm
     async def stale_only_retrieve(*, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
         return MemoryProviderRetrievalResult(
             hits=(
-                MemoryProviderHit(
+                _quality_hit(
                     text="Atlas launch status is unchanged from last year.",
                     score=0.62,
-                    provider_name="graph-memory",
                     bucket="project",
                     created_at=stale_created_at,
                 ),
@@ -662,17 +709,15 @@ async def test_plan_memory_retrieval_suppresses_stale_provider_user_model_hits(t
     adapter = FakeMemoryProviderAdapter(
         capabilities=("user_model",),
         model_hits=(
-            MemoryProviderHit(
+            _quality_hit(
                 text="Atlas launch remains the live project anchor.",
                 score=0.71,
-                provider_name="graph-memory",
                 bucket="project",
                 created_at=fresh_created_at,
             ),
-            MemoryProviderHit(
+            _quality_hit(
                 text="Alice owns Atlas launch communications.",
                 score=0.83,
-                provider_name="graph-memory",
                 bucket="collaborator",
                 created_at=stale_created_at,
             ),
@@ -708,17 +753,15 @@ async def test_plan_memory_retrieval_suppresses_irrelevant_project_scoped_provid
     adapter = FakeMemoryProviderAdapter(
         capabilities=("user_model",),
         model_hits=(
-            MemoryProviderHit(
+            _quality_hit(
                 text="Hermes migration remains the live project anchor.",
                 score=0.91,
-                provider_name="graph-memory",
                 bucket="project",
                 created_at=datetime.now(timezone.utc) - timedelta(days=1),
             ),
-            MemoryProviderHit(
+            _quality_hit(
                 text="Alice owns Atlas launch communications.",
                 score=0.67,
-                provider_name="graph-memory",
                 bucket="collaborator",
                 created_at=datetime.now(timezone.utc) - timedelta(days=1),
             ),

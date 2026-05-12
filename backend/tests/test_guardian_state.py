@@ -302,6 +302,7 @@ async def test_build_guardian_state_surfaces_memory_provider_diagnostics(async_d
                             "capabilities_used": ["user_model"],
                             "quality_state": "guarded",
                             "hit_count": 1,
+                            "quality_gate_suppressed_count": 0,
                             "stale_hit_count": 0,
                             "suppressed_irrelevant_hit_count": 1,
                             "topic_matches": ["Atlas launch"],
@@ -324,7 +325,7 @@ async def test_build_guardian_state_surfaces_memory_provider_diagnostics(async_d
 
     assert state.memory_provider_diagnostics == (
         "graph-memory quality=guarded, capabilities=user_model, hits=1, authority=guardian, "
-        "provenance=external_advisory, stale_suppressed=0, "
+        "provenance=external_advisory, quality_gate_suppressed=0, stale_suppressed=0, "
         "irrelevant_suppressed=1, topic_matches=Atlas launch",
     )
     assert "Memory provider diagnostics:" in state.to_prompt_block()

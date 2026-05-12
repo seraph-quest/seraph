@@ -41,6 +41,8 @@ _WRITEBACK_PROJECT_ANCHOR_KINDS = {
 }
 _PROVIDER_WRITEBACK_MIN_CONFIDENCE = 0.55
 _PROVIDER_WRITEBACK_MIN_IMPORTANCE = 0.5
+_PROVIDER_CONTEXT_MIN_CONFIDENCE = 0.5
+_PROVIDER_CONTEXT_MIN_SCORE = 0.35
 _CANONICAL_MEMORY_AUTHORITY = "guardian"
 _PROVIDER_ROLE = "additive_adapter"
 _PROVENANCE_CANONICAL = "guardian_canonical"
@@ -86,9 +88,15 @@ class MemoryProviderHit:
     text: str
     score: float
     provider_name: str
+    evidence_id: str | None = None
     bucket: str = "external_memory"
     source: str = "memory_provider"
     created_at: datetime | None = None
+    confidence: float | None = None
+    privacy_boundary: str | None = None
+    provenance: str | None = None
+    conflict_behavior: str | None = None
+    suppression_rules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,7 @@ class MemoryProviderInventoryItem:
     capabilities: tuple[str, ...]
     canonical_memory_owner: str
     canonical_write_mode: str
+    quality_declaration: dict[str, Any] | None = None
     extension_id: str | None = None
     reference: str | None = None
     notes: tuple[str, ...] = ()
@@ -155,10 +164,11 @@ class MemoryProviderInventoryItem:
             "capabilities": list(self.capabilities),
             "canonical_memory_owner": self.canonical_memory_owner,
             "canonical_write_mode": self.canonical_write_mode,
+            "quality_declaration": dict(self.quality_declaration or {}),
             "extension_id": self.extension_id,
-            "reference": self.reference,
-            "notes": list(self.notes),
-            "memory_contract": _provider_memory_contract_payload(),
+                "reference": self.reference,
+                "notes": list(self.notes),
+                "memory_contract": _provider_memory_contract_payload(),
         }
 
 
@@ -240,6 +250,54 @@ def _provider_memory_contract_payload() -> dict[str, Any]:
         "provider_retrieval_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
         "provider_model_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
         "provider_writeback_provenance": _PROVENANCE_PROVIDER_MIRROR,
+        "quality_gate_policy": "provider_evidence_requires_provenance_confidence_privacy_freshness_conflict_and_suppression_declarations",
+    }
+
+
+def memory_provider_quality_gate_policy_payload() -> dict[str, Any]:
+    return {
+        "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
+        "provider_role": _PROVIDER_ROLE,
+        "required_declarations": [
+            "provenance",
+            "confidence",
+            "privacy_boundary",
+            "freshness_or_created_at",
+            "evidence_id",
+            "conflict_behavior",
+            "suppression_rules",
+        ],
+        "required_provenance": _PROVENANCE_EXTERNAL_ADVISORY,
+        "required_conflict_behavior": _CONFLICT_POLICY,
+        "minimum_context_confidence": _PROVIDER_CONTEXT_MIN_CONFIDENCE,
+        "minimum_context_score": _PROVIDER_CONTEXT_MIN_SCORE,
+        "suppression_reasons": [
+            "missing_text",
+            "missing_evidence_id",
+            "missing_confidence",
+            "missing_freshness",
+            "missing_provider_declaration",
+            "invalid_provenance",
+            "low_confidence",
+            "low_score",
+            "unsafe_privacy_boundary",
+            "provider_conflict_policy_drift",
+            "missing_suppression_rules",
+            "stale_provider_evidence",
+            "irrelevant_provider_evidence",
+        ],
+        "privacy_boundaries_allowed_for_context": ["standard", "shared"],
+        "privacy_boundaries_suppressed_before_context": ["private", "secret", "credential", "unknown"],
+        "improvement_policy": "provider_evidence_enters_guardian_context_only_when_quality_gated_and_topic_relevant",
+        "operator_control_surfaces": [
+            "/api/memory/providers",
+            "/api/memory/corrections",
+            "/api/memory/{memory_id}/pin",
+            "/api/memory/{memory_id}/forget",
+            "/api/memory/{memory_id}/audit",
+            "/api/memory/audit",
+            "/api/operator/memory-provider-quality-gate",
+        ],
     }
 
 
@@ -413,6 +471,74 @@ def _filter_stale_provider_hits(
     return tuple(fresh), stale_bucket_counts
 
 
+def _effective_hit_confidence(hit: MemoryProviderHit) -> float:
+    if hit.confidence is None:
+        return -1.0
+    return float(hit.confidence)
+
+
+def _provider_hit_quality_failures(hit: MemoryProviderHit) -> tuple[str, ...]:
+    failures: list[str] = []
+    if not str(hit.text or "").strip():
+        failures.append("missing_text")
+    if not str(hit.evidence_id or "").strip():
+        failures.append("missing_evidence_id")
+    if hit.confidence is None:
+        failures.append("missing_confidence")
+    if hit.created_at is None:
+        failures.append("missing_freshness")
+    if str(hit.provenance or "").strip() != _PROVENANCE_EXTERNAL_ADVISORY:
+        failures.append("invalid_provenance")
+    if _effective_hit_confidence(hit) < _PROVIDER_CONTEXT_MIN_CONFIDENCE:
+        failures.append("low_confidence")
+    if float(hit.score) < _PROVIDER_CONTEXT_MIN_SCORE:
+        failures.append("low_score")
+    if str(hit.privacy_boundary or "unknown").strip() not in {"standard", "shared"}:
+        failures.append("unsafe_privacy_boundary")
+    if str(hit.conflict_behavior or "").strip() != _CONFLICT_POLICY:
+        failures.append("provider_conflict_policy_drift")
+    declared_rules = {str(rule).strip() for rule in hit.suppression_rules if str(rule).strip()}
+    required_rules = {"stale_provider_evidence", "irrelevant_provider_evidence"}
+    if not required_rules.issubset(declared_rules):
+        failures.append("missing_suppression_rules")
+    return tuple(failures)
+
+
+def _provider_declaration_complete(item: dict[str, Any]) -> bool:
+    declaration = item.get("quality_declaration")
+    if not isinstance(declaration, dict):
+        return False
+    if declaration.get("complete") is True:
+        return True
+    required_values = (
+        declaration.get("provenance"),
+        declaration.get("confidence"),
+        declaration.get("privacy_boundary"),
+        declaration.get("freshness"),
+        declaration.get("conflict_behavior"),
+    )
+    return all(bool(str(value or "").strip()) for value in required_values) and bool(declaration.get("suppression_rules"))
+
+
+def _filter_quality_gated_provider_hits(
+    hits: tuple[MemoryProviderHit, ...] | list[MemoryProviderHit],
+    *,
+    provider_declaration_complete: bool,
+) -> tuple[tuple[MemoryProviderHit, ...], dict[str, int]]:
+    accepted: list[MemoryProviderHit] = []
+    suppressed_reason_counts: dict[str, int] = {}
+    for hit in hits:
+        failures = list(_provider_hit_quality_failures(hit))
+        if not provider_declaration_complete:
+            failures.append("missing_provider_declaration")
+        if failures:
+            for reason in failures:
+                suppressed_reason_counts[reason] = suppressed_reason_counts.get(reason, 0) + 1
+            continue
+        accepted.append(hit)
+    return tuple(accepted), suppressed_reason_counts
+
+
 def _normalize_topic(value: str | None) -> str:
     normalized = "".join(
         character.lower() if character.isalnum() else " "
@@ -533,17 +659,18 @@ def _filter_ranked_provider_hits(
 def _summarize_quality_state(
     *,
     hit_count: int,
+    quality_gate_suppressed_count: int,
     stale_hit_count: int,
     suppressed_irrelevant_hit_count: int,
     failed_capabilities: list[str],
 ) -> str:
     if failed_capabilities and not hit_count:
         return "failed"
-    if hit_count and not stale_hit_count and not suppressed_irrelevant_hit_count:
+    if hit_count and not quality_gate_suppressed_count and not stale_hit_count and not suppressed_irrelevant_hit_count:
         return "focused"
     if hit_count:
         return "guarded"
-    if stale_hit_count or suppressed_irrelevant_hit_count:
+    if quality_gate_suppressed_count or stale_hit_count or suppressed_irrelevant_hit_count:
         return "suppressed"
     return "idle"
 
@@ -619,6 +746,24 @@ def _memory_provider_config(
         return {}
     entry = bucket.get(provider_name)
     return entry if isinstance(entry, dict) else {}
+
+
+def _redact_provider_text(text: str, *, config: dict[str, Any]) -> str:
+    redacted = str(text or "")
+    secret_values = [
+        str(value)
+        for key, value in config.items()
+        if isinstance(value, str)
+        and value
+        and ("key" in str(key).lower() or "token" in str(key).lower() or "secret" in str(key).lower())
+    ]
+    for value in secret_values:
+        redacted = redacted.replace(value, "[redacted]")
+    return redacted
+
+
+def _redact_provider_notes(notes: tuple[str, ...] | list[str], *, config: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(_redact_provider_text(str(note), config=config) for note in notes if str(note or "").strip())
 
 
 def list_memory_provider_inventory() -> dict[str, Any]:
@@ -717,6 +862,11 @@ def list_memory_provider_inventory() -> dict[str, Any]:
                 capabilities=declared_capabilities,
                 canonical_memory_owner=str(contribution.metadata.get("canonical_memory_owner") or "seraph"),
                 canonical_write_mode=str(contribution.metadata.get("canonical_write_mode") or "additive_only"),
+                quality_declaration=(
+                    contribution.metadata.get("quality_declaration")
+                    if isinstance(contribution.metadata.get("quality_declaration"), dict)
+                    else {}
+                ),
                 extension_id=contribution.extension_id,
                 reference=contribution.reference,
                 notes=tuple(notes + ([f"Capability states: {capability_states}."] if capability_states else [])),
@@ -761,11 +911,15 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             capability_states,
         )
         item["quality_controls"] = {
+            "quality_gate": memory_provider_quality_gate_policy_payload(),
+            "provider_declaration_complete": _provider_declaration_complete(item),
             "freshness_windows_days": {
                 kind.value if hasattr(kind, "value") else str(kind): days
                 for kind, days in _PROVIDER_STALE_WINDOWS_DAYS.items()
             },
             "project_scoped_buckets": sorted(_PROJECT_SCOPED_BUCKETS),
+            "context_minimum_confidence": _PROVIDER_CONTEXT_MIN_CONFIDENCE,
+            "context_minimum_score": _PROVIDER_CONTEXT_MIN_SCORE,
             "writeback_minimum_confidence": _PROVIDER_WRITEBACK_MIN_CONFIDENCE,
             "writeback_minimum_importance": _PROVIDER_WRITEBACK_MIN_IMPORTANCE,
         }
@@ -807,11 +961,14 @@ def list_memory_provider_inventory() -> dict[str, Any]:
             "Provider writeback mirrors only canonically persisted memories after guardrails pass.",
         ],
         "quality_controls": {
+            "quality_gate": memory_provider_quality_gate_policy_payload(),
             "freshness_windows_days": {
                 kind.value if hasattr(kind, "value") else str(kind): days
                 for kind, days in _PROVIDER_STALE_WINDOWS_DAYS.items()
             },
             "project_scoped_buckets": sorted(_PROJECT_SCOPED_BUCKETS),
+            "context_minimum_confidence": _PROVIDER_CONTEXT_MIN_CONFIDENCE,
+            "context_minimum_score": _PROVIDER_CONTEXT_MIN_SCORE,
             "writeback_minimum_confidence": _PROVIDER_WRITEBACK_MIN_CONFIDENCE,
             "writeback_minimum_importance": _PROVIDER_WRITEBACK_MIN_IMPORTANCE,
         },
@@ -853,6 +1010,7 @@ async def retrieve_additive_memory_provider_context(
             str(item.get("extension_id") or ""),
             name,
         )
+        provider_declaration_complete = _provider_declaration_complete(item)
         provider_hits: list[MemoryProviderHit] = []
         provider_notes: list[str] = []
         provider_summaries: list[str] = []
@@ -860,6 +1018,7 @@ async def retrieve_additive_memory_provider_context(
         capabilities_used: list[str] = []
         failed_capabilities: list[str] = []
         provider_degraded = False
+        quality_gate_suppressed_reason_counts: dict[str, int] = {}
         stale_bucket_counts: dict[str, int] = {}
         suppressed_irrelevant_bucket_counts: dict[str, int] = {}
 
@@ -878,7 +1037,15 @@ async def retrieve_additive_memory_provider_context(
                 failed_capabilities.append("retrieval")
                 provider_notes.append("Provider retrieval failed; canonical guardian memory remained in control.")
             else:
-                fresh_hits, stale_counts = _filter_stale_provider_hits(result.hits, now=now)
+                gated_hits, quality_counts = _filter_quality_gated_provider_hits(
+                    result.hits,
+                    provider_declaration_complete=provider_declaration_complete,
+                )
+                for reason, count in quality_counts.items():
+                    quality_gate_suppressed_reason_counts[reason] = (
+                        quality_gate_suppressed_reason_counts.get(reason, 0) + count
+                    )
+                fresh_hits, stale_counts = _filter_stale_provider_hits(gated_hits, now=now)
                 for bucket, count in stale_counts.items():
                     stale_bucket_counts[bucket] = stale_bucket_counts.get(bucket, 0) + count
                 ranked_hits, suppressed_counts = _filter_ranked_provider_hits(
@@ -893,8 +1060,8 @@ async def retrieve_additive_memory_provider_context(
                     suppressed_irrelevant_bucket_counts[bucket] = (
                         suppressed_irrelevant_bucket_counts.get(bucket, 0) + count
                     )
-                provider_summaries.append(result.summary)
-                _merge_provider_notes(provider_notes, result.notes)
+                provider_summaries.append(_redact_provider_text(result.summary, config=config))
+                _merge_provider_notes(provider_notes, _redact_provider_notes(result.notes, config=config))
                 if ranked_hits:
                     capabilities_used.append("retrieval")
                 provider_degraded = provider_degraded or result.degraded or retrieval_state == "degraded"
@@ -921,7 +1088,15 @@ async def retrieve_additive_memory_provider_context(
                 provider_notes.append("Provider user-model augmentation failed; canonical guardian memory remained in control.")
             else:
                 normalized_hits = _normalize_modeling_hits(result.hits, provider_name=name)
-                fresh_hits, stale_counts = _filter_stale_provider_hits(normalized_hits, now=now)
+                gated_hits, quality_counts = _filter_quality_gated_provider_hits(
+                    normalized_hits,
+                    provider_declaration_complete=provider_declaration_complete,
+                )
+                for reason, count in quality_counts.items():
+                    quality_gate_suppressed_reason_counts[reason] = (
+                        quality_gate_suppressed_reason_counts.get(reason, 0) + count
+                    )
+                fresh_hits, stale_counts = _filter_stale_provider_hits(gated_hits, now=now)
                 for bucket, count in stale_counts.items():
                     stale_bucket_counts[bucket] = stale_bucket_counts.get(bucket, 0) + count
                 ranked_hits, suppressed_counts = _filter_ranked_provider_hits(
@@ -936,14 +1111,19 @@ async def retrieve_additive_memory_provider_context(
                     suppressed_irrelevant_bucket_counts[bucket] = (
                         suppressed_irrelevant_bucket_counts.get(bucket, 0) + count
                     )
-                provider_summaries.append(result.summary)
-                _merge_provider_notes(provider_notes, result.notes)
+                provider_summaries.append(_redact_provider_text(result.summary, config=config))
+                _merge_provider_notes(provider_notes, _redact_provider_notes(result.notes, config=config))
                 if ranked_hits:
                     capabilities_used.append("user_model")
                 provider_degraded = provider_degraded or result.degraded or user_model_state == "degraded"
 
         stale_hit_count = sum(stale_bucket_counts.values())
+        quality_gate_suppressed_count = sum(quality_gate_suppressed_reason_counts.values())
         suppressed_irrelevant_hit_count = sum(suppressed_irrelevant_bucket_counts.values())
+        if quality_gate_suppressed_count:
+            provider_notes.append(
+                "Provider evidence missing quality-gate requirements was suppressed before guardian context assembly."
+            )
         if stale_hit_count:
             provider_notes.append(
                 "Stale provider evidence was suppressed so canonical guardian memory remained the active source of truth."
@@ -990,6 +1170,8 @@ async def retrieve_additive_memory_provider_context(
         diagnostics.append(
             {
                 "name": name,
+                "provider_declaration_complete": provider_declaration_complete,
+                "quality_declaration": item.get("quality_declaration") if isinstance(item.get("quality_declaration"), dict) else {},
                 "canonical_authority": _CANONICAL_MEMORY_AUTHORITY,
                 "provider_role": _PROVIDER_ROLE,
                 "provenance": _PROVENANCE_EXTERNAL_ADVISORY,
@@ -1010,6 +1192,18 @@ async def retrieve_additive_memory_provider_context(
                 "capability_contracts_used": _used_capability_contracts_payload(capabilities_used),
                 "failed_capabilities": failed_capabilities,
                 "bucket_counts": bucket_counts,
+                "quality_gate_policy": memory_provider_quality_gate_policy_payload(),
+                "quality_gate_state": "passed" if provider_hits and not quality_gate_suppressed_count else (
+                    "guarded" if provider_hits else "suppressed" if quality_gate_suppressed_count else "idle"
+                ),
+                "quality_gate_passed_count": len(provider_hits),
+                "quality_gate_suppressed_count": quality_gate_suppressed_count,
+                "quality_gate_suppressed_reason_counts": quality_gate_suppressed_reason_counts,
+                "accepted_evidence_ids": [
+                    str(hit.evidence_id)
+                    for hit in provider_hits
+                    if str(hit.evidence_id or "").strip()
+                ],
                 "stale_hit_count": stale_hit_count,
                 "stale_bucket_counts": stale_bucket_counts,
                 "suppressed_irrelevant_hit_count": suppressed_irrelevant_hit_count,
@@ -1018,6 +1212,7 @@ async def retrieve_additive_memory_provider_context(
                 "average_rank_score": round(average_rank_score, 3),
                 "quality_state": _summarize_quality_state(
                     hit_count=len(provider_hits),
+                    quality_gate_suppressed_count=quality_gate_suppressed_count,
                     stale_hit_count=stale_hit_count,
                     suppressed_irrelevant_hit_count=suppressed_irrelevant_hit_count,
                     failed_capabilities=failed_capabilities,
@@ -1180,7 +1375,7 @@ async def writeback_additive_memory_providers(
             write_failure_count += 1
             continue
 
-        _merge_provider_notes(provider_notes, result.notes)
+        _merge_provider_notes(provider_notes, _redact_provider_notes(result.notes, config=config))
         diagnostics.append(
             {
                 "name": name,
@@ -1195,7 +1390,7 @@ async def writeback_additive_memory_providers(
                 "partial_write_count": int(result.partial_write_count),
                 "write_failure_count": int(result.write_failure_count),
                 "degraded": bool(result.degraded),
-                "summary": result.summary.strip(),
+                "summary": _redact_provider_text(result.summary.strip(), config=config),
                 "notes": provider_notes,
                 "capabilities_used": ["consolidation"],
                 "capability_contracts_used": _used_capability_contracts_payload(["consolidation"]),

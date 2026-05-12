@@ -1445,6 +1445,49 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_memory_provider_quality_gate_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "memory_provider_quality_gate",
+                    "benchmark_posture": "memory_provider_quality_gate_ci_gated_operator_visible",
+                    "operator_status": "memory_provider_quality_gate_visible",
+                    "scenario_count": 4,
+                    "dimension_count": 4,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "declaration_state": "required_provider_declarations_visible",
+                    "quality_state": "provider_evidence_quality_gated",
+                    "suppression_state": "noisy_stale_conflicting_or_unsafe_provider_evidence_suppressed",
+                    "operator_control_state": "inspect_correct_pin_forget_and_audit_surfaces_visible",
+                    "claim_boundary": "deterministic_provider_quality_gate_not_live_external_memory_provider_superiority",
+                },
+                "scenario_names": [
+                    "memory_provider_quality_gate_contract_behavior",
+                    "memory_provider_quality_gate_improvement_behavior",
+                    "memory_provider_quality_gate_suppression_behavior",
+                    "operator_memory_provider_quality_gate_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "required_declarations": [
+                        "provenance",
+                        "confidence",
+                        "privacy_boundary",
+                        "freshness_or_created_at",
+                        "evidence_id",
+                        "conflict_behavior",
+                        "suppression_rules",
+                    ],
+                    "improvement_policy": "provider_evidence_enters_guardian_context_only_when_quality_gated_and_topic_relevant",
+                    "operator_control_surfaces": ["/api/memory/providers", "/api/operator/memory-provider-quality-gate"],
+                },
+                "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_governed_improvement_benchmark_report",
         AsyncMock(
             return_value={
@@ -1556,7 +1599,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 18
+    assert payload["summary"]["suite_count"] == 19
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1572,6 +1615,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
+    assert (
+        payload["summary"]["memory_provider_quality_gate_benchmark_posture"]
+        == "memory_provider_quality_gate_ci_gated_operator_visible"
+    )
     assert payload["summary"]["m9_governed_ecosystem_benchmark_posture"] == "m9_ci_gated_operator_visible"
     assert (
         payload["summary"]["m9_governed_ecosystem_claim_boundary"]
@@ -1633,6 +1680,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
+    memory_provider_gate_suite = next(item for item in payload["suites"] if item["name"] == "memory_provider_quality_gate")
+    assert "memory_provider_quality_gate_contract_behavior" in memory_provider_gate_suite["scenario_names"]
+    assert memory_provider_gate_suite["scenario_count"] == 4
     m9_suite = next(item for item in payload["suites"] if item["name"] == "m9_governed_ecosystem")
     assert "m9_manifest_governance_behavior" in m9_suite["scenario_names"]
     assert m9_suite["scenario_count"] == 6
@@ -1669,6 +1719,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
     assert payload["m6_memory_superiority_benchmark"]["policy"]["privacy_policy"] == "provider_config_and_secret_values_never_surface_in_operator_receipts"
+    assert payload["memory_provider_quality_gate_benchmark"]["summary"]["suite_name"] == "memory_provider_quality_gate"
+    assert "evidence_id" in payload["memory_provider_quality_gate_benchmark"]["policy"]["required_declarations"]
     assert payload["m9_governed_ecosystem_benchmark"]["summary"]["suite_name"] == "m9_governed_ecosystem"
     assert (
         payload["m9_governed_ecosystem_benchmark"]["policy"]["claim_boundary"]
@@ -1791,6 +1843,55 @@ async def test_operator_cockpit_efficiency_benchmark_surface_degrades_summary_on
     assert payload["summary"]["active_failure_count"] == 1
     assert payload["summary"]["receipt_coverage_state"] == "regressions_detected"
     assert payload["failure_report"][0]["scenario_name"] == "cockpit_efficiency_receipt_coverage_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_memory_provider_quality_gate_surface_reports_policy_and_claim_boundary(client):
+    resp = await client.get("/api/operator/memory-provider-quality-gate")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "memory_provider_quality_gate"
+    assert payload["summary"]["operator_status"] == "memory_provider_quality_gate_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["declaration_state"] == "required_provider_declarations_visible"
+    assert payload["summary"]["suppression_state"] == "noisy_stale_conflicting_or_unsafe_provider_evidence_suppressed"
+    assert payload["policy"]["minimum_context_confidence"] == 0.5
+    assert "evidence_id" in payload["policy"]["required_declarations"]
+    assert "private" in payload["policy"]["privacy_boundaries_suppressed_before_context"]
+    assert (
+        payload["summary"]["claim_boundary"]
+        == "deterministic_provider_quality_gate_not_live_external_memory_provider_superiority"
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_memory_provider_quality_gate_surface_degrades_summary_on_failures(client):
+    summary = SimpleNamespace(
+        total=4,
+        passed=3,
+        failed=1,
+        duration_ms=50,
+        results=[
+            SimpleNamespace(
+                name="memory_provider_quality_gate_suppression_behavior",
+                passed=False,
+                error="private provider evidence reached context",
+            )
+        ],
+    )
+
+    with patch(
+        "src.memory.provider_quality_gate._run_memory_provider_quality_gate_suite",
+        AsyncMock(return_value=summary),
+    ):
+        resp = await client.get("/api/operator/memory-provider-quality-gate")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "memory_provider_quality_gate_regressions_detected_operator_visible"
+    assert payload["summary"]["suppression_state"] == "regressions_detected"
+    assert payload["failure_report"][0]["scenario_name"] == "memory_provider_quality_gate_suppression_behavior"
 
 
 @pytest.mark.asyncio

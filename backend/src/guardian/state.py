@@ -518,6 +518,7 @@ def _memory_provider_diagnostic_lines(
         provenance = str(item.get("provenance") or "").strip()
         hit_count = int(item.get("hit_count") or 0)
         stale_hit_count = int(item.get("stale_hit_count") or 0)
+        quality_gate_suppressed_count = int(item.get("quality_gate_suppressed_count") or 0)
         suppressed_irrelevant_hit_count = int(item.get("suppressed_irrelevant_hit_count") or 0)
         topic_matches = [
             str(topic)
@@ -530,6 +531,7 @@ def _memory_provider_diagnostic_lines(
             f"hits={hit_count}, "
             f"{f'authority={canonical_authority}, ' if canonical_authority else ''}"
             f"{f'provenance={provenance}, ' if provenance else ''}"
+            f"quality_gate_suppressed={quality_gate_suppressed_count}, "
             f"stale_suppressed={stale_hit_count}, "
             f"irrelevant_suppressed={suppressed_irrelevant_hit_count}"
         )

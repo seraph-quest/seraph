@@ -361,6 +361,19 @@ def scaffold_extension_package(
         "compatibility": {"seraph": seraph_compatibility},
         "publisher": {"name": publisher_name},
         "trust": trust,
+        "governance": {
+            "provenance": {
+                "source": "local-authoring",
+                "publisher_id": _slugify(publisher_name),
+            },
+            "review": {
+                "status": "unreviewed",
+                "notes": "Local scaffold placeholder; catalog verification requires a signed digest and operator review receipt.",
+            },
+            "source_policy": "local_authoring_until_catalog_review",
+            "compatibility_policy": "declare_minimum_supported_seraph_version_and_retest_before_publish",
+            "trust_downgrade_policy": "block_verified_to_lower_trust_without_review",
+        },
         "contributes": manifest_contributions,
         "permissions": {
             "tools": required_tools,

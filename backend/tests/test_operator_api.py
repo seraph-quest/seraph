@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.guardian.learning_quality import GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
+from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
 from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
@@ -1747,15 +1748,23 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                     "suite_name": "m9_governed_ecosystem",
                     "benchmark_posture": "m9_ci_gated_operator_visible",
                     "operator_status": "m9_governed_ecosystem_receipts_visible",
-                    "scenario_count": 6,
-                    "dimension_count": 6,
-                    "failure_mode_count": 6,
+                    "scenario_count": 11,
+                    "dimension_count": 10,
+                    "failure_mode_count": 10,
                     "active_failure_count": 0,
                     "manifest_governance_state": "version_compatibility_publisher_trust_and_permissions_visible",
                     "lifecycle_review_gate_state": "privileged_lifecycle_actions_review_gated",
                     "connector_health_state": "degraded_connectors_fail_closed_with_operator_repair",
                     "marketplace_governance_state": "readiness_blockers_trust_and_actions_visible",
                     "diagnostics_update_triage_state": "repair_review_or_defer_triage_visible",
+                    "package_review_receipt_state": (
+                        "digest_key_review_permissions_compatibility_and_supply_chain_visible"
+                    ),
+                    "compatibility_transition_state": (
+                        "install_same_upgrade_downgrade_incompatible_and_override_semantics_visible"
+                    ),
+                    "trust_downgrade_state": "reviewed_provider_backed_downgrades_blocked",
+                    "authoring_ergonomics_state": "review_ready_local_scaffolds_and_doctor_guidance_visible",
                     "claim_boundary": "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security",
                 },
                 "scenario_names": [
@@ -1764,6 +1773,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                     "m9_connector_health_degradation_behavior",
                     "m9_marketplace_governance_flow_behavior",
                     "m9_diagnostics_update_triage_behavior",
+                    "m9_package_review_receipt_behavior",
+                    "m9_compatibility_transition_semantics_behavior",
+                    "m9_supply_chain_policy_behavior",
+                    "m9_provider_trust_downgrade_behavior",
+                    "m9_authoring_ergonomics_behavior",
                     "operator_m9_governed_ecosystem_benchmark_surface_behavior",
                 ],
                 "dimensions": [],
@@ -1779,7 +1793,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                     ],
                     "ci_gate_mode": "required_benchmark_suite",
                 },
-                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+                "latest_run": {"total": 11, "passed": 11, "failed": 0, "duration_ms": 100},
             }
         ),
     ):
@@ -1902,7 +1916,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert memory_provider_gate_suite["scenario_count"] == 4
     m9_suite = next(item for item in payload["suites"] if item["name"] == "m9_governed_ecosystem")
     assert "m9_manifest_governance_behavior" in m9_suite["scenario_names"]
-    assert m9_suite["scenario_count"] == 6
+    assert "m9_provider_trust_downgrade_behavior" in m9_suite["scenario_names"]
+    assert m9_suite["scenario_count"] == len(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES)
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -1984,11 +1999,19 @@ async def test_operator_m9_governed_ecosystem_benchmark_surface_reports_policy_r
     assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
     assert payload["summary"]["manifest_governance_state"] == "version_compatibility_publisher_trust_and_permissions_visible"
     assert payload["summary"]["connector_health_state"] == "degraded_connectors_fail_closed_with_operator_repair"
+    assert payload["summary"]["package_review_receipt_state"] == (
+        "digest_key_review_permissions_compatibility_and_supply_chain_visible"
+    )
+    assert payload["summary"]["compatibility_transition_state"] == (
+        "install_same_upgrade_downgrade_incompatible_and_override_semantics_visible"
+    )
+    assert payload["summary"]["trust_downgrade_state"] == "reviewed_provider_backed_downgrades_blocked"
+    assert payload["summary"]["authoring_ergonomics_state"] == "review_ready_local_scaffolds_and_doctor_guidance_visible"
     assert payload["summary"]["claim_boundary"] == (
         "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
     )
-    assert len(payload["dimensions"]) >= 6
-    assert len(payload["failure_taxonomy"]) >= 6
+    assert len(payload["dimensions"]) >= 10
+    assert len(payload["failure_taxonomy"]) >= 10
     assert payload["policy"]["manifest_governance_policy"] == (
         "packages_must_expose_version_compatibility_publisher_trust_and_declared_permissions"
     )
@@ -2000,6 +2023,10 @@ async def test_operator_m9_governed_ecosystem_benchmark_surface_reports_policy_r
     )
     assert "/api/operator/m9-governed-ecosystem-benchmark" in payload["policy"]["receipt_surfaces"]
     assert payload["governance_receipts"][0]["scenario_id"] == "m9_manifest_governance_behavior"
+    assert any(
+        receipt["scenario_id"] == "m9_provider_trust_downgrade_behavior"
+        for receipt in payload["governance_receipts"]
+    )
 
 
 @pytest.mark.asyncio

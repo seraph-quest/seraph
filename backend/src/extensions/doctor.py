@@ -26,10 +26,12 @@ from src.extensions.connectors import (
 from src.extensions.channels import parse_channel_adapter_definition
 from src.extensions.observers import parse_observer_definition
 from src.extensions.permissions import evaluate_contribution_permissions, evaluate_tool_permissions
+from src.extensions.governance import build_governance_status
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
     ExtensionRegistrySnapshot,
+    _current_seraph_version,
 )
 from src.security.context_scan import scan_text_for_suspicious_context
 from src.skills.loader import parse_skill_content
@@ -196,6 +198,47 @@ def doctor_extension(
 
     if extension.source != "manifest" or extension.manifest is None:
         return ExtensionDoctorResult(extension_id=extension.id, ok=True, issues=[])
+    governance = build_governance_status(
+        extension.manifest,
+        root_path=extension.root_path,
+        state_entry=None,
+        seraph_version=_current_seraph_version(),
+    )
+    review_receipt = governance.get("review_receipt") if isinstance(governance.get("review_receipt"), dict) else {}
+    if review_receipt.get("compatibility", {}).get("compatible") is False:
+        issues.append(
+            ExtensionDoctorIssue(
+                code="incompatible_runtime",
+                severity="error",
+                message=(
+                    "Package compatibility excludes the current Seraph runtime: "
+                    f"{review_receipt.get('compatibility', {}).get('seraph')}"
+                ),
+                suggested_fix="adjust manifest.compatibility.seraph or install the package on a compatible Seraph version",
+            )
+        )
+    supply_chain_status = str(review_receipt.get("supply_chain_status") or "")
+    if extension.manifest.trust.value == "verified" and supply_chain_status not in {
+        "",
+        "verified_signature_valid",
+    }:
+        issues.append(
+            ExtensionDoctorIssue(
+                code="supply_chain_policy",
+                severity="error",
+                message=f"Verified package supply-chain policy failed: {supply_chain_status}",
+                suggested_fix="regenerate the package digest/signature, use a supported signature algorithm, or re-review the package",
+            )
+        )
+    if review_receipt.get("source_policy_status") == "verified_source_policy_violation":
+        issues.append(
+            ExtensionDoctorIssue(
+                code="source_policy",
+                severity="error",
+                message="Verified packages must not declare local/workspace/unknown provenance as their source.",
+                suggested_fix="publish through a catalog provenance source or leave the package local instead of verified",
+            )
+        )
     for contribution in extension.contributions:
         resolved_path = contribution.metadata.get("resolved_path")
         resolved = Path(resolved_path) if isinstance(resolved_path, str) else None

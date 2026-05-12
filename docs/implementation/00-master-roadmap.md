@@ -135,7 +135,7 @@ This stack is the roadmap-level ordering for the next large batches after the me
    execute #438 for the selected native-notification channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
 9. [x] `guardian-world-model-learning-quality-v2`:
    add deterministic fixture receipts for multi-signal learning arbitration, stale and conflicting evidence suppression, salience and confidence calibration, and false-positive or false-negative accounting without claiming live human-outcome validation or a completed adaptive learning engine.
-10. [ ] `governed-extension-marketplace-hardening-foundations`:
+10. [x] `governed-extension-marketplace-hardening-foundations`:
    strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics as production-oriented foundations, not production marketplace security claims.
 
 ## Completed 10-PR Batches

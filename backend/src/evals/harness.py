@@ -13015,6 +13015,8 @@ def _run_m9_lifecycle_fail_closed_probe() -> dict[str, Any]:
 
 
 def _eval_m9_manifest_governance_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
     receipt = _m9_receipts_by_scenario()["m9_manifest_governance_behavior"]
     required_fields = {
         "version",
@@ -13031,11 +13033,13 @@ def _eval_m9_manifest_governance_behavior() -> dict[str, Any]:
         "manifest_fields_present": sorted(required_fields & manifest_fields),
         "manifest_governance_complete": required_fields <= manifest_fields,
         "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
-        "claim_boundary_visible": "production_marketplace_security" in receipt["claim_boundary"],
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
     }
 
 
 def _eval_m9_lifecycle_review_gate_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
     receipt = _m9_receipts_by_scenario()["m9_lifecycle_review_gate_behavior"]
     actions = set(receipt["actions"])
     expected_actions = {"install", "enable", "configure", "update"}
@@ -13055,7 +13059,7 @@ def _eval_m9_lifecycle_review_gate_behavior() -> dict[str, Any]:
         "real_managed_connector_disabled": fail_closed_probe["managed_connector_disabled"],
         "real_persisted_connector_disabled": fail_closed_probe["persisted_connector_disabled"],
         "control_plane_surface_visible": "/api/operator/control-plane" in receipt["operator_surfaces"],
-        "claim_boundary_visible": "competitor_superiority" in receipt["claim_boundary"],
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
     }
 
 
@@ -13072,6 +13076,8 @@ def _eval_m9_connector_health_degradation_behavior() -> dict[str, Any]:
 
 
 def _eval_m9_marketplace_governance_flow_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
     receipt = _m9_receipts_by_scenario()["m9_marketplace_governance_flow_behavior"]
     expected_items = {"extension_pack", "starter_pack", "packaged_runbook"}
     expected_actions = {"install", "update", "repair", "draft_follow_through"}
@@ -13081,11 +13087,13 @@ def _eval_m9_marketplace_governance_flow_behavior() -> dict[str, Any]:
         "flow_items_visible": expected_items <= set(receipt["flow_items"]),
         "explicit_actions_visible": expected_actions <= set(receipt["explicit_actions"]),
         "capability_overview_surface_visible": "/api/capabilities/overview" in receipt["operator_surfaces"],
-        "claim_boundary_visible": "deterministic_local_governance_proof" in receipt["claim_boundary"],
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
     }
 
 
 def _eval_m9_diagnostics_update_triage_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
     receipt = _m9_receipts_by_scenario()["m9_diagnostics_update_triage_behavior"]
     expected_choices = {"repair", "review", "defer"}
     _require_eval_contract(expected_choices <= set(receipt["triage_choices"]), "Expected M9 triage choices.")
@@ -13094,7 +13102,107 @@ def _eval_m9_diagnostics_update_triage_behavior() -> dict[str, Any]:
         "triage_choices_visible": expected_choices <= set(receipt["triage_choices"]),
         "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
         "benchmark_surface_visible": "/api/operator/benchmark-proof" in receipt["operator_surfaces"],
-        "claim_boundary_visible": "not_competitor_superiority" in receipt["claim_boundary"],
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_m9_package_review_receipt_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
+    receipt = _m9_receipts_by_scenario()["m9_package_review_receipt_behavior"]
+    required_fields = {
+        "digest",
+        "signed_digest",
+        "key_id",
+        "review_status",
+        "permission_fingerprint",
+        "reviewed_permission_fingerprint",
+        "compatibility_status",
+        "supply_chain_status",
+        "trust_downgrade_status",
+        "claim_boundary",
+    }
+    visible_fields = set(receipt["receipt_fields"])
+    _require_eval_contract(required_fields <= visible_fields, "Expected package review receipt fields.")
+    return {
+        "review_receipt_state": receipt["review_receipt_state"],
+        "receipt_fields_visible": required_fields <= visible_fields,
+        "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_m9_compatibility_transition_semantics_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_compatibility_transition_semantics_behavior"]
+    expected_modes = {
+        "new_install",
+        "same_version_changed_package",
+        "upgrade",
+        "downgrade",
+        "incompatible_runtime",
+        "workspace_override",
+    }
+    _require_eval_contract(expected_modes <= set(receipt["transition_modes"]), "Expected compatibility transition modes.")
+    return {
+        "transition_modes_visible": expected_modes <= set(receipt["transition_modes"]),
+        "incompatible_runtime_blocker_visible": (
+            "candidate_seraph_compatibility_excludes_current_runtime" in receipt["blocking_reasons"]
+        ),
+        "reject_action_visible": "reject_or_re_review" in receipt["recommended_actions"],
+        "validate_surface_visible": "/api/extensions/validate" in receipt["operator_surfaces"],
+    }
+
+
+def _eval_m9_supply_chain_policy_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
+    receipt = _m9_receipts_by_scenario()["m9_supply_chain_policy_behavior"]
+    expected_modes = {
+        "missing_provenance",
+        "unsupported_signature_algorithm",
+        "unsigned_verified",
+        "digest_mismatch",
+        "revoked_digest",
+        "unreviewed_provider_change",
+    }
+    _require_eval_contract(expected_modes <= set(receipt["supply_chain_failure_modes"]), "Expected supply-chain failure modes.")
+    return {
+        "supply_chain_failure_modes_visible": expected_modes <= set(receipt["supply_chain_failure_modes"]),
+        "fail_closed": receipt["fail_closed"] is True,
+        "validate_surface_visible": "/api/extensions/validate" in receipt["operator_surfaces"],
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_m9_provider_trust_downgrade_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY
+
+    receipt = _m9_receipts_by_scenario()["m9_provider_trust_downgrade_behavior"]
+    expected_transitions = {"verified_to_local", "verified_to_unsigned", "verified_connector_to_lower_trust"}
+    _require_eval_contract(expected_transitions <= set(receipt["blocked_transitions"]), "Expected trust downgrade blockers.")
+    return {
+        "blocked_transitions_visible": expected_transitions <= set(receipt["blocked_transitions"]),
+        "trust_downgrade_blocker_visible": receipt["transition_blocker"] == "trust_downgrade",
+        "fail_closed": receipt["fail_closed"] is True,
+        "claim_boundary_visible": receipt["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_m9_authoring_ergonomics_behavior() -> dict[str, Any]:
+    receipt = _m9_receipts_by_scenario()["m9_authoring_ergonomics_behavior"]
+    expected_fields = {
+        "governance.provenance",
+        "governance.review",
+        "governance.source_policy",
+        "governance.compatibility_policy",
+        "governance.trust_downgrade_policy",
+    }
+    _require_eval_contract(expected_fields <= set(receipt["scaffold_fields"]), "Expected review-ready scaffold fields.")
+    return {
+        "scaffold_fields_visible": expected_fields <= set(receipt["scaffold_fields"]),
+        "doctor_guidance_visible": {"incompatible_runtime", "supply_chain_policy"} <= set(receipt["doctor_guidance"]),
+        "local_claim_boundary_visible": receipt["verification_claim"] == "local_authoring_not_verified_marketplace_security",
+        "validate_surface_visible": "/api/extensions/validate" in receipt["operator_surfaces"],
     }
 
 
@@ -13148,12 +13256,27 @@ async def _eval_operator_m9_governed_ecosystem_benchmark_surface_behavior() -> d
             payload["policy"]["connector_health_policy"]
             == "degraded_managed_connectors_fail_closed_with_operator_repair_guidance"
         ),
+        "package_review_receipt_state_visible": (
+            payload["summary"]["package_review_receipt_state"]
+            == "digest_key_review_permissions_compatibility_and_supply_chain_visible"
+        ),
+        "compatibility_transition_state_visible": (
+            payload["summary"]["compatibility_transition_state"]
+            == "install_same_upgrade_downgrade_incompatible_and_override_semantics_visible"
+        ),
+        "trust_downgrade_state_visible": (
+            payload["summary"]["trust_downgrade_state"] == "reviewed_provider_backed_downgrades_blocked"
+        ),
+        "authoring_ergonomics_state_visible": (
+            payload["summary"]["authoring_ergonomics_state"]
+            == "review_ready_local_scaffolds_and_doctor_guidance_visible"
+        ),
         "receipt_surfaces_visible": (
             "/api/operator/m9-governed-ecosystem-benchmark" in payload["policy"]["receipt_surfaces"]
             and "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
         ),
         "claim_boundary_visible": payload["policy"]["claim_boundary"] == M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY,
-        "receipt_count_matches": len(payload["governance_receipts"]) == 5,
+        "receipt_count_matches": len(payload["governance_receipts"]) == 10,
     }
 
 
@@ -15283,6 +15406,36 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="extensions",
         description="M9 diagnostics and update posture support repair, review, or defer triage.",
         runner=_eval_m9_diagnostics_update_triage_behavior,
+    ),
+    EvalScenario(
+        name="m9_package_review_receipt_behavior",
+        category="extensions",
+        description="M9 verified packages expose digest, key, review, compatibility, supply-chain, and claim-boundary receipts.",
+        runner=_eval_m9_package_review_receipt_behavior,
+    ),
+    EvalScenario(
+        name="m9_compatibility_transition_semantics_behavior",
+        category="extensions",
+        description="M9 install and update flows distinguish new, same-version, upgrade, downgrade, incompatible, and override semantics.",
+        runner=_eval_m9_compatibility_transition_semantics_behavior,
+    ),
+    EvalScenario(
+        name="m9_supply_chain_policy_behavior",
+        category="extensions",
+        description="M9 supply-chain policy exposes supported fail-closed modes for verified packages.",
+        runner=_eval_m9_supply_chain_policy_behavior,
+    ),
+    EvalScenario(
+        name="m9_provider_trust_downgrade_behavior",
+        category="extensions",
+        description="M9 reviewed provider-backed packages cannot silently downgrade to lower trust on update.",
+        runner=_eval_m9_provider_trust_downgrade_behavior,
+    ),
+    EvalScenario(
+        name="m9_authoring_ergonomics_behavior",
+        category="extensions",
+        description="M9 scaffold and doctor flows guide authors toward review-ready local governance metadata.",
+        runner=_eval_m9_authoring_ergonomics_behavior,
     ),
     EvalScenario(
         name="operator_m9_governed_ecosystem_benchmark_surface_behavior",

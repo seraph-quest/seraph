@@ -7,10 +7,19 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from packaging.version import InvalidVersion, Version
 
 from src.extensions.manifest import ExtensionManifest, ExtensionTrust
 
 SIGNATURE_ALGORITHM = "seraph-sha256-v1"
+GOVERNED_MARKETPLACE_CLAIM_BOUNDARY = (
+    "local_governed_marketplace_foundations_not_production_marketplace_security"
+)
+_TRUST_RANK = {
+    ExtensionTrust.LOCAL.value: 1,
+    ExtensionTrust.VERIFIED.value: 2,
+    ExtensionTrust.BUNDLED.value: 3,
+}
 
 
 class ExtensionGovernanceError(ValueError):
@@ -88,14 +97,190 @@ def _string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item.strip()]
 
 
+def _version_relation(candidate_version: str, current_version: str | None) -> str:
+    if not current_version:
+        return "new_install"
+    try:
+        candidate = Version(candidate_version)
+        current = Version(current_version)
+    except InvalidVersion:
+        return "invalid_version"
+    if candidate > current:
+        return "upgrade"
+    if candidate < current:
+        return "downgrade"
+    return "same_version"
+
+
+def _compatibility_verdict(manifest: ExtensionManifest, seraph_version: str | None) -> dict[str, Any]:
+    if not seraph_version:
+        return {
+            "status": "declared",
+            "seraph": manifest.compatibility.seraph,
+            "current_version": None,
+            "compatible": None,
+            "blocking_reason": None,
+        }
+    try:
+        compatible = manifest.is_compatible_with(seraph_version)
+    except ValueError as exc:
+        return {
+            "status": "invalid_runtime_version",
+            "seraph": manifest.compatibility.seraph,
+            "current_version": seraph_version,
+            "compatible": False,
+            "blocking_reason": str(exc),
+        }
+    return {
+        "status": "compatible" if compatible else "incompatible_runtime",
+        "seraph": manifest.compatibility.seraph,
+        "current_version": seraph_version,
+        "compatible": compatible,
+        "blocking_reason": None if compatible else "candidate_seraph_compatibility_excludes_current_runtime",
+    }
+
+
+def _source_policy_status(manifest: ExtensionManifest) -> str:
+    if manifest.trust == ExtensionTrust.BUNDLED:
+        return "bundled_source_trusted"
+    if manifest.governance is None:
+        return "local_source_allowed"
+    source = manifest.governance.provenance.source.strip().lower()
+    if manifest.trust == ExtensionTrust.VERIFIED and source in {"local", "local-authoring", "workspace", "unknown"}:
+        return "verified_source_policy_violation"
+    if manifest.governance.source_policy:
+        return "declared"
+    return "defaulted"
+
+
+def build_package_review_receipt(
+    manifest: ExtensionManifest | None,
+    *,
+    root_path: str | Path | None,
+    state_entry: dict[str, Any] | None = None,
+    seraph_version: str | None = None,
+    previous_manifest: ExtensionManifest | None = None,
+) -> dict[str, Any]:
+    current_digest = governance_package_digest(root_path)
+    if manifest is None:
+        return {
+            "package_id": None,
+            "status": "unknown",
+            "trust": "unknown",
+            "digest": current_digest,
+            "claim_boundary": GOVERNED_MARKETPLACE_CLAIM_BOUNDARY,
+        }
+
+    state_governance = _state_governance(state_entry)
+    permission_fingerprint = extension_permission_fingerprint(manifest)
+    reviewed_permission_fingerprint = state_governance.get("reviewed_permission_fingerprint")
+    compatibility = _compatibility_verdict(manifest, seraph_version)
+    previous_trust = previous_manifest.trust.value if previous_manifest is not None else None
+    trust_downgrade = (
+        previous_trust is not None
+        and _TRUST_RANK.get(manifest.trust.value, 0) < _TRUST_RANK.get(previous_trust, 0)
+    )
+    version_relation = _version_relation(
+        manifest.version,
+        previous_manifest.version if previous_manifest is not None else None,
+    )
+    signature = manifest.governance.signature if manifest.governance is not None else None
+    provenance = (
+        manifest.governance.provenance.model_dump(mode="json")
+        if manifest.governance is not None
+        else {"source": "local"}
+    )
+    manifest_review = (
+        manifest.governance.review.model_dump(mode="json")
+        if manifest.governance is not None and manifest.governance.review is not None
+        else None
+    )
+    reviewed_digest = state_governance.get("reviewed_digest")
+    reviewed_key_id = state_governance.get("reviewed_key_id")
+    review_status = str(state_governance.get("review_status") or "not_required")
+    if manifest.trust == ExtensionTrust.VERIFIED:
+        if review_status in {"approved", "reviewed"} and reviewed_digest == current_digest:
+            review_status = "reviewed"
+        elif reviewed_digest:
+            review_status = "stale"
+        else:
+            review_status = "missing"
+        if permission_fingerprint != reviewed_permission_fingerprint and reviewed_permission_fingerprint:
+            review_status = "permission_drift"
+
+    supply_chain_status = "local_unsigned_allowed"
+    if manifest.trust == ExtensionTrust.BUNDLED:
+        supply_chain_status = "bundled_trusted"
+    elif manifest.trust == ExtensionTrust.VERIFIED:
+        if manifest.governance is None:
+            supply_chain_status = "missing_governance"
+        elif signature is None:
+            supply_chain_status = "unsigned_verified"
+        elif signature.algorithm != SIGNATURE_ALGORITHM:
+            supply_chain_status = "unsupported_signature_algorithm"
+        elif current_digest is not None and signature.digest != current_digest:
+            supply_chain_status = "digest_mismatch"
+        elif signature.signature != governance_signature_value(key_id=signature.key_id, digest=signature.digest):
+            supply_chain_status = "invalid_signature"
+        elif _source_policy_status(manifest) == "verified_source_policy_violation":
+            supply_chain_status = "source_policy_violation"
+        else:
+            supply_chain_status = "verified_signature_valid"
+
+    blocking_reasons: list[str] = []
+    if compatibility["compatible"] is False:
+        blocking_reasons.append(str(compatibility["blocking_reason"] or "incompatible_runtime"))
+    if manifest.trust == ExtensionTrust.VERIFIED and review_status != "reviewed":
+        blocking_reasons.append(f"review_{review_status}")
+    if trust_downgrade:
+        blocking_reasons.append("trust_downgrade")
+    if version_relation == "downgrade" and (
+        previous_manifest.trust == ExtensionTrust.VERIFIED
+        or previous_manifest.kind.value == "connector-pack"
+    ):
+        blocking_reasons.append("version_downgrade")
+    if manifest.trust == ExtensionTrust.VERIFIED and supply_chain_status != "verified_signature_valid":
+        blocking_reasons.append(f"supply_chain_{supply_chain_status}")
+
+    return {
+        "package_id": manifest.id,
+        "version": manifest.version,
+        "trust": manifest.trust.value,
+        "previous_trust": previous_trust,
+        "version_relation": version_relation,
+        "status": "blocked" if blocking_reasons else "reviewable",
+        "digest": current_digest,
+        "signed_digest": signature.digest if signature is not None else None,
+        "key_id": signature.key_id if signature is not None else None,
+        "reviewed_digest": reviewed_digest if isinstance(reviewed_digest, str) else None,
+        "reviewed_key_id": reviewed_key_id if isinstance(reviewed_key_id, str) else None,
+        "review_status": review_status,
+        "manifest_review": manifest_review,
+        "permission_fingerprint": permission_fingerprint,
+        "reviewed_permission_fingerprint": (
+            reviewed_permission_fingerprint if isinstance(reviewed_permission_fingerprint, str) else None
+        ),
+        "compatibility": compatibility,
+        "compatibility_status": compatibility["status"],
+        "supply_chain_status": supply_chain_status,
+        "source_policy_status": _source_policy_status(manifest),
+        "trust_downgrade_status": "blocked" if trust_downgrade else "not_downgraded",
+        "blocking_reasons": blocking_reasons,
+        "recommended_action": "reject_or_re_review" if blocking_reasons else "review_or_install",
+        "claim_boundary": GOVERNED_MARKETPLACE_CLAIM_BOUNDARY,
+    }
+
+
 def build_governance_status(
     manifest: ExtensionManifest | None,
     *,
     root_path: str | Path | None,
     state_entry: dict[str, Any] | None = None,
+    seraph_version: str | None = None,
 ) -> dict[str, Any]:
     current_digest = governance_package_digest(root_path)
     if manifest is None:
+        review_receipt = build_package_review_receipt(None, root_path=root_path, state_entry=state_entry)
         return {
             "status": "unknown",
             "trust": "unknown",
@@ -111,8 +296,16 @@ def build_governance_status(
             "permission_drift": False,
             "fail_closed": False,
             "fail_closed_reason": None,
+            "review_receipt": review_receipt,
+            "claim_boundary": GOVERNED_MARKETPLACE_CLAIM_BOUNDARY,
         }
 
+    review_receipt = build_package_review_receipt(
+        manifest,
+        root_path=root_path,
+        state_entry=state_entry,
+        seraph_version=seraph_version,
+    )
     state_governance = _state_governance(state_entry)
     permission_fingerprint = extension_permission_fingerprint(manifest)
     reviewed_permission_fingerprint = state_governance.get("reviewed_permission_fingerprint")
@@ -143,6 +336,10 @@ def build_governance_status(
             "permission_drift": False,
             "fail_closed": False,
             "fail_closed_reason": None,
+            "review_receipt": review_receipt,
+            "compatibility_status": review_receipt["compatibility_status"],
+            "supply_chain_status": review_receipt["supply_chain_status"],
+            "claim_boundary": GOVERNED_MARKETPLACE_CLAIM_BOUNDARY,
         }
 
     if manifest.trust == ExtensionTrust.LOCAL:
@@ -168,6 +365,10 @@ def build_governance_status(
             "permission_drift": False,
             "fail_closed": False,
             "fail_closed_reason": None,
+            "review_receipt": review_receipt,
+            "compatibility_status": review_receipt["compatibility_status"],
+            "supply_chain_status": review_receipt["supply_chain_status"],
+            "claim_boundary": GOVERNED_MARKETPLACE_CLAIM_BOUNDARY,
         }
 
     signature = manifest.governance.signature if manifest.governance is not None else None
@@ -225,6 +426,10 @@ def build_governance_status(
         fail_closed_reason = revocation_reason or "revoked"
     elif review_status != "reviewed":
         fail_closed_reason = f"review_{review_status}"
+    elif review_receipt["compatibility"].get("compatible") is False:
+        fail_closed_reason = "compatibility_incompatible_runtime"
+    elif review_receipt["supply_chain_status"] != "verified_signature_valid":
+        fail_closed_reason = f"supply_chain_{review_receipt['supply_chain_status']}"
 
     return {
         "status": "verified" if fail_closed_reason is None else "blocked",
@@ -247,6 +452,11 @@ def build_governance_status(
         "permission_drift": permission_drift,
         "fail_closed": fail_closed_reason is not None,
         "fail_closed_reason": fail_closed_reason,
+        "review_receipt": review_receipt,
+        "compatibility_status": review_receipt["compatibility_status"],
+        "supply_chain_status": review_receipt["supply_chain_status"],
+        "source_policy_status": review_receipt["source_policy_status"],
+        "claim_boundary": GOVERNED_MARKETPLACE_CLAIM_BOUNDARY,
     }
 
 
@@ -256,11 +466,41 @@ def assert_governance_allows_lifecycle(
     root_path: str | Path | None,
     state_entry: dict[str, Any] | None,
     action: str,
+    seraph_version: str | None = None,
 ) -> dict[str, Any]:
-    status = build_governance_status(manifest, root_path=root_path, state_entry=state_entry)
+    status = build_governance_status(
+        manifest,
+        root_path=root_path,
+        state_entry=state_entry,
+        seraph_version=seraph_version,
+    )
     if status.get("fail_closed"):
         reason = str(status.get("fail_closed_reason") or "governance blocked")
         raise ExtensionGovernanceError(
             f"extension governance blocks {action}: {reason}"
         )
     return status
+
+
+def assert_governance_allows_update_transition(
+    candidate_manifest: ExtensionManifest,
+    *,
+    existing_manifest: ExtensionManifest | None,
+    root_path: str | Path | None,
+    state_entry: dict[str, Any] | None,
+    seraph_version: str | None = None,
+) -> dict[str, Any]:
+    receipt = build_package_review_receipt(
+        candidate_manifest,
+        root_path=root_path,
+        state_entry=state_entry,
+        seraph_version=seraph_version,
+        previous_manifest=existing_manifest,
+    )
+    blocking_reasons = [str(reason) for reason in receipt.get("blocking_reasons", [])]
+    if blocking_reasons:
+        raise ExtensionGovernanceError(
+            "extension governance blocks update transition: "
+            + ",".join(blocking_reasons)
+        )
+    return receipt

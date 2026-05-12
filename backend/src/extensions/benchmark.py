@@ -10,6 +10,11 @@ M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES = (
     "m9_connector_health_degradation_behavior",
     "m9_marketplace_governance_flow_behavior",
     "m9_diagnostics_update_triage_behavior",
+    "m9_package_review_receipt_behavior",
+    "m9_compatibility_transition_semantics_behavior",
+    "m9_supply_chain_policy_behavior",
+    "m9_provider_trust_downgrade_behavior",
+    "m9_authoring_ergonomics_behavior",
     "operator_m9_governed_ecosystem_benchmark_surface_behavior",
 )
 M9_GOVERNED_ECOSYSTEM_CLAIM_BOUNDARY = (
@@ -49,6 +54,26 @@ def m9_governed_ecosystem_benchmark_dimensions() -> list[dict[str, str]]:
             "label": "Operator receipt surface",
             "summary": "M9 governance proof should be visible in benchmark-proof and the dedicated M9 benchmark endpoint with an explicit claim boundary.",
         },
+        {
+            "name": "package_review_receipts",
+            "label": "Package review receipts",
+            "summary": "Verified packages should surface digest, key, review status, permission fingerprint, compatibility, supply-chain, and claim-boundary fields as one operator-readable receipt.",
+        },
+        {
+            "name": "compatibility_transition_semantics",
+            "label": "Compatibility transition semantics",
+            "summary": "Install and update flows should distinguish new installs, same-version changed packages, upgrades, downgrades, incompatible runtimes, and workspace overrides with clear recommended actions.",
+        },
+        {
+            "name": "provider_trust_downgrade",
+            "label": "Provider trust downgrade",
+            "summary": "Previously reviewed verified/provider-backed packages should not silently become lower-trust local or unsigned connector packages during update.",
+        },
+        {
+            "name": "authoring_ergonomics",
+            "label": "Authoring ergonomics",
+            "summary": "Scaffold and doctor paths should produce review-ready local manifests and precise policy guidance without pretending local packages are verified.",
+        },
     ]
 
 
@@ -84,6 +109,26 @@ def m9_governed_ecosystem_failure_taxonomy() -> list[dict[str, str]]:
             "severity": "medium",
             "summary": "The proof surface implies competitor superiority or production marketplace security instead of local deterministic governance foundations.",
         },
+        {
+            "name": "missing_package_review_receipt",
+            "severity": "high",
+            "summary": "A verified package lacks operator-visible digest, key, review, permission fingerprint, compatibility, or supply-chain verdict fields.",
+        },
+        {
+            "name": "unsafe_transition_semantics",
+            "severity": "high",
+            "summary": "An update cannot distinguish upgrade, downgrade, same-version content change, incompatible runtime, or workspace override posture.",
+        },
+        {
+            "name": "provider_trust_downgrade",
+            "severity": "high",
+            "summary": "A reviewed verified/provider-backed package can silently become local, unsigned, or lower trust on update.",
+        },
+        {
+            "name": "weak_authoring_guidance",
+            "severity": "medium",
+            "summary": "Scaffolded packages or doctor output do not guide authors toward review-ready governance metadata and safer compatibility policy.",
+        },
     ]
 
 
@@ -95,6 +140,10 @@ def m9_governed_ecosystem_benchmark_policy_payload() -> dict[str, Any]:
         "connector_health_policy": "degraded_managed_connectors_fail_closed_with_operator_repair_guidance",
         "marketplace_governance_policy": "marketplace_flows_must_show_readiness_blockers_trust_tier_and_explicit_actions",
         "diagnostics_update_policy": "diagnostics_and_update_posture_must_support_repair_review_or_defer_triage",
+        "package_review_policy": "verified_packages_must_surface_digest_key_review_permission_compatibility_and_supply_chain_receipts",
+        "compatibility_transition_policy": "install_update_flows_must_distinguish_new_same_upgrade_downgrade_incompatible_and_workspace_override",
+        "trust_downgrade_policy": "reviewed_verified_or_provider_backed_packs_must_not_silently_downgrade_to_lower_trust",
+        "authoring_policy": "scaffold_and_doctor_must_emit_review_ready_local_governance_metadata_without_verification_claims",
         "operator_visibility": "benchmark_proof_plus_dedicated_m9_report_visible",
         "receipt_surfaces": [
             "/api/operator/benchmark-proof",
@@ -169,6 +218,90 @@ def build_m9_governed_ecosystem_receipts() -> list[dict[str, Any]]:
             "operator_surfaces": ["/api/extensions", "/api/operator/benchmark-proof"],
             "claim_boundary": policy["claim_boundary"],
         },
+        {
+            "scenario_id": "m9_package_review_receipt_behavior",
+            "dimension": "package_review_receipts",
+            "status": "passed",
+            "package_id": "seraph.github-managed",
+            "receipt_fields": [
+                "digest",
+                "signed_digest",
+                "key_id",
+                "review_status",
+                "permission_fingerprint",
+                "reviewed_permission_fingerprint",
+                "compatibility_status",
+                "supply_chain_status",
+                "trust_downgrade_status",
+                "claim_boundary",
+            ],
+            "review_receipt_state": "digest_key_review_permissions_compatibility_and_supply_chain_visible",
+            "operator_surfaces": ["/api/extensions", "/api/operator/m9-governed-ecosystem-benchmark"],
+            "claim_boundary": policy["claim_boundary"],
+        },
+        {
+            "scenario_id": "m9_compatibility_transition_semantics_behavior",
+            "dimension": "compatibility_transition_semantics",
+            "status": "passed",
+            "transition_modes": [
+                "new_install",
+                "same_version_changed_package",
+                "upgrade",
+                "downgrade",
+                "incompatible_runtime",
+                "workspace_override",
+            ],
+            "blocking_reasons": ["candidate_seraph_compatibility_excludes_current_runtime", "version_downgrade"],
+            "recommended_actions": ["install", "update", "none", "reject_or_re_review"],
+            "operator_surfaces": ["/api/extensions/validate"],
+            "claim_boundary": policy["claim_boundary"],
+        },
+        {
+            "scenario_id": "m9_supply_chain_policy_behavior",
+            "dimension": "package_review_receipts",
+            "status": "passed",
+            "supply_chain_failure_modes": [
+                "missing_provenance",
+                "unsupported_signature_algorithm",
+                "unsigned_verified",
+                "digest_mismatch",
+                "revoked_digest",
+                "unreviewed_provider_change",
+            ],
+            "fail_closed": True,
+            "operator_surfaces": ["/api/extensions", "/api/extensions/validate"],
+            "claim_boundary": policy["claim_boundary"],
+        },
+        {
+            "scenario_id": "m9_provider_trust_downgrade_behavior",
+            "dimension": "provider_trust_downgrade",
+            "status": "passed",
+            "blocked_transitions": [
+                "verified_to_local",
+                "verified_to_unsigned",
+                "verified_connector_to_lower_trust",
+            ],
+            "transition_blocker": "trust_downgrade",
+            "fail_closed": True,
+            "operator_surfaces": ["/api/extensions/validate", "/api/extensions/install"],
+            "claim_boundary": policy["claim_boundary"],
+        },
+        {
+            "scenario_id": "m9_authoring_ergonomics_behavior",
+            "dimension": "authoring_ergonomics",
+            "status": "passed",
+            "scaffold_fields": [
+                "governance.provenance",
+                "governance.review",
+                "governance.source_policy",
+                "governance.compatibility_policy",
+                "governance.trust_downgrade_policy",
+            ],
+            "doctor_guidance": ["incompatible_runtime", "supply_chain_policy", "source_policy"],
+            "verification_claim": "local_authoring_not_verified_marketplace_security",
+            "operator_surfaces": ["/api/extensions/validate"],
+            "claim_boundary": policy["claim_boundary"],
+        },
     ]
 
 
@@ -234,6 +367,26 @@ async def build_m9_governed_ecosystem_benchmark_report() -> dict[str, Any]:
             ),
             "diagnostics_update_triage_state": (
                 "repair_review_or_defer_triage_visible"
+                if healthy
+                else degraded_state
+            ),
+            "package_review_receipt_state": (
+                "digest_key_review_permissions_compatibility_and_supply_chain_visible"
+                if healthy
+                else degraded_state
+            ),
+            "compatibility_transition_state": (
+                "install_same_upgrade_downgrade_incompatible_and_override_semantics_visible"
+                if healthy
+                else degraded_state
+            ),
+            "trust_downgrade_state": (
+                "reviewed_provider_backed_downgrades_blocked"
+                if healthy
+                else degraded_state
+            ),
+            "authoring_ergonomics_state": (
+                "review_ready_local_scaffolds_and_doctor_guidance_visible"
                 if healthy
                 else degraded_state
             ),

@@ -35,6 +35,8 @@ backend/.venv/bin/python scripts/extensions/validate_pack.py ./tmp/research-pack
 - suspicious context-bearing content in `skills`, `workflows`, and `prompt_packs`
 - connector payload parse failures
 - connector network-permission mismatches when the payload actually implies a network transport
+- incompatible Seraph runtime declarations
+- verified-package supply-chain policy failures such as unsupported signature algorithms, digest mismatches, unsigned verified packages, or local/workspace provenance
 
 Current semantic validation is intentionally narrower than the full canonical
 contribution matrix:

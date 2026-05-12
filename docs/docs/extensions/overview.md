@@ -65,6 +65,14 @@ Current manifest provenance values are:
 
 These are package provenance markers, not a replacement for Seraph’s architectural trust tiers.
 
+The current marketplace-hardening foundation is deliberately local and
+operator-visible: review receipts show package digest, signing key, review
+status, permission fingerprint, compatibility verdict, supply-chain verdict,
+and downgrade posture. Verified/provider-backed updates fail closed when they
+would silently downgrade trust. This is not a production marketplace security
+claim; external publisher operations, key infrastructure, and live third-party
+review remain future work.
+
 At a higher level, Seraph treats extension work in three buckets:
 
 1. Safe declarative extensions

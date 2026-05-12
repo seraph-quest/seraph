@@ -4566,6 +4566,71 @@ class TestWorkflowSurfaces:
         ]
         assert _checkpoint_context_allowed(approval_context) is False
 
+    def test_workflow_tool_redacts_durable_state_when_checkpoint_context_is_disallowed(self):
+        workflow = Workflow(
+            name="secret-sync",
+            description="Handle a secret-backed source",
+            inputs={
+                "token": {"type": "string", "required": True},
+                "prompt": {"type": "string", "required": True},
+            },
+            steps=[
+                WorkflowStep(
+                    id="fetch",
+                    tool="secret_fetch",
+                    arguments={
+                        "token": "{{ token }}",
+                        "prompt": "{{ prompt }}",
+                    },
+                )
+            ],
+            requires_tools=["secret_fetch"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {
+                "secret_fetch": DummyTool(
+                    "secret_fetch",
+                    lambda **_kwargs: {"token": "secret-token", "body": "private-result"},
+                )
+            },
+        )
+        durable_repository = SimpleNamespace(
+            create_run=AsyncMock(),
+            record_step_started=AsyncMock(),
+            record_step_completed=AsyncMock(),
+            record_step_failed=AsyncMock(),
+            finish_run=AsyncMock(),
+        )
+        approval_context = {
+            "risk_level": "high",
+            "accepts_secret_refs": True,
+            "execution_boundaries": ["secret_read"],
+        }
+
+        with (
+            patch.object(workflow_tool, "get_approval_context", return_value=approval_context),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+        ):
+            workflow_tool(token="sref_123", prompt="private prompt")
+
+        create_arguments = durable_repository.create_run.await_args.kwargs["arguments"]
+        assert create_arguments == {
+            "redacted": True,
+            "reason": "checkpoint_context_disallowed",
+            "argument_keys": ["prompt", "token"],
+        }
+        started_arguments = durable_repository.record_step_started.await_args.kwargs["arguments"]
+        assert started_arguments == {
+            "redacted": True,
+            "reason": "checkpoint_context_disallowed",
+            "argument_keys": ["prompt", "token"],
+        }
+        completed_kwargs = durable_repository.record_step_completed.await_args.kwargs
+        assert completed_kwargs["result"] is None
+        assert completed_kwargs["checkpoint"] is None
+        assert durable_repository.finish_run.await_args.kwargs["checkpoint_context"] == {}
+
     def test_workflow_tool_approval_context_records_delegated_tool_inventory(self):
         workflow = Workflow(
             name="delegated-mcp-sync",

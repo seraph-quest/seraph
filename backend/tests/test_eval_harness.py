@@ -10,6 +10,7 @@ from config.settings import settings
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
 from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
+from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -205,7 +206,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 21
+    assert details["suite_count"] == 22
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -214,6 +215,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["live_workflow_canary_suite_scenario_count_matches"] is True
     assert details["live_workflow_canary_suite_axis_matches"] is True
     assert details["live_workflow_canary_gate_required"] is True
+    assert details["durable_workflow_engine_suite_present"] is True
+    assert details["durable_workflow_engine_suite_scenario_count_matches"] is True
+    assert details["durable_workflow_engine_suite_axis_matches"] is True
+    assert details["durable_workflow_engine_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -257,6 +262,17 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["gate_requires_review"] is True
     assert details["gate_blocks_constraint_failure"] is True
     assert details["proof_contract"] == "deterministic_benchmark_suites_plus_review_receipts"
+
+
+def test_run_durable_workflow_engine_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["durable_workflow_engine_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["suite_name_visible"] is True
+        assert result.details["receipt_surface_visible"] is True
+        assert result.details["benchmark_proof_surface_visible"] is True
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():

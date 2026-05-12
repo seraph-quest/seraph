@@ -119,18 +119,18 @@ This stack is the roadmap-level ordering for the next large batches after the me
 
 1. [ ] `m0-board-proof-and-p1-wave-normalization`:
    normalize the active Project fields, stale merged-item PR/review states, parent-batch linkage, and proof/claim gates before the next wave starts claiming readiness.
-2. [ ] `secure-execution-host-v1`:
+2. [x] `secure-execution-host-v1`:
    deepen host/container isolation strategy, browser credential and cookie partitioning, workspace escape defenses, hostile-provider replay, and fail-closed privileged-path receipts without claiming production-secure execution.
-3. [ ] `live-long-horizon-eval-replay-v1`:
+3. [x] `live-long-horizon-eval-replay-v1`:
    add a replayable proof substrate with live-ish fake providers, cross-surface failure taxonomy, CI receipts, and operator-visible evidence across memory, workflow, reach, security, and cockpit flows.
-4. [ ] `cockpit-operator-efficiency-benchmark`:
+4. [x] `cockpit-operator-efficiency-benchmark`:
    execute #439 as a measured operator benchmark for inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, and audit flows using real workflow and memory scenarios.
 5. [x] `memory-provider-quality-gate`:
    execute #441 so external memory evidence must declare provenance, confidence, privacy boundary, freshness, conflict behavior, evidence IDs, and suppression rules before entering guardian context.
 6. [x] `workflow-endurance-canary`:
    execute #440 as a multi-session canary covering checkpoint, branch, failure injection, recovery, delegated ownership, artifact comparison, approval preservation, and audit receipts.
-7. [ ] `durable-workflow-engine-v1`:
-   promote workflow control from audit-projected receipts toward a minimal durable state kernel with crash-safe resume, heartbeat or reactive triggers, repair, retry, and delegated artifact review lifecycle.
+7. [x] `durable-workflow-engine-v1`:
+   promote workflow control from audit-projected receipts toward a minimal durable state kernel with persisted run, step, safe checkpoint, retry or repair rows, repository support for artifact-review lifecycle receipts, and fixture-backed heartbeat or reactive proof while preserving the boundary that this is not a full distributed workflow engine.
 8. [x] `one-excellent-reach-channel-canary`:
    execute #438 for the selected native-notification channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
 9. [ ] `guardian-world-model-learning-quality-v2`:

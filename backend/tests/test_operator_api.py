@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
+
 
 @pytest.fixture(autouse=True)
 def _default_empty_continuity_snapshot():
@@ -1035,6 +1037,38 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_durable_workflow_state_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "durable_workflow_engine_v1",
+                    "benchmark_posture": "durable_workflow_engine_ci_gated_operator_visible",
+                    "operator_status": "durable_workflow_engine_visible",
+                    "scenario_count": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                    "active_failure_count": 0,
+                    "durable_state_state": "checkpointed_state_and_resume_metadata_visible",
+                    "recovery_state": "crash_safe_continuation_receipts_visible",
+                    "trigger_state": "heartbeat_and_reactive_trigger_receipts_visible",
+                },
+                "scenario_names": list(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                "policy": {
+                    "operator_visibility": "durable_workflow_engine_state_and_benchmark_proof_visible",
+                    "receipt_surfaces": [
+                        "/api/operator/durable-workflow-engine",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "failure_report": [],
+                "latest_run": {
+                    "total": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                    "passed": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                    "failed": 0,
+                    "duration_ms": 100,
+                },
+            }
+        ),
+    ), patch(
         "src.api.operator.build_live_replay_benchmark_report",
         AsyncMock(
             return_value={
@@ -1713,7 +1747,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 21
+    assert payload["summary"]["suite_count"] == 22
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1723,6 +1757,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["live_workflow_endurance_canary_posture"]
         == "live_workflow_canary_ci_gated_operator_visible"
     )
+    assert payload["summary"]["durable_workflow_engine_posture"] == "durable_workflow_engine_ci_gated_operator_visible"
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
@@ -1746,6 +1781,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
+    assert payload["durable_workflow_engine"]["summary"]["suite_name"] == "durable_workflow_engine_v1"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -1757,6 +1793,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "durable_workflow_engine_v1" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "one_excellent_reach_channel_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
@@ -1775,6 +1812,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     live_workflow_canary_suite = next(item for item in payload["suites"] if item["name"] == "live_workflow_endurance_canary")
     assert "live_workflow_canary_protocol_behavior" in live_workflow_canary_suite["scenario_names"]
     assert live_workflow_canary_suite["scenario_count"] == 4
+    durable_workflow_engine_suite = next(item for item in payload["suites"] if item["name"] == "durable_workflow_engine_v1")
+    assert "durable_workflow_state_kernel_behavior" in durable_workflow_engine_suite["scenario_names"]
+    assert durable_workflow_engine_suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
     live_replay_suite = next(item for item in payload["suites"] if item["name"] == "live_long_horizon_eval_replay_v1")
     assert "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"]
     assert live_replay_suite["scenario_count"] == 5
@@ -2263,6 +2303,48 @@ async def test_operator_live_workflow_endurance_canary_surface_degrades_summary_
     assert payload["summary"]["benchmark_posture"] == "live_workflow_canary_regressions_detected_operator_visible"
     assert payload["summary"]["active_failure_count"] == 1
     assert payload["failure_report"][0]["scenario_name"] == "live_workflow_canary_approval_preservation_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_durable_workflow_engine_surface_delegates_to_state_report(client):
+    payload = {
+        "summary": {
+            "suite_name": "durable_workflow_engine_v1",
+            "benchmark_posture": "durable_workflow_engine_ci_gated_operator_visible",
+            "operator_status": "durable_workflow_engine_visible",
+            "scenario_count": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+            "active_failure_count": 0,
+            "durable_state_state": "checkpointed_state_and_resume_metadata_visible",
+            "recovery_state": "crash_safe_continuation_receipts_visible",
+            "trigger_state": "heartbeat_and_reactive_trigger_receipts_visible",
+        },
+        "scenario_names": list(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+        "policy": {
+            "receipt_surfaces": [
+                "/api/operator/durable-workflow-engine",
+                "/api/operator/benchmark-proof",
+            ],
+            "ci_gate_mode": "required_benchmark_suite",
+        },
+        "latest_run": {
+            "total": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+            "passed": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+            "failed": 0,
+            "duration_ms": 11,
+        },
+    }
+
+    with patch(
+        "src.api.operator.build_durable_workflow_state_report",
+        AsyncMock(return_value=payload),
+    ) as build_report:
+        resp = await client.get("/api/operator/durable-workflow-engine")
+
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["suite_name"] == "durable_workflow_engine_v1"
+    assert resp.json()["summary"]["operator_status"] == "durable_workflow_engine_visible"
+    assert "/api/operator/durable-workflow-engine" in resp.json()["policy"]["receipt_surfaces"]
+    build_report.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

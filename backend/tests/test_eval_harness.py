@@ -10,6 +10,7 @@ from config.settings import settings
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
 from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
+from src.guardian.learning_quality import GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES
 from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
@@ -206,7 +207,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 22
+    assert details["suite_count"] == 23
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -244,6 +245,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m8_guardian_brain_suite_present"] is True
     assert details["m8_guardian_brain_suite_scenario_count_matches"] is True
     assert details["m8_guardian_brain_suite_axis_matches"] is True
+    assert details["guardian_learning_quality_suite_present"] is True
+    assert details["guardian_learning_quality_suite_scenario_count_matches"] is True
+    assert details["guardian_learning_quality_suite_axis_matches"] is True
+    assert details["guardian_learning_quality_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -355,6 +360,15 @@ def test_run_benchmark_suites_executes_m8_guardian_intervention_quality_suite():
         "m8_no_action_restraint_behavior",
         "operator_m8_guardian_brain_surface_behavior",
     }
+
+
+def test_run_benchmark_suites_executes_guardian_learning_quality_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_world_model_learning_quality_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
 
 
 def test_operator_m8_guardian_brain_surface_behavior_runtime_eval_details():
@@ -1175,6 +1189,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "m7_operator_cockpit_legibility" in captured.out
     assert "cockpit_operator_efficiency_benchmark" in captured.out
     assert "m8_guardian_intervention_quality" in captured.out
+    assert "guardian_world_model_learning_quality_v2" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -1183,6 +1198,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_memory_quality",
         "guardian_user_model_restraint",
         "m8_guardian_intervention_quality",
+        "guardian_world_model_learning_quality_v2",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

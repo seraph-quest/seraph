@@ -49,6 +49,14 @@ from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
 )
+from src.cockpit.efficiency_benchmark import (
+    COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES,
+    COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME,
+    cockpit_efficiency_failure_taxonomy,
+    cockpit_efficiency_policy_payload,
+    cockpit_efficiency_scorecard,
+    cockpit_efficiency_scripted_tasks,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -11962,6 +11970,93 @@ async def _eval_operator_m7_cockpit_benchmark_surface_behavior() -> dict[str, An
     }
 
 
+def _eval_cockpit_efficiency_task_fixture_behavior() -> dict[str, Any]:
+    tasks = cockpit_efficiency_scripted_tasks()
+    required_tasks = {"inspect", "approve", "deny", "pause", "resume", "retry", "repair", "branch", "compare", "revoke", "audit"}
+    task_names = {task["task"] for task in tasks}
+    return {
+        "required_tasks_present": required_tasks.issubset(task_names),
+        "all_tasks_have_surface": all(bool(task.get("surface")) for task in tasks),
+        "all_tasks_have_target": all(bool(task.get("target")) for task in tasks),
+        "all_tasks_have_initial_state": all(bool(task.get("initial_state")) for task in tasks),
+        "all_tasks_have_success_condition": all(bool(task.get("success_condition")) for task in tasks),
+        "all_tasks_have_measured_counters": all(len(task.get("measured_counters", [])) >= 3 for task in tasks),
+        "all_tasks_have_receipt": all(bool(task.get("receipt")) for task in tasks),
+        "task_count": len(tasks),
+    }
+
+
+def _eval_cockpit_efficiency_threshold_behavior() -> dict[str, Any]:
+    scorecard = cockpit_efficiency_scorecard()
+    tasks = cockpit_efficiency_scripted_tasks()
+    return {
+        "baseline_is_current_seraph": scorecard["baseline"] == "current_seraph_fixture",
+        "baseline_scope_visible": "develop_branch_at_batch_start" in scorecard["baseline_scope"],
+        "no_regression_rule_visible": "within_action_and_time_budget" in scorecard["no_regression_rule"],
+        "confidence_is_proxy_bounded": scorecard["confidence_measurement_boundary"]
+        == "confidence_affordance_proxy_not_operator_reported_confidence",
+        "action_budget_visible": scorecard["max_actions_total"] == sum(int(task["max_actions"]) for task in tasks),
+        "time_budget_visible": scorecard["max_seconds_total"] == sum(int(task["max_seconds"]) for task in tasks),
+        "all_tasks_have_action_threshold": all(int(task["max_actions"]) <= 4 for task in tasks),
+        "all_tasks_have_time_threshold": all(int(task["max_seconds"]) <= 25 for task in tasks),
+        "error_detectability_requirements_visible": len(scorecard["error_detectability_requirements"]) >= 4,
+    }
+
+
+def _eval_cockpit_efficiency_receipt_coverage_behavior() -> dict[str, Any]:
+    tasks = cockpit_efficiency_scripted_tasks()
+    policy = cockpit_efficiency_policy_payload()
+    return {
+        "unique_receipts_for_tasks": len({task["receipt"] for task in tasks}) == len(tasks),
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in policy["receipt_surfaces"],
+        "dedicated_surface_visible": "/api/operator/cockpit-efficiency-benchmark" in policy["receipt_surfaces"],
+        "m7_surface_visible": "/api/operator/m7-cockpit" in policy["receipt_surfaces"],
+        "activity_surface_visible": "/api/activity/ledger" in policy["receipt_surfaces"],
+    }
+
+
+def _eval_cockpit_efficiency_baseline_claim_boundary_behavior() -> dict[str, Any]:
+    taxonomy = cockpit_efficiency_failure_taxonomy()
+    policy = cockpit_efficiency_policy_payload()
+    names = {item["name"] for item in taxonomy}
+    return {
+        "baseline_policy_visible": policy["baseline_policy"] == "baseline_is_current_seraph_fixture_not_competitor_superiority_claim",
+        "competitor_claim_policy_visible": policy["competitor_claim_policy"]
+        == "competitor_informed_expectations_require_source_dated_evidence_before_public_claims",
+        "claim_boundary_visible": policy["claim_boundary"] == "deterministic_operator_efficiency_fixture_not_live_multi_operator_usability_study",
+        "unsupported_superiority_failure_visible": "unsupported_superiority_claim" in names,
+        "error_state_hidden_failure_visible": "error_state_hidden" in names,
+    }
+
+
+async def _eval_operator_cockpit_efficiency_benchmark_surface_behavior() -> dict[str, Any]:
+    from src.cockpit.efficiency_benchmark import build_cockpit_efficiency_benchmark_report
+
+    scenario_names = list(COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES)
+    summary = types.SimpleNamespace(
+        total=len(scenario_names),
+        passed=len(scenario_names),
+        failed=0,
+        duration_ms=42,
+        results=[types.SimpleNamespace(name=name, passed=True, error="") for name in scenario_names],
+    )
+    with patch(
+        "src.cockpit.efficiency_benchmark._run_cockpit_efficiency_benchmark_suite",
+        AsyncMock(return_value=summary),
+    ):
+        payload = await build_cockpit_efficiency_benchmark_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "cockpit_efficiency_receipts_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES),
+        "scripted_task_state_visible": payload["summary"]["scripted_task_state"] == "inspect_to_audit_paths_measured",
+        "threshold_state_visible": payload["summary"]["threshold_state"] == "action_and_time_budgets_visible",
+        "receipt_coverage_state_visible": payload["summary"]["receipt_coverage_state"] == "all_scripted_tasks_have_receipts",
+        "scorecard_task_count_matches": payload["scorecard"]["task_count"] == 11,
+        "claim_boundary_visible": payload["summary"]["claim_boundary"] == payload["policy"]["claim_boundary"],
+    }
+
+
 def _m9_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_m9_governed_ecosystem_receipts
 
@@ -12392,6 +12487,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
     m7_operator_cockpit_suite = next(item for item in suites if item["name"] == M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME)
+    cockpit_efficiency_suite = next(item for item in suites if item["name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME)
     m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -12428,6 +12524,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "m7_operator_cockpit_suite_axis_matches": (
             m7_operator_cockpit_suite["benchmark_axis"] == "m7_operator_cockpit_control_legibility"
+        ),
+        "cockpit_efficiency_suite_present": (
+            "cockpit_efficiency_task_fixture_behavior" in cockpit_efficiency_suite["scenario_names"]
+        ),
+        "cockpit_efficiency_suite_scenario_count_matches": (
+            cockpit_efficiency_suite["scenario_count"] == len(COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "cockpit_efficiency_suite_axis_matches": (
+            cockpit_efficiency_suite["benchmark_axis"] == "cockpit_operator_efficiency"
+        ),
+        "cockpit_efficiency_gate_required": (
+            COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m8_guardian_brain_suite_present": (
             "m8_risky_capability_approval_behavior" in m8_guardian_brain_suite["scenario_names"]
@@ -13967,6 +14075,36 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="observability",
         description="Operator M7 cockpit benchmark surface exposes receipt legibility, fast-control posture, receipt surfaces, and claim boundary.",
         runner=_eval_operator_m7_cockpit_benchmark_surface_behavior,
+    ),
+    EvalScenario(
+        name="cockpit_efficiency_task_fixture_behavior",
+        category="cockpit",
+        description="Cockpit operator efficiency fixtures cover inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, and audit paths.",
+        runner=_eval_cockpit_efficiency_task_fixture_behavior,
+    ),
+    EvalScenario(
+        name="cockpit_efficiency_threshold_behavior",
+        category="cockpit",
+        description="Cockpit operator efficiency fixtures carry action, time, error-detectability, and no-regression thresholds.",
+        runner=_eval_cockpit_efficiency_threshold_behavior,
+    ),
+    EvalScenario(
+        name="cockpit_efficiency_receipt_coverage_behavior",
+        category="cockpit",
+        description="Cockpit operator efficiency fixtures require unique receipts and operator-visible benchmark surfaces.",
+        runner=_eval_cockpit_efficiency_receipt_coverage_behavior,
+    ),
+    EvalScenario(
+        name="cockpit_efficiency_baseline_claim_boundary_behavior",
+        category="cockpit",
+        description="Cockpit operator efficiency fixtures remain bounded to current-Seraph deterministic proxy proof, not live usability or competitor-superiority claims.",
+        runner=_eval_cockpit_efficiency_baseline_claim_boundary_behavior,
+    ),
+    EvalScenario(
+        name="operator_cockpit_efficiency_benchmark_surface_behavior",
+        category="observability",
+        description="Operator cockpit efficiency benchmark surface exposes scripted tasks, thresholds, receipt coverage, scorecard, and claim boundary.",
+        runner=_eval_operator_cockpit_efficiency_benchmark_surface_behavior,
     ),
     EvalScenario(
         name="operator_governed_improvement_benchmark_surface_behavior",

@@ -28,6 +28,7 @@ from src.extensions.connector_health import (
 from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
 from src.extensions.doctor import doctor_snapshot
 from src.extensions.governance import (
+    assert_governance_allows_update_transition,
     assert_governance_allows_lifecycle,
     build_governance_status,
 )
@@ -194,6 +195,7 @@ def _extension_governance_status(
         extension.manifest,
         root_path=extension.root_path,
         state_entry=state_entry,
+        seraph_version=_current_seraph_version(),
     )
 
 
@@ -208,6 +210,7 @@ def _raise_if_governance_blocks_lifecycle(
         root_path=extension.root_path,
         state_entry=state_entry,
         action=action,
+        seraph_version=_current_seraph_version(),
     )
 
 
@@ -406,18 +409,31 @@ def _extension_lifecycle_plan(
     current_digest = _extension_package_digest(existing.root_path)
     package_changed = candidate_digest != current_digest
     version_relation = _version_relation(manifest.version, current_version)
+    transition_blockers: list[str] = []
+    if existing.manifest is not None:
+        if existing.manifest.trust.value == "verified" and manifest.trust.value != "verified":
+            transition_blockers.append("trust_downgrade")
+        if version_relation == "downgrade" and (
+            existing.manifest.trust.value == "verified" or existing.kind == "connector-pack"
+        ):
+            transition_blockers.append("version_downgrade")
     if current_location == "workspace":
         return {
             "mode": "update_workspace" if package_changed else "up_to_date",
-            "recommended_action": "update" if package_changed else "none",
+            "recommended_action": (
+                "reject_or_re_review"
+                if transition_blockers
+                else ("update" if package_changed else "none")
+            ),
             "install_allowed": False,
-            "update_supported": package_changed,
+            "update_supported": package_changed and not transition_blockers,
             "current_location": current_location,
             "current_version": current_version,
             "current_source": existing.source,
             "candidate_version": manifest.version,
             "version_relation": version_relation,
             "package_changed": package_changed,
+            "transition_blockers": transition_blockers,
         }
     return {
         "mode": "workspace_override",
@@ -430,6 +446,7 @@ def _extension_lifecycle_plan(
         "candidate_version": manifest.version,
         "version_relation": version_relation,
         "package_changed": package_changed,
+        "transition_blockers": transition_blockers,
     }
 
 
@@ -2535,6 +2552,7 @@ def validate_extension_path(path: str) -> dict[str, Any]:
         manifest,
         root_path=package_root,
         state_entry=state_entry,
+        seraph_version=_current_seraph_version(),
     )
     permission_summary = summarize_extension_permissions(
         extension,
@@ -2712,6 +2730,7 @@ def install_extension_path(path: str) -> dict[str, Any]:
         root_path=package_root,
         state_entry=state_entry,
         action="install",
+        seraph_version=_current_seraph_version(),
     )
 
     existing = _registry().snapshot().get_extension(manifest.id)
@@ -2749,6 +2768,7 @@ def update_extension_path(path: str) -> dict[str, Any]:
         root_path=package_root,
         state_entry=candidate_state_entry,
         action="update",
+        seraph_version=_current_seraph_version(),
     )
 
     snapshot = _registry().snapshot()
@@ -2759,6 +2779,13 @@ def update_extension_path(path: str) -> dict[str, Any]:
         raise ValueError(
             f"extension '{manifest.id}' is bundled; install the package to create a workspace override"
         )
+    assert_governance_allows_update_transition(
+        manifest,
+        existing_manifest=existing.manifest,
+        root_path=package_root,
+        state_entry=candidate_state_entry,
+        seraph_version=_current_seraph_version(),
+    )
 
     current_digest = _extension_package_digest(existing.root_path)
     candidate_digest = _hash_extension_directory(package_root)

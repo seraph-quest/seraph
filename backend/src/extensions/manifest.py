@@ -152,11 +152,51 @@ class ExtensionSignature(BaseModel):
         return value
 
 
+class ExtensionReviewContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = "unreviewed"
+    reviewer: str | None = None
+    reviewed_at: str | None = None
+    permission_fingerprint: str | None = None
+    notes: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, value: str) -> str:
+        value = value.strip()
+        if value not in {"unreviewed", "approved", "rejected", "needs_review"}:
+            raise ValueError("must be one of unreviewed, approved, rejected, needs_review")
+        return value
+
+    @field_validator("reviewer", "reviewed_at", "permission_fingerprint", "notes")
+    @classmethod
+    def _validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
 class ExtensionGovernanceContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provenance: ExtensionProvenance
     signature: ExtensionSignature | None = None
+    review: ExtensionReviewContract | None = None
+    source_policy: str | None = None
+    compatibility_policy: str | None = None
+    trust_downgrade_policy: str = "block_verified_to_lower_trust_without_review"
+
+    @field_validator("source_policy", "compatibility_policy", "trust_downgrade_policy")
+    @classmethod
+    def _validate_policy_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
 
 
 class ExtensionCompatibility(BaseModel):

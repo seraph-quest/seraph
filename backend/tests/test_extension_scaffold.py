@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.extensions.scaffold import scaffold_extension_package, validate_extension_package
 
@@ -21,6 +22,13 @@ def test_scaffold_capability_pack_creates_valid_manifest_and_files(tmp_path: Pat
     runbook_contents = (package.package_root / "runbooks" / "research-pack.yaml").read_text(encoding="utf-8")
     assert "name: research-pack" in workflow_contents
     assert "workflow: research-pack" in runbook_contents
+    manifest = yaml.safe_load(package.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["governance"]["provenance"]["source"] == "local-authoring"
+    assert manifest["governance"]["review"]["status"] == "unreviewed"
+    assert manifest["governance"]["compatibility_policy"] == (
+        "declare_minimum_supported_seraph_version_and_retest_before_publish"
+    )
+    assert manifest["governance"]["trust_downgrade_policy"] == "block_verified_to_lower_trust_without_review"
 
     report = validate_extension_package(package.package_root)
 

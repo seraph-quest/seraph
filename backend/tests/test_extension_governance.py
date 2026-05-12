@@ -5,7 +5,9 @@ import pytest
 from config.settings import settings
 from src.extensions.governance import (
     ExtensionGovernanceError,
+    assert_governance_allows_update_transition,
     assert_governance_allows_lifecycle,
+    build_package_review_receipt,
     build_governance_status,
     extension_permission_fingerprint,
     governance_package_digest,
@@ -326,6 +328,45 @@ def test_valid_verified_pack_exposes_reviewed_governance_status(tmp_path: Path):
     assert status["signing_key_id"] == _KEY_ID
     assert status["permission_drift"] is False
     assert status["fail_closed_reason"] is None
+    assert status["review_receipt"]["key_id"] == _KEY_ID
+    assert status["review_receipt"]["permission_fingerprint"] == extension_permission_fingerprint(manifest)
+    assert status["review_receipt"]["supply_chain_status"] == "verified_signature_valid"
+    assert status["claim_boundary"] == "local_governed_marketplace_foundations_not_production_marketplace_security"
+
+
+def test_package_review_receipt_exposes_compatibility_and_supply_chain_verdicts(tmp_path: Path):
+    package_dir, manifest = _write_verified_package(tmp_path)
+    state_entry = _reviewed_state(manifest, package_dir)
+
+    receipt = build_package_review_receipt(
+        manifest,
+        root_path=package_dir,
+        state_entry=state_entry,
+        seraph_version="2026.4.10",
+    )
+
+    assert receipt["status"] == "reviewable"
+    assert receipt["review_status"] == "reviewed"
+    assert receipt["compatibility_status"] == "compatible"
+    assert receipt["supply_chain_status"] == "verified_signature_valid"
+    assert receipt["trust_downgrade_status"] == "not_downgraded"
+    assert receipt["blocking_reasons"] == []
+
+
+def test_package_review_receipt_blocks_missing_verified_review(tmp_path: Path):
+    package_dir, manifest = _write_verified_package(tmp_path)
+
+    receipt = build_package_review_receipt(
+        manifest,
+        root_path=package_dir,
+        state_entry={},
+        seraph_version="2026.4.10",
+    )
+
+    assert receipt["review_status"] == "missing"
+    assert receipt["status"] == "blocked"
+    assert "review_missing" in receipt["blocking_reasons"]
+    assert receipt["recommended_action"] == "reject_or_re_review"
 
 
 def test_invalid_signature_fails_closed_for_lifecycle_actions(tmp_path: Path):
@@ -493,3 +534,73 @@ def test_local_unsigned_pack_remains_allowed(tmp_path: Path):
         state_entry={},
         action="install",
     )
+
+
+def test_verified_provider_update_blocks_trust_downgrade(tmp_path: Path):
+    existing_dir, existing_manifest = _write_verified_connector_package(tmp_path)
+    state_entry = _reviewed_state(existing_manifest, existing_dir)
+    candidate_dir = tmp_path / "local-connectors"
+    (candidate_dir / "mcp").mkdir(parents=True)
+    (candidate_dir / "connectors" / "managed").mkdir(parents=True)
+    (candidate_dir / "mcp" / "github.json").write_text((existing_dir / "mcp" / "github.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (candidate_dir / "connectors" / "managed" / "github.yaml").write_text(
+        (existing_dir / "connectors" / "managed" / "github.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (candidate_dir / "manifest.yaml").write_text(
+        "id: seraph.verified-connectors\n"
+        "version: 2026.3.22\n"
+        "display_name: Verified Connectors\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Local Operator\n"
+        "trust: local\n"
+        "governance:\n"
+        "  provenance:\n"
+        "    source: local-authoring\n"
+        "contributes:\n"
+        "  mcp_servers:\n"
+        "    - mcp/github.json\n"
+        "  managed_connectors:\n"
+        "    - connectors/managed/github.yaml\n"
+        "permissions:\n"
+        "  execution_boundaries: [external_mcp]\n"
+        "  audit_events: [mcp_request]\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    candidate_manifest = load_extension_manifest(candidate_dir / "manifest.yaml")
+
+    with pytest.raises(ExtensionGovernanceError, match="trust_downgrade"):
+        assert_governance_allows_update_transition(
+            candidate_manifest,
+            existing_manifest=existing_manifest,
+            root_path=candidate_dir,
+            state_entry=state_entry,
+            seraph_version="2026.4.10",
+        )
+
+
+def test_verified_provider_update_blocks_downgrade_version(tmp_path: Path):
+    existing_dir, existing_manifest = _write_verified_connector_package(tmp_path)
+    downgraded_dir, downgraded_manifest = _write_verified_connector_package(tmp_path / "candidate")
+    (downgraded_dir / "manifest.yaml").write_text(
+        (downgraded_dir / "manifest.yaml").read_text(encoding="utf-8").replace(
+            "version: 2026.3.21",
+            "version: 2026.3.20",
+        ),
+        encoding="utf-8",
+    )
+    downgraded_manifest = load_extension_manifest(downgraded_dir / "manifest.yaml")
+    state_entry = _reviewed_state(existing_manifest, existing_dir)
+
+    with pytest.raises(ExtensionGovernanceError, match="version_downgrade"):
+        assert_governance_allows_update_transition(
+            downgraded_manifest,
+            existing_manifest=existing_manifest,
+            root_path=downgraded_dir,
+            state_entry=state_entry,
+            seraph_version="2026.4.10",
+        )

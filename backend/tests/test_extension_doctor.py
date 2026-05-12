@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src.extensions.doctor import doctor_extension, doctor_snapshot
+from src.extensions.governance import governance_package_digest, governance_signature_value
 from src.extensions.registry import ExtensionRegistry
 
 
@@ -180,6 +181,147 @@ permissions:
 
     assert result.ok is False
     assert any(issue.code == "suspicious_context_content" for issue in result.issues)
+
+
+def test_doctor_reports_verified_source_policy_violation(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "verified-local-source"
+    skill_dir = pack_dir / "skills"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "helper.md").write_text(
+        "---\n"
+        "name: helper\n"
+        "description: Helper\n"
+        "requires:\n"
+        "  tools: []\n"
+        "---\n\n"
+        "Use carefully.\n",
+        encoding="utf-8",
+    )
+    zero_digest = "0" * 64
+    signature = governance_signature_value(key_id="seraph-root-2026", digest=zero_digest)
+    manifest_template = (
+        "id: seraph.verified-local-source\n"
+        "version: 2026.3.21\n"
+        "display_name: Verified Local Source\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: verified\n"
+        "governance:\n"
+        "  provenance:\n"
+        "    source: local\n"
+        "    publisher_id: seraph\n"
+        "  signature:\n"
+        "    algorithm: seraph-sha256-v1\n"
+        "    key_id: seraph-root-2026\n"
+        "    digest: {digest}\n"
+        "    signature: {signature}\n"
+        "contributes:\n"
+        "  skills:\n"
+        "    - skills/helper.md\n"
+        "permissions:\n"
+        "  tools: []\n"
+    )
+    (pack_dir / "manifest.yaml").write_text(
+        manifest_template.format(digest=zero_digest, signature=signature),
+        encoding="utf-8",
+    )
+    digest = governance_package_digest(pack_dir)
+    assert digest is not None
+    (pack_dir / "manifest.yaml").write_text(
+        manifest_template.format(
+            digest=digest,
+            signature=governance_signature_value(key_id="seraph-root-2026", digest=digest),
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.4.10",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.verified-local-source"))
+
+    assert result.ok is False
+    assert any(issue.code == "supply_chain_policy" for issue in result.issues)
+    assert any(issue.code == "source_policy" for issue in result.issues)
+
+
+def test_doctor_reports_verified_local_authoring_source_policy_violation(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "verified-local-authoring"
+    skill_dir = pack_dir / "skills"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "helper.md").write_text(
+        "---\n"
+        "name: helper\n"
+        "description: Helper\n"
+        "requires:\n"
+        "  tools: []\n"
+        "---\n\n"
+        "Use carefully.\n",
+        encoding="utf-8",
+    )
+    zero_digest = "0" * 64
+    manifest_template = (
+        "id: seraph.verified-local-authoring\n"
+        "version: 2026.3.21\n"
+        "display_name: Verified Local Authoring\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: verified\n"
+        "governance:\n"
+        "  provenance:\n"
+        "    source: local-authoring\n"
+        "    publisher_id: seraph\n"
+        "  signature:\n"
+        "    algorithm: seraph-sha256-v1\n"
+        "    key_id: seraph-root-2026\n"
+        "    digest: {digest}\n"
+        "    signature: {signature}\n"
+        "contributes:\n"
+        "  skills:\n"
+        "    - skills/helper.md\n"
+        "permissions:\n"
+        "  tools: []\n"
+    )
+    (pack_dir / "manifest.yaml").write_text(
+        manifest_template.format(
+            digest=zero_digest,
+            signature=governance_signature_value(key_id="seraph-root-2026", digest=zero_digest),
+        ),
+        encoding="utf-8",
+    )
+    digest = governance_package_digest(pack_dir)
+    assert digest is not None
+    (pack_dir / "manifest.yaml").write_text(
+        manifest_template.format(
+            digest=digest,
+            signature=governance_signature_value(key_id="seraph-root-2026", digest=digest),
+        ),
+        encoding="utf-8",
+    )
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+        seraph_version="2026.4.10",
+    )
+
+    result = doctor_extension(registry.snapshot().get_extension("seraph.verified-local-authoring"))
+
+    assert result.ok is False
+    assert any(issue.code == "source_policy" for issue in result.issues)
 
 
 def test_doctor_reports_suspicious_workflow_context_content(tmp_path: Path):

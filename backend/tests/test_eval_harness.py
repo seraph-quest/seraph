@@ -431,12 +431,39 @@ def test_operator_m9_governed_ecosystem_surface_behavior_runtime_eval_details():
     assert details["connector_health_state_visible"] is True
     assert details["marketplace_governance_state_visible"] is True
     assert details["diagnostics_update_triage_state_visible"] is True
+    assert details["package_review_receipt_state_visible"] is True
+    assert details["compatibility_transition_state_visible"] is True
+    assert details["trust_downgrade_state_visible"] is True
+    assert details["authoring_ergonomics_state_visible"] is True
     assert details["dimensions_visible"] is True
     assert details["failure_taxonomy_visible"] is True
     assert details["policy_visible"] is True
     assert details["receipt_surfaces_visible"] is True
     assert details["claim_boundary_visible"] is True
     assert details["receipt_count_matches"] is True
+
+
+def test_m9_marketplace_hardening_foundation_runtime_eval_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "m9_package_review_receipt_behavior",
+                "m9_compatibility_transition_semantics_behavior",
+                "m9_supply_chain_policy_behavior",
+                "m9_provider_trust_downgrade_behavior",
+                "m9_authoring_ergonomics_behavior",
+            ]
+        )
+    )
+
+    assert summary.total == 5
+    assert summary.failed == 0
+    details_by_name = {result.name: result.details for result in summary.results}
+    assert details_by_name["m9_package_review_receipt_behavior"]["receipt_fields_visible"] is True
+    assert details_by_name["m9_compatibility_transition_semantics_behavior"]["transition_modes_visible"] is True
+    assert details_by_name["m9_supply_chain_policy_behavior"]["supply_chain_failure_modes_visible"] is True
+    assert details_by_name["m9_provider_trust_downgrade_behavior"]["blocked_transitions_visible"] is True
+    assert details_by_name["m9_authoring_ergonomics_behavior"]["scaffold_fields_visible"] is True
 
 
 def test_workflow_endurance_benchmark_surface_behavior_runtime_eval_details():

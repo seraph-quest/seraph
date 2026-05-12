@@ -69,6 +69,30 @@ Current provenance values:
 - `local`
 - `verified`
 
+### `governance`
+
+Local packages may include governance metadata so authors can prepare a package
+for review before publishing. Verified packages must include provenance and a
+signature.
+
+```yaml
+governance:
+  provenance:
+    source: local-authoring
+    publisher_id: seraph
+  review:
+    status: unreviewed
+    notes: Local scaffold placeholder; catalog verification requires review.
+  source_policy: local_authoring_until_catalog_review
+  compatibility_policy: declare_minimum_supported_seraph_version_and_retest_before_publish
+  trust_downgrade_policy: block_verified_to_lower_trust_without_review
+```
+
+Verified package review receipts expose digest, key, review, permission
+fingerprint, compatibility, supply-chain, and trust-downgrade verdicts at the
+operator surface. These receipts are local governance foundations, not a
+production-secure marketplace claim.
+
 ### `contributes`
 
 Typed contribution lists keyed by contribution type.

@@ -69,6 +69,12 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.learning_quality import (
+    GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+    GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_QUALITY_SUITE_NAME,
+    build_guardian_learning_quality_replay,
+)
 from src.memory.provider_quality_gate import (
     MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
     MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME,
@@ -12538,6 +12544,42 @@ async def _eval_operator_m8_guardian_brain_surface_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_guardian_learning_quality_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    suite = next(item for item in suites if item["name"] == GUARDIAN_LEARNING_QUALITY_SUITE_NAME)
+    replay = build_guardian_learning_quality_replay()
+    receipts = replay["receipts"]
+    receipt_by_name = {receipt["scenario_name"]: receipt for receipt in receipts}
+    stale_receipt = receipt_by_name["guardian_learning_stale_conflict_suppression_behavior"]
+    calibration_receipt = receipt_by_name["guardian_learning_salience_confidence_calibration_behavior"]
+    accounting_receipt = receipt_by_name["guardian_learning_false_positive_negative_accounting_behavior"]
+    operator_receipt = receipt_by_name["operator_guardian_learning_quality_surface_behavior"]
+    policy = replay["policy"]
+    return {
+        "suite_name_visible": suite["name"] == GUARDIAN_LEARNING_QUALITY_SUITE_NAME,
+        "scenario_count_matches": suite["scenario_count"] == len(GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES),
+        "scenario_names_match_constants": list(suite["scenario_names"]) == list(GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES),
+        "benchmark_axis_visible": suite["benchmark_axis"] == "guardian_world_model_learning_quality_v2",
+        "operator_status_visible": replay["summary"]["operator_status"] == "guardian_learning_quality_receipts_visible",
+        "multi_signal_receipts_visible": all(len(receipt["source_mix"]) >= 2 for receipt in receipts),
+        "stale_conflict_suppressed": stale_receipt["selected_action"] == "defer"
+        and stale_receipt["stale_evidence_policy"] == "stale_provider_evidence_suppressed",
+        "salience_confidence_calibrated": calibration_receipt["salience_level"] == "high"
+        and calibration_receipt["confidence_level"] == "partial"
+        and calibration_receipt["selected_action"] == "clarify",
+        "false_positive_negative_labels_visible": (
+            accounting_receipt["false_positive_label"] != "missing"
+            and accounting_receipt["false_negative_label"] != "missing"
+        ),
+        "operator_receipt_visible": operator_receipt["operator_receipt"] == "operator_guardian_learning_quality_surface",
+        "claim_boundary_visible": policy["claim_boundary"] == GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+        "receipt_surface_visible": "/api/operator/guardian-learning-quality" in policy["receipt_surfaces"],
+        "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in policy["receipt_surfaces"],
+        "ci_gate_required": GUARDIAN_LEARNING_QUALITY_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
 async def _eval_operator_fast_control_availability_behavior() -> dict[str, Any]:
     payload = await _m7_cockpit_endpoint_payload()
     active_work = payload["active_work"]
@@ -13139,6 +13181,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     m7_operator_cockpit_suite = next(item for item in suites if item["name"] == M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME)
     cockpit_efficiency_suite = next(item for item in suites if item["name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME)
     m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
+    guardian_learning_quality_suite = next(item for item in suites if item["name"] == GUARDIAN_LEARNING_QUALITY_SUITE_NAME)
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -13233,6 +13276,19 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "m8_guardian_brain_suite_axis_matches": (
             m8_guardian_brain_suite["benchmark_axis"] == "m8_guardian_intervention_quality"
+        ),
+        "guardian_learning_quality_suite_present": (
+            "guardian_learning_multi_signal_arbitration_behavior"
+            in guardian_learning_quality_suite["scenario_names"]
+        ),
+        "guardian_learning_quality_suite_scenario_count_matches": (
+            guardian_learning_quality_suite["scenario_count"] == len(GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
+        ),
+        "guardian_learning_quality_suite_axis_matches": (
+            guardian_learning_quality_suite["benchmark_axis"] == "guardian_world_model_learning_quality_v2"
+        ),
+        "guardian_learning_quality_gate_required": (
+            GUARDIAN_LEARNING_QUALITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -15188,6 +15244,15 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Operator surfaces expose the M8 guardian intervention benchmark, decision receipts, score labels, and claim boundary.",
         runner=_eval_operator_m8_guardian_brain_surface_behavior,
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description="Guardian world-model learning quality v2 exposes multi-signal arbitration, stale/conflict suppression, calibration, and operator replay receipts.",
+            runner=_eval_guardian_learning_quality_behavior,
+        )
+        for name in GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.guardian.learning_quality import GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
 from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
@@ -1523,6 +1524,45 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_guardian_learning_quality_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "guardian_world_model_learning_quality_v2",
+                    "benchmark_posture": "guardian_learning_quality_ci_gated_operator_visible",
+                    "operator_status": "guardian_learning_quality_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 5,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "quality_state": "multi_signal_stale_conflict_salience_confidence_and_outcome_labels_visible",
+                    "receipt_count": 6,
+                    "action_count": 5,
+                },
+                "scenario_names": [
+                    "guardian_learning_multi_signal_arbitration_behavior",
+                    "guardian_learning_stale_conflict_suppression_behavior",
+                    "guardian_learning_salience_confidence_calibration_behavior",
+                    "guardian_learning_false_positive_negative_accounting_behavior",
+                    "guardian_learning_live_replay_receipts_behavior",
+                    "operator_guardian_learning_quality_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+                    "receipt_surfaces": [
+                        "/api/operator/guardian-learning-quality",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1747,7 +1787,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 22
+    assert payload["summary"]["suite_count"] == 23
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1767,6 +1807,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["cockpit_efficiency_benchmark_posture"] == "cockpit_efficiency_ci_gated_operator_visible"
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
+    assert (
+        payload["summary"]["guardian_learning_quality_benchmark_posture"]
+        == "guardian_learning_quality_ci_gated_operator_visible"
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -1795,6 +1839,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "durable_workflow_engine_v1" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "one_excellent_reach_channel_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "guardian_world_model_learning_quality_v2" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
@@ -1844,6 +1889,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m8_suite = next(item for item in payload["suites"] if item["name"] == "m8_guardian_intervention_quality")
     assert "m8_risky_capability_approval_behavior" in m8_suite["scenario_names"]
     assert m8_suite["scenario_count"] == 7
+    guardian_learning_quality_suite = next(
+        item for item in payload["suites"] if item["name"] == "guardian_world_model_learning_quality_v2"
+    )
+    assert "guardian_learning_multi_signal_arbitration_behavior" in guardian_learning_quality_suite["scenario_names"]
+    assert guardian_learning_quality_suite["scenario_count"] == 6
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -1891,6 +1941,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["m8_guardian_brain_benchmark"]["summary"]["suite_name"] == "m8_guardian_intervention_quality"
     assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
+    assert payload["guardian_learning_quality_benchmark"]["summary"]["suite_name"] == (
+        "guardian_world_model_learning_quality_v2"
+    )
+    assert payload["guardian_learning_quality_benchmark"]["policy"]["claim_boundary"] == GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -2129,6 +2183,50 @@ async def test_operator_m8_guardian_intervention_benchmark_surface_reports_polic
     assert payload["policy"]["milestone_contract"] == "m8_guardian_brain_and_intervention_quality_ship_as_one_ready_pr"
     assert payload["policy"]["claim_boundary"] == "deterministic_guardian_judgment_receipts_not_live_superiority_claim"
     assert "/api/operator/m8-guardian-brain" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_guardian_learning_quality_surface_delegates_to_report(client):
+    payload = {
+        "summary": {
+            "suite_name": "guardian_world_model_learning_quality_v2",
+            "benchmark_posture": "guardian_learning_quality_ci_gated_operator_visible",
+            "operator_status": "guardian_learning_quality_receipts_visible",
+            "scenario_count": 6,
+            "quality_state": "multi_signal_stale_conflict_salience_confidence_and_outcome_labels_visible",
+        },
+        "scenario_names": [
+            "guardian_learning_multi_signal_arbitration_behavior",
+            "guardian_learning_stale_conflict_suppression_behavior",
+            "guardian_learning_salience_confidence_calibration_behavior",
+            "guardian_learning_false_positive_negative_accounting_behavior",
+            "guardian_learning_live_replay_receipts_behavior",
+            "operator_guardian_learning_quality_surface_behavior",
+        ],
+        "receipts": [
+            {
+                "scenario_name": "guardian_learning_stale_conflict_suppression_behavior",
+                "selected_action": "defer",
+                "claim_boundary": GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+            }
+        ],
+        "policy": {
+            "claim_boundary": GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+            "receipt_surfaces": ["/api/operator/guardian-learning-quality"],
+        },
+        "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 10},
+    }
+    with patch(
+        "src.api.operator.build_guardian_learning_quality_report",
+        AsyncMock(return_value=payload),
+    ) as build_report:
+        resp = await client.get("/api/operator/guardian-learning-quality")
+
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["suite_name"] == "guardian_world_model_learning_quality_v2"
+    assert resp.json()["summary"]["operator_status"] == "guardian_learning_quality_receipts_visible"
+    assert resp.json()["policy"]["claim_boundary"] == GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
+    build_report.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

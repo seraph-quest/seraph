@@ -606,6 +606,9 @@ def _workflow_event_fingerprint(tool_name: str, details: dict[str, Any]) -> str:
 
 
 def _workflow_projection_key(event: dict[str, Any], details: dict[str, Any]) -> str:
+    durable_run_identity = details.get("durable_run_identity")
+    if isinstance(durable_run_identity, str) and durable_run_identity.strip():
+        return durable_run_identity.strip()
     tool_name = str(event.get("tool_name") or "workflow")
     fingerprint = _workflow_event_fingerprint(tool_name, details)
     return build_workflow_run_identity(
@@ -1570,12 +1573,7 @@ async def _list_workflow_runs(
                     step["recovery_actions"] = []
                     step["recovery_hint"] = None
                     step["is_recoverable"] = False
-        run_identity = build_workflow_run_identity(
-            run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-            tool_name,
-            run_fingerprint,
-            run_discriminator=run_discriminator,
-        )
+        run_identity = key
         lineage = _workflow_branch_lineage(
             run_identity=run_identity,
             details=details,
@@ -1928,17 +1926,28 @@ async def _list_workflow_runs(
         if not run_identity:
             continue
         existing = completed_by_identity.get(run_identity, {})
+        audit_projection_available = bool(existing)
+        durable_only_replay_allowed = False
+        durable_only_replay_block_reason = "durable_projection_missing"
         merged = {
             **existing,
             **durable_run,
             "status": durable_run.get("status") or existing.get("status"),
-            "availability": existing.get("availability") or "ready",
+            "availability": existing.get("availability") or "audit_projection_missing",
             "checkpoint_candidates": existing.get("checkpoint_candidates") or [],
             "resume_plan": existing.get("resume_plan"),
-            "replay_allowed": existing.get("replay_allowed", True),
-            "replay_block_reason": existing.get("replay_block_reason"),
+            "replay_allowed": (
+                existing.get("replay_allowed", durable_only_replay_allowed)
+                if audit_projection_available
+                else durable_only_replay_allowed
+            ),
+            "replay_block_reason": (
+                existing.get("replay_block_reason")
+                if audit_projection_available
+                else durable_only_replay_block_reason
+            ),
             "state_source": "durable_workflow_state",
-            "audit_projection_available": bool(existing),
+            "audit_projection_available": audit_projection_available,
         }
         completed_by_identity[run_identity] = merged
     completed = list(completed_by_identity.values())

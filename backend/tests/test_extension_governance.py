@@ -1,8 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from config.settings import settings
+from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 from src.extensions.governance import (
     ExtensionGovernanceError,
     assert_governance_allows_lifecycle,
@@ -395,6 +397,23 @@ def test_capability_pack_hardening_receipt_blocks_permission_creep_and_supply_ch
     assert "trusted_supply_chain" in receipt["blocked_claims"]
     assert "package_count_superiority" in receipt["blocked_claims"]
     assert receipt["operator_summary"].startswith("Pack transition is blocked")
+
+
+def test_capability_pack_hardening_receipts_reflect_failed_suite_results():
+    summary = SimpleNamespace(
+        results=[
+            SimpleNamespace(name="capability_pack_permission_creep_behavior", passed=False),
+            SimpleNamespace(name="capability_pack_rollback_ready_behavior", passed=True),
+        ]
+    )
+
+    receipts = {
+        receipt["scenario_id"]: receipt
+        for receipt in build_governed_capability_pack_hardening_receipts(summary)
+    }
+
+    assert receipts["capability_pack_permission_creep_behavior"]["status"] == "failed"
+    assert receipts["capability_pack_rollback_ready_behavior"]["status"] == "passed"
 
 
 def test_invalid_signature_fails_closed_for_lifecycle_actions(tmp_path: Path):

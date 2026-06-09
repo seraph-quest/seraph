@@ -18,8 +18,10 @@ from src.audit.formatting import format_tool_call_summary, redact_for_audit
 from src.approval.runtime import get_current_session_id
 from src.db.engine import get_session
 from src.db.models import AuditEvent
+from src.extensions.governance import build_governance_status
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
+from src.extensions.state import extension_state_entries, load_extension_state_payload
 from src.memory.flush import flush_session_memory_sync
 from src.approval.repository import fingerprint_tool_call
 from src.native_tools.registry import TOOL_METADATA, canonical_tool_name
@@ -227,6 +229,10 @@ def _summarize_value_shape(value: Any) -> str:
     if isinstance(value, tuple):
         return f"tuple ({len(value)} items)"
     return type(value).__name__
+
+
+def _safe_workflow_error_summary(exc: Exception) -> str:
+    return f"{type(exc).__name__} (details redacted)"
 
 
 def _utc_now_iso() -> str:
@@ -624,6 +630,20 @@ def _record_delegated_artifact_reviews(
         ))
 
 
+def _verified_extension_runtime_block(extension: Any, state_entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    manifest = getattr(extension, "manifest", None)
+    if manifest is None or getattr(manifest.trust, "value", None) != "verified":
+        return None
+    governance = build_governance_status(
+        manifest,
+        root_path=getattr(extension, "root_path", None),
+        state_entry=state_entry,
+    )
+    if not governance.get("fail_closed"):
+        return None
+    return governance
+
+
 async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any] | None:
     try:
         durable_payload = await workflow_state_repository.get_checkpoint_payload(run_identity)
@@ -819,10 +839,12 @@ class WorkflowTool(Tool):
             approval_context=approval_context,
         )
         current_session_id = get_current_session_id()
+        direct_run_discriminator = f"run-{time.time_ns()}"
         durable_run_identity = build_workflow_run_identity(
             current_session_id,
             self.name,
             run_fingerprint,
+            run_discriminator=direct_run_discriminator,
         )
         parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
         root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
@@ -897,6 +919,7 @@ class WorkflowTool(Tool):
                     sanitize_inputs_outputs=sanitize_inputs_outputs,
                 )
             except Exception as exc:
+                safe_error_summary = _safe_workflow_error_summary(exc)
                 step_completed_at = _utc_now_iso()
                 duration_ms = int((time.perf_counter() - started) * 1000)
                 if not step.continue_on_error:
@@ -913,7 +936,7 @@ class WorkflowTool(Tool):
                         "artifact_paths": step_artifact_paths,
                         "result_summary": None,
                         "error_kind": type(exc).__name__,
-                        "error_summary": str(exc).strip()[:160] or type(exc).__name__,
+                        "error_summary": safe_error_summary,
                         "started_at": step_started_at,
                         "completed_at": step_completed_at,
                         "duration_ms": duration_ms,
@@ -927,7 +950,7 @@ class WorkflowTool(Tool):
                         artifact_paths=step_artifact_paths,
                         checkpoint=None,
                         error_kind=type(exc).__name__,
-                        error_summary=str(exc).strip()[:160] or type(exc).__name__,
+                        error_summary=safe_error_summary,
                     ))
                     self._last_audit_failure_payload = self._build_audit_payload(
                         status="failed",
@@ -941,7 +964,7 @@ class WorkflowTool(Tool):
                         checkpoint_context=checkpoint_context,
                         checkpoint_context_allowed=checkpoint_context_allowed,
                         control_inputs=control_inputs,
-                        error=str(exc),
+                        error=safe_error_summary,
                         durable_run_identity=durable_run_identity,
                     )
                     durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, "failed")
@@ -959,7 +982,7 @@ class WorkflowTool(Tool):
                             ),
                             None,
                         ),
-                        error=str(exc),
+                        error=safe_error_summary,
                         metadata={
                             "summary": f"{self.name} failed",
                             "durable_audit_receipt_id": durable_audit_receipt_id,
@@ -976,11 +999,11 @@ class WorkflowTool(Tool):
                         durable_audit_receipt_id=durable_audit_receipt_id,
                     )
                     raise
-                result = f"Error: {exc}"
+                result = f"Error: {safe_error_summary}"
                 continued_error_steps.append(step.id)
                 step_status = "continued_error"
                 error_kind = type(exc).__name__
-                error_summary = str(exc).strip()[:160] or error_kind
+                error_summary = safe_error_summary
                 step_completed_at = _utc_now_iso()
                 duration_ms = int((time.perf_counter() - started) * 1000)
             else:
@@ -1635,6 +1658,7 @@ class WorkflowManager:
     ) -> list[dict[str, Any]]:
         snapshot = self._snapshot()
         extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
+        state_entries = extension_state_entries(load_extension_state_payload())
         available_runtime_profiles = {
             str(item.metadata.get("name"))
             for item in snapshot.list_contributions("workflow_runtimes")
@@ -1649,8 +1673,13 @@ class WorkflowManager:
         }
         workflows: list[dict[str, Any]] = []
         for workflow in self._workflows:
+            extension = extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None
+            governance_block = _verified_extension_runtime_block(
+                extension,
+                state_entries.get(workflow.extension_id) if workflow.extension_id else None,
+            )
             permission_profile = evaluate_tool_permissions(
-                extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
+                extension,
                 tool_names=workflow.step_tools,
             )
             item = {
@@ -1680,6 +1709,12 @@ class WorkflowManager:
                 "missing_manifest_execution_boundaries": list(permission_profile["missing_execution_boundaries"]),
                 "requires_network": bool(permission_profile["requires_network"]),
                 "missing_manifest_network": bool(permission_profile["missing_network"]),
+                "governance_runtime_blocked": governance_block is not None,
+                "governance_fail_closed_reason": (
+                    str(governance_block.get("fail_closed_reason") or "governance_blocked")
+                    if governance_block is not None
+                    else None
+                ),
                 "approval_behavior": permission_profile["approval_behavior"],
                 "requires_approval": bool(permission_profile["requires_approval"]),
             }
@@ -1692,6 +1727,7 @@ class WorkflowManager:
                         available_runtime_profiles=available_runtime_profiles,
                         available_output_surfaces=available_output_surfaces,
                         permission_profile=permission_profile,
+                        governance_block=governance_block,
                     )
                 )
             workflows.append(item)
@@ -1752,6 +1788,7 @@ class WorkflowManager:
         skill_set = set(active_skill_names)
         snapshot = self._snapshot()
         extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
+        state_entries = extension_state_entries(load_extension_state_payload())
         available_runtime_profiles = {
             str(item.metadata.get("name"))
             for item in snapshot.list_contributions("workflow_runtimes")
@@ -1768,8 +1805,15 @@ class WorkflowManager:
         for workflow in self._workflows:
             if not workflow.enabled:
                 continue
+            extension = extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None
+            governance_block = _verified_extension_runtime_block(
+                extension,
+                state_entries.get(workflow.extension_id) if workflow.extension_id else None,
+            )
+            if governance_block is not None:
+                continue
             permission_profile = evaluate_tool_permissions(
-                extensions_by_id.get(workflow.extension_id) if workflow.extension_id else None,
+                extension,
                 tool_names=workflow.step_tools,
             )
             availability = self._get_runtime_availability(
@@ -1779,6 +1823,7 @@ class WorkflowManager:
                 available_runtime_profiles=available_runtime_profiles,
                 available_output_surfaces=available_output_surfaces,
                 permission_profile=permission_profile,
+                governance_block=governance_block,
             )
             if not permission_profile["ok"] or not availability["is_available"]:
                 continue
@@ -1833,6 +1878,7 @@ class WorkflowManager:
         available_runtime_profiles: set[str] | None = None,
         available_output_surfaces: set[str] | None = None,
         permission_profile: dict[str, Any] | None = None,
+        governance_block: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tool_set = {canonical_tool_name(name) for name in available_tool_names}
         skill_set = set(active_skill_names)
@@ -1864,6 +1910,12 @@ class WorkflowManager:
             (permission_profile or {}).get("missing_execution_boundaries", [])
         )
         missing_manifest_network = bool((permission_profile or {}).get("missing_network", False))
+        governance_blocked = governance_block is not None
+        governance_fail_closed_reason = (
+            str(governance_block.get("fail_closed_reason") or "governance_blocked")
+            if governance_block is not None
+            else None
+        )
         return {
             "is_available": (
                 not missing_tools
@@ -1873,6 +1925,7 @@ class WorkflowManager:
                 and not missing_manifest_tools
                 and not missing_manifest_execution_boundaries
                 and not missing_manifest_network
+                and not governance_blocked
             ),
             "missing_tools": missing_tools,
             "missing_skills": missing_skills,
@@ -1881,6 +1934,8 @@ class WorkflowManager:
             "missing_manifest_tools": missing_manifest_tools,
             "missing_manifest_execution_boundaries": missing_manifest_execution_boundaries,
             "missing_manifest_network": missing_manifest_network,
+            "governance_runtime_blocked": governance_blocked,
+            "governance_fail_closed_reason": governance_fail_closed_reason,
         }
 
     def _infer_policy_modes(self, workflow: Workflow, approval_context: dict[str, Any] | None = None) -> list[str]:

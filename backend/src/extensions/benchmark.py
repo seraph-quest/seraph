@@ -365,13 +365,22 @@ def governed_capability_pack_hardening_policy_payload() -> dict[str, Any]:
     }
 
 
-def build_governed_capability_pack_hardening_receipts() -> list[dict[str, Any]]:
+def build_governed_capability_pack_hardening_receipts(summary: Any | None = None) -> list[dict[str, Any]]:
     policy = governed_capability_pack_hardening_policy_payload()
+    failed_scenarios = {
+        str(getattr(result, "name", "") or "")
+        for result in getattr(summary, "results", []) or []
+        if not getattr(result, "passed", True)
+    }
+
+    def status_for(scenario_id: str) -> str:
+        return "failed" if scenario_id in failed_scenarios else "passed"
+
     return [
         {
             "scenario_id": "capability_pack_review_receipt_behavior",
             "dimension": "review_receipts",
-            "status": "passed",
+            "status": status_for("capability_pack_review_receipt_behavior"),
             "receipt_fields": [
                 "review_status",
                 "signature_status",
@@ -387,7 +396,7 @@ def build_governed_capability_pack_hardening_receipts() -> list[dict[str, Any]]:
         {
             "scenario_id": "capability_pack_compatibility_downgrade_behavior",
             "dimension": "compatibility_and_downgrade",
-            "status": "passed",
+            "status": status_for("capability_pack_compatibility_downgrade_behavior"),
             "negative_cases": ["incompatible_pack_version", "provider_downgrade"],
             "version_relation_states": ["new", "same", "upgrade", "downgrade"],
             "risk_deltas": ["compatibility_block", "provider_or_pack_downgrade", "provider_runtime_degraded"],
@@ -396,7 +405,7 @@ def build_governed_capability_pack_hardening_receipts() -> list[dict[str, Any]]:
         {
             "scenario_id": "capability_pack_permission_creep_behavior",
             "dimension": "permission_creep",
-            "status": "passed",
+            "status": status_for("capability_pack_permission_creep_behavior"),
             "negative_cases": ["underdeclared_permissions", "extension_permission_creep"],
             "blocked_claims": ["complete_permission_declaration", "reviewed_permission_envelope"],
             "fail_closed_required": True,
@@ -405,7 +414,7 @@ def build_governed_capability_pack_hardening_receipts() -> list[dict[str, Any]]:
         {
             "scenario_id": "capability_pack_supply_chain_suspicion_behavior",
             "dimension": "supply_chain_suspicion",
-            "status": "passed",
+            "status": status_for("capability_pack_supply_chain_suspicion_behavior"),
             "negative_cases": ["supply_chain_suspicion", "failed_update"],
             "fail_closed_reasons": [
                 "signature_missing",
@@ -420,7 +429,7 @@ def build_governed_capability_pack_hardening_receipts() -> list[dict[str, Any]]:
         {
             "scenario_id": "capability_pack_rollback_ready_behavior",
             "dimension": "rollback_readiness",
-            "status": "passed",
+            "status": status_for("capability_pack_rollback_ready_behavior"),
             "negative_cases": ["rollback_need"],
             "rollback_actions": ["remove_new_pack", "restore_previous_workspace_pack"],
             "review_required_for_verified_pack": True,
@@ -429,7 +438,7 @@ def build_governed_capability_pack_hardening_receipts() -> list[dict[str, Any]]:
         {
             "scenario_id": "operator_governed_capability_pack_hardening_surface_behavior",
             "dimension": "operator_surface",
-            "status": "passed",
+            "status": status_for("operator_governed_capability_pack_hardening_surface_behavior"),
             "operator_surfaces": policy["receipt_surfaces"],
             "benchmark_proof_visible": True,
             "claim_boundary": policy["claim_boundary"],
@@ -490,7 +499,7 @@ async def build_governed_capability_pack_hardening_report() -> dict[str, Any]:
         "scenario_names": list(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES),
         "dimensions": governed_capability_pack_hardening_dimensions(),
         "failure_taxonomy": governed_capability_pack_hardening_failure_taxonomy(),
-        "hardening_receipts": build_governed_capability_pack_hardening_receipts(),
+        "hardening_receipts": build_governed_capability_pack_hardening_receipts(summary),
         "failure_report": failure_report,
         "policy": governed_capability_pack_hardening_policy_payload(),
         "latest_run": {

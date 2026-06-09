@@ -83,6 +83,10 @@ from src.workflows.endurance_canary import (
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+    DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+    PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
 )
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
@@ -324,6 +328,43 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Broader production workload replay and external long-running agent benchmark parity remain future proof work."
         ),
         scenario_names=DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
+        label="Production durable orchestration",
+        description=(
+            "Pins the Batch BX production orchestration proof gate: durable leases, transition idempotency, "
+            "trigger dedupe, unsafe-resume blocking, delegated-artifact adoption gates, and operator-visible "
+            "recovery receipts without claiming LangGraph-class or exactly-once execution."
+        ),
+        benchmark_axis="production_durable_orchestration",
+        operator_summary=(
+            "Durable orchestration v2 now exposes production-oriented recovery receipts over leases, idempotent "
+            "transitions, deduped triggers, unsafe-resume blocks, and delegated-artifact adoption gates."
+        ),
+        remaining_gap=(
+            "This still does not claim full distributed workflow execution, exactly-once external scheduling, "
+            "or competitor-superiority parity."
+        ),
+        scenario_names=PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+        label="Durable workflow engine v2",
+        description=(
+            "Adds v2 durable orchestration receipts on top of the v1 state kernel: lease ownership, revision "
+            "guards, idempotent trigger and transition ledgers, recovery plans, and delegated artifact adoption."
+        ),
+        benchmark_axis="durable_workflow_engine_v2",
+        operator_summary=(
+            "Durable workflow engine v2 makes long-running recovery and multi-agent ownership legible through "
+            "explicit receipts and negative cases."
+        ),
+        remaining_gap=(
+            "External queue durability, exactly-once third-party effects, and broad live crash studies remain "
+            "outside this bounded proof gate."
+        ),
+        scenario_names=DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

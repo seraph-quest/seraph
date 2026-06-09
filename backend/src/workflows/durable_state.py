@@ -41,6 +41,33 @@ TRUST_BOUNDARY_BLOCK_REASONS = {"approval_context_changed", "approval_context_mi
 TERMINAL_STATUSES = {"completed", "succeeded", "failed", "cancelled"}
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME = DURABLE_WORKFLOW_ENGINE_SUITE_NAME
 DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES = DURABLE_WORKFLOW_ENGINE_SCENARIO_NAMES
+PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME = "production_durable_orchestration"
+DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME = "durable_workflow_engine_v2"
+DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES = (
+    "durable_workflow_v2_lease_ownership_behavior",
+    "durable_workflow_v2_idempotent_transition_behavior",
+    "durable_workflow_v2_trigger_dedupe_behavior",
+    "durable_workflow_v2_recovery_plan_behavior",
+    "durable_workflow_v2_delegated_artifact_adoption_behavior",
+    "operator_durable_workflow_engine_v2_surface_behavior",
+)
+PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES = (
+    *DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
+    "production_durable_orchestration_claim_boundary_behavior",
+)
+DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY = (
+    "production_orchestration_receipts_not_langgraph_class_or_exactly_once_engine"
+)
+PRODUCTION_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY = DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY
+DURABLE_WORKFLOW_ENGINE_V2_BLOCKED_CLAIMS = (
+    "solved_durable_workflows",
+    "langgraph_class_durable_workflows",
+    "exactly_once_external_scheduling",
+    "crash_proof_orchestration",
+    "unbounded_autonomous_multi_agent_orchestration",
+    "ahead_of_devin_cursor_workflows",
+    "full_workflow_parity",
+)
 
 
 def _utc_now() -> datetime:
@@ -67,6 +94,43 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _approval_context_digest(context: dict[str, Any] | None) -> str:
+    return hashlib.sha256(json_dumps_canonical(_as_dict(context)).encode("utf-8")).hexdigest()[:20]
+
+
+def _workflow_v2_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _as_dict(metadata).copy()
+    payload.setdefault("orchestration_v2", {})
+    v2 = _as_dict(payload["orchestration_v2"]).copy()
+    v2.setdefault("revision", 0)
+    v2.setdefault("lease", {})
+    v2.setdefault("lease_conflict_receipts", [])
+    v2.setdefault("transition_ledger", [])
+    v2.setdefault("transition_block_receipts", [])
+    v2.setdefault("trigger_ledger", [])
+    v2.setdefault("recovery_receipts", [])
+    v2.setdefault("artifact_adoption_receipts", [])
+    payload["orchestration_v2"] = v2
+    return payload
+
+
+def _lease_active(lease: dict[str, Any], now: datetime | None = None) -> bool:
+    expires_at = _parse_iso(lease.get("expires_at"))
+    return bool(lease.get("lease_id") and expires_at and expires_at > (now or _utc_now()))
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:
@@ -560,6 +624,342 @@ class WorkflowStateRepository:
             await db.flush()
             db.expunge(run)
             return self._serialize_run(run)
+
+    async def acquire_or_renew_v2_lease(
+        self,
+        *,
+        run_identity: str,
+        owner: str,
+        lease_id: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        owner = _text(owner, "workflow-worker")
+        lease_id = _text(lease_id) or _stable_id("workflow_lease", run_identity, owner)
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            current_lease = _as_dict(v2.get("lease"))
+            active_other_owner = (
+                _lease_active(current_lease, now)
+                and (
+                    current_lease.get("owner") != owner
+                    or current_lease.get("lease_id") != lease_id
+                )
+            )
+            receipt = {
+                "kind": "lease",
+                "run_identity": run_identity,
+                "owner": owner,
+                "lease_id": lease_id,
+                "status": "blocked" if active_other_owner else "acquired",
+                "blocked_reason": "active_lease_owned_by_another_worker" if active_other_owner else None,
+                "previous_owner": current_lease.get("owner"),
+                "expires_at": current_lease.get("expires_at") if active_other_owner else (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            if not active_other_owner:
+                v2["revision"] = int(v2.get("revision") or 0) + 1
+                v2["lease"] = {
+                    "owner": owner,
+                    "lease_id": lease_id,
+                    "acquired_at": current_lease.get("acquired_at") or now.isoformat(),
+                    "renewed_at": now.isoformat(),
+                    "expires_at": receipt["expires_at"],
+                    "revision": v2["revision"],
+                }
+                run.heartbeat_at = now
+                run.updated_at = now
+                run.metadata_json = _dumps(metadata)
+                await db.flush()
+            else:
+                conflicts = [
+                    _as_dict(item)
+                    for item in _as_list(v2.get("lease_conflict_receipts"))
+                    if isinstance(item, dict)
+                ]
+                conflicts.append(receipt)
+                v2["lease_conflict_receipts"] = conflicts[-10:]
+                run.updated_at = now
+                run.metadata_json = _dumps(metadata)
+                await db.flush()
+            db.expunge(run)
+            return {
+                "receipt": receipt,
+                "run": self._serialize_run(run),
+                "orchestration_v2": v2,
+            }
+
+    async def record_v2_transition(
+        self,
+        *,
+        run_identity: str,
+        transition_key: str,
+        transition_type: str,
+        owner: str,
+        step_id: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        transition_key = _text(transition_key) or _stable_id("workflow_transition", run_identity, transition_type, step_id or "run")
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            ledger = [
+                _as_dict(item)
+                for item in _as_list(v2.get("transition_ledger"))
+                if isinstance(item, dict)
+            ]
+            existing = next((item for item in ledger if item.get("transition_key") == transition_key), None)
+            revision = int(v2.get("revision") or 0)
+            revision_mismatch = expected_revision is not None and expected_revision != revision
+            lease = _as_dict(v2.get("lease"))
+            lease_owner_mismatch = not _lease_active(lease, now) or lease.get("owner") != owner
+            if existing:
+                receipt = {**existing, "status": "deduped", "operator_visible": True}
+            elif lease_owner_mismatch:
+                receipt = {
+                    "transition_key": transition_key,
+                    "transition_type": transition_type,
+                    "step_id": step_id,
+                    "owner": owner,
+                    "status": "blocked",
+                    "blocked_reason": "active_owner_lease_required",
+                    "lease_owner": lease.get("owner"),
+                    "lease_id": lease.get("lease_id"),
+                    "operator_visible": True,
+                    "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+                }
+                blocks = [
+                    _as_dict(item)
+                    for item in _as_list(v2.get("transition_block_receipts"))
+                    if isinstance(item, dict)
+                ]
+                blocks.append(receipt)
+                v2["transition_block_receipts"] = blocks[-10:]
+                run.updated_at = now
+                run.metadata_json = _dumps(metadata)
+                await db.flush()
+            elif revision_mismatch:
+                receipt = {
+                    "transition_key": transition_key,
+                    "transition_type": transition_type,
+                    "step_id": step_id,
+                    "owner": owner,
+                    "status": "blocked",
+                    "blocked_reason": "revision_mismatch",
+                    "expected_revision": expected_revision,
+                    "actual_revision": revision,
+                    "operator_visible": True,
+                    "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+                }
+                blocks = [
+                    _as_dict(item)
+                    for item in _as_list(v2.get("transition_block_receipts"))
+                    if isinstance(item, dict)
+                ]
+                blocks.append(receipt)
+                v2["transition_block_receipts"] = blocks[-10:]
+                run.updated_at = now
+                run.metadata_json = _dumps(metadata)
+                await db.flush()
+            else:
+                receipt = {
+                    "transition_key": transition_key,
+                    "transition_type": transition_type,
+                    "step_id": step_id,
+                    "owner": owner,
+                    "status": "recorded",
+                    "revision": revision + 1,
+                    "recorded_at": now.isoformat(),
+                    "idempotency_key": transition_key,
+                    "operator_visible": True,
+                    "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+                }
+                ledger.append(receipt)
+                v2["transition_ledger"] = ledger
+                v2["revision"] = revision + 1
+                run.heartbeat_at = now
+                run.updated_at = now
+                run.metadata_json = _dumps(metadata)
+                await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_trigger(
+        self,
+        *,
+        run_identity: str,
+        trigger_key: str,
+        trigger_kind: str,
+        source: str,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        trigger_key = _text(trigger_key) or _stable_id("workflow_trigger", run_identity, trigger_kind, source)
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            ledger = [
+                _as_dict(item)
+                for item in _as_list(v2.get("trigger_ledger"))
+                if isinstance(item, dict)
+            ]
+            existing = next((item for item in ledger if item.get("trigger_key") == trigger_key), None)
+            if existing:
+                receipt = {**existing, "status": "deduped", "external_action_allowed": False}
+            else:
+                v2["revision"] = int(v2.get("revision") or 0) + 1
+                receipt = {
+                    "trigger_key": trigger_key,
+                    "trigger_kind": trigger_kind,
+                    "source": source,
+                    "status": "recorded",
+                    "external_action_allowed": True,
+                    "next_action": "recover_or_resume_with_operator_visible_receipt",
+                    "recorded_at": now.isoformat(),
+                    "revision": v2["revision"],
+                    "operator_visible": True,
+                    "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+                }
+                ledger.append(receipt)
+                v2["trigger_ledger"] = ledger
+                run.heartbeat_at = now
+                run.updated_at = now
+                run.metadata_json = _dumps(metadata)
+                await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def build_v2_recovery_plan(
+        self,
+        *,
+        run_identity: str,
+        owner: str,
+        approval_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            stored_context = _loads(run.approval_context_json, {})
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            lease = _as_dict(v2.get("lease"))
+            proposed_digest = _approval_context_digest(approval_context or stored_context)
+            stored_digest = _approval_context_digest(stored_context)
+            context_changed = proposed_digest != stored_digest
+            active_other_owner = _lease_active(lease, now) and lease.get("owner") != owner
+            blocked_reason = None
+            if context_changed:
+                blocked_reason = "approval_context_changed"
+            elif active_other_owner:
+                blocked_reason = "active_lease_owned_by_another_worker"
+            receipt = {
+                "kind": "recovery_plan",
+                "run_identity": run_identity,
+                "owner": owner,
+                "status": "blocked" if blocked_reason else "ready",
+                "blocked_reason": blocked_reason,
+                "requires_fresh_run": bool(blocked_reason),
+                "resume_from_step": run.last_completed_step_id,
+                "root_run_identity": run.root_run_identity,
+                "parent_run_identity": run.parent_run_identity,
+                "approval_context_digest": stored_digest,
+                "proposed_context_digest": proposed_digest,
+                "lease_owner": lease.get("owner"),
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("recovery_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["recovery_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_artifact_adoption(
+        self,
+        *,
+        run_identity: str,
+        artifact_path: str,
+        adopter: str,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            reviews = (
+                await db.execute(
+                    select(WorkflowArtifactReview)
+                    .where(WorkflowArtifactReview.run_identity == run_identity)
+                    .where(WorkflowArtifactReview.artifact_path == artifact_path)
+                )
+            ).scalars().all()
+            approved_reviews = [
+                review
+                for review in reviews
+                if review.decision in {"approved", "accepted"}
+                or review.review_state in {"approved", "accepted"}
+            ]
+            approved = bool(approved_reviews)
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            receipt = {
+                "kind": "artifact_adoption",
+                "run_identity": run_identity,
+                "artifact_path": artifact_path,
+                "adopter": adopter,
+                "status": "recorded" if approved else "blocked",
+                "blocked_reason": None if approved else "missing_delegated_artifact_review_approval",
+                "review_count": len(reviews),
+                "approved_review_count": len(approved_reviews),
+                "approval_ids": [review.approval_id for review in approved_reviews if review.approval_id],
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("artifact_adoption_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["artifact_adoption_receipts"] = receipts[-10:]
+            v2["revision"] = int(v2.get("revision") or 0) + 1
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            for review in reviews:
+                db.expunge(review)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
 
     async def mark_stale_runs_interrupted(self, *, older_than_seconds: int = 300) -> list[dict[str, Any]]:
         cutoff = _utc_now() - timedelta(seconds=older_than_seconds)
@@ -1142,6 +1542,362 @@ async def build_durable_workflow_state_report() -> dict[str, Any]:
         "proof_state_kernel": proof_kernel,
         "persisted_state_kernel": persisted_kernel,
         "persisted_run_snapshots": persisted_snapshots,
+        "latest_run": {
+            "total": int(getattr(summary, "total", 0) or 0),
+            "passed": int(getattr(summary, "passed", 0) or 0),
+            "failed": int(getattr(summary, "failed", 0) or 0),
+            "duration_ms": int(getattr(summary, "duration_ms", 0) or 0),
+        },
+    }
+
+
+def durable_workflow_v2_policy_payload() -> dict[str, Any]:
+    return {
+        "benchmark_suites": [
+            PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
+            DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+        ],
+        "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+        "durability_policy": "lease_owned_revision_guarded_recovery_receipts_on_existing_durable_state",
+        "lease_policy": "active_worker_or_delegated_agent_requires_non_expired_owner_lease_before_continuation",
+        "transition_policy": "step_resume_retry_repair_and_trigger_paths_require_idempotency_keys_and_revision_guards",
+        "recovery_policy": "unsafe_resume_blocks_on_approval_trust_credential_owner_or_checkpoint_drift",
+        "artifact_policy": "delegated_artifacts_require review_or_approval_receipt_before_adoption",
+        "operator_surfaces": [
+            "/api/operator/durable-workflow-engine-v2",
+            "/api/operator/durable-workflow-engine",
+            "/api/operator/benchmark-proof",
+        ],
+        "blocked_claims": list(DURABLE_WORKFLOW_ENGINE_V2_BLOCKED_CLAIMS),
+        "not_claimed": [
+            "langgraph_class_durable_workflows",
+            "exactly_once_external_scheduling",
+            "crash_proof_orchestration",
+            "unbounded_autonomous_multi_agent_orchestration",
+            "full_workflow_parity",
+        ],
+    }
+
+
+def _fixture_workflow_v2_runs() -> list[dict[str, Any]]:
+    return [
+        {
+            "run_identity": "wf_v2_release_root",
+            "root_run_identity": "wf_v2_release_root",
+            "workflow_name": "release-hardening",
+            "status": "interrupted",
+            "last_completed_step_id": "collect",
+            "approval_context": {
+                "risk_level": "medium",
+                "execution_boundaries": ["workspace_filesystem", "delegation"],
+                "delegated_specialists": ["critic"],
+            },
+            "metadata": {
+                "orchestration_v2": {
+                    "revision": 4,
+                    "lease": {
+                        "owner": "worker-a",
+                        "lease_id": "lease-release-worker-a",
+                        "acquired_at": "2026-06-09T10:00:00+00:00",
+                        "renewed_at": "2026-06-09T10:04:00+00:00",
+                        "expires_at": "2026-06-09T10:09:00+00:00",
+                        "revision": 4,
+                    },
+                    "lease_conflict_receipts": [
+                        {
+                            "kind": "lease",
+                            "owner": "worker-b",
+                            "lease_id": "lease-release-worker-a",
+                            "status": "blocked",
+                            "blocked_reason": "active_lease_owned_by_another_worker",
+                            "previous_owner": "worker-a",
+                            "operator_visible": True,
+                        }
+                    ],
+                    "transition_ledger": [
+                        {
+                            "transition_key": "resume:collect",
+                            "transition_type": "resume",
+                            "step_id": "collect",
+                            "owner": "worker-a",
+                            "status": "recorded",
+                            "revision": 3,
+                            "idempotency_key": "resume:collect",
+                        }
+                    ],
+                    "transition_block_receipts": [
+                        {
+                            "transition_key": "resume:publish",
+                            "transition_type": "resume",
+                            "step_id": "publish",
+                            "owner": "worker-b",
+                            "status": "blocked",
+                            "blocked_reason": "active_owner_lease_required",
+                            "lease_owner": "worker-a",
+                            "lease_id": "lease-release-worker-a",
+                            "operator_visible": True,
+                        }
+                    ],
+                    "trigger_ledger": [
+                        {
+                            "trigger_key": "heartbeat:wf_v2_release_root",
+                            "trigger_kind": "heartbeat",
+                            "source": "scheduler",
+                            "status": "recorded",
+                            "external_action_allowed": True,
+                        }
+                    ],
+                    "recovery_receipts": [
+                        {
+                            "kind": "recovery_plan",
+                            "status": "ready",
+                            "resume_from_step": "collect",
+                            "operator_visible": True,
+                        }
+                    ],
+                    "artifact_adoption_receipts": [
+                        {
+                            "kind": "artifact_adoption",
+                            "artifact_path": "reports/release.md",
+                            "status": "recorded",
+                            "approval_ids": ["approval-release-review"],
+                        }
+                    ],
+                }
+            },
+            "artifact_reviews": [
+                {
+                    "artifact_path": "reports/release.md",
+                    "owner": "delegated_specialist",
+                    "review_state": "approved",
+                    "approval_id": "approval-release-review",
+                }
+            ],
+        },
+        {
+            "run_identity": "wf_v2_blocked_auth",
+            "root_run_identity": "wf_v2_blocked_auth",
+            "workflow_name": "authenticated-brief",
+            "status": "failed",
+            "last_completed_step_id": "fetch-private-source",
+            "approval_context": {
+                "risk_level": "high",
+                "execution_boundaries": ["external_mcp_credential_egress"],
+                "accepts_secret_refs": True,
+            },
+            "metadata": {
+                "orchestration_v2": {
+                    "revision": 2,
+                    "lease": {
+                        "owner": "worker-b",
+                        "lease_id": "lease-auth-worker-b",
+                        "expires_at": "2026-06-09T10:09:00+00:00",
+                    },
+                    "transition_ledger": [],
+                    "trigger_ledger": [
+                        {
+                            "trigger_key": "reactive:private-source",
+                            "trigger_kind": "reactive_signal",
+                            "source": "private-source",
+                            "status": "deduped",
+                            "external_action_allowed": False,
+                        }
+                    ],
+                    "recovery_receipts": [
+                        {
+                            "kind": "recovery_plan",
+                            "status": "blocked",
+                            "blocked_reason": "approval_context_changed",
+                            "requires_fresh_run": True,
+                            "operator_visible": True,
+                        }
+                    ],
+                    "artifact_adoption_receipts": [
+                        {
+                            "kind": "artifact_adoption",
+                            "artifact_path": "reports/private.md",
+                            "status": "blocked",
+                            "blocked_reason": "missing_delegated_artifact_review_approval",
+                        }
+                    ],
+                }
+            },
+        },
+    ]
+
+
+def build_durable_workflow_v2_contract(
+    workflow_runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    runs = workflow_runs or _fixture_workflow_v2_runs()
+    receipts: list[dict[str, Any]] = []
+    for run in runs:
+        metadata = _workflow_v2_metadata(_as_dict(run.get("metadata")))
+        v2 = _as_dict(metadata.get("orchestration_v2"))
+        lease = _as_dict(v2.get("lease"))
+        transitions = [
+            _as_dict(item)
+            for item in _as_list(v2.get("transition_ledger"))
+            if isinstance(item, dict)
+        ]
+        lease_conflicts = [
+            _as_dict(item)
+            for item in _as_list(v2.get("lease_conflict_receipts"))
+            if isinstance(item, dict)
+        ]
+        transition_blocks = [
+            _as_dict(item)
+            for item in _as_list(v2.get("transition_block_receipts"))
+            if isinstance(item, dict)
+        ]
+        triggers = [
+            _as_dict(item)
+            for item in _as_list(v2.get("trigger_ledger"))
+            if isinstance(item, dict)
+        ]
+        recoveries = [
+            _as_dict(item)
+            for item in _as_list(v2.get("recovery_receipts"))
+            if isinstance(item, dict)
+        ]
+        adoptions = [
+            _as_dict(item)
+            for item in _as_list(v2.get("artifact_adoption_receipts"))
+            if isinstance(item, dict)
+        ]
+        receipts.append({
+            "run_identity": run.get("run_identity"),
+            "root_run_identity": run.get("root_run_identity") or run.get("run_identity"),
+            "parent_run_identity": run.get("parent_run_identity"),
+            "workflow_name": run.get("workflow_name"),
+            "status": run.get("status"),
+            "revision": int(v2.get("revision") or 0),
+            "lease": {
+                "owner": lease.get("owner"),
+                "lease_id": lease.get("lease_id"),
+                "expires_at": lease.get("expires_at"),
+                "operator_visible": bool(lease.get("lease_id")),
+            },
+            "lease_conflict_count": len(lease_conflicts),
+            "latest_lease_conflict": lease_conflicts[-1] if lease_conflicts else {},
+            "transition_count": len(transitions),
+            "transition_keys": _dedupe_sorted([item.get("transition_key") for item in transitions]),
+            "transition_block_count": len(transition_blocks),
+            "latest_transition_block": transition_blocks[-1] if transition_blocks else {},
+            "trigger_count": len(triggers),
+            "deduped_trigger_count": sum(1 for item in triggers if item.get("status") == "deduped"),
+            "recovery": recoveries[-1] if recoveries else {},
+            "artifact_adoption": adoptions[-1] if adoptions else {},
+            "approval_context_digest": _approval_context_digest(_as_dict(run.get("approval_context"))),
+            "blocked_claims": list(DURABLE_WORKFLOW_ENGINE_V2_BLOCKED_CLAIMS),
+            "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+        })
+    blocked_recoveries = [
+        receipt for receipt in receipts
+        if _as_dict(receipt.get("recovery")).get("status") == "blocked"
+    ]
+    blocked_adoptions = [
+        receipt for receipt in receipts
+        if _as_dict(receipt.get("artifact_adoption")).get("status") == "blocked"
+    ]
+    return {
+        "summary": {
+            "suite_name": DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+            "operator_status": "durable_workflow_engine_v2_recovery_receipts_visible",
+            "run_count": len(receipts),
+            "lease_receipt_count": sum(1 for item in receipts if item["lease"]["operator_visible"]),
+            "blocked_lease_count": sum(int(item["lease_conflict_count"]) for item in receipts),
+            "transition_receipt_count": sum(int(item["transition_count"]) for item in receipts),
+            "blocked_transition_count": sum(int(item["transition_block_count"]) for item in receipts),
+            "trigger_receipt_count": sum(int(item["trigger_count"]) for item in receipts),
+            "deduped_trigger_count": sum(int(item["deduped_trigger_count"]) for item in receipts),
+            "blocked_recovery_count": len(blocked_recoveries),
+            "blocked_artifact_adoption_count": len(blocked_adoptions),
+            "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+        },
+        "receipts": receipts,
+        "policy": durable_workflow_v2_policy_payload(),
+    }
+
+
+def _durable_workflow_engine_v2_failure_report(summary: Any) -> list[dict[str, str]]:
+    failed = int(getattr(summary, "failed", 0) or 0)
+    if failed == 0:
+        return []
+    return [
+        {
+            "suite": DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+            "failed": str(failed),
+            "summary": "Durable workflow engine v2 benchmark reported regressions.",
+        }
+    ]
+
+
+async def _run_durable_workflow_engine_v2_suites():
+    from src.evals.harness import run_benchmark_suites
+
+    return await run_benchmark_suites([
+        PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
+        DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+    ])
+
+
+async def build_durable_workflow_v2_report() -> dict[str, Any]:
+    summary = await _run_durable_workflow_engine_v2_suites()
+    failure_report = _durable_workflow_engine_v2_failure_report(summary)
+    try:
+        persisted_runs = await workflow_state_repository.list_runs(limit=10)
+    except Exception:  # pragma: no cover - defensive fail-soft path for partially migrated/local DBs.
+        persisted_runs = []
+    proof_contract = build_durable_workflow_v2_contract()
+    persisted_contract = build_durable_workflow_v2_contract(persisted_runs) if persisted_runs else {
+        "summary": {
+            "run_count": 0,
+            "lease_receipt_count": 0,
+            "blocked_lease_count": 0,
+            "transition_receipt_count": 0,
+            "blocked_transition_count": 0,
+            "trigger_receipt_count": 0,
+            "deduped_trigger_count": 0,
+            "blocked_recovery_count": 0,
+            "blocked_artifact_adoption_count": 0,
+            "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+        },
+        "receipts": [],
+        "policy": durable_workflow_v2_policy_payload(),
+    }
+    active_contract = persisted_contract if persisted_runs else proof_contract
+    return {
+        "summary": {
+            "suite_name": DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+            "production_suite_name": PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
+            "operator_status": "durable_workflow_engine_v2_recovery_receipts_visible",
+            "benchmark_posture": (
+                "durable_workflow_engine_v2_ci_gated_operator_visible"
+                if not failure_report
+                else "durable_workflow_engine_v2_regressions_detected"
+            ),
+            "scenario_count": len(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES),
+            "production_scenario_count": len(PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES),
+            "persisted_run_count": len(persisted_runs),
+            "run_count": active_contract["summary"]["run_count"],
+            "lease_receipt_count": active_contract["summary"]["lease_receipt_count"],
+            "blocked_lease_count": active_contract["summary"]["blocked_lease_count"],
+            "transition_receipt_count": active_contract["summary"]["transition_receipt_count"],
+            "blocked_transition_count": active_contract["summary"]["blocked_transition_count"],
+            "trigger_receipt_count": active_contract["summary"]["trigger_receipt_count"],
+            "deduped_trigger_count": active_contract["summary"]["deduped_trigger_count"],
+            "blocked_recovery_count": active_contract["summary"]["blocked_recovery_count"],
+            "blocked_artifact_adoption_count": active_contract["summary"]["blocked_artifact_adoption_count"],
+            "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+        },
+        "scenario_names": list(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES),
+        "production_scenario_names": list(PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES),
+        "failure_report": failure_report,
+        "policy": durable_workflow_v2_policy_payload(),
+        "active_contract": active_contract,
+        "proof_contract": proof_contract,
+        "persisted_contract": persisted_contract,
         "latest_run": {
             "total": int(getattr(summary, "total", 0) or 0),
             "passed": int(getattr(summary, "passed", 0) or 0),

@@ -119,8 +119,16 @@ from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
     DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
+    DURABLE_WORKFLOW_ENGINE_V2_BLOCKED_CLAIMS,
+    DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+    DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+    PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
     build_durable_workflow_state_report,
     build_durable_workflow_state_kernel,
+    build_durable_workflow_v2_contract,
+    build_durable_workflow_v2_report,
 )
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
@@ -13871,6 +13879,12 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     durable_workflow_engine_suite = next(
         item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME
     )
+    production_durable_orchestration_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME
+    )
+    durable_workflow_engine_v2_suite = next(
+        item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
@@ -13948,6 +13962,33 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "durable_workflow_engine_gate_required": (
             DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_durable_orchestration_suite_present": (
+            "production_durable_orchestration_claim_boundary_behavior"
+            in production_durable_orchestration_suite["scenario_names"]
+        ),
+        "production_durable_orchestration_suite_scenario_count_matches": (
+            production_durable_orchestration_suite["scenario_count"]
+            == len(PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+        ),
+        "production_durable_orchestration_suite_axis_matches": (
+            production_durable_orchestration_suite["benchmark_axis"] == "production_durable_orchestration"
+        ),
+        "production_durable_orchestration_gate_required": (
+            PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "durable_workflow_engine_v2_suite_present": (
+            "durable_workflow_v2_lease_ownership_behavior"
+            in durable_workflow_engine_v2_suite["scenario_names"]
+        ),
+        "durable_workflow_engine_v2_suite_scenario_count_matches": (
+            durable_workflow_engine_v2_suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES)
+        ),
+        "durable_workflow_engine_v2_suite_axis_matches": (
+            durable_workflow_engine_v2_suite["benchmark_axis"] == "durable_workflow_engine_v2"
+        ),
+        "durable_workflow_engine_v2_gate_required": (
+            DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
@@ -14288,6 +14329,84 @@ async def _eval_durable_workflow_engine_report_behavior() -> dict[str, Any]:
         "receipt_surface_visible": "/api/operator/durable-workflow-engine" in kernel["policy"]["receipt_surfaces"],
         "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in kernel["policy"]["receipt_surfaces"],
         "ci_gate_required": DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
+async def _eval_durable_workflow_engine_v2_report_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    suite = next(item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME)
+    production_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME
+    )
+    contract = build_durable_workflow_v2_contract()
+    receipts = contract["receipts"]
+    blocked = set(contract["policy"]["blocked_claims"])
+
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    recovery_receipts = [as_dict(receipt.get("recovery")) for receipt in receipts]
+    artifact_receipts = [as_dict(receipt.get("artifact_adoption")) for receipt in receipts]
+    lease_conflict_receipts = [as_dict(receipt.get("latest_lease_conflict")) for receipt in receipts]
+    transition_block_receipts = [as_dict(receipt.get("latest_transition_block")) for receipt in receipts]
+    return {
+        "suite_name_visible": suite["name"] == DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME,
+        "production_suite_visible": production_suite["name"] == PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
+        "scenario_count_matches": suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES),
+        "production_scenario_count_matches": (
+            production_suite["scenario_count"] == len(PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+        ),
+        "scenario_names_match_constants": list(suite["scenario_names"])
+        == list(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES),
+        "benchmark_axis_visible": suite["benchmark_axis"] == "durable_workflow_engine_v2",
+        "production_axis_visible": production_suite["benchmark_axis"] == "production_durable_orchestration",
+        "operator_report_available": callable(build_durable_workflow_v2_report),
+        "operator_status_visible": contract["summary"]["operator_status"] == "durable_workflow_engine_v2_recovery_receipts_visible",
+        "lease_receipts_visible": contract["summary"]["lease_receipt_count"] >= 2,
+        "lease_takeover_block_visible": (
+            contract["summary"]["blocked_lease_count"] >= 1
+            and any(
+                receipt.get("status") == "blocked"
+                and receipt.get("blocked_reason") == "active_lease_owned_by_another_worker"
+                for receipt in lease_conflict_receipts
+            )
+        ),
+        "transition_idempotency_visible": (
+            contract["summary"]["transition_receipt_count"] >= 1
+            and any("resume:collect" in receipt["transition_keys"] for receipt in receipts)
+        ),
+        "transition_owner_gate_visible": (
+            contract["summary"]["blocked_transition_count"] >= 1
+            and any(
+                receipt.get("status") == "blocked"
+                and receipt.get("blocked_reason") == "active_owner_lease_required"
+                for receipt in transition_block_receipts
+            )
+        ),
+        "trigger_dedupe_visible": contract["summary"]["deduped_trigger_count"] >= 1,
+        "unsafe_recovery_block_visible": any(
+            receipt.get("status") == "blocked"
+            and receipt.get("blocked_reason") == "approval_context_changed"
+            and receipt.get("requires_fresh_run") is True
+            for receipt in recovery_receipts
+        ),
+        "delegated_artifact_adoption_gate_visible": any(
+            receipt.get("status") == "blocked"
+            and receipt.get("blocked_reason") == "missing_delegated_artifact_review_approval"
+            for receipt in artifact_receipts
+        ),
+        "claim_boundary_visible": contract["policy"]["claim_boundary"] == DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(DURABLE_WORKFLOW_ENGINE_V2_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": (
+            "/api/operator/durable-workflow-engine-v2" in contract["policy"]["operator_surfaces"]
+        ),
+        "benchmark_proof_surface_visible": (
+            "/api/operator/benchmark-proof" in contract["policy"]["operator_surfaces"]
+        ),
+        "ci_gate_required": DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "production_ci_gate_required": PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
     }
 
@@ -15707,6 +15826,24 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_durable_workflow_engine_report_behavior,
         )
         for name in DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description="Durable workflow engine v2 exposes lease ownership, idempotent transitions, trigger dedupe, recovery blocks, and delegated-artifact adoption gates.",
+            runner=_eval_durable_workflow_engine_v2_report_behavior,
+        )
+        for name in DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description="Production durable orchestration proof keeps v2 recovery receipts operator-visible while blocking solved-workflow and exactly-once claims.",
+            runner=_eval_durable_workflow_engine_v2_report_behavior,
+        )
+        for name in PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

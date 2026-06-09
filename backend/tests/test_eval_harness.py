@@ -16,7 +16,11 @@ from src.extensions.benchmark import (
 )
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
 from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
-from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
+from src.workflows.durable_state import (
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
+    PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -229,6 +233,14 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["durable_workflow_engine_suite_scenario_count_matches"] is True
     assert details["durable_workflow_engine_suite_axis_matches"] is True
     assert details["durable_workflow_engine_gate_required"] is True
+    assert details["production_durable_orchestration_suite_present"] is True
+    assert details["production_durable_orchestration_suite_scenario_count_matches"] is True
+    assert details["production_durable_orchestration_suite_axis_matches"] is True
+    assert details["production_durable_orchestration_gate_required"] is True
+    assert details["durable_workflow_engine_v2_suite_present"] is True
+    assert details["durable_workflow_engine_v2_suite_scenario_count_matches"] is True
+    assert details["durable_workflow_engine_v2_suite_axis_matches"] is True
+    assert details["durable_workflow_engine_v2_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -323,6 +335,29 @@ def test_run_durable_workflow_engine_benchmark_suite_passes():
         assert result.details["suite_name_visible"] is True
         assert result.details["receipt_surface_visible"] is True
         assert result.details["benchmark_proof_surface_visible"] is True
+
+
+def test_run_durable_workflow_engine_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["durable_workflow_engine_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["suite_name_visible"] is True
+        assert result.details["operator_surface_visible"] is True
+        assert result.details["blocked_claims_visible"] is True
+        assert result.details["ci_gate_required"] is True
+
+
+def test_run_production_durable_orchestration_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_durable_orchestration"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["production_suite_visible"] is True
+        assert result.details["production_ci_gate_required"] is True
+        assert result.details["unsafe_recovery_block_visible"] is True
 
 
 def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
@@ -1339,6 +1374,8 @@ def test_main_lists_available_benchmark_suites(capsys):
         "workflow_endurance_and_repair",
         "live_workflow_endurance_canary",
         "durable_workflow_engine_v1",
+        "production_durable_orchestration",
+        "durable_workflow_engine_v2",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

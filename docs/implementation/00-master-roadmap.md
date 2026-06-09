@@ -138,6 +138,8 @@ This stack is the roadmap-level ordering for the next large batches after the me
    deepen multi-signal learning, stale and conflicting evidence arbitration, salience and confidence calibration, and false-positive or false-negative accounting with live-ish intervention replay.
 10. [ ] `governed-extension-marketplace-hardening-foundations`:
    strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics as production-oriented foundations, not production marketplace security claims.
+11. [x] `guardian-safe-multimodal-voice-proof`:
+   execute #467 as a governed proof gate for voice, TTS/STT, browser vision, image/media analysis, and media delivery families with owner, trust, permission, capture/provider/privacy, continuity, correction/deletion, revocation, and guardian-value receipts, without claiming live broad voice or multimodal parity.
 
 ## Completed 10-PR Batches
 

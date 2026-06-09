@@ -35,6 +35,10 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.multimodal_voice import (
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+)
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
 from src.memory.provider_quality_gate import (
     MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
@@ -137,6 +141,24 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live long-horizon human outcome studies and external guardian-intelligence superiority claims remain future proof work."
         ),
         scenario_names=M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+        label="Guardian-safe multimodal and voice",
+        description=(
+            "Pins voice, TTS/STT, browser vision, image/media analysis, and media delivery "
+            "behind governance, audit, privacy, continuity, revocation, and guardian-value gates."
+        ),
+        benchmark_axis="guardian_safe_multimodal_voice",
+        operator_summary=(
+            "Voice and media capability families now have a dedicated proof gate that requires "
+            "guardian value and operator-visible capture/provider/privacy/correction receipts."
+        ),
+        remaining_gap=(
+            "Live broad voice runtime, production STT/TTS, mobile voice, and full multimodal "
+            "runtime parity remain future implementation work."
+        ),
+        scenario_names=GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

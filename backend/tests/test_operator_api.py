@@ -1523,6 +1523,55 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_guardian_safe_multimodal_voice_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "guardian_safe_multimodal_voice",
+                    "benchmark_posture": "guardian_safe_multimodal_voice_ci_gated_operator_visible",
+                    "operator_status": "guardian_safe_voice_media_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "capability_governance_state": "owner_trust_permission_data_access_mutation_revocation_visible",
+                    "transcript_audit_privacy_state": "capture_destination_provider_context_correction_deletion_visible",
+                    "continuity_approval_state": "thread_memory_approval_workflow_continuity_preserved",
+                    "exposure_revocation_state": "silent_screen_file_credential_media_network_expansion_blocked",
+                    "guardian_value_state": "voice_media_requires_guardian_value_reason",
+                    "claim_boundary": "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity",
+                },
+                "scenario_names": [
+                    "multimodal_voice_capability_governance_behavior",
+                    "multimodal_voice_transcript_audit_privacy_behavior",
+                    "multimodal_voice_continuity_approval_behavior",
+                    "multimodal_voice_exposure_revocation_behavior",
+                    "multimodal_voice_guardian_value_behavior",
+                    "operator_guardian_safe_multimodal_voice_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "capability_families": [],
+                "governance_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "guardian_value_policy": "voice_media_must_improve_timing_accessibility_situational_awareness_or_intervention_quality",
+                    "claim_boundary": "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity",
+                    "receipt_surfaces": [
+                        "/api/operator/guardian-safe-multimodal-voice",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": [
+                        "live_broad_voice_runtime",
+                        "voice_parity",
+                        "multimodal_parity",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1767,6 +1816,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["cockpit_efficiency_benchmark_posture"] == "cockpit_efficiency_ci_gated_operator_visible"
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
+    assert (
+        payload["summary"]["guardian_safe_multimodal_voice_benchmark_posture"]
+        == "guardian_safe_multimodal_voice_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["guardian_safe_multimodal_voice_claim_boundary"]
+        == "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity"
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -1792,6 +1849,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "guardian_safe_multimodal_voice"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "one_excellent_reach_channel_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "durable_workflow_engine_v1" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -1844,6 +1905,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m8_suite = next(item for item in payload["suites"] if item["name"] == "m8_guardian_intervention_quality")
     assert "m8_risky_capability_approval_behavior" in m8_suite["scenario_names"]
     assert m8_suite["scenario_count"] == 7
+    multimodal_voice_suite = next(item for item in payload["suites"] if item["name"] == "guardian_safe_multimodal_voice")
+    assert "multimodal_voice_capability_governance_behavior" in multimodal_voice_suite["scenario_names"]
+    assert multimodal_voice_suite["scenario_count"] == 6
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -1891,6 +1955,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["m8_guardian_brain_benchmark"]["summary"]["suite_name"] == "m8_guardian_intervention_quality"
     assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
+    assert payload["guardian_safe_multimodal_voice_benchmark"]["summary"]["suite_name"] == "guardian_safe_multimodal_voice"
+    assert payload["guardian_safe_multimodal_voice_benchmark"]["policy"]["guardian_value_policy"] == (
+        "voice_media_must_improve_timing_accessibility_situational_awareness_or_intervention_quality"
+    )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -2129,6 +2197,31 @@ async def test_operator_m8_guardian_intervention_benchmark_surface_reports_polic
     assert payload["policy"]["milestone_contract"] == "m8_guardian_brain_and_intervention_quality_ship_as_one_ready_pr"
     assert payload["policy"]["claim_boundary"] == "deterministic_guardian_judgment_receipts_not_live_superiority_claim"
     assert "/api/operator/m8-guardian-brain" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_guardian_safe_multimodal_voice_surface_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/guardian-safe-multimodal-voice")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "guardian_safe_multimodal_voice"
+    assert payload["summary"]["operator_status"] == "guardian_safe_voice_media_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["capability_governance_state"] == (
+        "owner_trust_permission_data_access_mutation_revocation_visible"
+    )
+    assert payload["summary"]["guardian_value_state"] == "voice_media_requires_guardian_value_reason"
+    assert payload["summary"]["claim_boundary"] == (
+        "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity"
+    )
+    assert len(payload["capability_families"]) == 5
+    assert len(payload["governance_receipts"]) == 5
+    assert payload["policy"]["exposure_policy"] == (
+        "browser_vision_and_media_analysis_cannot_expand_screen_file_credential_camera_microphone_or_network_exposure_silently"
+    )
+    assert "voice_parity" in payload["policy"]["not_claimed"]
+    assert "/api/operator/guardian-safe-multimodal-voice" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

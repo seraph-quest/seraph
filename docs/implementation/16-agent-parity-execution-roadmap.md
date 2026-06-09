@@ -6,7 +6,11 @@ title: 16. Agent Parity Execution Roadmap
 
 ## Status On `develop`
 
-- [ ] The full agent parity and targeted exceedance goal from [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals) is not complete on `develop`.
+- [x] The aggregate agent-parity proof train from [#468](https://github.com/seraph-quest/seraph/issues/468) landed on `develop` through merged PR [#473](https://github.com/seraph-quest/seraph/pull/473) on June 9, 2026.
+- [x] The strategy artifact in [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals) is complete as the target, proof-gate, and claim-boundary map.
+- [x] The proof train gives Seraph deterministic parity-floor coverage for the named Hermes/OpenClaw/IronClaw pressure areas: replay, cockpit operator efficiency, memory-provider quality, workflow endurance, durable workflow state v1, one reach canary, guardian learning arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice proof.
+- [ ] The broader product parity and targeted exceedance goal is not fully complete on `develop`: production-grade durable orchestration, deeper execution isolation, broader daily-life reach, stronger live long-horizon learning, richer operator debugging, and marketplace-grade ecosystem maturity remain real gaps.
+- [ ] Seraph still must not claim full parity, superiority, production readiness, broad security, or IronClaw-class secure execution unless [19. Strategy Claim Ledger](/research/strategy-claim-ledger) permits the exact wording.
 
 ## Paired Research
 
@@ -29,7 +33,7 @@ Active execution state remains in the GitHub Project, issues, and PRs. This road
 Research document 20 is the competitor-pressure overlay. This roadmap is the implementation sequencing layer. The GitHub Project is the execution layer.
 
 - Do not recreate M0-M9 milestone issues; those are foundation anchors.
-- Do not create duplicate issues for the current live proof anchors: [#438](https://github.com/seraph-quest/seraph/issues/438), [#439](https://github.com/seraph-quest/seraph/issues/439), [#440](https://github.com/seraph-quest/seraph/issues/440), [#441](https://github.com/seraph-quest/seraph/issues/441), and [#467](https://github.com/seraph-quest/seraph/issues/467).
+- Do not create duplicate issues for the completed proof anchors: [#438](https://github.com/seraph-quest/seraph/issues/438), [#439](https://github.com/seraph-quest/seraph/issues/439), [#440](https://github.com/seraph-quest/seraph/issues/440), [#441](https://github.com/seraph-quest/seraph/issues/441), and [#467](https://github.com/seraph-quest/seraph/issues/467).
 - Do not parent new work under closed historical batch [#422](https://github.com/seraph-quest/seraph/issues/422).
 - Do not create an `ironclaw-*` import family. IronClaw pressure is implemented as secure-capability-host proof.
 - Do not treat raw channel count, plugin count, provider count, or voice/media presence as parity.
@@ -37,27 +41,36 @@ Research document 20 is the competitor-pressure overlay. This roadmap is the imp
 
 ## Board Receipts
 
-Verified on June 9, 2026 through GitHub Project GraphQL reads.
+Verified on June 9, 2026 through GitHub PR, issue, and Project GraphQL/API reads after post-merge reconciliation. [#473](https://github.com/seraph-quest/seraph/pull/473) merged into `develop` at `2026-06-09T18:35:49Z`; the proof-slice issues below were then closed with completion comments and their Project status fields were updated to `Done`.
+
+GitHub closing metadata for PR #473 may still expose closed historical batch [#422](https://github.com/seraph-quest/seraph/issues/422) from earlier PR body history. That is treated as a stale metadata artifact, not the active parent relationship. The active parent for this proof train was [#468](https://github.com/seraph-quest/seraph/issues/468).
 
 | Issue | Role | Project item | Queue | Lane | Priority | Size | Status | PR | Code Review |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [#468 Batch BQ: agent parity proof execution train](https://github.com/seraph-quest/seraph/issues/468) | current parent hub for the proof train | `PVTI_lADOD4qAvs4BS6n3zgvLeHs` | Now | Docs / Meta | P0 | L | In Progress | Open | Pending |
-| [#467 P1: Guardian-safe multimodal and voice proof](https://github.com/seraph-quest/seraph/issues/467) | active multimodal/voice proof-governance anchor | `PVTI_lADOD4qAvs4BS6n3zgvLV0A` | Now | Presence and Reach | P1 | M | In Progress | Not Ready | Not Ready |
-| [#470 Batch BR: durable workflow state after endurance canary](https://github.com/seraph-quest/seraph/issues/470) | active durable workflow state follow-on | `PVTI_lADOD4qAvs4BS6n3zgvMBK8` | Now | Runtime Reliability | P1 | L | In Progress | Not Ready | Not Ready |
-| [#471 Batch BS: guardian arbitration and live-learning receipts](https://github.com/seraph-quest/seraph/issues/471) | active guardian arbitration follow-on | `PVTI_lADOD4qAvs4BS6n3zgvMBLE` | Now | Guardian Intelligence | P1 | L | In Progress | Not Ready | Not Ready |
-| [#472 Batch BT: governed capability-pack hardening receipts](https://github.com/seraph-quest/seraph/issues/472) | active ecosystem hardening follow-on | `PVTI_lADOD4qAvs4BS6n3zgvMBLI` | Now | Ecosystem and Leverage | P1 | L | In Progress | Not Ready | Not Ready |
+| [#468 Batch BQ: agent parity proof execution train](https://github.com/seraph-quest/seraph/issues/468) | parent hub for the merged proof train | `PVTI_lADOD4qAvs4BS6n3zgvLeHs` | Now | Docs / Meta | P0 | L | Done | Merged through [PR #473](https://github.com/seraph-quest/seraph/pull/473) | Passed |
+| [#467 P1: Guardian-safe multimodal and voice proof](https://github.com/seraph-quest/seraph/issues/467) | closed multimodal/voice proof-governance traceability anchor implemented in the aggregate train | `PVTI_lADOD4qAvs4BS6n3zgvLV0A` | Now | Presence and Reach | P1 | M | Done | Not Ready | Not Ready |
+| [#470 Batch BR: durable workflow state after endurance canary](https://github.com/seraph-quest/seraph/issues/470) | closed durable workflow state proof-slice traceability anchor implemented in the aggregate train | `PVTI_lADOD4qAvs4BS6n3zgvMBK8` | Now | Runtime Reliability | P1 | L | Done | Not Ready | Not Ready |
+| [#471 Batch BS: guardian arbitration and live-learning receipts](https://github.com/seraph-quest/seraph/issues/471) | closed guardian arbitration proof-slice traceability anchor implemented in the aggregate train | `PVTI_lADOD4qAvs4BS6n3zgvMBLE` | Now | Guardian Intelligence | P1 | L | Done | Not Ready | Not Ready |
+| [#472 Batch BT: governed capability-pack hardening receipts](https://github.com/seraph-quest/seraph/issues/472) | closed ecosystem hardening proof-slice traceability anchor implemented in the aggregate train | `PVTI_lADOD4qAvs4BS6n3zgvMBLI` | Now | Ecosystem and Leverage | P1 | L | Done | Not Ready | Not Ready |
 
-The current parent hub is [#468](https://github.com/seraph-quest/seraph/issues/468). It coordinates the aggregate proof train without splitting it into micro-issues. Ready PR [#473](https://github.com/seraph-quest/seraph/pull/473) integrates the current replay, cockpit, memory, workflow, reach, durable-state, guardian-learning, ecosystem-hardening, and multimodal/voice proof slices against `develop`:
+The parent hub [#468](https://github.com/seraph-quest/seraph/issues/468) coordinated the aggregate proof train without splitting it into micro-issues. Merged PR [#473](https://github.com/seraph-quest/seraph/pull/473) integrated the replay, cockpit, memory, workflow, reach, durable-state, guardian-learning, ecosystem-hardening, and multimodal/voice proof slices against `develop`:
 
 - [#457](https://github.com/seraph-quest/seraph/issues/457) / [PR #458](https://github.com/seraph-quest/seraph/pull/458): live long-horizon replay and proof substrate
 - [#439](https://github.com/seraph-quest/seraph/issues/439) / [PR #459](https://github.com/seraph-quest/seraph/pull/459): cockpit operator efficiency benchmark
 - [#441](https://github.com/seraph-quest/seraph/issues/441) / [PR #460](https://github.com/seraph-quest/seraph/pull/460): memory provider quality gate
 - [#440](https://github.com/seraph-quest/seraph/issues/440) / [PR #461](https://github.com/seraph-quest/seraph/pull/461): workflow endurance canary
-- [#438](https://github.com/seraph-quest/seraph/issues/438) / [PR #462](https://github.com/seraph-quest/seraph/pull/462): one excellent reach channel canary
+- [#438](https://github.com/seraph-quest/seraph/issues/438) / superseded [PR #462](https://github.com/seraph-quest/seraph/pull/462): one excellent reach channel canary, with accepted proof merged through PR #473
 - [#467](https://github.com/seraph-quest/seraph/issues/467): guardian-safe multimodal and voice proof gate
 - [#470](https://github.com/seraph-quest/seraph/issues/470): durable workflow state after endurance canary
 - [#471](https://github.com/seraph-quest/seraph/issues/471): guardian arbitration and live-learning receipts
 - [#472](https://github.com/seraph-quest/seraph/issues/472): governed capability-pack hardening receipts
+
+Post-merge interpretation:
+
+- The proof-train issues demonstrate deterministic parity-floor coverage for the named proof areas.
+- They do not close the broader production-grade gaps listed in [Development Status](/status).
+- The child issue `PR` and `Code Review` fields intentionally do not mirror the aggregate PR; the parent hub owned PR [#473](https://github.com/seraph-quest/seraph/pull/473).
+- Stale reach PR [#462](https://github.com/seraph-quest/seraph/pull/462) was closed as superseded after [#438](https://github.com/seraph-quest/seraph/issues/438) was closed through the aggregate proof-train receipt. Its Project item `PVTI_lADOD4qAvs4BS6n3zgrw9ec` is now `Status=Done`, `PR=Merged`, and `Code Review=Passed` because the accepted reach proof landed through PR #473, not because PR #462 merged.
 
 ## Roadmap Phases
 
@@ -69,11 +82,11 @@ The current parent hub is [#468](https://github.com/seraph-quest/seraph/issues/4
 | 3 | Cockpit operator efficiency benchmark | Measure inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, audit, confidence, and error detectability on real operator tasks. | M7 benchmark over workflow, memory, trust, and reach scenarios, not synthetic UI density alone. | Needs replay receipts so the same operator tasks can be re-run and compared. | [#439](https://github.com/seraph-quest/seraph/issues/439), [PR #459](https://github.com/seraph-quest/seraph/pull/459) |
 | 4 | Memory provider quality gate | External memory evidence declares provenance, confidence, privacy boundary, freshness, conflict behavior, usefulness, suppression, and canonical writeback rules. | `guardian_memory_quality` plus provider-quality receipts showing behavior change, suppression, or refusal. | Must land before memory-provider breadth is treated as a guardian advantage. | [#441](https://github.com/seraph-quest/seraph/issues/441), [PR #460](https://github.com/seraph-quest/seraph/pull/460) |
 | 5 | Workflow endurance canary | Multi-session work proves checkpoint, branch, interruption, delegated ownership, failure injection, recovery, artifact comparison, approval preservation, trust-boundary drift blocking, and audit trail. | `workflow_endurance_and_repair` plus `live_workflow_endurance_canary` with cockpit-visible final audit trail. | Can prove endurance canary behavior, but must not claim a durable workflow engine yet. | [#440](https://github.com/seraph-quest/seraph/issues/440), [PR #461](https://github.com/seraph-quest/seraph/pull/461) |
-| 6 | Durable workflow engine v1 | Move workflow state beyond audit-projected receipts into minimal durable state: crash-safe resume, heartbeat or reactive trigger receipts, retry, repair, persisted snapshots, durable audit receipts, and delegated artifact review lifecycle. | Durable-state tests plus operator recovery receipts across crash, resume, failed-step, and delegated-artifact paths. | Active after the workflow endurance canary; claim stays bounded to a minimal state kernel. | [#470](https://github.com/seraph-quest/seraph/issues/470) |
-| 7 | One excellent reach channel canary | One selected external channel proves pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded UI, and external-message-to-audited-action flow. | M4 reach proof plus Activity Ledger and cockpit receipts. | Should follow security, replay, memory-quality, and workflow-endurance proof unless the Project explicitly promotes it. | [#438](https://github.com/seraph-quest/seraph/issues/438), [PR #462](https://github.com/seraph-quest/seraph/pull/462) |
-| 8 | Guardian world-model learning quality v2 | Deepen stale and conflicting evidence arbitration, salience/confidence calibration, false-positive and false-negative accounting, restraint, and follow-through. | `guardian_learning_arbitration_v2` plus `/api/operator/guardian-learning-arbitration`, covering act, defer, bundle, clarify, approval, and stay-silent outcomes with explicit negative-case receipts. | Active after replay and memory-quality proof; external-channel cases should only join after reach continuity is proven. | [#471](https://github.com/seraph-quest/seraph/issues/471) |
+| 6 | Durable workflow engine v1 | Move workflow state beyond audit-projected receipts into minimal durable state: crash-safe resume, heartbeat or reactive trigger receipts, retry, repair, persisted snapshots, durable audit receipts, and delegated artifact review lifecycle. | Durable-state tests plus operator recovery receipts across crash, resume, failed-step, and delegated-artifact paths. | Landed in the proof train after the workflow endurance canary; future follow-ons must stay below production-grade orchestration claims. | [#470](https://github.com/seraph-quest/seraph/issues/470) |
+| 7 | One excellent reach channel canary | One selected external channel proves pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded UI, and external-message-to-audited-action flow. | M4 reach proof plus Activity Ledger and cockpit receipts. | Should follow security, replay, memory-quality, and workflow-endurance proof unless the Project explicitly promotes it. | [#438](https://github.com/seraph-quest/seraph/issues/438), superseded [PR #462](https://github.com/seraph-quest/seraph/pull/462), accepted proof in [PR #473](https://github.com/seraph-quest/seraph/pull/473) |
+| 8 | Guardian world-model learning quality v2 | Deepen stale and conflicting evidence arbitration, salience/confidence calibration, false-positive and false-negative accounting, restraint, and follow-through. | `guardian_learning_arbitration_v2` plus `/api/operator/guardian-learning-arbitration`, covering act, defer, bundle, clarify, approval, and stay-silent outcomes with explicit negative-case receipts. | Landed in the proof train after replay and memory-quality proof; future external-channel follow-ons should only join after reach continuity is proven. | [#471](https://github.com/seraph-quest/seraph/issues/471) |
 | 9 | Governed extension marketplace hardening | Mature pack review, verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, rollback posture, and authoring ergonomics. | `governed_capability_pack_hardening` review, compatibility, downgrade, permission-creep, supply-chain suspicion, rollback, and operator-surface receipts, alongside `m9_governed_ecosystem`. | Depends on secure execution and M1/M9 manifest contracts; do not claim production marketplace security. | [#472](https://github.com/seraph-quest/seraph/issues/472) |
-| 10 | Guardian-safe multimodal and voice proof | Voice, TTS/STT, browser vision, image/media analysis, and media delivery exist only as governed capability families with owner, trust, permission, data-access, audit, privacy, continuity, correction/deletion, and revocation receipts. | `guardian_safe_multimodal_voice` plus `/api/operator/guardian-safe-multimodal-voice`, showing channel safety plus actual guardian value. | Active as a proof-gate slice; does not claim live broad voice/media runtime, voice parity, or multimodal parity. | [#467](https://github.com/seraph-quest/seraph/issues/467) |
+| 10 | Guardian-safe multimodal and voice proof | Voice, TTS/STT, browser vision, image/media analysis, and media delivery exist only as governed capability families with owner, trust, permission, data-access, audit, privacy, continuity, correction/deletion, and revocation receipts. | `guardian_safe_multimodal_voice` plus `/api/operator/guardian-safe-multimodal-voice`, showing channel safety plus actual guardian value. | Landed as a proof-gate slice; does not claim live broad voice/media runtime, voice parity, or multimodal parity. | [#467](https://github.com/seraph-quest/seraph/issues/467) |
 
 ## Feature Traceability
 
@@ -126,7 +139,7 @@ Accepted:
 - The roadmap must not duplicate closed M0-M9 anchors or the active #438/#439/#440/#441/#467 proof issues.
 - Closed [#422](https://github.com/seraph-quest/seraph/issues/422) must not be used as the parent for new work.
 - Selective reach must not outrun secure execution, replay proof, cockpit legibility, memory quality, and workflow endurance unless the Project deliberately promotes it.
-- Board receipt language must be backed by live Project reads; this doc includes only verified Project fields for #468 and #467.
+- Board receipt language must distinguish tool-confirmed PR merge state from issue/project fields that require separate confirmation.
 - Feature rows need guardian value gates, not only parity surfaces.
 
 Rejected:
@@ -135,5 +148,9 @@ Rejected:
 
 Accepted after follow-up:
 
-- The remaining roadmap-level follow-ons were created as Project items and then promoted into the aggregate proof train once their prerequisite evidence was available. [#470](https://github.com/seraph-quest/seraph/issues/470), [#471](https://github.com/seraph-quest/seraph/issues/471), and [#472](https://github.com/seraph-quest/seraph/issues/472) are active slices in ready PR [#473](https://github.com/seraph-quest/seraph/pull/473), while their child issue `PR` fields remain `Not Ready` because the parent hub owns the aggregate PR relationship.
+- The remaining roadmap-level follow-ons were created as Project items and then promoted into the aggregate proof train once their prerequisite evidence was available. [#470](https://github.com/seraph-quest/seraph/issues/470), [#471](https://github.com/seraph-quest/seraph/issues/471), and [#472](https://github.com/seraph-quest/seraph/issues/472) were integrated through merged PR [#473](https://github.com/seraph-quest/seraph/pull/473), while their child issue `PR` fields remain `Not Ready` because the parent hub owned the aggregate PR relationship.
 - A duplicate secure execution host v1 ticket was not created because closed [#455](https://github.com/seraph-quest/seraph/issues/455) already owns that batch; future secure-host work needs a narrowed follow-up with named uncovered negative cases.
+
+Post-merge disposition:
+
+- [PR #473](https://github.com/seraph-quest/seraph/pull/473) completed the current proof train. The next roadmap work is not proof-train bookkeeping; it is production-grade durability, secure-host hardening, broader reach hardening, live-learning quality, and denser long-work operator control.

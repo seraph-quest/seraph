@@ -74,6 +74,10 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Onboarding can now inspect an explicitly user-linked webpage during the current onboarding turn, so Seraph can derive profile or workspace context from a real source without widening onboarding into general browsing.
 - [x] The workspace window system now uses flatter terminal-style chrome with close controls, a Windows visibility menu, and per-pane hide/show state instead of only static rounded dashboard cards.
 - [x] The capability import program is now complete through all five waves, including Hermes-style runtime primitives, packaged reach surfaces, selective OpenClaw imports, operator-surface visibility, and deterministic proof for the imported capability families.
+- [x] The agent-parity strategy artifact is complete as a target, proof-gate, and claim-boundary map.
+- [x] The aggregate agent-parity proof train landed on `develop` through merged PR [#473](https://github.com/seraph-quest/seraph/pull/473), completing deterministic proof-floor coverage for replay, cockpit efficiency, memory-provider quality, workflow endurance, durable workflow state v1, one reach canary, guardian arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice.
+- [x] The named parity proof floors are reached as deterministic receipts, not as broad production parity or superiority claims.
+- [ ] Full parity and targeted exceedance are not complete; production-grade durable orchestration, deeper secure-host isolation, broader hardened reach, live intervention-learning quality, and denser long-running operator control remain open.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -109,7 +113,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
 - [x] The cross-cutting world-class strategy translation is tracked in `docs/implementation/11-world-class-strategy-delivery.md`.
-- [x] The next strategic focus is now post-import hardening: deeper execution isolation beyond the new field-scoped secret-ref, mutation-allowlist, workspace-escape blocking, browser partition strategy, hostile-provider replay receipts, and session-bound process-recovery layer, live-ish long-horizon replay proof, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
+- [x] The next strategic focus is now post-proof-train hardening: deeper execution isolation beyond the new field-scoped secret-ref, mutation-allowlist, workspace-escape blocking, browser partition strategy, hostile-provider replay receipts, and session-bound process-recovery layer, live-provider attestation beyond deterministic replay, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
 
 ## Current Target Shape
 
@@ -291,8 +295,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Seraph already has a serious guardian core: memory, observer loop, strategy, tools, approvals, runtime audit, and deterministic evals.
 - [x] The strongest current moat is guardian-oriented state plus proactive scaffolding, not the UI.
 - [x] Execution hardening now also covers scoped extension mutation approvals, connector-backed authenticated mutation planning plus executable bounded adapter actions, explicit trust-boundary payloads across workflow/operator/activity surfaces, operator-visible approval scope metadata, and heavier CI stabilization for long-tail backend/frontend suites instead of only replay blocking plus generic pending-approval rows.
-- [ ] The biggest gaps against the reference systems are now production-grade durable orchestration beyond the v1 state kernel, deeper execution hardening, denser step-level workflow/operator debugging beyond the new triage and evidence-control layer, live long-horizon intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, and production-grade hardening for the broadened reach surface.
-- [ ] The next major step is to land and then extend the aggregate agent-parity proof train: preserve the new guardian learning arbitration, governed capability-pack hardening, reach, durable-state, and multimodal/voice proof receipts while moving only evidence-backed follow-ons into production-grade durability, trust, reach, and operator-control work.
+- [ ] The biggest gaps against the reference systems are now production-grade durable orchestration beyond the v1 state kernel, deeper execution hardening beyond deterministic choke-point proof, denser step-level workflow/operator debugging beyond the new triage and evidence-control layer, live long-horizon intervention learning beyond the current world-model plus evidence-weighted timing/channel/blocked-state/suppression layer, broad daily-life reach beyond the native-notification canary, and production-grade hardening for the broadened reach surface.
+- [ ] The next major step is to extend the landed aggregate agent-parity proof train: preserve the new guardian learning arbitration, governed capability-pack hardening, reach, durable-state, and multimodal/voice proof receipts while moving only evidence-backed follow-ons into production-grade durability, trust, reach, live-learning, and operator-control work.
 
 ## Workstream View
 

@@ -114,11 +114,11 @@ Legend for the checklist column:
 - [ ] Seraph is still behind the strongest reference systems on capability marketplace depth, deeper memory-provider ecosystems beyond the first governed diagnostics/writeback-quality pass, cleaner adapter-first external capability surfaces, broader long-running workflow control, stronger long-horizon intervention learning beyond the first multi-day and scheduled-outcome watchpoint pass, broader multi-surface reach beyond the hardened browser/native layer, and deeper execution hardening.
 - [ ] No workstream is complete yet.
 
-## Next Strategic Batch Stack
+## Completed Agent-Parity Proof Train Stack
 
-This stack is the roadmap-level ordering for the next large batches after the merged M0-M9 foundation work. It is not a calendar plan and not a live queue mirror; the GitHub Project, parent issues, and PRs remain the execution source of truth. The ordering reflects the current proof and trust dependency: normalize the board and claim gates first, deepen trusted execution and live replay proof next, then expand memory, workflow, reach, guardian learning, and ecosystem depth.
+This stack records the proof-train sequence completed by PR [#473](https://github.com/seraph-quest/seraph/pull/473). It is a historical proof record, not a live queue mirror; the GitHub Project, parent issues, and PRs remain the execution source of truth. The completed train normalized board/claim gates, deepened trusted execution and replay proof, then extended memory, workflow, reach, guardian learning, ecosystem hardening, and multimodal proof floors.
 
-1. [ ] `m0-board-proof-and-p1-wave-normalization`:
+1. [x] `m0-board-proof-and-p1-wave-normalization`:
    normalize the active Project fields, stale merged-item PR/review states, parent-batch linkage, and proof/claim gates before the next wave starts claiming readiness.
 2. [x] `secure-execution-host-v1`:
    deepen host/container isolation strategy, browser credential and cookie partitioning, workspace escape defenses, hostile-provider replay, and fail-closed privileged-path receipts without claiming production-secure execution.
@@ -141,6 +141,17 @@ This stack is the roadmap-level ordering for the next large batches after the me
    strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, rollback posture, and operator hardening receipts as production-oriented foundations, not production marketplace security claims.
 11. [x] `guardian-safe-multimodal-voice-proof`:
    execute #467 as a governed proof gate for voice, TTS/STT, browser vision, image/media analysis, and media delivery families with owner, trust, permission, capture/provider/privacy, continuity, correction/deletion, revocation, and guardian-value receipts, without claiming live broad voice or multimodal parity.
+
+## Next Strategic Production-Parity Batches
+
+The next strategic work is no longer proof-train bookkeeping. It should move only evidence-backed follow-ons into production-grade durability, secure execution hardening, broader reach hardening, live-learning quality, long-work operator control, and marketplace-grade install/update/rollback ergonomics.
+
+1. Production durable orchestration beyond the v1 state kernel.
+2. Secure-host architectural isolation and privileged-path hardening beyond deterministic choke-point proof.
+3. Broad reach and channel hardening beyond the native-notification canary.
+4. Live long-horizon guardian learning quality beyond deterministic arbitration receipts.
+5. Dense long-running operator debugging and recovery controls.
+6. Marketplace-grade capability install, update, downgrade, rollback, and review ergonomics.
 
 ## Completed 10-PR Batches
 

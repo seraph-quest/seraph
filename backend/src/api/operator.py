@@ -62,6 +62,7 @@ from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
 from src.replay.benchmark import build_live_replay_benchmark_report
 from src.security.benchmark import build_trust_boundary_benchmark_report
+from src.security.production_hardening import build_production_secure_host_hardening_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
 from src.observer.insight_queue import insight_queue
 from src.observer.native_notification_queue import native_notification_queue
@@ -3404,6 +3405,7 @@ async def get_operator_benchmark_proof():
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
+        production_secure_host_hardening,
         computer_use_benchmark,
         one_reach_channel_canary,
         m2_execution_benchmark,
@@ -3428,6 +3430,7 @@ async def get_operator_benchmark_proof():
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
+        build_production_secure_host_hardening_report(),
         build_computer_use_benchmark_report(),
         build_one_reach_channel_canary_report(),
         build_m2_execution_benchmark_report(),
@@ -3459,6 +3462,7 @@ async def get_operator_benchmark_proof():
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
+        str(production_secure_host_hardening["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
         str(one_reach_channel_canary["summary"]["benchmark_posture"]),
         str(m2_execution_benchmark["summary"]["benchmark_posture"]),
@@ -3517,6 +3521,8 @@ async def get_operator_benchmark_proof():
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
+            "production_secure_host_hardening_posture": production_secure_host_hardening["summary"]["benchmark_posture"],
+            "production_secure_host_hardening_claim_boundary": production_secure_host_hardening["policy"]["claim_boundary"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
             "one_reach_channel_canary_posture": one_reach_channel_canary["summary"]["benchmark_posture"],
             "m2_execution_benchmark_posture": m2_execution_benchmark["summary"]["benchmark_posture"],
@@ -3544,6 +3550,7 @@ async def get_operator_benchmark_proof():
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
+        "production_secure_host_hardening": production_secure_host_hardening,
         "computer_use_benchmark": computer_use_benchmark,
         "one_reach_channel_canary": one_reach_channel_canary,
         "m2_execution_benchmark": m2_execution_benchmark,
@@ -3650,6 +3657,11 @@ async def get_operator_trust_boundary_benchmark():
 @router.get("/operator/secure-capability-host-benchmark")
 async def get_operator_secure_capability_host_benchmark():
     return await build_secure_capability_host_benchmark_report()
+
+
+@router.get("/operator/secure-capability-host-hardening")
+async def get_operator_secure_capability_host_hardening():
+    return await build_production_secure_host_hardening_report()
 
 
 @router.get("/operator/computer-use-benchmark")

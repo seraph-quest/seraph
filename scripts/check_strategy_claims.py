@@ -18,12 +18,16 @@ DEFAULT_SCOPE = [
     ROOT / "docs/research/09-reference-systems-and-evidence.md",
     ROOT / "docs/research/10-competitive-benchmark.md",
     ROOT / "docs/research/17-seraph-world-class-strategy.md",
+    ROOT / "docs/research/20-seraph-agent-parity-and-exceedance-goals.md",
     COMPETITION_TABLE,
     LEDGER,
+    ROOT / "docs/implementation/00-master-roadmap.md",
     ROOT / "docs/implementation/08-docs-contract.md",
     ROOT / "docs/implementation/09-benchmark-status.md",
     ROOT / "docs/implementation/10-superiority-delivery.md",
     ROOT / "docs/implementation/11-world-class-strategy-delivery.md",
+    ROOT / "docs/implementation/16-agent-parity-execution-roadmap.md",
+    ROOT / "docs/implementation/STATUS.md",
 ]
 
 HIGH_RISK_PATTERN = re.compile(
@@ -66,7 +70,7 @@ REQUIRED_LEDGER_SECTIONS = [
     "## Short Replacement Rules",
     "## Completion Gate",
 ]
-REQUIRED_CLAIMS = {f"SCL-{index:03d}" for index in range(1, 14)}
+REQUIRED_CLAIMS = {f"SCL-{index:03d}" for index in range(1, 15)}
 
 
 def _display(path: Path) -> str:

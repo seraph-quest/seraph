@@ -19,6 +19,7 @@ class DummyHeaderTool:
     }
     output_type = "string"
     def __init__(self):
+        self.last_kwargs = {}
         self.seraph_source_context = {
             "authenticated_source": True,
             "hostname": "api.example.com",
@@ -30,7 +31,14 @@ class DummyHeaderTool:
         }
 
     def __call__(self, *args, **kwargs):
-        return {"args": args, "kwargs": kwargs}
+        self.last_kwargs = dict(kwargs)
+        return {"status": "ok"}
+
+
+class DummyLeakyHeaderTool(DummyHeaderTool):
+    def __call__(self, *args, **kwargs):
+        self.last_kwargs = dict(kwargs)
+        return {"headers": kwargs.get("headers", {})}
 
 
 class DummyWriteTool(DummyHeaderTool):
@@ -68,7 +76,8 @@ def test_get_secret_ref_returns_opaque_reference_without_leaking_value():
 
 
 def test_secret_ref_wrapper_resolves_nested_values_for_current_session():
-    wrapped = SecretRefResolvingTool(DummyHeaderTool())
+    tool = DummyHeaderTool()
+    wrapped = SecretRefResolvingTool(tool)
     secret_ref = _issue_ref_for_session("s1")
     tokens = set_runtime_context("s1", "high_risk")
     try:
@@ -79,8 +88,23 @@ def test_secret_ref_wrapper_resolves_nested_values_for_current_session():
     finally:
         reset_runtime_context(tokens)
 
-    assert result["kwargs"]["headers"]["Authorization"] == "Bearer super-secret-value"
+    assert result["status"] == "ok"
+    assert tool.last_kwargs["headers"]["Authorization"] == "Bearer super-secret-value"
     assert wrapped.seraph_secret_ref_fields == ["headers"]
+
+
+def test_secret_ref_wrapper_blocks_result_secret_echo():
+    wrapped = SecretRefResolvingTool(DummyLeakyHeaderTool())
+    secret_ref = _issue_ref_for_session("s1")
+    tokens = set_runtime_context("s1", "high_risk")
+    try:
+        with pytest.raises(ValueError, match="redaction failure blocked"):
+            wrapped(
+                url="https://api.example.com/v1",
+                headers={"Authorization": f"Bearer {secret_ref}"},
+            )
+    finally:
+        reset_runtime_context(tokens)
 
 
 def test_secret_ref_wrapper_blocks_refs_outside_allowlisted_fields():

@@ -15,6 +15,8 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 
 When this file is updated on an open feature branch, it reflects the intended post-merge `develop` state for that branch. Until merge, the open PR and its validation are the live integration truth.
 
+High-risk strategic wording in this status page remains governed by [19. Strategy Claim Ledger](/research/strategy-claim-ledger).
+
 ## Current Snapshot
 
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
@@ -79,7 +81,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] The named parity proof floors are reached as deterministic receipts, not as broad production parity or superiority claims.
 - [x] The production-grade parity execution roadmap is now board-backed through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475) and huge batch issues [#476](https://github.com/seraph-quest/seraph/issues/476), [#477](https://github.com/seraph-quest/seraph/issues/477), [#478](https://github.com/seraph-quest/seraph/issues/478), [#479](https://github.com/seraph-quest/seraph/issues/479), [#480](https://github.com/seraph-quest/seraph/issues/480), [#481](https://github.com/seraph-quest/seraph/issues/481), and [#482](https://github.com/seraph-quest/seraph/issues/482).
 - [x] The production-grade parity train now has a named readiness proof gate: `production_parity_readiness` plus `/api/operator/production-parity-readiness` expose batch proof paths, Project-field contract requirements, duplicate-scope guardrails, negative-case requirements, receipt-schema fields, current-source gating for competitor-dependent claims, validation classes, and blocked claim boundaries before later batches claim implementation readiness.
-- [ ] Full parity and targeted exceedance are not complete; production-grade durable orchestration, deeper secure-host isolation, broader hardened reach, live intervention-learning quality, and denser long-running operator control remain open.
+- [x] Batch BW now adds a named secure-host hardening proof gate: `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, and `/api/operator/secure-capability-host-hardening` expose privileged-path receipt schema, secret replay and redaction checks, browser recovery partitioning, private-network egress denial, extension revocation cutoff, workflow/provider replay trust-drift receipts, blocked claims, and recovery actions. This remains hardening proof, not secure/private-by-default, production-ready, IronClaw-class secure execution, or full parity wording.
+- [ ] Full parity and targeted exceedance are not complete; production-grade durable orchestration, broader hardened reach, live intervention-learning quality, marketplace-grade capability lifecycle, broader browser/computer-use reliability, and denser long-running operator control remain open.
 - [ ] No workstream is complete yet.
 - [ ] Seraph is not yet the finished guardian product described in the research docs.
 
@@ -115,7 +118,7 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] Runtime Reliability now has deterministic proof for activity-ledger attribution, imported capability surfaces, and simulation-grade route-planning visibility in addition to the earlier guardian/runtime contracts.
 - [x] The repo-wide strategic program is tracked in `docs/implementation/00-master-roadmap.md`, while active execution is tracked in the GitHub Project, issues, and PRs.
 - [x] The cross-cutting world-class strategy translation is tracked in `docs/implementation/11-world-class-strategy-delivery.md`.
-- [x] The next strategic focus is now post-proof-train hardening: deeper execution isolation beyond the new field-scoped secret-ref, mutation-allowlist, workspace-escape blocking, browser partition strategy, hostile-provider replay receipts, and session-bound process-recovery layer, live-provider attestation beyond deterministic replay, denser operator/debug ergonomics, production-grade reach hardening, and stronger guardian learning on top of the expanded capability surface.
+- [x] The next strategic focus is now post-proof-train hardening: production-grade durable orchestration, broader reach and browser/computer-use reliability, live-provider attestation beyond deterministic replay, denser operator/debug ergonomics, marketplace-grade capability lifecycle, and stronger guardian learning on top of the expanded capability surface. Secure-host hardening now has Batch BW receipts, while host/container-grade privileged execution isolation remains a future stronger-proof boundary.
 
 ## Current Target Shape
 

@@ -80,7 +80,7 @@ def production_parity_batch_contracts() -> list[dict[str, Any]]:
                 "production_secure_host_hardening",
                 "secure_capability_host_live_isolation_v2",
             ],
-            "operator_receipt_target": "/api/operator/secure-capability-host-benchmark",
+            "operator_receipt_target": "/api/operator/secure-capability-host-hardening",
             "validation_classes": [
                 "privileged_path_negative_cases",
                 "browser_session_partitioning",

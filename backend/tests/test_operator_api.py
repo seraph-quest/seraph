@@ -1342,6 +1342,55 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_production_secure_host_hardening_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "production_secure_host_hardening",
+                    "benchmark_posture": "production_secure_host_hardening_ci_gated_operator_visible",
+                    "operator_status": "production_secure_host_hardening_receipts_visible",
+                    "claim_boundary": "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class",
+                    "child_suite_count": 2,
+                    "scenario_count": 9,
+                    "active_failure_count": 0,
+                    "live_isolation_state": "privileged_paths_fail_closed_with_receipts",
+                    "secret_redaction_state": "replay_and_redaction_fail_closed",
+                    "browser_recovery_partition_state": "per_session_recovery_without_profile_bleed",
+                    "private_network_egress_state": "private_targets_blocked_with_receipts",
+                    "extension_revocation_state": "runtime_contributions_cut_off_after_revocation",
+                    "workflow_provider_replay_state": "same_or_narrower_trust_replay_required",
+                    "operator_receipt_state": "allow_deny_recover_receipts_visible",
+                },
+                "scenario_names": [
+                    "production_secure_host_batch_contract_behavior",
+                    "production_secure_host_receipt_schema_behavior",
+                    "production_secure_host_claim_boundary_behavior",
+                    "operator_production_secure_host_hardening_surface_behavior",
+                    "secure_host_live_secret_redaction_replay_behavior",
+                    "secure_host_live_browser_recovery_partition_behavior",
+                    "secure_host_live_private_network_egress_behavior",
+                    "secure_host_live_extension_revocation_behavior",
+                    "secure_host_live_workflow_replay_trust_drift_behavior",
+                ],
+                "negative_cases": [],
+                "live_isolation_controls": [],
+                "receipt_schema": [],
+                "operator_surfaces": ["/api/operator/secure-capability-host-hardening"],
+                "policy": {
+                    "claim_boundary": "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class",
+                    "blocked_claims": [
+                        "secure_private_by_default",
+                        "production_security",
+                        "ironclaw_class_secure_execution",
+                    ],
+                    "receipt_surfaces": ["/api/operator/secure-capability-host-hardening"],
+                },
+                "failure_report": [],
+                "latest_run": {"total": 9, "passed": 9, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_computer_use_benchmark_report",
         AsyncMock(
             return_value={
@@ -1991,7 +2040,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 26
+    assert payload["summary"]["suite_count"] == 28
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2013,6 +2062,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
+    assert (
+        payload["summary"]["production_secure_host_hardening_posture"]
+        == "production_secure_host_hardening_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["production_secure_host_hardening_claim_boundary"]
+        == "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class"
+    )
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
@@ -2124,6 +2181,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"]
     assert "secure_host_capability_trust_matrix_behavior" in secure_host_suite["scenario_names"]
     assert secure_host_suite["scenario_count"] >= 13
+    production_secure_host_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_secure_host_hardening"
+    )
+    assert "production_secure_host_receipt_schema_behavior" in production_secure_host_suite["scenario_names"]
+    assert production_secure_host_suite["scenario_count"] == 4
+    secure_host_live_v2_suite = next(
+        item for item in payload["suites"] if item["name"] == "secure_capability_host_live_isolation_v2"
+    )
+    assert "secure_host_live_private_network_egress_behavior" in secure_host_live_v2_suite["scenario_names"]
+    assert "secure_host_live_extension_revocation_behavior" in secure_host_live_v2_suite["scenario_names"]
+    assert secure_host_live_v2_suite["scenario_count"] == 5
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
@@ -2181,6 +2249,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert payload["secure_capability_host_benchmark"]["summary"]["suite_name"] == "secure_capability_host"
     assert payload["secure_capability_host_benchmark"]["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
+    assert payload["production_secure_host_hardening"]["summary"]["suite_name"] == "production_secure_host_hardening"
+    assert payload["production_secure_host_hardening"]["policy"]["claim_boundary"] == (
+        "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class"
+    )
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
@@ -2858,6 +2930,49 @@ async def test_operator_secure_capability_host_benchmark_surface_reports_policy_
     assert payload["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
     assert "/api/operator/secure-capability-host-benchmark" in payload["policy"]["receipt_surfaces"]
     assert payload["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+
+
+@pytest.mark.asyncio
+async def test_operator_secure_capability_host_hardening_surface_reports_v2_policy_and_receipts(client):
+    resp = await client.get("/api/operator/secure-capability-host-hardening")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "production_secure_host_hardening"
+    assert payload["summary"]["operator_status"] == "production_secure_host_hardening_receipts_visible"
+    assert payload["summary"]["live_isolation_state"] == "privileged_paths_fail_closed_with_receipts"
+    assert payload["summary"]["secret_redaction_state"] == "replay_and_redaction_fail_closed"
+    assert payload["summary"]["browser_recovery_partition_state"] == "per_session_recovery_without_profile_bleed"
+    assert payload["summary"]["private_network_egress_state"] == "private_targets_blocked_with_receipts"
+    assert payload["summary"]["extension_revocation_state"] == "runtime_contributions_cut_off_after_revocation"
+    assert payload["summary"]["workflow_provider_replay_state"] == "same_or_narrower_trust_replay_required"
+    assert "secure_host_live_private_network_egress_behavior" in payload["scenario_names"]
+    assert "secure_host_live_extension_revocation_behavior" in payload["scenario_names"]
+    assert "actor_or_session" in payload["receipt_schema"]
+    assert "redaction_status" in payload["receipt_schema"]
+    assert "/api/operator/secure-capability-host-hardening" in payload["operator_surfaces"]
+    assert any(
+        receipt["attempted_action"] == "secret_ref_connector_call"
+        and receipt["policy_decision"] == "blocked"
+        and "redaction_failure" in receipt["blocked_reasons"]
+        for receipt in payload["enforcement_receipts"]
+    )
+    assert any(
+        receipt["attempted_action"] == "browser_recovery"
+        and receipt["policy_decision"] == "allowed"
+        and receipt["isolation_mode"] == "per_session_browser_recovery_partition"
+        for receipt in payload["enforcement_receipts"]
+    )
+    assert any(
+        receipt["attempted_action"] == "connector_private_network_fetch"
+        and "private_network_egress" in receipt["blocked_reasons"]
+        for receipt in payload["enforcement_receipts"]
+    )
+    assert payload["policy"]["claim_boundary"] == (
+        "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class"
+    )
+    assert "secure_private_by_default" in payload["policy"]["blocked_claims"]
+    assert "ironclaw_class_secure_execution" in payload["policy"]["blocked_claims"]
 
 
 @pytest.mark.asyncio

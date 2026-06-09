@@ -64,6 +64,12 @@ from src.security.secure_host_benchmark import (
     SECURE_CAPABILITY_HOST_BENCHMARK_SCENARIO_NAMES,
     SECURE_CAPABILITY_HOST_BENCHMARK_SUITE_NAME,
 )
+from src.security.production_hardening import (
+    PRODUCTION_SECURE_HOST_HARDENING_SCENARIO_NAMES,
+    PRODUCTION_SECURE_HOST_HARDENING_SUITE_NAME,
+    SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SCENARIO_NAMES,
+    SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -380,6 +386,39 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Full host/container isolation, live hostile browser replay, and production provider trust telemetry remain future hardening work.",
         scenario_names=SECURE_CAPABILITY_HOST_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_SECURE_HOST_HARDENING_SUITE_NAME,
+        label="Production secure-host hardening",
+        description=(
+            "Pins the Batch BW production-hardening contract above the M3 secure-host foundation: "
+            "receipt schema, blocked claims, operator surfaces, current-source boundaries, and v2 live isolation gates."
+        ),
+        benchmark_axis="production_secure_host_hardening",
+        operator_summary=(
+            "Production secure-host hardening now has its own operator-visible gate while keeping secure/private, "
+            "production-ready, and IronClaw-class claims blocked."
+        ),
+        remaining_gap=(
+            "This is the privileged-path hardening gate, not full TEE/Wasm/container isolation or a production security claim."
+        ),
+        scenario_names=PRODUCTION_SECURE_HOST_HARDENING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SUITE_NAME,
+        label="Secure capability-host live isolation v2",
+        description=(
+            "Pins v2 live-isolation negative cases for secret replay/redaction, browser recovery partitions, "
+            "private-network egress, revoked extension contributions, and workflow/provider trust drift."
+        ),
+        benchmark_axis="secure_capability_host_live_isolation_v2",
+        operator_summary=(
+            "Secure-host v2 live isolation makes privileged-path deny/recover receipts explicit across live-ish failure modes."
+        ),
+        remaining_gap=(
+            "Live external attack replay and hardware-backed isolation remain future proof work before stronger security wording."
+        ),
+        scenario_names=SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

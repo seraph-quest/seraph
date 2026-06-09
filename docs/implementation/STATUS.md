@@ -82,8 +82,8 @@ When this file is updated on an open feature branch, it reflects the intended po
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program.
 - [x] this file owns the fastest shipped snapshot on `develop`.
 - [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program and completed-program record.
-- [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, `docs/implementation/10-superiority-delivery.md`, and `docs/implementation/11-world-class-strategy-delivery.md` are the implementation-side mirrors of the research evidence, benchmark, program, and cross-cutting strategy layers.
-- [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `11` are meta mirrors, not extra workstreams.
+- [x] `docs/implementation/08-docs-contract.md`, `docs/implementation/09-benchmark-status.md`, `docs/implementation/10-superiority-delivery.md`, `docs/implementation/11-world-class-strategy-delivery.md`, and `docs/implementation/16-agent-parity-execution-roadmap.md` are the implementation-side mirrors of the research evidence, benchmark, program, cross-cutting strategy, and agent parity goal layers.
+- [x] `docs/implementation/01` through `07` remain the workstream docs; `08` through `11` and `16` are meta mirrors, not extra workstreams.
 - [x] the GitHub Project, issues, and PRs own active execution and review state.
 
 ## Current Focus On `develop`

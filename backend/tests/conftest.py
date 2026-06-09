@@ -41,6 +41,7 @@ _PATCH_TARGETS = [
     "src.memory.decay.get_session",
     "src.memory.flush.get_session",
     "src.memory.hybrid_retrieval.get_session",
+    "src.workflows.durable_state.get_session",
 ]
 
 

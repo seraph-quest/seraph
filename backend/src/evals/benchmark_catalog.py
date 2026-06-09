@@ -60,6 +60,10 @@ from src.workflows.endurance_canary import (
     LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
     LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME,
 )
+from src.workflows.durable_state import (
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -227,6 +231,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "remain future proof work."
         ),
         scenario_names=LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+        label="Durable workflow engine v1",
+        description=(
+            "Pins durable workflow state reporting, crash-safe continuation posture, heartbeat or trigger receipts, "
+            "and operator-visible recovery policy into one CI-gated proof lane."
+        ),
+        benchmark_axis="durable_workflow_engine_v1",
+        operator_summary=(
+            "Durable workflow engine v1 exposes durable state, recovery, trigger, and operator receipt posture "
+            "through a dedicated benchmark and operator surface."
+        ),
+        remaining_gap=(
+            "Broader production workload replay and external long-running agent benchmark parity remain future proof work."
+        ),
+        scenario_names=DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

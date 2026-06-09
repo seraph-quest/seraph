@@ -186,6 +186,76 @@ class ScheduledJobRun(SQLModel, table=True):
     metadata_json: Optional[str] = Field(default=None)
 
 
+class WorkflowRunState(SQLModel, table=True):
+    __tablename__ = "workflow_run_states"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True, unique=True)
+    root_run_identity: str = Field(index=True)
+    parent_run_identity: Optional[str] = Field(default=None, index=True)
+    workflow_name: str = Field(index=True)
+    tool_name: str = Field(default="", index=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    status: str = Field(default="running", index=True)
+    branch_kind: Optional[str] = Field(default=None, index=True)
+    branch_depth: int = Field(default=0)
+    run_fingerprint: str = Field(default="", index=True)
+    arguments_json: str = Field(default="{}")
+    approval_context_json: Optional[str] = Field(default=None)
+    checkpoint_context_json: Optional[str] = Field(default=None)
+    artifact_paths_json: str = Field(default="[]")
+    continued_error_steps_json: str = Field(default="[]")
+    last_completed_step_id: Optional[str] = Field(default=None, index=True)
+    error: Optional[str] = Field(default=None)
+    heartbeat_at: datetime = Field(default_factory=_now, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
+
+
+class WorkflowStepState(SQLModel, table=True):
+    __tablename__ = "workflow_step_states"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True)
+    workflow_name: str = Field(default="", index=True)
+    step_id: str = Field(index=True)
+    step_index: int = Field(default=0, index=True)
+    tool_name: str = Field(default="", index=True)
+    status: str = Field(default="running", index=True)
+    arguments_json: str = Field(default="{}")
+    result_json: Optional[str] = Field(default=None)
+    result_summary: Optional[str] = Field(default=None)
+    artifact_paths_json: str = Field(default="[]")
+    error_kind: Optional[str] = Field(default=None)
+    error_summary: Optional[str] = Field(default=None)
+    checkpoint_json: Optional[str] = Field(default=None)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class WorkflowArtifactReview(SQLModel, table=True):
+    __tablename__ = "workflow_artifact_reviews"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True)
+    root_run_identity: str = Field(index=True)
+    parent_run_identity: Optional[str] = Field(default=None, index=True)
+    workflow_name: str = Field(default="", index=True)
+    artifact_path: str = Field(index=True)
+    owner: str = Field(default="workflow", index=True)
+    review_state: str = Field(default="pending_review", index=True)
+    reviewer: Optional[str] = Field(default=None, index=True)
+    decision: Optional[str] = Field(default=None)
+    approval_id: Optional[str] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    decided_at: Optional[datetime] = Field(default=None, index=True)
+
+
 # ─── Memory ──────────────────────────────────────────────
 
 class Memory(SQLModel, table=True):

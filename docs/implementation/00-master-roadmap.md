@@ -131,7 +131,7 @@ This stack is the roadmap-level ordering for the next large batches after the me
 6. [x] `workflow-endurance-canary`:
    execute #440 as a multi-session canary covering checkpoint, branch, failure injection, recovery, delegated ownership, artifact comparison, approval preservation, and audit receipts.
 7. [x] `durable-workflow-engine-v1`:
-   promote workflow control from audit-projected receipts toward a minimal durable state kernel with persisted run, step, safe checkpoint, retry or repair rows, repository support for artifact-review lifecycle receipts, and fixture-backed heartbeat or reactive proof while preserving the boundary that this is not a full distributed workflow engine.
+   promote workflow control from audit-projected receipts toward a minimal durable state kernel with persisted run, step, safe checkpoint, retry or repair rows, durable audit receipt metadata, normal delegated artifact-review lifecycle rows, persisted operator snapshots, and fixture-backed heartbeat or reactive proof while preserving the boundary that this is not a full distributed workflow engine.
 8. [ ] `one-excellent-reach-channel-canary`:
    execute #438 for a single selected external channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
 9. [ ] `guardian-world-model-learning-quality-v2`:

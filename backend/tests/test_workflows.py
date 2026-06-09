@@ -4631,6 +4631,66 @@ class TestWorkflowSurfaces:
         assert completed_kwargs["checkpoint"] is None
         assert durable_repository.finish_run.await_args.kwargs["checkpoint_context"] == {}
 
+    def test_workflow_tool_records_delegated_artifact_review_receipts(self):
+        workflow = Workflow(
+            name="delegated-artifact-review",
+            description="Delegate artifact production",
+            inputs={
+                "task": {"type": "string", "required": True},
+                "specialist": {"type": "string", "required": True},
+                "file_path": {"type": "string", "required": True},
+            },
+            steps=[
+                WorkflowStep(
+                    id="delegate",
+                    tool="delegate_task",
+                    arguments={
+                        "task": "{{ task }}",
+                        "specialist": "{{ specialist }}",
+                        "file_path": "{{ file_path }}",
+                    },
+                )
+            ],
+            requires_tools=["delegate_task"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {"delegate_task": DummyTool("delegate_task", lambda **_kwargs: "delegated")},
+        )
+        durable_repository = SimpleNamespace(
+            create_run=AsyncMock(),
+            record_step_started=AsyncMock(),
+            record_step_completed=AsyncMock(),
+            record_step_failed=AsyncMock(),
+            finish_run=AsyncMock(),
+            record_artifact_review=AsyncMock(),
+        )
+        approval_context = {
+            "risk_level": "medium",
+            "execution_boundaries": ["delegation", "workspace_filesystem"],
+            "delegated_specialists": ["critic"],
+            "delegated_tool_names": ["review_tool"],
+            "trust_partition": {"mode": "delegated_specialist", "blocked": False},
+        }
+
+        with (
+            patch.object(workflow_tool, "get_approval_context", return_value=approval_context),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+        ):
+            workflow_tool(
+                task="Draft a review artifact.",
+                specialist="critic",
+                file_path="notes/review.md",
+            )
+
+        review_kwargs = durable_repository.record_artifact_review.await_args.kwargs
+        assert review_kwargs["artifact_path"] == "notes/review.md"
+        assert review_kwargs["owner"] == "delegated_specialist"
+        assert review_kwargs["review_state"] == "pending_operator_review"
+        assert review_kwargs["reviewer"] == "critic"
+        assert review_kwargs["metadata"]["delegated_specialists"] == ["critic"]
+        assert review_kwargs["metadata"]["durable_audit_receipt_id"].endswith(":durable-audit:succeeded")
+
     def test_workflow_tool_approval_context_records_delegated_tool_inventory(self):
         workflow = Workflow(
             name="delegated-mcp-sync",

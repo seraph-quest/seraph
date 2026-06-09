@@ -561,6 +561,69 @@ def _durable_checkpoint(value: Any, *, checkpoint_context_allowed: bool) -> Any 
     return None
 
 
+def _durable_audit_receipt_id(run_identity: str, status: str) -> str:
+    return f"{run_identity}:durable-audit:{status}"
+
+
+def _delegated_artifact_review_metadata(
+    *,
+    approval_context: dict[str, Any],
+    durable_audit_receipt_id: str,
+) -> dict[str, Any]:
+    return {
+        "durable_audit_receipt_id": durable_audit_receipt_id,
+        "risk_level": approval_context.get("risk_level"),
+        "execution_boundaries": approval_context.get("execution_boundaries", []),
+        "delegated_specialists": approval_context.get("delegated_specialists", []),
+        "delegated_tool_names": approval_context.get("delegated_tool_names", []),
+        "trust_partition": approval_context.get("trust_partition"),
+        "content_redacted": True,
+    }
+
+
+def _record_delegated_artifact_reviews(
+    *,
+    run_identity: str,
+    root_run_identity: str | None,
+    parent_run_identity: str | None,
+    workflow_name: str,
+    approval_context: dict[str, Any],
+    artifact_paths: list[str],
+    durable_audit_receipt_id: str,
+) -> None:
+    delegated_specialists = [
+        str(item)
+        for item in approval_context.get("delegated_specialists", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    delegated_tool_names = [
+        str(item)
+        for item in approval_context.get("delegated_tool_names", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    if not artifact_paths or not (delegated_specialists or delegated_tool_names):
+        return
+    if not hasattr(workflow_state_repository, "record_artifact_review"):
+        return
+    reviewer = delegated_specialists[0] if delegated_specialists else None
+    metadata = _delegated_artifact_review_metadata(
+        approval_context=approval_context,
+        durable_audit_receipt_id=durable_audit_receipt_id,
+    )
+    for artifact_path in sorted({path for path in artifact_paths if isinstance(path, str) and path.strip()}):
+        _run_durable_state_write(workflow_state_repository.record_artifact_review(
+            run_identity=run_identity,
+            root_run_identity=root_run_identity or run_identity,
+            parent_run_identity=parent_run_identity,
+            workflow_name=workflow_name,
+            artifact_path=artifact_path,
+            owner="delegated_specialist",
+            review_state="pending_operator_review",
+            reviewer=reviewer,
+            metadata=metadata,
+        ))
+
+
 async def _load_workflow_checkpoint_payload(run_identity: str) -> dict[str, Any] | None:
     try:
         durable_payload = await workflow_state_repository.get_checkpoint_payload(run_identity)
@@ -761,6 +824,8 @@ class WorkflowTool(Tool):
             self.name,
             run_fingerprint,
         )
+        parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
+        root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
         _run_durable_state_write(workflow_state_repository.create_run(
             run_identity=durable_run_identity,
             workflow_name=self.workflow.name,
@@ -769,8 +834,8 @@ class WorkflowTool(Tool):
             run_fingerprint=run_fingerprint,
             arguments=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
             approval_context=approval_context,
-            parent_run_identity=control_inputs.get("_seraph_parent_run_identity"),
-            root_run_identity=control_inputs.get("_seraph_root_run_identity") or durable_run_identity,
+            parent_run_identity=parent_run_identity,
+            root_run_identity=root_run_identity,
             branch_kind=control_inputs.get("_seraph_branch_kind"),
             branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
         ))
@@ -879,6 +944,7 @@ class WorkflowTool(Tool):
                         error=str(exc),
                         durable_run_identity=durable_run_identity,
                     )
+                    durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, "failed")
                     _run_durable_state_write(workflow_state_repository.finish_run(
                         run_identity=durable_run_identity,
                         status="failed",
@@ -894,8 +960,21 @@ class WorkflowTool(Tool):
                             None,
                         ),
                         error=str(exc),
-                        metadata={"summary": f"{self.name} failed"},
+                        metadata={
+                            "summary": f"{self.name} failed",
+                            "durable_audit_receipt_id": durable_audit_receipt_id,
+                            "content_redacted": True,
+                        },
                     ))
+                    _record_delegated_artifact_reviews(
+                        run_identity=durable_run_identity,
+                        root_run_identity=root_run_identity,
+                        parent_run_identity=parent_run_identity,
+                        workflow_name=self.workflow.name,
+                        approval_context=approval_context,
+                        artifact_paths=artifact_paths,
+                        durable_audit_receipt_id=durable_audit_receipt_id,
+                    )
                     raise
                 result = f"Error: {exc}"
                 continued_error_steps.append(step.id)
@@ -984,6 +1063,7 @@ class WorkflowTool(Tool):
             summary=summary,
             durable_run_identity=durable_run_identity,
         )
+        durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, status)
         _run_durable_state_write(workflow_state_repository.finish_run(
             run_identity=durable_run_identity,
             status=status,
@@ -1002,8 +1082,18 @@ class WorkflowTool(Tool):
                 "summary": summary,
                 "canvas_output": _redact_canvas_output(canvas_output),
                 "content_redacted": True,
+                "durable_audit_receipt_id": durable_audit_receipt_id,
             },
         ))
+        _record_delegated_artifact_reviews(
+            run_identity=durable_run_identity,
+            root_run_identity=root_run_identity,
+            parent_run_identity=parent_run_identity,
+            workflow_name=self.workflow.name,
+            approval_context=approval_context,
+            artifact_paths=artifact_paths,
+            durable_audit_receipt_id=durable_audit_receipt_id,
+        )
         if current_session_id:
             flush_session_memory_sync(
                 session_id=current_session_id,

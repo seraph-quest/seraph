@@ -77,6 +77,12 @@ def _stable_id(prefix: str, *parts: Any) -> str:
 def durable_workflow_snapshot_dict(run: dict[str, Any]) -> dict[str, Any]:
     """Return a deterministic durable-state snapshot for one workflow projection."""
     projection = _as_dict(run)
+    metadata = _as_dict(projection.get("metadata"))
+    artifact_reviews = [
+        _as_dict(review)
+        for review in _as_list(projection.get("artifact_reviews"))
+        if isinstance(review, dict)
+    ]
     steps: list[dict[str, Any]] = []
     for fallback_index, raw_step in enumerate(_as_list(projection.get("step_records"))):
         step = _as_dict(raw_step)
@@ -151,8 +157,44 @@ def durable_workflow_snapshot_dict(run: dict[str, Any]) -> dict[str, Any]:
         for context in contexts
         if isinstance(context.get("trust_partition"), dict)
     ]
-    review = _as_dict(projection.get("artifact_review") or projection.get("delegated_artifact_review"))
+    review = _as_dict(
+        projection.get("artifact_review")
+        or projection.get("delegated_artifact_review")
+        or (artifact_reviews[0] if artifact_reviews else {})
+    )
+    review_receipts = sorted(
+        [
+            {
+                "artifact_path": _text(item.get("artifact_path")),
+                "owner": _text(item.get("owner"), "workflow"),
+                "review_state": _text(item.get("review_state"), "pending_review"),
+                "reviewer": item.get("reviewer"),
+                "decision": item.get("decision"),
+                "approval_id": item.get("approval_id"),
+                "metadata": _as_dict(item.get("metadata")),
+                "lineage": {
+                    "run_identity": item.get("run_identity") or projection.get("run_identity"),
+                    "root_run_identity": item.get("root_run_identity") or projection.get("root_run_identity") or projection.get("run_identity"),
+                    "parent_run_identity": item.get("parent_run_identity") or projection.get("parent_run_identity"),
+                },
+            }
+            for item in artifact_reviews
+            if _text(item.get("artifact_path"))
+        ],
+        key=lambda item: (item["artifact_path"], item["owner"], item["review_state"]),
+    )
+    audit_receipt_id = _text(
+        metadata.get("durable_audit_receipt_id")
+        or projection.get("durable_audit_receipt_id")
+        or _stable_id("audit_receipt", projection.get("run_identity"), projection.get("status")),
+    )
     receipts = {
+        "audit": {
+            "durable_audit_receipt_id": audit_receipt_id,
+            "state_source": _text(projection.get("state_source"), "durable_workflow_state"),
+            "summary": metadata.get("summary"),
+            "content_redacted": bool(metadata.get("content_redacted", True)),
+        },
         "resume": {
             "resume_available": resume_available,
             "resume_from_step": resume_step if resume_available else None,
@@ -182,11 +224,13 @@ def durable_workflow_snapshot_dict(run: dict[str, Any]) -> dict[str, Any]:
         },
         "delegated_artifact_review": {
             "delegation_present": bool(delegated_specialists or delegated_tool_names),
-            "artifact_review_present": bool(artifacts or review),
+            "artifact_review_present": bool(artifacts or review or review_receipts),
             "delegated_specialists": delegated_specialists,
             "delegated_tool_names": delegated_tool_names,
             "artifact_paths": artifacts,
             "review_state": _text(review.get("review_state") or review.get("state"), "pending" if artifacts else "not_started"),
+            "review_count": len(review_receipts),
+            "review_receipts": review_receipts,
             "required": bool(review.get("required")) or bool(artifacts and (delegated_specialists or delegated_tool_names)),
             "trust_partitions": trust_partitions,
         },
@@ -232,6 +276,7 @@ def durable_workflow_snapshot_dict(run: dict[str, Any]) -> dict[str, Any]:
         "run_identity": projection.get("run_identity"),
         "workflow_name": _text(projection.get("workflow_name"), "workflow"),
         "status": _text(projection.get("status"), "unknown"),
+        "audit_receipt_id": audit_receipt_id,
         "session_id": projection.get("thread_id") or projection.get("session_id"),
         "lineage": {
             "root_run_identity": projection.get("root_run_identity") or projection.get("run_identity"),
@@ -305,6 +350,25 @@ class WorkflowStateRepository:
             "started_at": step.started_at.isoformat(),
             "completed_at": step.completed_at.isoformat() if step.completed_at else None,
             "duration_ms": None,
+        }
+
+    def _serialize_review(self, review: WorkflowArtifactReview) -> dict[str, Any]:
+        return {
+            "id": review.id,
+            "run_identity": review.run_identity,
+            "root_run_identity": review.root_run_identity,
+            "parent_run_identity": review.parent_run_identity,
+            "workflow_name": review.workflow_name,
+            "artifact_path": review.artifact_path,
+            "owner": review.owner,
+            "review_state": review.review_state,
+            "reviewer": review.reviewer,
+            "decision": review.decision,
+            "approval_id": review.approval_id,
+            "metadata": _loads(review.metadata_json, {}),
+            "created_at": review.created_at.isoformat(),
+            "updated_at": review.updated_at.isoformat(),
+            "decided_at": review.decided_at.isoformat() if review.decided_at else None,
         }
 
     async def create_run(
@@ -527,8 +591,12 @@ class WorkflowStateRepository:
             steps = (
                 await db.execute(select(WorkflowStepState).where(WorkflowStepState.run_identity == run_identity))
             ).scalars().all()
+            reviews = (
+                await db.execute(select(WorkflowArtifactReview).where(WorkflowArtifactReview.run_identity == run_identity))
+            ).scalars().all()
             payload = self._serialize_run(run, list(steps))
-            for item in [run, *steps]:
+            payload["artifact_reviews"] = [self._serialize_review(review) for review in reviews]
+            for item in [run, *steps, *reviews]:
                 db.expunge(item)
             return {
                 "workflow_name": payload["workflow_name"],
@@ -556,8 +624,13 @@ class WorkflowStateRepository:
                 steps = (
                     await db.execute(select(WorkflowStepState).where(WorkflowStepState.run_identity == run.run_identity))
                 ).scalars().all()
-                serialized.append(self._serialize_run(run, list(steps)))
-                for item in [run, *steps]:
+                reviews = (
+                    await db.execute(select(WorkflowArtifactReview).where(WorkflowArtifactReview.run_identity == run.run_identity))
+                ).scalars().all()
+                run_payload = self._serialize_run(run, list(steps))
+                run_payload["artifact_reviews"] = [self._serialize_review(review) for review in reviews]
+                serialized.append(run_payload)
+                for item in [run, *steps, *reviews]:
                     db.expunge(item)
             return serialized
 
@@ -794,13 +867,23 @@ def _state_phase(run: dict[str, Any]) -> str:
 def _checkpoint_receipt(run: dict[str, Any]) -> dict[str, Any]:
     candidates = [item for item in run.get("checkpoint_candidates", []) if isinstance(item, dict)]
     checkpoint = candidates[0] if candidates else {}
-    step_id = str(checkpoint.get("step_id") or run.get("resume_from_step") or run.get("last_completed_step_id") or "")
+    checkpoint_context_available = bool(run.get("checkpoint_context_available"))
+    step_id = str(
+        checkpoint.get("step_id")
+        or run.get("resume_from_step")
+        or run.get("last_completed_step_id")
+        or ""
+    )
+    available = bool(candidates or run.get("resume_from_step") or (checkpoint_context_available and step_id))
     return {
         "checkpoint_id": _stable_id("checkpoint", run.get("run_identity"), step_id),
         "step_id": step_id or None,
-        "available": bool(candidates or run.get("resume_from_step")),
-        "resume_supported": bool(checkpoint.get("resume_supported", bool(run.get("resume_from_step")))),
+        "available": available,
+        "resume_supported": bool(
+            checkpoint.get("resume_supported", bool(run.get("resume_from_step") or checkpoint_context_available))
+        ),
         "checkpoint_count": len(candidates),
+        "checkpoint_context_available": checkpoint_context_available,
         "trust_boundary_stable": not bool((run.get("trust_boundary") or {}).get("blocked")),
     }
 
@@ -845,8 +928,34 @@ def _trigger_receipts(run: dict[str, Any]) -> list[dict[str, Any]]:
 def _artifact_review_receipts(run: dict[str, Any]) -> list[dict[str, Any]]:
     artifacts = [path for path in run.get("artifact_paths", []) if isinstance(path, str) and path.strip()]
     delegated = bool((run.get("approval_context") or {}).get("delegated_specialists"))
+    recorded_reviews = [
+        item for item in run.get("artifact_reviews", []) if isinstance(item, dict)
+    ]
     receipts: list[dict[str, Any]] = []
+    for review in recorded_reviews:
+        path = str(review.get("artifact_path") or "").strip()
+        if not path:
+            continue
+        receipts.append(
+            {
+                "artifact_path": path,
+                "owner": str(review.get("owner") or "workflow"),
+                "review_state": str(review.get("review_state") or "pending_review"),
+                "approval_handoff": bool(review.get("approval_id") or review.get("reviewer")),
+                "lineage": {
+                    "run_identity": review.get("run_identity") or run.get("run_identity"),
+                    "root_run_identity": review.get("root_run_identity") or run.get("root_run_identity") or run.get("run_identity"),
+                    "parent_run_identity": review.get("parent_run_identity") or run.get("parent_run_identity"),
+                },
+                "audit_receipt_id": str(
+                    (review.get("metadata") or {}).get("durable_audit_receipt_id")
+                    or _stable_id("artifact_review", review.get("run_identity") or run.get("run_identity"), path)
+                ),
+            }
+        )
     for path in artifacts:
+        if any(receipt["artifact_path"] == path for receipt in receipts):
+            continue
         receipts.append(
             {
                 "artifact_path": path,
@@ -908,6 +1017,14 @@ def build_durable_workflow_state_kernel(
                     1 for item in artifact_reviews if item["review_state"] == "pending_operator_review"
                 ),
                 "receipts": artifact_reviews,
+            },
+            "audit": {
+                "durable_audit_receipt_id": str(
+                    (run.get("metadata") or {}).get("durable_audit_receipt_id")
+                    or _stable_id("audit_receipt", run_identity, run.get("status"))
+                ),
+                "state_source": str(run.get("state_source") or "durable_workflow_state"),
+                "content_redacted": bool((run.get("metadata") or {}).get("content_redacted", True)),
             },
             "trust_boundary": run.get("trust_boundary") or {"status": "unknown", "blocked": False},
             "source": "audit_event_journal_plus_state_kernel_projection",
@@ -979,7 +1096,22 @@ async def _run_durable_workflow_engine_suite():
 async def build_durable_workflow_state_report() -> dict[str, Any]:
     summary = await _run_durable_workflow_engine_suite()
     failure_report = _durable_workflow_engine_failure_report(summary)
-    kernel = build_durable_workflow_state_kernel()
+    proof_kernel = build_durable_workflow_state_kernel()
+    try:
+        persisted_runs = await workflow_state_repository.list_runs(limit=10)
+    except Exception:  # pragma: no cover - defensive fail-soft path for partially migrated/local DBs.
+        persisted_runs = []
+    persisted_kernel = (
+        build_durable_workflow_state_kernel(persisted_runs)
+        if persisted_runs
+        else {"summary": {"state_count": 0, "transition_count": 0}, "states": [], "transitions": [], "policy": durable_workflow_engine_policy_payload()}
+    )
+    persisted_snapshots = [
+        durable_workflow_snapshot_dict(run)
+        for run in persisted_runs
+        if isinstance(run, dict)
+    ]
+    active_kernel = persisted_kernel if persisted_runs else proof_kernel
     return {
         "summary": {
             "suite_name": DURABLE_WORKFLOW_ENGINE_SUITE_NAME,
@@ -992,10 +1124,13 @@ async def build_durable_workflow_state_report() -> dict[str, Any]:
             "scenario_count": len(DURABLE_WORKFLOW_ENGINE_SCENARIO_NAMES),
             "dimension_count": len(durable_workflow_engine_dimensions()),
             "failure_mode_count": len(durable_workflow_engine_failure_taxonomy()),
-            "state_count": kernel["summary"]["state_count"],
-            "transition_count": kernel["summary"]["transition_count"],
-            "crash_resume_ready_count": kernel["summary"]["crash_resume_ready_count"],
-            "pending_artifact_review_count": kernel["summary"]["pending_artifact_review_count"],
+            "state_count": active_kernel["summary"]["state_count"],
+            "transition_count": active_kernel["summary"]["transition_count"],
+            "persisted_run_count": len(persisted_runs),
+            "persisted_snapshot_count": len(persisted_snapshots),
+            "proof_fixture_state_count": proof_kernel["summary"]["state_count"],
+            "crash_resume_ready_count": active_kernel["summary"].get("crash_resume_ready_count", 0),
+            "pending_artifact_review_count": active_kernel["summary"].get("pending_artifact_review_count", 0),
             "claim_boundary": DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
         },
         "scenario_names": list(DURABLE_WORKFLOW_ENGINE_SCENARIO_NAMES),
@@ -1003,7 +1138,10 @@ async def build_durable_workflow_state_report() -> dict[str, Any]:
         "failure_taxonomy": durable_workflow_engine_failure_taxonomy(),
         "failure_report": failure_report,
         "policy": durable_workflow_engine_policy_payload(),
-        "state_kernel": kernel,
+        "state_kernel": active_kernel,
+        "proof_state_kernel": proof_kernel,
+        "persisted_state_kernel": persisted_kernel,
+        "persisted_run_snapshots": persisted_snapshots,
         "latest_run": {
             "total": int(getattr(summary, "total", 0) or 0),
             "passed": int(getattr(summary, "passed", 0) or 0),

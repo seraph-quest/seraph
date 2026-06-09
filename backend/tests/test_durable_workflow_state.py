@@ -6,6 +6,7 @@ import pytest
 
 from src.workflows.durable_state import (
     DURABLE_STATE_CLAIM_BOUNDARY,
+    build_durable_workflow_state_report,
     durable_workflow_snapshot_dict,
     workflow_state_repository,
 )
@@ -199,6 +200,44 @@ def test_delegated_artifact_review_receipt_preserves_trust_partition_and_artifac
     ]
 
 
+def test_snapshot_preserves_audit_and_recorded_artifact_review_receipts():
+    snapshot = durable_workflow_snapshot_dict({
+        "run_identity": "session-5:workflow_review:runtime",
+        "root_run_identity": "session-5:workflow_review:runtime",
+        "workflow_name": "artifact-review",
+        "status": "succeeded",
+        "artifact_paths": ["notes/runtime.md"],
+        "metadata": {
+            "summary": "workflow_artifact_review succeeded",
+            "content_redacted": True,
+            "durable_audit_receipt_id": "receipt-123",
+        },
+        "approval_context": {
+            "delegated_specialists": ["critic"],
+            "delegated_tool_names": ["review_tool"],
+        },
+        "artifact_reviews": [
+            {
+                "run_identity": "session-5:workflow_review:runtime",
+                "root_run_identity": "session-5:workflow_review:runtime",
+                "artifact_path": "notes/runtime.md",
+                "owner": "delegated_specialist",
+                "review_state": "pending_operator_review",
+                "reviewer": "critic",
+                "metadata": {"durable_audit_receipt_id": "receipt-123"},
+            }
+        ],
+    })
+
+    receipts = snapshot["record"]["receipts"]
+
+    assert snapshot["record"]["audit_receipt_id"] == "receipt-123"
+    assert receipts["audit"]["durable_audit_receipt_id"] == "receipt-123"
+    assert receipts["delegated_artifact_review"]["review_count"] == 1
+    assert receipts["delegated_artifact_review"]["review_receipts"][0]["owner"] == "delegated_specialist"
+    assert receipts["delegated_artifact_review"]["review_receipts"][0]["review_state"] == "pending_operator_review"
+
+
 @pytest.mark.asyncio
 async def test_workflow_state_repository_persists_run_steps_and_checkpoint(async_db):
     await workflow_state_repository.create_run(
@@ -286,3 +325,71 @@ async def test_workflow_state_repository_records_delegated_artifact_review(async
     assert review["owner"] == "delegated_specialist"
     assert review["review_state"] == "pending_review"
     assert review["metadata"]["trust_partition"] == "delegated_specialist"
+
+
+@pytest.mark.asyncio
+async def test_durable_workflow_state_report_includes_persisted_snapshots(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-4:workflow_runtime:abc",
+        workflow_name="runtime-review",
+        tool_name="workflow_runtime_review",
+        session_id="session-4",
+        run_fingerprint="abc",
+        arguments={"file_path": "notes/runtime.md"},
+        approval_context={
+            "risk_level": "medium",
+            "execution_boundaries": ["workspace_filesystem", "delegation"],
+            "delegated_specialists": ["critic"],
+        },
+    )
+    await workflow_state_repository.record_step_started(
+        run_identity="session-4:workflow_runtime:abc",
+        workflow_name="runtime-review",
+        step_id="write",
+        step_index=1,
+        tool_name="write_file",
+        arguments={"file_path": "notes/runtime.md"},
+    )
+    await workflow_state_repository.record_step_completed(
+        run_identity="session-4:workflow_runtime:abc",
+        step_id="write",
+        status="succeeded",
+        artifact_paths=["notes/runtime.md"],
+        checkpoint={"tool": "write_file", "arguments": {"file_path": "notes/runtime.md"}, "result": "ok"},
+    )
+    await workflow_state_repository.finish_run(
+        run_identity="session-4:workflow_runtime:abc",
+        status="succeeded",
+        checkpoint_context={
+            "write": {"tool": "write_file", "arguments": {"file_path": "notes/runtime.md"}, "result": "ok"}
+        },
+        artifact_paths=["notes/runtime.md"],
+        last_completed_step_id="write",
+        metadata={
+            "summary": "workflow_runtime_review succeeded",
+            "content_redacted": True,
+            "durable_audit_receipt_id": "runtime-receipt-1",
+        },
+    )
+    await workflow_state_repository.record_artifact_review(
+        run_identity="session-4:workflow_runtime:abc",
+        root_run_identity="session-4:workflow_runtime:abc",
+        workflow_name="runtime-review",
+        artifact_path="notes/runtime.md",
+        owner="delegated_specialist",
+        review_state="pending_operator_review",
+        reviewer="critic",
+        metadata={"durable_audit_receipt_id": "runtime-receipt-1"},
+    )
+
+    report = await build_durable_workflow_state_report()
+
+    assert report["summary"]["persisted_run_count"] == 1
+    assert report["summary"]["persisted_snapshot_count"] == 1
+    assert report["summary"]["state_count"] == 1
+    assert report["proof_state_kernel"]["summary"]["state_count"] >= 2
+    persisted_state = report["persisted_state_kernel"]["states"][0]
+    assert persisted_state["audit"]["durable_audit_receipt_id"] == "runtime-receipt-1"
+    assert persisted_state["artifact_review"]["receipts"][0]["review_state"] == "pending_operator_review"
+    snapshot = report["persisted_run_snapshots"][0]
+    assert snapshot["record"]["receipts"]["delegated_artifact_review"]["review_count"] == 1

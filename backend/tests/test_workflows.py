@@ -1608,6 +1608,8 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
                 }
             ],
         ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2614,6 +2616,8 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
             ],
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2729,6 +2733,8 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
             ],
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -3658,6 +3664,8 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
             ],
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={

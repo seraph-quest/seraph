@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -944,13 +945,15 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
 
 @pytest.mark.asyncio
 async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
-    with patch(
+    with ExitStack() as stack:
+        stack.enter_context(patch(
         "src.api.operator.list_evolution_targets",
         return_value=[
             {"target_type": "skill", "source_path": "/tmp/skills/web-briefing.md"},
             {"target_type": "prompt_pack", "source_path": "/tmp/extensions/review-pack/prompts/review.md"},
         ],
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_workflow_endurance_benchmark_report",
         AsyncMock(
             return_value={
@@ -982,7 +985,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_live_workflow_endurance_canary_report",
         AsyncMock(
             return_value={
@@ -1036,7 +1040,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_durable_workflow_state_report",
         AsyncMock(
             return_value={
@@ -1068,7 +1073,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 },
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_live_replay_benchmark_report",
         AsyncMock(
             return_value={
@@ -1111,7 +1117,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_trust_boundary_benchmark_report",
         AsyncMock(
             return_value={
@@ -1148,7 +1155,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m5_operating_layer_benchmark_report",
         AsyncMock(
             return_value={
@@ -1187,7 +1195,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_secure_capability_host_benchmark_report",
         AsyncMock(
             return_value={
@@ -1251,7 +1260,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_computer_use_benchmark_report",
         AsyncMock(
             return_value={
@@ -1293,7 +1303,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_one_reach_channel_canary_report",
         AsyncMock(
             return_value={
@@ -1353,7 +1364,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m2_execution_benchmark_report",
         AsyncMock(
             return_value={
@@ -1387,7 +1399,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 11, "passed": 11, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m7_operator_cockpit_benchmark_report",
         AsyncMock(
             return_value={
@@ -1427,7 +1440,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_cockpit_efficiency_benchmark_report",
         AsyncMock(
             return_value={
@@ -1478,7 +1492,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m8_guardian_brain_benchmark_report",
         AsyncMock(
             return_value={
@@ -1522,7 +1537,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_guardian_safe_multimodal_voice_report",
         AsyncMock(
             return_value={
@@ -1571,7 +1587,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_guardian_learning_arbitration_report",
         AsyncMock(
             return_value={
@@ -1619,7 +1636,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1650,7 +1668,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m6_memory_superiority_benchmark_report",
         AsyncMock(
             return_value={
@@ -1689,7 +1708,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_memory_provider_quality_gate_report",
         AsyncMock(
             return_value={
@@ -1732,7 +1752,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_improvement_benchmark_report",
         AsyncMock(
             return_value={
@@ -1796,7 +1817,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 ],
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m9_governed_ecosystem_benchmark_report",
         AsyncMock(
             return_value={
@@ -1839,7 +1861,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_capability_pack_hardening_report",
         AsyncMock(
             return_value={
@@ -1883,12 +1906,12 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
             }
         ),
-    ):
+        ))
         resp = await client.get("/api/operator/benchmark-proof")
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 21
+    assert payload["summary"]["suite_count"] == 25
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"

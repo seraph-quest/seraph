@@ -238,7 +238,7 @@ def build_guardian_learning_arbitration_receipts() -> list[dict[str, Any]]:
         context = _context_for_outcome(outcome)
         decision = build_guardian_brain_decision(context)
         metadata = _scenario_metadata(outcome)
-        quality = decision.receipt["quality_score"]
+        quality = decision.receipt["scores"]
         receipts.append({
             "scenario_id": context.scenario_id,
             "status": "passed",

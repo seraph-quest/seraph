@@ -211,7 +211,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 21
+    assert details["suite_count"] == 25
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -1246,11 +1246,14 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_memory_quality",
         "guardian_user_model_restraint",
         "m8_guardian_intervention_quality",
+        "guardian_safe_multimodal_voice",
+        "guardian_learning_arbitration_v2",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",
         "workflow_endurance_and_repair",
         "live_workflow_endurance_canary",
+        "durable_workflow_engine_v1",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

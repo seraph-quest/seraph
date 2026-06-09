@@ -296,7 +296,7 @@ def build_capability_pack_hardening_receipt(
     update_supported = bool(lifecycle_plan.get("update_supported"))
 
     risk_deltas: list[str] = []
-    blocked_claims: list[str] = []
+    blocked_claims: list[str] = ["package_count_superiority"]
     negative_cases: list[str] = []
     if incompatible:
         risk_deltas.append("compatibility_block")
@@ -367,6 +367,6 @@ def build_capability_pack_hardening_receipt(
         "operator_summary": operator_summary,
         "blocked_claims": sorted(set(blocked_claims)),
         "claim_boundary": (
-            "governed_capability_pack_hardening_receipts_not_production_marketplace_security"
+            "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
         ),
     }

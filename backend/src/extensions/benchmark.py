@@ -25,7 +25,7 @@ GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES = (
     "operator_governed_capability_pack_hardening_surface_behavior",
 )
 GOVERNED_CAPABILITY_PACK_HARDENING_CLAIM_BOUNDARY = (
-    "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity"
+    "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
 )
 
 
@@ -349,6 +349,11 @@ def governed_capability_pack_hardening_policy_payload() -> dict[str, Any]:
         "permission_creep_policy": "permission_drift_and_underdeclaration_block_reviewed_pack_claims",
         "supply_chain_policy": "signature_digest_key_revocation_and_validation_failures_fail_closed",
         "rollback_policy": "install_update_and_downgrade_previews_expose_rollback_availability_and_action",
+        "blocked_claims": [
+            "production_marketplace_security",
+            "ecosystem_maturity",
+            "package_count_superiority",
+        ],
         "receipt_surfaces": [
             "/api/extensions",
             "/api/extensions/validate",

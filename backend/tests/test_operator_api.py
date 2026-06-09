@@ -1879,7 +1879,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                     "permission_creep_state": "underdeclaration_and_drift_fail_closed",
                     "supply_chain_state": "signature_digest_key_revocation_fail_closed",
                     "rollback_state": "rollback_availability_and_action_visible",
-                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity",
+                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority",
                 },
                 "scenario_names": [
                     "capability_pack_review_receipt_behavior",
@@ -1894,7 +1894,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "hardening_receipts": [],
                 "failure_report": [],
                 "policy": {
-                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity",
+                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority",
                     "receipt_surfaces": [
                         "/api/extensions",
                         "/api/extensions/validate",
@@ -1964,7 +1964,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         payload["summary"]["governed_capability_pack_hardening_claim_boundary"]
-        == "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity"
+        == "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
     )
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
@@ -2179,7 +2179,7 @@ async def test_operator_governed_capability_pack_hardening_reports_policy_receip
     assert payload["summary"]["review_receipt_state"] == "risk_delta_and_blocked_claim_receipts_visible"
     assert payload["summary"]["rollback_state"] == "rollback_availability_and_action_visible"
     assert payload["summary"]["claim_boundary"] == (
-        "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity"
+        "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
     )
     assert len(payload["dimensions"]) >= 6
     assert len(payload["failure_taxonomy"]) >= 7
@@ -2187,7 +2187,18 @@ async def test_operator_governed_capability_pack_hardening_reports_policy_receip
         "install_update_and_downgrade_previews_expose_rollback_availability_and_action"
     )
     assert "/api/operator/governed-capability-pack-hardening" in payload["policy"]["receipt_surfaces"]
-    assert payload["hardening_receipts"][0]["scenario_id"] == "capability_pack_review_receipt_behavior"
+    hardening_receipts = {receipt["scenario_id"]: receipt for receipt in payload["hardening_receipts"]}
+    assert "capability_pack_review_receipt_behavior" in hardening_receipts
+    assert "package_count_superiority" in payload["policy"]["blocked_claims"]
+    permission_receipt = hardening_receipts["capability_pack_permission_creep_behavior"]
+    assert {"underdeclared_permissions", "extension_permission_creep"} <= set(permission_receipt["negative_cases"])
+    assert {"complete_permission_declaration", "reviewed_permission_envelope"} <= set(permission_receipt["blocked_claims"])
+    assert permission_receipt["fail_closed_required"] is True
+    failed_update_receipt = hardening_receipts["capability_pack_supply_chain_suspicion_behavior"]
+    assert "failed_update" in failed_update_receipt["negative_cases"]
+    assert failed_update_receipt["runtime_access_removed"] is True
+    rollback_receipt = hardening_receipts["capability_pack_rollback_ready_behavior"]
+    assert {"remove_new_pack", "restore_previous_workspace_pack"} <= set(rollback_receipt["rollback_actions"])
 
 
 @pytest.mark.asyncio

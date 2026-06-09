@@ -5748,8 +5748,7 @@ describe("CockpitView", () => {
             ],
             protocol: {
               replay_command: "uv run python -m src.evals.harness --benchmark-suite live_workflow_endurance_canary --indent 0",
-              fixed_time_anchor: "2026-04-22T09:00:00+00:00",
-              receipt_contract: ["run_identity", "checkpoint_candidates", "audit_receipts"],
+              time_anchor: "2026-05-11T09:00:00Z",
             },
             policy: {
               claim_boundary: "audit_projected_replayable_canary_not_durable_workflow_engine",
@@ -5759,6 +5758,19 @@ describe("CockpitView", () => {
                 "/api/operator/benchmark-proof",
               ],
               not_claimed: ["durable_workflow_state_machine", "crash_safe_executor"],
+              required_receipts: [
+                "run_identity",
+                "thread_id",
+                "checkpoint_id",
+                "branch_lineage",
+                "failure_injection",
+                "recovery_action",
+                "delegated_owner",
+                "artifact_comparison",
+                "approval_preservation",
+                "trust_boundary_decision",
+                "audit_trail",
+              ],
             },
             sessions: [
               { session_id: "session-canary-a", run_count: 3 },
@@ -5768,12 +5780,22 @@ describe("CockpitView", () => {
               {
                 run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:root",
                 workflow_name: "workflow_live_workflow_endurance_canary",
-                status: "succeeded",
+                status: "running",
                 branch_kind: "root",
-                summary: "Root workflow established approval and artifact baseline.",
+                summary: "Primary long-running artifact handoff is paused at comparison before publish.",
                 checkpoint_candidates: [{ step_id: "plan" }],
                 artifact_receipts: [{ artifact_id: "artifact-root" }],
                 audit_receipts: ["audit-root", "audit-artifact"],
+              },
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:branch-compare",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "succeeded",
+                branch_kind: "branch_from_checkpoint",
+                summary: "Checkpoint branch compares the revised artifact against the original output.",
+                checkpoint_candidates: [{ step_id: "compare" }],
+                artifact_receipts: [{ artifact_id: "artifact-compare" }],
+                audit_receipts: ["audit-compare", "audit-artifact"],
               },
               {
                 run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:branch-repair",
@@ -5786,13 +5808,23 @@ describe("CockpitView", () => {
                 audit_receipts: ["audit-failure", "audit-recovery"],
               },
               {
+                run_identity: "session-canary-b:workflow_live_workflow_endurance_canary:approval-preserved",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "awaiting_approval",
+                branch_kind: "root",
+                summary: "Second session holds a pending operator approval with stable context.",
+                checkpoint_candidates: [{ step_id: "approval_gate" }],
+                artifact_receipts: [],
+                audit_receipts: ["audit-approval", "audit-pending"],
+              },
+              {
                 run_identity: "session-canary-b:workflow_live_workflow_endurance_canary:approval-drift",
                 workflow_name: "workflow_live_workflow_endurance_canary",
-                status: "blocked",
-                branch_kind: "branch_from_checkpoint",
-                summary: "Replay blocked after approval context drift.",
+                status: "failed",
+                branch_kind: "retry_failed_step",
+                summary: "Replay is blocked because the repair path gained authenticated-source authority.",
                 replay_block_reason: "approval_context_changed",
-                checkpoint_candidates: [{ step_id: "approval" }],
+                checkpoint_candidates: [],
                 artifact_receipts: [],
                 audit_receipts: ["audit-approval-drift"],
               },
@@ -6327,8 +6359,12 @@ describe("CockpitView", () => {
     expect(within(operatorWindow).getByText(/multi session visible · delegated owner visible · checkpoint branch visible · failure recovery visible · artifact comparison visible · approval preservation visible · trust boundary fail closed visible · audit trail visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/audit projected replayable canary not durable workflow engine · not durable workflow state machine · not crash safe executor/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/uv run python -m src\.evals\.harness --benchmark-suite live_workflow_endurance_canary --indent 0/)).toBeInTheDocument();
-    expect(within(operatorWindow).getByText(/Root workflow established approval and artifact baseline\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/2026-05-11T09:00:00Z · 11 required receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Primary long-running artifact handoff is paused at comparison before publish\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Checkpoint branch compares the revised artifact against the original output\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Injected failure recovered through repair branch\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Second session holds a pending operator approval with stable context\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Replay is blocked because the repair path gained authenticated-source authority\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/blocked approval context changed/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();

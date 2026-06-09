@@ -372,13 +372,14 @@ interface OperatorLiveWorkflowEnduranceCanary {
   };
   protocol: {
     replay_command: string;
-    fixed_time_anchor: string;
+    time_anchor: string;
     receipt_contract: string[];
   };
   policy: {
     claim_boundary: string;
     receipt_surfaces: string[];
     not_claimed: string[];
+    required_receipts: string[];
   };
   sessions: Record<string, unknown>[];
   runs: Record<string, unknown>[];
@@ -3306,9 +3307,13 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
         },
         protocol: {
           replay_command: typeof protocolValue.replay_command === "string" ? protocolValue.replay_command : "",
-          fixed_time_anchor: typeof protocolValue.fixed_time_anchor === "string" ? protocolValue.fixed_time_anchor : "",
+          time_anchor: typeof protocolValue.time_anchor === "string"
+            ? protocolValue.time_anchor
+            : typeof protocolValue.fixed_time_anchor === "string" ? protocolValue.fixed_time_anchor : "",
           receipt_contract: Array.isArray(protocolValue.receipt_contract)
             ? protocolValue.receipt_contract.filter((item): item is string => typeof item === "string")
+            : Array.isArray(policyValue.required_receipts)
+              ? policyValue.required_receipts.filter((item): item is string => typeof item === "string")
             : [],
         },
         policy: {
@@ -3318,6 +3323,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
             : [],
           not_claimed: Array.isArray(policyValue.not_claimed)
             ? policyValue.not_claimed.filter((item): item is string => typeof item === "string")
+            : [],
+          required_receipts: Array.isArray(policyValue.required_receipts)
+            ? policyValue.required_receipts.filter((item): item is string => typeof item === "string")
             : [],
         },
         sessions: Array.isArray(canaryRecord.sessions)
@@ -14500,7 +14508,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               {operatorBenchmarkProof.live_workflow_endurance_canary.protocol.replay_command ? (
                                 <div className="cockpit-operator-note">{operatorBenchmarkProof.live_workflow_endurance_canary.protocol.replay_command}</div>
                               ) : null}
-                              {operatorBenchmarkProof.live_workflow_endurance_canary.runs.slice(0, 3).map((run, index) => {
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.protocol.time_anchor ? (
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    operatorBenchmarkProof.live_workflow_endurance_canary.protocol.time_anchor,
+                                    `${operatorBenchmarkProof.live_workflow_endurance_canary.policy.required_receipts.length || operatorBenchmarkProof.live_workflow_endurance_canary.protocol.receipt_contract.length} required receipts`,
+                                  ].join(" · ")}
+                                </div>
+                              ) : null}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.runs.map((run, index) => {
                                 const runId = typeof run.run_identity === "string" ? run.run_identity : `canary-run-${index}`;
                                 const workflowName = typeof run.workflow_name === "string" ? run.workflow_name : "workflow";
                                 const status = typeof run.status === "string" ? run.status : "unknown";

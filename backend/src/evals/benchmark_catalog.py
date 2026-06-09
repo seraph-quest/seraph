@@ -31,6 +31,10 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.learning_arbitration_benchmark import (
+    GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+)
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
 from src.memory.provider_quality_gate import (
     MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
@@ -129,6 +133,24 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live long-horizon human outcome studies and external guardian-intelligence superiority claims remain future proof work."
         ),
         scenario_names=M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+        label="Guardian learning arbitration v2",
+        description=(
+            "Pins act, defer, bundle, clarify, approval, and stay-silent arbitration over stale, "
+            "conflicting, ambiguous, degraded, unsafe, and repeated-negative intervention cases."
+        ),
+        benchmark_axis="guardian_learning_arbitration_v2",
+        operator_summary=(
+            "Guardian learning proof now exposes why Seraph acts, waits, asks, escalates, bundles, "
+            "or stays silent under conflicting live and durable evidence."
+        ),
+        remaining_gap=(
+            "Live long-horizon human outcome studies, external-channel intervention replay, and "
+            "guardian-intelligence superiority claims remain future proof work."
+        ),
+        scenario_names=GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

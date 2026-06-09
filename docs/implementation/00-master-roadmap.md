@@ -136,6 +136,7 @@ This stack is the roadmap-level ordering for the next large batches after the me
    execute #438 for a single selected external channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
 9. [ ] `guardian-world-model-learning-quality-v2`:
    deepen multi-signal learning, stale and conflicting evidence arbitration, salience and confidence calibration, and false-positive or false-negative accounting with live-ish intervention replay.
+   - [x] `guardian_learning_arbitration_v2` now pins act, defer, bundle, clarify, approval, and stay-silent receipts across stale memory, conflicting provider/workflow evidence, ambiguous referents, degraded observer confidence, unsafe capability context, and repeated negative outcomes.
 10. [ ] `governed-extension-marketplace-hardening-foundations`:
    strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics as production-oriented foundations, not production marketplace security claims.
 

@@ -47,6 +47,7 @@ from src.guardian.brain import (
     build_m8_guardian_brain_receipts,
 )
 from src.guardian.feedback import guardian_feedback_repository
+from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import apply_memory_operator_control
@@ -3384,6 +3385,7 @@ async def get_operator_benchmark_proof():
         m7_operator_cockpit_benchmark,
         cockpit_efficiency_benchmark,
         m8_guardian_brain_benchmark,
+        guardian_learning_arbitration_benchmark,
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
@@ -3402,6 +3404,7 @@ async def get_operator_benchmark_proof():
         build_m7_operator_cockpit_benchmark_report(),
         build_cockpit_efficiency_benchmark_report(),
         build_m8_guardian_brain_benchmark_report(),
+        build_guardian_learning_arbitration_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
@@ -3427,6 +3430,7 @@ async def get_operator_benchmark_proof():
         str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
         str(cockpit_efficiency_benchmark["summary"]["benchmark_posture"]),
         str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
+        str(guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
@@ -3476,6 +3480,8 @@ async def get_operator_benchmark_proof():
             "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
             "cockpit_efficiency_benchmark_posture": cockpit_efficiency_benchmark["summary"]["benchmark_posture"],
             "m8_guardian_brain_benchmark_posture": m8_guardian_brain_benchmark["summary"]["benchmark_posture"],
+            "guardian_learning_arbitration_benchmark_posture": guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"],
+            "guardian_learning_arbitration_claim_boundary": guardian_learning_arbitration_benchmark["policy"]["claim_boundary"],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
@@ -3496,6 +3502,7 @@ async def get_operator_benchmark_proof():
         "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
         "cockpit_efficiency_benchmark": cockpit_efficiency_benchmark,
         "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
+        "guardian_learning_arbitration_benchmark": guardian_learning_arbitration_benchmark,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
@@ -3534,6 +3541,11 @@ async def get_operator_live_workflow_endurance_canary():
 @router.get("/operator/m5-operating-layer-benchmark")
 async def get_operator_m5_operating_layer_benchmark():
     return await build_m5_operating_layer_benchmark_report()
+
+
+@router.get("/operator/guardian-learning-arbitration")
+async def get_operator_guardian_learning_arbitration():
+    return await build_guardian_learning_arbitration_report()
 
 
 @router.get("/operator/m6-memory-superiority-benchmark")

@@ -1572,6 +1572,54 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_guardian_learning_arbitration_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "guardian_learning_arbitration_v2",
+                    "benchmark_posture": "guardian_learning_arbitration_ci_gated_operator_visible",
+                    "operator_status": "guardian_learning_arbitration_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "outcome_count": 6,
+                    "negative_case_count": 6,
+                    "outcome_coverage_state": "act_defer_bundle_clarify_approval_stay_silent_receipts_visible",
+                    "negative_case_state": "stale_conflict_ambiguous_degraded_unsafe_negative_outcome_cases_visible",
+                    "guardian_value_state": "learning_improves_restraint_clarification_timing_approval_recovery_or_follow_through",
+                    "claim_boundary": "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority",
+                },
+                "scenario_names": [
+                    "guardian_learning_arbitration_act_behavior",
+                    "guardian_learning_arbitration_defer_behavior",
+                    "guardian_learning_arbitration_bundle_behavior",
+                    "guardian_learning_arbitration_clarify_behavior",
+                    "guardian_learning_arbitration_approval_behavior",
+                    "guardian_learning_arbitration_stay_silent_behavior",
+                    "operator_guardian_learning_arbitration_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "arbitration_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "guardian_value_policy": "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume",
+                    "claim_boundary": "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority",
+                    "receipt_surfaces": [
+                        "/api/operator/guardian-learning-arbitration",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": [
+                        "guardian_intelligence_superiority",
+                        "live_human_outcome_study",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1824,6 +1872,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["guardian_safe_multimodal_voice_claim_boundary"]
         == "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity"
     )
+    assert (
+        payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
+        == "guardian_learning_arbitration_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["guardian_learning_arbitration_claim_boundary"]
+        == "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority"
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -1851,6 +1907,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert (
         "guardian_safe_multimodal_voice"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "guardian_learning_arbitration_v2"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -1908,6 +1968,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     multimodal_voice_suite = next(item for item in payload["suites"] if item["name"] == "guardian_safe_multimodal_voice")
     assert "multimodal_voice_capability_governance_behavior" in multimodal_voice_suite["scenario_names"]
     assert multimodal_voice_suite["scenario_count"] == 6
+    learning_arbitration_suite = next(item for item in payload["suites"] if item["name"] == "guardian_learning_arbitration_v2")
+    assert "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
+    assert learning_arbitration_suite["scenario_count"] == 7
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -1958,6 +2021,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["guardian_safe_multimodal_voice_benchmark"]["summary"]["suite_name"] == "guardian_safe_multimodal_voice"
     assert payload["guardian_safe_multimodal_voice_benchmark"]["policy"]["guardian_value_policy"] == (
         "voice_media_must_improve_timing_accessibility_situational_awareness_or_intervention_quality"
+    )
+    assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
+    assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
+        "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
     )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
@@ -2222,6 +2289,39 @@ async def test_operator_guardian_safe_multimodal_voice_surface_reports_policy_re
     )
     assert "voice_parity" in payload["policy"]["not_claimed"]
     assert "/api/operator/guardian-safe-multimodal-voice" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_guardian_learning_arbitration_surface_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/guardian-learning-arbitration")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
+    assert payload["summary"]["operator_status"] == "guardian_learning_arbitration_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["outcome_coverage_state"] == (
+        "act_defer_bundle_clarify_approval_stay_silent_receipts_visible"
+    )
+    assert payload["summary"]["negative_case_state"] == (
+        "stale_conflict_ambiguous_degraded_unsafe_negative_outcome_cases_visible"
+    )
+    assert payload["summary"]["claim_boundary"] == (
+        "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority"
+    )
+    assert {receipt["actual_action"] for receipt in payload["arbitration_receipts"]} == {
+        "act",
+        "bundle",
+        "clarify",
+        "defer",
+        "request_approval",
+        "stay_silent",
+    }
+    assert payload["policy"]["guardian_value_policy"] == (
+        "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
+    )
+    assert "guardian_intelligence_superiority" in payload["policy"]["not_claimed"]
+    assert "/api/operator/guardian-learning-arbitration" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

@@ -69,6 +69,12 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.learning_arbitration_benchmark import (
+    GUARDIAN_LEARNING_ARBITRATION_CLAIM_BOUNDARY,
+    GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+    build_guardian_learning_arbitration_receipts,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
@@ -13276,6 +13282,101 @@ async def _eval_operator_m9_governed_ecosystem_benchmark_surface_behavior() -> d
     }
 
 
+def _learning_arbitration_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in build_guardian_learning_arbitration_receipts()
+    }
+
+
+def _eval_guardian_learning_arbitration_outcome(expected_action: str) -> dict[str, Any]:
+    scenario_name = (
+        "guardian_learning_arbitration_approval_behavior"
+        if expected_action == "request_approval"
+        else f"guardian_learning_arbitration_{expected_action}_behavior"
+    )
+    receipt = _learning_arbitration_receipts_by_scenario()[scenario_name]
+    _require_eval_contract(
+        receipt["actual_action"] == expected_action,
+        f"Expected learning arbitration action {expected_action}.",
+    )
+    return {
+        "expected_action": expected_action,
+        "actual_action": receipt["actual_action"],
+        "negative_case": receipt["negative_case"],
+        "evidence_sources": receipt["evidence_sources"],
+        "guardian_value": receipt["guardian_value"],
+        "operator_explanation_visible": bool(receipt["operator_explanation"]),
+        "false_positive_risk_visible": bool(receipt["quality_receipts"]["false_positive_risk"]),
+        "false_negative_risk_visible": bool(receipt["quality_receipts"]["false_negative_risk"]),
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_LEARNING_ARBITRATION_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_guardian_learning_arbitration_act_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("act")
+
+
+def _eval_guardian_learning_arbitration_defer_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("defer")
+
+
+def _eval_guardian_learning_arbitration_bundle_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("bundle")
+
+
+def _eval_guardian_learning_arbitration_clarify_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("clarify")
+
+
+def _eval_guardian_learning_arbitration_approval_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("request_approval")
+
+
+def _eval_guardian_learning_arbitration_stay_silent_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("stay_silent")
+
+
+async def _eval_operator_guardian_learning_arbitration_surface_behavior() -> dict[str, Any]:
+    from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="guardian",
+                description="Guardian learning arbitration benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
+        ],
+        duration_ms=len(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.guardian.learning_arbitration_benchmark._run_guardian_learning_arbitration_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_guardian_learning_arbitration_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+        "operator_status_visible": (
+            payload["summary"]["operator_status"] == "guardian_learning_arbitration_receipts_visible"
+        ),
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
+        ),
+        "benchmark_posture_green": (
+            payload["summary"]["benchmark_posture"] == "guardian_learning_arbitration_ci_gated_operator_visible"
+        ),
+        "outcome_count": payload["summary"]["outcome_count"],
+        "negative_case_count": payload["summary"]["negative_case_count"],
+        "receipt_surface_visible": "/api/operator/guardian-learning-arbitration" in payload["policy"]["receipt_surfaces"],
+        "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"],
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == GUARDIAN_LEARNING_ARBITRATION_CLAIM_BOUNDARY,
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -13302,6 +13403,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
     multimodal_voice_suite = next(
         item for item in suites if item["name"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME
+    )
+    learning_arbitration_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
     )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
@@ -13409,6 +13513,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "guardian_safe_multimodal_voice_gate_required": (
             GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "guardian_learning_arbitration_suite_present": (
+            "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
+        ),
+        "guardian_learning_arbitration_suite_scenario_count_matches": (
+            learning_arbitration_suite["scenario_count"] == len(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
+        ),
+        "guardian_learning_arbitration_suite_axis_matches": (
+            learning_arbitration_suite["benchmark_axis"] == "guardian_learning_arbitration_v2"
+        ),
+        "guardian_learning_arbitration_gate_required": (
+            GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -15400,6 +15516,48 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Operator surfaces expose the guardian-safe multimodal and voice benchmark, policy, receipts, and claim boundary.",
         runner=_eval_operator_guardian_safe_multimodal_voice_surface_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_act_behavior",
+        category="guardian",
+        description="Learning arbitration acts when fresh grounded evidence and urgency make follow-through valuable.",
+        runner=_eval_guardian_learning_arbitration_act_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_defer_behavior",
+        category="guardian",
+        description="Learning arbitration defers when stale memory and repeated negative outcomes make action risky.",
+        runner=_eval_guardian_learning_arbitration_defer_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_bundle_behavior",
+        category="guardian",
+        description="Learning arbitration bundles conflicting provider or workflow evidence during high-interruption windows.",
+        runner=_eval_guardian_learning_arbitration_bundle_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_clarify_behavior",
+        category="guardian",
+        description="Learning arbitration asks for clarification when referents or project anchors are ambiguous.",
+        runner=_eval_guardian_learning_arbitration_clarify_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_approval_behavior",
+        category="guardian",
+        description="Learning arbitration escalates to approval when useful follow-through crosses unsafe capability context.",
+        runner=_eval_guardian_learning_arbitration_approval_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_stay_silent_behavior",
+        category="guardian",
+        description="Learning arbitration stays silent for degraded low-value observer cues under repeated negative outcomes.",
+        runner=_eval_guardian_learning_arbitration_stay_silent_behavior,
+    ),
+    EvalScenario(
+        name="operator_guardian_learning_arbitration_surface_behavior",
+        category="guardian",
+        description="Operator surfaces expose guardian learning arbitration receipts, policy, failure taxonomy, and claim boundary.",
+        runner=_eval_operator_guardian_learning_arbitration_surface_behavior,
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

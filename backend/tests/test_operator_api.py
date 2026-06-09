@@ -1648,12 +1648,56 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
             }
         ),
+    ), patch(
+        "src.api.operator.build_governed_capability_pack_hardening_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "governed_capability_pack_hardening",
+                    "benchmark_posture": "governed_pack_hardening_ci_gated_operator_visible",
+                    "operator_status": "governed_capability_pack_hardening_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 6,
+                    "failure_mode_count": 7,
+                    "active_failure_count": 0,
+                    "review_receipt_state": "risk_delta_and_blocked_claim_receipts_visible",
+                    "compatibility_downgrade_state": "incompatible_and_downgrade_states_named",
+                    "permission_creep_state": "underdeclaration_and_drift_fail_closed",
+                    "supply_chain_state": "signature_digest_key_revocation_fail_closed",
+                    "rollback_state": "rollback_availability_and_action_visible",
+                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity",
+                },
+                "scenario_names": [
+                    "capability_pack_review_receipt_behavior",
+                    "capability_pack_compatibility_downgrade_behavior",
+                    "capability_pack_permission_creep_behavior",
+                    "capability_pack_supply_chain_suspicion_behavior",
+                    "capability_pack_rollback_ready_behavior",
+                    "operator_governed_capability_pack_hardening_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "hardening_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity",
+                    "receipt_surfaces": [
+                        "/api/extensions",
+                        "/api/extensions/validate",
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/governed-capability-pack-hardening",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+            }
+        ),
     ):
         resp = await client.get("/api/operator/benchmark-proof")
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 20
+    assert payload["summary"]["suite_count"] == 21
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1682,6 +1726,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["m9_governed_ecosystem_claim_boundary"]
         == "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
     )
+    assert (
+        payload["summary"]["governed_capability_pack_hardening_posture"]
+        == "governed_pack_hardening_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["governed_capability_pack_hardening_claim_boundary"]
+        == "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity"
+    )
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -1695,6 +1747,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "governed_capability_pack_hardening"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
@@ -1748,6 +1804,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m9_suite = next(item for item in payload["suites"] if item["name"] == "m9_governed_ecosystem")
     assert "m9_manifest_governance_behavior" in m9_suite["scenario_names"]
     assert m9_suite["scenario_count"] == 6
+    hardening_suite = next(item for item in payload["suites"] if item["name"] == "governed_capability_pack_hardening")
+    assert "capability_pack_review_receipt_behavior" in hardening_suite["scenario_names"]
+    assert hardening_suite["scenario_count"] == 6
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -1763,6 +1822,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert payload["secure_capability_host_benchmark"]["summary"]["suite_name"] == "secure_capability_host"
     assert payload["secure_capability_host_benchmark"]["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
+    assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
+    assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
@@ -1836,6 +1897,29 @@ async def test_operator_m9_governed_ecosystem_benchmark_surface_reports_policy_r
     )
     assert "/api/operator/m9-governed-ecosystem-benchmark" in payload["policy"]["receipt_surfaces"]
     assert payload["governance_receipts"][0]["scenario_id"] == "m9_manifest_governance_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_governed_capability_pack_hardening_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/governed-capability-pack-hardening")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "governed_capability_pack_hardening"
+    assert payload["summary"]["operator_status"] == "governed_capability_pack_hardening_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["review_receipt_state"] == "risk_delta_and_blocked_claim_receipts_visible"
+    assert payload["summary"]["rollback_state"] == "rollback_availability_and_action_visible"
+    assert payload["summary"]["claim_boundary"] == (
+        "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity"
+    )
+    assert len(payload["dimensions"]) >= 6
+    assert len(payload["failure_taxonomy"]) >= 7
+    assert payload["policy"]["rollback_policy"] == (
+        "install_update_and_downgrade_previews_expose_rollback_availability_and_action"
+    )
+    assert "/api/operator/governed-capability-pack-hardening" in payload["policy"]["receipt_surfaces"]
+    assert payload["hardening_receipts"][0]["scenario_id"] == "capability_pack_review_receipt_behavior"
 
 
 @pytest.mark.asyncio

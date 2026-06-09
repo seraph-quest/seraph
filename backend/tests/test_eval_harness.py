@@ -9,7 +9,10 @@ import pytest
 from config.settings import settings
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
-from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
+from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -205,7 +208,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 20
+    assert details["suite_count"] == 21
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -248,6 +251,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m9_governed_ecosystem_suite_scenario_count_matches"] is True
     assert details["m9_governed_ecosystem_suite_axis_matches"] is True
     assert details["m9_governed_ecosystem_gate_required"] is True
+    assert details["governed_capability_pack_hardening_suite_present"] is True
+    assert details["governed_capability_pack_hardening_suite_scenario_count_matches"] is True
+    assert details["governed_capability_pack_hardening_suite_axis_matches"] is True
+    assert details["governed_capability_pack_hardening_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
@@ -365,6 +372,33 @@ def test_run_benchmark_suites_executes_m9_governed_ecosystem_suite():
 
     assert summary.failed == 0
     assert result_names == set(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES)
+
+
+def test_run_benchmark_suites_executes_governed_capability_pack_hardening_suite():
+    summary = asyncio.run(run_benchmark_suites(["governed_capability_pack_hardening"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+
+
+def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["review_receipt_state_visible"] is True
+    assert details["rollback_state_visible"] is True
+    assert details["failure_taxonomy_covers_issue_cases"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_count_matches"] is True
 
 
 def test_m9_lifecycle_review_gate_behavior_exercises_real_fail_closed_paths():
@@ -1105,6 +1139,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert "m9_governed_ecosystem" in captured.out
+    assert "governed_capability_pack_hardening" in captured.out
     assert available_benchmark_suites() == (
         "guardian_memory_quality",
         "guardian_user_model_restraint",
@@ -1126,6 +1161,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "planning_retrieval_reporting",
         "governed_improvement",
         "m9_governed_ecosystem",
+        "governed_capability_pack_hardening",
     )
 
 

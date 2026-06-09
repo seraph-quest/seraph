@@ -6,6 +6,7 @@ from config.settings import settings
 from src.extensions.governance import (
     ExtensionGovernanceError,
     assert_governance_allows_lifecycle,
+    build_capability_pack_hardening_receipt,
     build_governance_status,
     extension_permission_fingerprint,
     governance_package_digest,
@@ -326,6 +327,72 @@ def test_valid_verified_pack_exposes_reviewed_governance_status(tmp_path: Path):
     assert status["signing_key_id"] == _KEY_ID
     assert status["permission_drift"] is False
     assert status["fail_closed_reason"] is None
+
+
+def test_capability_pack_hardening_receipt_names_risk_delta_and_rollback(tmp_path: Path):
+    package_dir, manifest = _write_verified_package(tmp_path)
+    state_entry = _reviewed_state(manifest, package_dir)
+    status = build_governance_status(manifest, root_path=package_dir, state_entry=state_entry)
+
+    receipt = build_capability_pack_hardening_receipt(
+        manifest,
+        governance_status=status,
+        compatibility={"seraph": ">=2026.4.10", "current_version": "2026.4.10", "compatible": True},
+        lifecycle_plan={
+            "current_version": "2026.3.20",
+            "candidate_version": manifest.version,
+            "version_relation": "upgrade",
+            "package_changed": True,
+            "update_supported": True,
+            "current_location": "workspace",
+        },
+        diagnostics_summary={"degraded_connector_count": 0, "error_issue_count": 0},
+        permission_summary={"missing": {}},
+    )
+
+    assert receipt["receipt_id"] == "capability_pack_hardening:seraph.verified-pack"
+    assert receipt["risk_deltas"] == ["no_material_risk_delta_detected"]
+    assert receipt["rollback"]["available"] is True
+    assert receipt["rollback"]["action"] == "restore_previous_workspace_pack"
+    assert receipt["operator_summary"].startswith("Pack transition is reviewable")
+    assert receipt["claim_boundary"] == (
+        "governed_capability_pack_hardening_receipts_not_production_marketplace_security"
+    )
+
+
+def test_capability_pack_hardening_receipt_blocks_permission_creep_and_supply_chain_claims(tmp_path: Path):
+    package_dir, manifest = _write_verified_package(tmp_path, invalid_signature=True)
+    state_entry = _reviewed_state(manifest, package_dir)
+    state_entry["governance"]["reviewed_permission_fingerprint"] = "1" * 64
+    status = build_governance_status(manifest, root_path=package_dir, state_entry=state_entry)
+
+    receipt = build_capability_pack_hardening_receipt(
+        manifest,
+        governance_status=status,
+        compatibility={"seraph": "<2026.1.0", "current_version": "2026.4.10", "compatible": False},
+        lifecycle_plan={
+            "current_version": "2026.4.0",
+            "candidate_version": manifest.version,
+            "version_relation": "downgrade",
+            "package_changed": True,
+            "update_supported": True,
+            "current_location": "workspace",
+        },
+        diagnostics_summary={"degraded_connector_count": 1, "error_issue_count": 1},
+        permission_summary={"missing": {"tools": ["shell"], "execution_boundaries": ["filesystem"]}},
+    )
+
+    assert receipt["fail_closed"] is True
+    assert "compatibility_block" in receipt["risk_deltas"]
+    assert "permission_expansion_or_underdeclaration" in receipt["risk_deltas"]
+    assert "provider_or_pack_downgrade" in receipt["risk_deltas"]
+    assert "supply_chain_integrity_change" in receipt["risk_deltas"]
+    assert "extension_permission_creep" in receipt["negative_cases"]
+    assert "underdeclared_permissions" in receipt["negative_cases"]
+    assert "supply_chain_suspicion" in receipt["negative_cases"]
+    assert "rollback_need" in receipt["negative_cases"]
+    assert "trusted_supply_chain" in receipt["blocked_claims"]
+    assert receipt["operator_summary"].startswith("Pack transition is blocked")
 
 
 def test_invalid_signature_fails_closed_for_lifecycle_actions(tmp_path: Path):

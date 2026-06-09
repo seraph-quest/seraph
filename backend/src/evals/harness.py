@@ -42,6 +42,8 @@ from src.evals.benchmark_catalog import (
     benchmark_suite_scenarios,
 )
 from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
 )
@@ -13000,6 +13002,132 @@ async def _eval_operator_m9_governed_ecosystem_benchmark_surface_behavior() -> d
     }
 
 
+def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
+
+    receipts = build_governed_capability_pack_hardening_receipts()
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in receipts
+        if isinstance(receipt.get("scenario_id"), str)
+    }
+
+
+def _eval_capability_pack_review_receipt_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()["capability_pack_review_receipt_behavior"]
+    expected_fields = {"review_status", "signature_status", "risk_deltas", "rollback", "blocked_claims", "claim_boundary"}
+    _require_eval_contract(expected_fields <= set(receipt["receipt_fields"]), "Expected hardening receipt fields.")
+    return {
+        "receipt_fields_visible": expected_fields <= set(receipt["receipt_fields"]),
+        "operator_summary_visible": receipt["operator_summary_visible"] is True,
+        "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
+        "validation_surface_visible": "/api/extensions/validate" in receipt["operator_surfaces"],
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_capability_pack_compatibility_downgrade_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()[
+        "capability_pack_compatibility_downgrade_behavior"
+    ]
+    expected_cases = {"incompatible_pack_version", "provider_downgrade"}
+    expected_relations = {"new", "same", "upgrade", "downgrade"}
+    _require_eval_contract(expected_cases <= set(receipt["negative_cases"]), "Expected compatibility/downgrade cases.")
+    return {
+        "negative_cases_named": expected_cases <= set(receipt["negative_cases"]),
+        "version_relation_states_visible": expected_relations <= set(receipt["version_relation_states"]),
+        "compatibility_risk_delta_visible": "compatibility_block" in receipt["risk_deltas"],
+        "downgrade_risk_delta_visible": "provider_or_pack_downgrade" in receipt["risk_deltas"],
+        "provider_degradation_visible": "provider_runtime_degraded" in receipt["risk_deltas"],
+    }
+
+
+def _eval_capability_pack_permission_creep_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()["capability_pack_permission_creep_behavior"]
+    expected_cases = {"underdeclared_permissions", "extension_permission_creep"}
+    expected_claims = {"complete_permission_declaration", "reviewed_permission_envelope"}
+    _require_eval_contract(expected_cases <= set(receipt["negative_cases"]), "Expected permission creep cases.")
+    return {
+        "negative_cases_named": expected_cases <= set(receipt["negative_cases"]),
+        "blocked_claims_named": expected_claims <= set(receipt["blocked_claims"]),
+        "fail_closed_required": receipt["fail_closed_required"] is True,
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_capability_pack_supply_chain_suspicion_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()[
+        "capability_pack_supply_chain_suspicion_behavior"
+    ]
+    expected_cases = {"supply_chain_suspicion", "failed_update"}
+    expected_reasons = {"signature_missing", "signature_digest_mismatch", "signature_invalid", "review_stale", "revoked"}
+    _require_eval_contract(expected_cases <= set(receipt["negative_cases"]), "Expected supply-chain suspicion cases.")
+    return {
+        "negative_cases_named": expected_cases <= set(receipt["negative_cases"]),
+        "fail_closed_reasons_named": expected_reasons <= set(receipt["fail_closed_reasons"]),
+        "runtime_access_removed": receipt["runtime_access_removed"] is True,
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_capability_pack_rollback_ready_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()["capability_pack_rollback_ready_behavior"]
+    expected_actions = {"remove_new_pack", "restore_previous_workspace_pack"}
+    _require_eval_contract("rollback_need" in receipt["negative_cases"], "Expected rollback need case.")
+    return {
+        "rollback_need_named": "rollback_need" in receipt["negative_cases"],
+        "rollback_actions_visible": expected_actions <= set(receipt["rollback_actions"]),
+        "verified_pack_review_required": receipt["review_required_for_verified_pack"] is True,
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+async def _eval_operator_governed_capability_pack_hardening_surface_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import (
+        GOVERNED_CAPABILITY_PACK_HARDENING_CLAIM_BOUNDARY,
+        build_governed_capability_pack_hardening_report,
+    )
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="extensions",
+                description="Governed capability-pack hardening benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES
+        ],
+        duration_ms=len(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.extensions.benchmark._run_governed_capability_pack_hardening_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_governed_capability_pack_hardening_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
+        "operator_status_visible": (
+            payload["summary"]["operator_status"] == "governed_capability_pack_hardening_receipts_visible"
+        ),
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+        ),
+        "review_receipt_state_visible": (
+            payload["summary"]["review_receipt_state"] == "risk_delta_and_blocked_claim_receipts_visible"
+        ),
+        "rollback_state_visible": payload["summary"]["rollback_state"] == "rollback_availability_and_action_visible",
+        "failure_taxonomy_covers_issue_cases": len(payload["failure_taxonomy"]) >= 7,
+        "receipt_surfaces_visible": (
+            "/api/operator/governed-capability-pack-hardening" in payload["policy"]["receipt_surfaces"]
+            and "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+        ),
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == GOVERNED_CAPABILITY_PACK_HARDENING_CLAIM_BOUNDARY,
+        "receipt_count_matches": len(payload["hardening_receipts"]) == 6,
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -13026,6 +13154,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
     m9_governed_ecosystem_suite = next(
         item for item in suites if item["name"] == M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME
+    )
+    governed_capability_pack_hardening_suite = next(
+        item for item in suites if item["name"] == GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -13118,6 +13249,20 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "m9_governed_ecosystem_gate_required": (
             M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "governed_capability_pack_hardening_suite_present": (
+            "capability_pack_review_receipt_behavior"
+            in governed_capability_pack_hardening_suite["scenario_names"]
+        ),
+        "governed_capability_pack_hardening_suite_scenario_count_matches": (
+            governed_capability_pack_hardening_suite["scenario_count"]
+            == len(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+        ),
+        "governed_capability_pack_hardening_suite_axis_matches": (
+            governed_capability_pack_hardening_suite["benchmark_axis"] == "governed_capability_pack_hardening"
+        ),
+        "governed_capability_pack_hardening_gate_required": (
+            GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -15001,6 +15146,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="extensions",
         description="Operator surfaces expose the M9 governed ecosystem benchmark, policy, receipts, and claim boundary.",
         runner=_eval_operator_m9_governed_ecosystem_benchmark_surface_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_review_receipt_behavior",
+        category="extensions",
+        description="Capability-pack transitions expose review, risk-delta, rollback, blocked-claim, and claim-boundary receipts.",
+        runner=_eval_capability_pack_review_receipt_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_compatibility_downgrade_behavior",
+        category="extensions",
+        description="Capability-pack hardening names incompatible-version and downgrade risk before lifecycle mutation.",
+        runner=_eval_capability_pack_compatibility_downgrade_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_permission_creep_behavior",
+        category="extensions",
+        description="Capability-pack hardening blocks underdeclared permissions and permission drift claims.",
+        runner=_eval_capability_pack_permission_creep_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_supply_chain_suspicion_behavior",
+        category="extensions",
+        description="Capability-pack hardening fails closed for signature, digest, key, revocation, and failed-update suspicion.",
+        runner=_eval_capability_pack_supply_chain_suspicion_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_rollback_ready_behavior",
+        category="extensions",
+        description="Capability-pack hardening exposes rollback availability and operator action for risky pack changes.",
+        runner=_eval_capability_pack_rollback_ready_behavior,
+    ),
+    EvalScenario(
+        name="operator_governed_capability_pack_hardening_surface_behavior",
+        category="extensions",
+        description="Operator surfaces expose governed capability-pack hardening policy, receipts, taxonomy, and claim boundary.",
+        runner=_eval_operator_governed_capability_pack_hardening_surface_behavior,
     ),
     EvalScenario(
         name="guardian_feedback_loop",

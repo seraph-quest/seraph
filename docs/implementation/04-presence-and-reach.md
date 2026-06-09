@@ -69,7 +69,8 @@
 - [x] the cockpit now exposes a first actionable desktop shell surface for pending alerts, queued items, and recent interventions
 - [x] native continuation payloads can now resume work back into the cockpit instead of only showing a passive notification
 - [x] M4 benchmark proof names identity, pairing, revocation, mutation, external-continuity, and abuse/failure review boundaries for channel/device reach
-- [ ] live broad mobile or messaging transport execution is not claimed by this proof lane
+- [x] guardian-safe multimodal and voice now has a dedicated proof gate: `guardian_safe_multimodal_voice` and `/api/operator/guardian-safe-multimodal-voice` require voice, TTS/STT, browser vision, image/media analysis, and media delivery families to expose owner, trust, permissions, capture/provider/privacy receipts, continuity, correction/deletion, revocation, and guardian-value reasons before being treated as reach
+- [ ] live broad mobile, messaging, voice, STT/TTS, or multimodal transport execution is not claimed by this proof lane
 
 ## Batch I Branch Review Log
 

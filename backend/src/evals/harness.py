@@ -61,6 +61,12 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
+from src.guardian.multimodal_voice import (
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+    build_guardian_safe_multimodal_voice_receipts,
+)
 from src.memory.provider_quality_gate import (
     MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
     MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME,
@@ -12878,6 +12884,161 @@ def _eval_m9_manifest_governance_behavior() -> dict[str, Any]:
     }
 
 
+def _multimodal_voice_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in build_guardian_safe_multimodal_voice_receipts()
+    }
+
+
+def _eval_multimodal_voice_capability_governance_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_capability_governance_behavior"]
+    families = receipt["families"]
+    required_fields = {
+        "family",
+        "owner",
+        "trust_level",
+        "permissions",
+        "data_access",
+        "mutation_rights",
+        "revocation_path",
+    }
+    complete = all(required_fields <= set(family) for family in families)
+    _require_eval_contract(complete, "Expected every voice/media family to declare governance fields.")
+    return {
+        "family_count": receipt["family_count"],
+        "required_fields_present": complete,
+        "all_families_have_permissions": all(bool(family["permissions"]) for family in families),
+        "all_families_have_revocation": all(bool(family["revocation_path"]) for family in families),
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_transcript_audit_privacy_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_transcript_audit_privacy_behavior"]
+    expected_fields = {
+        "captured_surface",
+        "destination",
+        "provider_model",
+        "transcript_or_summary_id",
+        "memory_context_used",
+        "privacy_boundary",
+        "retention",
+        "correction_path",
+        "deletion_path",
+    }
+    _require_eval_contract(
+        expected_fields <= set(receipt["operator_receipt_fields"]),
+        "Expected operator receipt to expose capture, provider, privacy, correction, and deletion fields.",
+    )
+    return {
+        "operator_receipt_fields_visible": expected_fields <= set(receipt["operator_receipt_fields"]),
+        "capture_receipt_count": len(receipt["capture_receipts"]),
+        "privacy_boundary_state": receipt["privacy_boundary_state"],
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_continuity_approval_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_continuity_approval_behavior"]
+    expected_preserves = {"thread", "memory_context", "approval_context", "workflow_context"}
+    expected_approval = {"external_send", "memory_import", "mutation"}
+    _require_eval_contract(
+        expected_preserves <= set(receipt["preserves"]),
+        "Expected voice/media continuity receipt to preserve thread, memory, approval, and workflow context.",
+    )
+    return {
+        "preserves_context": expected_preserves <= set(receipt["preserves"]),
+        "approval_required_for_mutations": expected_approval <= set(receipt["approval_required_for"]),
+        "continuity_contract": receipt["continuity_contract"],
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_exposure_revocation_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_exposure_revocation_behavior"]
+    expected_blocked = {
+        "credential_scope",
+        "screen_capture_scope",
+        "file_read_scope",
+        "camera_scope",
+        "microphone_scope",
+        "network_destination_scope",
+    }
+    _require_eval_contract(
+        expected_blocked <= set(receipt["blocked_silent_expansions"]),
+        "Expected voice/media proof to block silent exposure expansion.",
+    )
+    return {
+        "blocked_silent_expansions": expected_blocked <= set(receipt["blocked_silent_expansions"]),
+        "revocation_state": receipt["revocation_state"],
+        "fails_closed_after_revoke": receipt["revocation_state"] == "capability_family_fails_closed_after_revoke",
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_guardian_value_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_guardian_value_behavior"]
+    expected_reasons = {"timing", "accessibility", "situational_awareness", "intervention_quality"}
+    _require_eval_contract(
+        expected_reasons <= set(receipt["accepted_value_reasons"]),
+        "Expected guardian-value reasons for voice/media use.",
+    )
+    return {
+        "accepted_value_reasons": expected_reasons <= set(receipt["accepted_value_reasons"]),
+        "raw_feature_presence_rejected": receipt["rejected_reason"] == "raw_feature_presence",
+        "family_value_reason_count": len(receipt["family_value_reasons"]),
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+async def _eval_operator_guardian_safe_multimodal_voice_surface_behavior() -> dict[str, Any]:
+    from src.guardian.multimodal_voice import build_guardian_safe_multimodal_voice_report
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="guardian",
+                description="Guardian-safe multimodal and voice benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
+        ],
+        duration_ms=len(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.guardian.multimodal_voice._run_guardian_safe_multimodal_voice_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_guardian_safe_multimodal_voice_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+        "operator_status_visible": (
+            payload["summary"]["operator_status"] == "guardian_safe_voice_media_receipts_visible"
+        ),
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+        ),
+        "benchmark_posture_green": (
+            payload["summary"]["benchmark_posture"]
+            == "guardian_safe_multimodal_voice_ci_gated_operator_visible"
+        ),
+        "capability_family_count": len(payload["capability_families"]),
+        "governance_receipt_count": len(payload["governance_receipts"]),
+        "receipt_surface_visible": (
+            "/api/operator/guardian-safe-multimodal-voice" in payload["policy"]["receipt_surfaces"]
+        ),
+        "benchmark_proof_surface_visible": (
+            "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+        ),
+        "claim_boundary_visible": (
+            payload["policy"]["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY
+        ),
+    }
+
+
 def _eval_m9_lifecycle_review_gate_behavior() -> dict[str, Any]:
     receipt = _m9_receipts_by_scenario()["m9_lifecycle_review_gate_behavior"]
     actions = set(receipt["actions"])
@@ -13020,6 +13181,9 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     m7_operator_cockpit_suite = next(item for item in suites if item["name"] == M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME)
     cockpit_efficiency_suite = next(item for item in suites if item["name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME)
     m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
+    multimodal_voice_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME
+    )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -13089,6 +13253,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "m8_guardian_brain_suite_axis_matches": (
             m8_guardian_brain_suite["benchmark_axis"] == "m8_guardian_intervention_quality"
+        ),
+        "guardian_safe_multimodal_voice_suite_present": (
+            "multimodal_voice_capability_governance_behavior" in multimodal_voice_suite["scenario_names"]
+        ),
+        "guardian_safe_multimodal_voice_suite_scenario_count_matches": (
+            multimodal_voice_suite["scenario_count"] == len(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+        ),
+        "guardian_safe_multimodal_voice_suite_axis_matches": (
+            multimodal_voice_suite["benchmark_axis"] == "guardian_safe_multimodal_voice"
+        ),
+        "guardian_safe_multimodal_voice_gate_required": (
+            GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -14965,6 +15141,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Operator surfaces expose the M8 guardian intervention benchmark, decision receipts, score labels, and claim boundary.",
         runner=_eval_operator_m8_guardian_brain_surface_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_capability_governance_behavior",
+        category="guardian",
+        description="Voice and media capability families declare owner, trust, permissions, data access, mutation rights, and revocation paths.",
+        runner=_eval_multimodal_voice_capability_governance_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_transcript_audit_privacy_behavior",
+        category="guardian",
+        description="Voice and media receipts expose capture, provider/model, privacy, retention, correction, and deletion posture.",
+        runner=_eval_multimodal_voice_transcript_audit_privacy_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_continuity_approval_behavior",
+        category="guardian",
+        description="Voice and media flows preserve thread, memory, approval, and workflow continuity before mutation or import.",
+        runner=_eval_multimodal_voice_continuity_approval_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_exposure_revocation_behavior",
+        category="guardian",
+        description="Browser vision and media analysis block silent exposure expansion and fail closed after revocation.",
+        runner=_eval_multimodal_voice_exposure_revocation_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_guardian_value_behavior",
+        category="guardian",
+        description="Voice and media require a real guardian-value reason instead of raw feature presence.",
+        runner=_eval_multimodal_voice_guardian_value_behavior,
+    ),
+    EvalScenario(
+        name="operator_guardian_safe_multimodal_voice_surface_behavior",
+        category="guardian",
+        description="Operator surfaces expose the guardian-safe multimodal and voice benchmark, policy, receipts, and claim boundary.",
+        runner=_eval_operator_guardian_safe_multimodal_voice_surface_behavior,
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

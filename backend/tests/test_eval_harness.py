@@ -10,6 +10,7 @@ from config.settings import settings
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
 from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
+from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -205,7 +206,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 20
+    assert details["suite_count"] == 21
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -235,6 +236,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m8_guardian_brain_suite_present"] is True
     assert details["m8_guardian_brain_suite_scenario_count_matches"] is True
     assert details["m8_guardian_brain_suite_axis_matches"] is True
+    assert details["guardian_safe_multimodal_voice_suite_present"] is True
+    assert details["guardian_safe_multimodal_voice_suite_scenario_count_matches"] is True
+    assert details["guardian_safe_multimodal_voice_suite_axis_matches"] is True
+    assert details["guardian_safe_multimodal_voice_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -253,6 +258,15 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["gate_requires_review"] is True
     assert details["gate_blocks_constraint_failure"] is True
     assert details["proof_contract"] == "deterministic_benchmark_suites_plus_review_receipts"
+
+
+def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_safe_multimodal_voice"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():

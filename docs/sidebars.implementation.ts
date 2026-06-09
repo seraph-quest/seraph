@@ -32,6 +32,7 @@ const sidebars: SidebarsConfig = {
         'benchmark-status',
         'superiority-delivery',
         'world-class-strategy-delivery',
+        'agent-parity-execution-roadmap',
       ],
     },
   ],

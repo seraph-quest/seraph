@@ -212,7 +212,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 26
+    assert details["suite_count"] == len(available_benchmark_suites())
     assert details["production_parity_readiness_suite_present"] is True
     assert details["production_parity_readiness_suite_scenario_count_matches"] is True
     assert details["production_parity_readiness_suite_axis_matches"] is True
@@ -236,6 +236,14 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m5_suite_scenario_count_matches"] is True
     assert details["trust_suite_present"] is True
     assert details["secure_host_suite_present"] is True
+    assert details["production_secure_host_hardening_suite_present"] is True
+    assert details["production_secure_host_hardening_suite_scenario_count_matches"] is True
+    assert details["production_secure_host_hardening_suite_axis_matches"] is True
+    assert details["production_secure_host_hardening_gate_required"] is True
+    assert details["secure_host_live_isolation_v2_suite_present"] is True
+    assert details["secure_host_live_isolation_v2_suite_scenario_count_matches"] is True
+    assert details["secure_host_live_isolation_v2_suite_axis_matches"] is True
+    assert details["secure_host_live_isolation_v2_gate_required"] is True
     assert details["computer_suite_present"] is True
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
@@ -1407,6 +1415,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
                 "delegation_secret_boundary_behavior",
+                "secret_ref_egress_boundary_behavior",
+                "secure_host_secret_ref_fail_closed_behavior",
                 "delegated_tool_workflow_behavior",
                 "delegated_tool_workflow_degraded_behavior",
                 "workflow_composition_behavior",
@@ -1924,6 +1934,14 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_result"] == "vault handled"
     assert details_by_name["delegation_secret_boundary_behavior"]["memory_task_result"] == "memory handled"
     assert details_by_name["delegation_secret_boundary_behavior"]["explicit_vault_alias_result"] == "vault handled"
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["allowlisted_header_resolves"] is True
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["allowlisted_result_redacted"] is True
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["body_field_blocked"] is True
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["missing_egress_allowlist_blocked"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["allowlisted_destination_resolves"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["allowlisted_result_redacted"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["non_allowlisted_destination_blocked"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["cross_session_secret_ref_blocked"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_web_researcher"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_file_worker"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["tool_steps_present"] == {

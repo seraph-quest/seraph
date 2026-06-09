@@ -1702,14 +1702,19 @@ def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
                     "transport": "https",
                     "allowed_hosts": list(allowed_hosts),
                 }
+            self.observed_authorization = None
 
         def __call__(self, sanitize_inputs_outputs: bool = False, **kwargs):
-            return {"kwargs": kwargs}
+            headers = kwargs.get("headers") if isinstance(kwargs, dict) else None
+            if isinstance(headers, dict):
+                self.observed_authorization = headers.get("Authorization")
+            return {"status": "sent", "headers": {"Authorization": "[REDACTED]"}}
 
     context_tokens = set_runtime_context("session-1", "high_risk")
     try:
         secret_ref = issue_secret_ref("session-1", "super-secret-token")
-        allowlisted_tool = SecretRefResolvingTool(_EvalMCPTool("mcp_allowlisted", ["api.example.com"]))
+        raw_allowlisted_tool = _EvalMCPTool("mcp_allowlisted", ["api.example.com"])
+        allowlisted_tool = SecretRefResolvingTool(raw_allowlisted_tool)
         unallowlisted_tool = SecretRefResolvingTool(_EvalMCPTool("mcp_unallowlisted", None))
 
         allowlisted_result = allowlisted_tool(headers={"Authorization": f"Bearer {secret_ref}"})
@@ -1726,9 +1731,8 @@ def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
             allowlist_error = str(exc)
 
         return {
-            "allowlisted_header_resolves": (
-                allowlisted_result["kwargs"]["headers"]["Authorization"] == "Bearer super-secret-token"
-            ),
+            "allowlisted_header_resolves": raw_allowlisted_tool.observed_authorization == "Bearer super-secret-token",
+            "allowlisted_result_redacted": "super-secret-token" not in str(allowlisted_result),
             "body_field_blocked": "allowlisted fields" in body_error,
             "missing_egress_allowlist_blocked": "credential egress allowlist" in allowlist_error,
         }
@@ -1754,14 +1758,19 @@ def _eval_secure_host_secret_ref_fail_closed_behavior() -> dict[str, Any]:
                     "allowed_hosts": ["api.example.com"],
                 },
             }
+            self.observed_authorization = None
 
         def __call__(self, sanitize_inputs_outputs: bool = False, **kwargs):
-            return {"kwargs": kwargs}
+            headers = kwargs.get("headers") if isinstance(kwargs, dict) else None
+            if isinstance(headers, dict):
+                self.observed_authorization = headers.get("Authorization")
+            return {"status": "sent", "headers": {"Authorization": "[REDACTED]"}}
 
     context_tokens = set_runtime_context("secure-host-session", "high_risk")
     try:
         secret_ref = issue_secret_ref("secure-host-session", "secure-host-token")
-        wrapped = SecretRefResolvingTool(_EvalMCPTool())
+        raw_tool = _EvalMCPTool()
+        wrapped = SecretRefResolvingTool(raw_tool)
         allowed = wrapped(
             url="https://api.example.com/v1",
             headers={"Authorization": f"Bearer {secret_ref}"},
@@ -1791,7 +1800,8 @@ def _eval_secure_host_secret_ref_fail_closed_behavior() -> dict[str, Any]:
         reset_runtime_context(other_tokens)
 
     return {
-        "allowlisted_destination_resolves": allowed["kwargs"]["headers"]["Authorization"] == "Bearer secure-host-token",
+        "allowlisted_destination_resolves": raw_tool.observed_authorization == "Bearer secure-host-token",
+        "allowlisted_result_redacted": "secure-host-token" not in str(allowed),
         "non_allowlisted_destination_blocked": "non-allowlisted destination host" in evil_host_error,
         "cross_session_secret_ref_blocked": "another session" in cross_session_error,
     }
@@ -13865,6 +13875,12 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
     secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
+    production_secure_host_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_SECURE_HOST_HARDENING_SUITE_NAME
+    )
+    secure_host_live_isolation_v2_suite = next(
+        item for item in suites if item["name"] == SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SUITE_NAME
+    )
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     one_reach_channel_suite = next(item for item in suites if item["name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME)
@@ -13942,6 +13958,32 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "m5_suite_scenario_count_matches": m5_suite["scenario_count"] == len(M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES),
         "trust_suite_present": "secret_ref_egress_boundary_behavior" in trust_suite["scenario_names"],
         "secure_host_suite_present": "secure_host_secret_ref_fail_closed_behavior" in secure_host_suite["scenario_names"],
+        "production_secure_host_hardening_suite_present": (
+            "production_secure_host_claim_boundary_behavior" in production_secure_host_suite["scenario_names"]
+        ),
+        "production_secure_host_hardening_suite_scenario_count_matches": (
+            production_secure_host_suite["scenario_count"] == len(PRODUCTION_SECURE_HOST_HARDENING_SCENARIO_NAMES)
+        ),
+        "production_secure_host_hardening_suite_axis_matches": (
+            production_secure_host_suite["benchmark_axis"] == "production_secure_host_hardening"
+        ),
+        "production_secure_host_hardening_gate_required": (
+            PRODUCTION_SECURE_HOST_HARDENING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "secure_host_live_isolation_v2_suite_present": (
+            "secure_host_live_secret_redaction_replay_behavior"
+            in secure_host_live_isolation_v2_suite["scenario_names"]
+        ),
+        "secure_host_live_isolation_v2_suite_scenario_count_matches": (
+            secure_host_live_isolation_v2_suite["scenario_count"]
+            == len(SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SCENARIO_NAMES)
+        ),
+        "secure_host_live_isolation_v2_suite_axis_matches": (
+            secure_host_live_isolation_v2_suite["benchmark_axis"] == "secure_capability_host_live_isolation_v2"
+        ),
+        "secure_host_live_isolation_v2_gate_required": (
+            SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
         "channels_suite_present": "device_pairing_revocation_fail_closed" in channels_suite["scenario_names"],
         "channels_suite_scenario_count_matches": (

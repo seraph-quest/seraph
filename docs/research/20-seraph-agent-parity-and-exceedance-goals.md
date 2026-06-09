@@ -308,6 +308,22 @@ This goal document is complete as a strategy artifact when:
 
 Post-PR #473 status: this strategy artifact is complete, and the aggregate proof train it spawned is complete. That does not complete the full product ambition. The next work remains production-grade durability, hardened trust boundaries, broader live reach, stronger live-learning quality, and denser operator steering over long-running work.
 
+## Production-Grade Execution Roadmap
+
+The GitHub Project now tracks the production-grade parity train through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475) and huge batch issues [#476](https://github.com/seraph-quest/seraph/issues/476)-[#482](https://github.com/seraph-quest/seraph/issues/482). That board-backed roadmap is an execution commitment, not evidence that production parity has shipped.
+
+The batch order is:
+
+1. readiness, claim gates, and integration proof harness
+2. secure-host architectural isolation and privileged-path hardening
+3. production durable orchestration and multi-agent workflow control
+4. broad live reach, browser reliability, and voice/media runtime hardening
+5. live guardian learning, intervention quality, and memory-provider outcome proof
+6. marketplace-grade capability lifecycle, review, rollback, and ecosystem maturity
+7. production operator cockpit control and end-to-end parity verification
+
+This roadmap preserves the Seraph vision boundary: Seraph should exceed reference agents through guardian memory, restraint, trust, operator legibility, and recovery rather than by becoming an unrestricted plugin farm, raw channel gateway, or terminal-only coding shell.
+
 ## Team Review Record
 
 Lead plan:

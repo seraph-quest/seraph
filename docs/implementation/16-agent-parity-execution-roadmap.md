@@ -72,6 +72,22 @@ Post-merge interpretation:
 - The child issue `PR` and `Code Review` fields intentionally do not mirror the aggregate PR; the parent hub owned PR [#473](https://github.com/seraph-quest/seraph/pull/473).
 - Stale reach PR [#462](https://github.com/seraph-quest/seraph/pull/462) was closed as superseded after [#438](https://github.com/seraph-quest/seraph/issues/438) was closed through the aggregate proof-train receipt. Its Project item `PVTI_lADOD4qAvs4BS6n3zgrw9ec` is now `Status=Done`, `PR=Merged`, and `Code Review=Passed` because the accepted reach proof landed through PR #473, not because PR #462 merged.
 
+## Production-Grade Parity Execution Train
+
+The proof train is complete, but the production-grade parity train is now tracked in GitHub rather than in this document as a live queue. Parent issue [#475](https://github.com/seraph-quest/seraph/issues/475) owns the execution train and Project state. The issue bodies and Project fields are the active work-tracking layer; this section records the durable dependency order and proof intent.
+
+| Order | Issue | Production-grade gap | Proof gate |
+| ---: | --- | --- | --- |
+| 1 | [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476) | Shared readiness rubric, claim gates, duplicate-issue guardrails, and aggregate proof contracts before implementation claims start. | `production_parity_readiness`, claim-ledger check, Project receipt, duplicate scan. |
+| 2 | [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477) | Live privileged-path hardening beyond deterministic secure-host choke-point proof. | `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, expanded trust-boundary receipts. |
+| 3 | [#478 Batch BX: production durable orchestration and multi-agent workflow control](https://github.com/seraph-quest/seraph/issues/478) | Production long-running orchestration beyond the v1 durable state kernel. | `production_durable_orchestration`, `durable_workflow_engine_v2`, cockpit recovery receipts. |
+| 4 | [#479 Batch BY: broad live reach, browser reliability, and voice/media runtime hardening](https://github.com/seraph-quest/seraph/issues/479) | Live channel breadth, browser/computer-use reliability, and guarded voice/media runtime beyond canary proof. | `production_reach_channel_hardening`, `browser_computer_use_reliability_v2`, `guardian_safe_voice_media_runtime`. |
+| 5 | [#480 Batch BZ: live guardian learning, intervention quality, and memory-provider outcome proof](https://github.com/seraph-quest/seraph/issues/480) | Longitudinal outcome learning and provider maturity beyond deterministic arbitration/provider-quality gates. | `live_guardian_learning_quality`, `guardian_intervention_outcome_cohorts`, `memory_provider_ecosystem_maturity_v1`. |
+| 6 | [#481 Batch CA: marketplace-grade capability lifecycle, review, rollback, and ecosystem maturity](https://github.com/seraph-quest/seraph/issues/481) | Marketplace-grade install/update/downgrade/disable/rollback/review maturity beyond local governed-pack proof. | `marketplace_grade_capability_lifecycle`, governed capability hardening v2, lifecycle receipts. |
+| 7 | [#482 Batch CB: production operator cockpit control and end-to-end parity verification](https://github.com/seraph-quest/seraph/issues/482) | Dense long-work operator control and final train verification across the production parity batches. | `production_operator_control_parity`, aggregate `production_parity_train`, cockpit no-regression proof. |
+
+Blocked claim boundary for the train: no issue or PR may claim full parity, superiority, production readiness, secure/private by default, IronClaw-class secure execution, solved durable workflows, broad OpenClaw-class reach, voice/multimodal parity, production-secure marketplace, or exceeded reference systems unless the claim ledger permits the exact wording after merged proof.
+
 ## Roadmap Phases
 
 | Phase | Batch | Implementation goal | Proof gate | Dependency rule | Issue anchors |

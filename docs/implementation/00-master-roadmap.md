@@ -144,14 +144,15 @@ This stack records the proof-train sequence completed by PR [#473](https://githu
 
 ## Next Strategic Production-Parity Batches
 
-The next strategic work is no longer proof-train bookkeeping. It should move only evidence-backed follow-ons into production-grade durability, secure execution hardening, broader reach hardening, live-learning quality, long-work operator control, and marketplace-grade install/update/rollback ergonomics.
+The next strategic work is no longer proof-train bookkeeping. It should move only evidence-backed follow-ons into production-grade durability, secure execution hardening, broader reach hardening, live-learning quality, long-work operator control, and marketplace-grade install/update/rollback ergonomics. The GitHub Project owns active state for this train through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475); this section records durable sequencing, not live queue status.
 
-1. Production durable orchestration beyond the v1 state kernel.
-2. Secure-host architectural isolation and privileged-path hardening beyond deterministic choke-point proof.
-3. Broad reach and channel hardening beyond the native-notification canary.
-4. Live long-horizon guardian learning quality beyond deterministic arbitration receipts.
-5. Dense long-running operator debugging and recovery controls.
-6. Marketplace-grade capability install, update, downgrade, rollback, and review ergonomics.
+1. [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476).
+2. [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477).
+3. [#478 Batch BX: production durable orchestration and multi-agent workflow control](https://github.com/seraph-quest/seraph/issues/478).
+4. [#479 Batch BY: broad live reach, browser reliability, and voice/media runtime hardening](https://github.com/seraph-quest/seraph/issues/479).
+5. [#480 Batch BZ: live guardian learning, intervention quality, and memory-provider outcome proof](https://github.com/seraph-quest/seraph/issues/480).
+6. [#481 Batch CA: marketplace-grade capability lifecycle, review, rollback, and ecosystem maturity](https://github.com/seraph-quest/seraph/issues/481).
+7. [#482 Batch CB: production operator cockpit control and end-to-end parity verification](https://github.com/seraph-quest/seraph/issues/482).
 
 ## Completed 10-PR Batches
 

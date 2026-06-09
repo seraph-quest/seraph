@@ -612,6 +612,35 @@ def test_run_benchmark_suites_executes_secure_capability_host_suite():
     }
 
 
+def test_run_benchmark_suites_executes_production_secure_host_hardening_suite():
+    summary = asyncio.run(run_benchmark_suites(["production_secure_host_hardening"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "production_secure_host_batch_contract_behavior",
+        "production_secure_host_receipt_schema_behavior",
+        "production_secure_host_claim_boundary_behavior",
+        "operator_production_secure_host_hardening_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_secure_capability_host_live_isolation_v2_suite():
+    summary = asyncio.run(run_benchmark_suites(["secure_capability_host_live_isolation_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "secure_host_live_secret_redaction_replay_behavior",
+        "secure_host_live_browser_recovery_partition_behavior",
+        "secure_host_live_private_network_egress_behavior",
+        "secure_host_live_extension_revocation_behavior",
+        "secure_host_live_workflow_replay_trust_drift_behavior",
+    }
+
+
 def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_secure_capability_host_benchmark_surface_behavior"]))
 
@@ -632,6 +661,25 @@ def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval
     assert details["receipt_surface_completeness_visible"] is True
     assert details["claim_boundary_visible"] is True
     assert details["receipt_surfaces_visible"] is True
+
+
+def test_operator_production_secure_host_hardening_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_production_secure_host_hardening_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["live_isolation_state_visible"] is True
+    assert details["browser_recovery_partition_state_visible"] is True
+    assert details["private_network_egress_state_visible"] is True
+    assert details["extension_revocation_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["dedicated_surface_visible"] is True
+    assert details["failure_report_empty_when_healthy"] is True
 
 
 def test_operator_m6_memory_superiority_benchmark_surface_behavior_runtime_eval_details():
@@ -1256,6 +1304,8 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
+    assert "production_secure_host_hardening" in captured.out
+    assert "secure_capability_host_live_isolation_v2" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "one_excellent_reach_channel_canary" in captured.out
@@ -1285,6 +1335,8 @@ def test_main_lists_available_benchmark_suites(capsys):
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",
         "secure_capability_host",
+        "production_secure_host_hardening",
+        "secure_capability_host_live_isolation_v2",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

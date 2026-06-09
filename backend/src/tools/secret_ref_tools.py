@@ -14,7 +14,8 @@ from src.tools.policy import (
 )
 from src.tools.vault_tools import _log_secret_event, _run
 from src.vault.refs import _REF_PREFIX
-from src.vault.refs import issue_secret_ref, resolve_secret_refs
+from src.security.secure_host import redact_secret_values_from_payload
+from src.vault.refs import issue_secret_ref, resolve_secret_refs_with_values
 from src.vault.repository import vault_repository
 
 
@@ -86,18 +87,28 @@ class SecretRefResolvingTool(Tool):
                         f"Tool '{self.name}' cannot receive secret references for non-allowlisted destination host(s): "
                         f"{', '.join(blocked_hosts)}."
                     )
-        resolved_invocation = {
-            key: (
-                resolve_secret_refs(value, session_id)
-                if key in secret_ref_fields
-                else value
-            )
-            for key, value in invocation.items()
-        }
-        return self.wrapped_tool(
+        resolved_invocation: dict[str, object] = {}
+        resolved_secret_values: list[str] = []
+        for key, value in invocation.items():
+            if key in secret_ref_fields:
+                resolved_value, secret_values = resolve_secret_refs_with_values(value, session_id)
+                resolved_invocation[key] = resolved_value
+                resolved_secret_values.extend(secret_values)
+            else:
+                resolved_invocation[key] = value
+
+        result = self.wrapped_tool(
             sanitize_inputs_outputs=sanitize_inputs_outputs,
             **resolved_invocation,
         )
+        if resolved_secret_values:
+            _redacted, leaked = redact_secret_values_from_payload(result, resolved_secret_values)
+            if leaked:
+                raise ValueError(
+                    f"Tool '{self.name}' returned resolved secret material; "
+                    "redaction failure blocked the result."
+                )
+        return result
 
     def get_audit_result_payload(self, arguments, result):
         hook = getattr(self.wrapped_tool, "get_audit_result_payload", None)

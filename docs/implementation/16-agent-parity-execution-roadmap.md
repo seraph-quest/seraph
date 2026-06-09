@@ -4,12 +4,15 @@ title: 16. Agent Parity Execution Roadmap
 
 # 16. Agent Parity Execution Roadmap
 
-## Status On `develop`
+## Status For `develop`
+
+On an open feature branch, checked items below describe the intended post-merge `develop` state for that branch. Merged PR links remain the authoritative evidence for items that already landed.
 
 - [x] The aggregate agent-parity proof train from [#468](https://github.com/seraph-quest/seraph/issues/468) landed on `develop` through merged PR [#473](https://github.com/seraph-quest/seraph/pull/473) on June 9, 2026.
 - [x] The strategy artifact in [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals) is complete as the target, proof-gate, and claim-boundary map.
 - [x] The proof train gives Seraph deterministic parity-floor coverage for the named Hermes/OpenClaw/IronClaw pressure areas: replay, cockpit operator efficiency, memory-provider quality, workflow endurance, durable workflow state v1, one reach canary, guardian learning arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice proof.
-- [ ] The broader product parity and targeted exceedance goal is not fully complete on `develop`: production-grade durable orchestration, deeper execution isolation, broader daily-life reach, stronger live long-horizon learning, richer operator debugging, and marketplace-grade ecosystem maturity remain real gaps.
+- [x] Batch BW adds a bounded secure-host hardening proof gate with `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, and `/api/operator/secure-capability-host-hardening` receipts for privileged-path redaction, replay, partitioning, egress, revocation, trust drift, blocked claims, and recovery actions.
+- [ ] The broader product parity and targeted exceedance goal is not fully complete on `develop`: production-grade durable orchestration, broader daily-life reach, stronger live long-horizon learning, richer operator debugging, marketplace-grade ecosystem maturity, and broader browser/computer-use reliability remain real gaps.
 - [ ] Seraph still must not claim full parity, superiority, production readiness, broad security, or IronClaw-class secure execution unless [19. Strategy Claim Ledger](/research/strategy-claim-ledger) permits the exact wording.
 
 ## Paired Research
@@ -79,7 +82,7 @@ The proof train is complete, but the production-grade parity train is now tracke
 | Order | Issue | Production-grade gap | Proof gate |
 | ---: | --- | --- | --- |
 | 1 | [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476) | Shared readiness rubric, claim gates, duplicate-issue guardrails, and aggregate proof contracts before implementation claims start. | `production_parity_readiness`, `/api/operator/production-parity-readiness`, claim-ledger check, Project receipt, duplicate scan. |
-| 2 | [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477) | Live privileged-path hardening beyond deterministic secure-host choke-point proof. | `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, expanded trust-boundary receipts. |
+| 2 | [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477) | Live privileged-path hardening beyond deterministic secure-host choke-point proof, covering secret replay/redaction, browser recovery partitioning, private-network egress, extension revocation, workflow/provider replay trust drift, blocked claims, and recovery actions. | `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, `/api/operator/secure-capability-host-hardening`, expanded trust-boundary receipts. |
 | 3 | [#478 Batch BX: production durable orchestration and multi-agent workflow control](https://github.com/seraph-quest/seraph/issues/478) | Production long-running orchestration beyond the v1 durable state kernel. | `production_durable_orchestration`, `durable_workflow_engine_v2`, cockpit recovery receipts. |
 | 4 | [#479 Batch BY: broad live reach, browser reliability, and voice/media runtime hardening](https://github.com/seraph-quest/seraph/issues/479) | Live channel breadth, browser/computer-use reliability, and guarded voice/media runtime beyond canary proof. | `production_reach_channel_hardening`, `browser_computer_use_reliability_v2`, `guardian_safe_voice_media_runtime`. |
 | 5 | [#480 Batch BZ: live guardian learning, intervention quality, and memory-provider outcome proof](https://github.com/seraph-quest/seraph/issues/480) | Longitudinal outcome learning and provider maturity beyond deterministic arbitration/provider-quality gates. | `live_guardian_learning_quality`, `guardian_intervention_outcome_cohorts`, `memory_provider_ecosystem_maturity_v1`. |
@@ -89,6 +92,8 @@ The proof train is complete, but the production-grade parity train is now tracke
 Blocked claim boundary for the train: no issue or PR may claim full parity, superiority, production readiness, secure/private by default, IronClaw-class secure execution, solved durable workflows, broad OpenClaw-class reach, voice/multimodal parity, production-secure marketplace, or exceeded reference systems unless the claim ledger permits the exact wording after merged proof.
 
 Batch BV readiness proof is intentionally a contract layer. It proves that later batches have named proof paths, validation classes, operator receipt targets, negative-case requirements, review-role requirements, duplicate-scope guardrails, Project-field requirements, current-source requirements for competitor-dependent claims, receipt-schema fields, and blocked claim wording. It does not prove that the later production-grade implementations are complete.
+
+Batch BW is the first implementation proof gate after readiness. It makes the secure-host hardening receipts operator-visible through `/api/operator/secure-capability-host-hardening` and aggregate benchmark proof, but the claim boundary remains unchanged: no broad secure/private-by-default, production-ready, IronClaw-class secure execution, TEE/Wasm/container isolation, full parity, or exceeded-reference-system wording is allowed without later proof and claim-ledger permission.
 
 ## Roadmap Phases
 

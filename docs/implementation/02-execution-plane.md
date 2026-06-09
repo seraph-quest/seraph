@@ -76,7 +76,7 @@
 ## Still To Do On `develop`
 
 - [ ] richer live-provider browser/computer-use depth beyond the deterministic extract/html/screenshot proof and current local provider model
-- [ ] deeper host/container-grade isolation beyond disposable worker roots, session-scoped process handles, and sandbox timeout/nonzero receipts
+- [ ] deeper host/container-grade isolation beyond disposable worker roots, session-scoped process handles, sandbox timeout/nonzero receipts, and Batch BW secure-host hardening receipts
 - [ ] production-grade durable orchestration beyond the v1 state kernel, including broader crash/restart replay across arbitrary tools, live trigger executors, and exactly-once external scheduling semantics
 - [ ] broader external system leverage without weakening trust boundaries or the new credential-egress contract
 

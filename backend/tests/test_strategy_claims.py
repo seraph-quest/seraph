@@ -40,6 +40,23 @@ def test_strategy_claim_gate_rejects_unlinked_high_risk_claim(tmp_path: Path) ->
     assert "M0 claim ledger" in result.stderr
 
 
+def test_strategy_claim_gate_covers_batch_bw_docs_and_scl_014() -> None:
+    script = (ROOT / "scripts/check_strategy_claims.py").read_text(encoding="utf-8")
+    ledger = _read_doc("docs/research/19-strategy-claim-ledger.md")
+    parity_goals = _read_doc("docs/research/20-seraph-agent-parity-and-exceedance-goals.md")
+    roadmap = _read_doc("docs/implementation/16-agent-parity-execution-roadmap.md")
+    status = _read_doc("docs/implementation/STATUS.md")
+
+    assert "20-seraph-agent-parity-and-exceedance-goals.md" in script
+    assert "16-agent-parity-execution-roadmap.md" in script
+    assert "STATUS.md" in script
+    assert "SCL-014" in ledger
+    assert "Seraph ships Batch BW production secure-host hardening receipts" in ledger
+    assert "production_secure_host_hardening" in parity_goals
+    assert "/api/operator/secure-capability-host-hardening" in roadmap
+    assert "secure/private-by-default" in status
+
+
 def test_m1_capability_contract_docs_pin_downstream_acceptance_and_proof() -> None:
     roadmap = _read_doc("docs/implementation/00-master-roadmap.md")
     docs_contract = _read_doc("docs/implementation/08-docs-contract.md")

@@ -34,6 +34,7 @@ When these docs are updated on an open feature branch, they describe the intende
 - `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
 - `docs/implementation/11-world-class-strategy-delivery.md` mirrors the cross-cutting world-class strategy translation as delivery rules.
 - `docs/implementation/16-agent-parity-execution-roadmap.md` mirrors the agent parity and targeted exceedance goals from research as implementation sequencing, proof gates, and board linkage rules.
+- [19. Strategy Claim Ledger](/research/strategy-claim-ledger) is the M0 claim wording gate for high-risk terms in this roadmap.
 - `docs/implementation/01` through `07` are the only workstream docs; `08` through `11` and `16` are cross-cutting implementation mirrors, not extra workstreams.
 - if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
 - active execution state belongs in the GitHub Project, issues, and PRs rather than this document
@@ -147,7 +148,7 @@ This stack records the proof-train sequence completed by PR [#473](https://githu
 The next strategic work is no longer proof-train bookkeeping. It should move only evidence-backed follow-ons into production-grade durability, secure execution hardening, broader reach hardening, live-learning quality, long-work operator control, and marketplace-grade install/update/rollback ergonomics. The GitHub Project owns active state for this train through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475); this section records durable sequencing, not live queue status.
 
 1. [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476): adds the `production_parity_readiness` suite and `/api/operator/production-parity-readiness` receipt contract so later production batches inherit named proof paths, Project-field requirements, duplicate-scope guardrails, negative-case requirements, receipt-schema fields, current-source gates, validation classes, and blocked claim boundaries before claiming readiness.
-2. [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477).
+2. [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477): adds `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, and `/api/operator/secure-capability-host-hardening` receipts for secret replay/redaction, browser recovery partitioning, private-network egress denial, extension revocation cutoff, workflow/provider replay trust drift, blocked claims, and recovery actions, without claiming secure/private-by-default, production readiness, IronClaw-class secure execution, or full parity.
 3. [#478 Batch BX: production durable orchestration and multi-agent workflow control](https://github.com/seraph-quest/seraph/issues/478).
 4. [#479 Batch BY: broad live reach, browser reliability, and voice/media runtime hardening](https://github.com/seraph-quest/seraph/issues/479).
 5. [#480 Batch BZ: live guardian learning, intervention quality, and memory-provider outcome proof](https://github.com/seraph-quest/seraph/issues/480).

@@ -43,39 +43,66 @@ def issue_secret_ref(session_id: str, secret_value: str) -> str:
 
 def resolve_secret_refs(value, session_id: str | None):
     """Recursively resolve secret references inside nested tool arguments."""
+    resolved, _secret_values = resolve_secret_refs_with_values(value, session_id)
+    return resolved
+
+
+def resolve_secret_refs_with_values(value, session_id: str | None) -> tuple[object, list[str]]:
+    """Resolve secret references and return the raw values used for leak checks."""
     if session_id is None:
         if _contains_secret_ref(value):
             raise ValueError("Secret references require an active session.")
-        return value
+        return value, []
 
     if isinstance(value, str):
         return _resolve_secret_refs_in_string(value, session_id)
     if isinstance(value, list):
-        return [resolve_secret_refs(item, session_id) for item in value]
+        resolved_items: list[object] = []
+        secret_values: list[str] = []
+        for item in value:
+            resolved_item, item_secrets = resolve_secret_refs_with_values(item, session_id)
+            resolved_items.append(resolved_item)
+            secret_values.extend(item_secrets)
+        return resolved_items, secret_values
     if isinstance(value, tuple):
-        return tuple(resolve_secret_refs(item, session_id) for item in value)
+        resolved_items = []
+        secret_values: list[str] = []
+        for item in value:
+            resolved_item, item_secrets = resolve_secret_refs_with_values(item, session_id)
+            resolved_items.append(resolved_item)
+            secret_values.extend(item_secrets)
+        return tuple(resolved_items), secret_values
     if isinstance(value, dict):
-        return {key: resolve_secret_refs(item, session_id) for key, item in value.items()}
-    return value
+        resolved_dict: dict[object, object] = {}
+        secret_values: list[str] = []
+        for key, item in value.items():
+            resolved_item, item_secrets = resolve_secret_refs_with_values(item, session_id)
+            resolved_dict[key] = resolved_item
+            secret_values.extend(item_secrets)
+        return resolved_dict, secret_values
+    return value, []
 
 
-def _resolve_secret_refs_in_string(value: str, session_id: str) -> str:
+def _resolve_secret_refs_in_string(value: str, session_id: str) -> tuple[str, list[str]]:
     if _REF_PREFIX not in value:
-        return value
+        return value, []
 
     now = time.time()
     with _lock:
         _prune_expired(now)
         session_refs = _issued_refs.get(session_id, {}).copy()
 
+    secret_values: list[str] = []
+
     def _replace(match: re.Match[str]) -> str:
         token = match.group(1)
         secret_value = session_refs.get(token)
         if secret_value is None:
             raise ValueError("Secret reference is expired, unknown, or belongs to another session.")
+        secret_values.append(secret_value[0])
         return secret_value[0]
 
-    return _REF_RE.sub(_replace, value)
+    return _REF_RE.sub(_replace, value), secret_values
 
 
 def _contains_secret_ref(value) -> bool:

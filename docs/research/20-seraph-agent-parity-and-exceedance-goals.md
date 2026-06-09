@@ -37,6 +37,10 @@ External sources checked for this refresh:
 - [IronClaw GitHub repository](https://github.com/nearai/ironclaw)
 - [IronClaw feature parity matrix](https://github.com/nearai/ironclaw/blob/staging/FEATURE_PARITY.md)
 
+Source note:
+
+- [X post 2063645563241844823](https://x.com/IBuzovskyi/status/2063645563241844823) is used with access caveats. X oEmbed shows a June 7, 2026 YanXbt post with only `https://t.co/nmM5JJuuqI`; that short URL resolves to [X article 2063630561466265600](https://x.com/i/article/2063630561466265600), which returned X's unauthenticated "Nothing to see here" page during this review. The article body was retrieved through [fxtwitter API access](https://api.fxtwitter.com/IBuzovskyi/status/2063645563241844823) on June 9, 2026, but the retrieved payload is not archived in this repository. This document uses only conservative article claims and treats the article's benchmark claims as unverified unless an independent benchmark artifact is provided.
+
 ## Current Source Refresh
 
 Primary-source refresh completed on June 9, 2026:
@@ -62,6 +66,21 @@ Claim boundary:
 - It must not say Seraph is broadly superior, best, secure, production-ready, or fully at parity.
 - Stronger claims must pass the claim rules in [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md).
 
+## Post-PR 473 Reconciliation
+
+Verified on June 9, 2026: [PR #473](https://github.com/seraph-quest/seraph/pull/473) merged the aggregate agent-parity proof train into `develop`.
+
+That merge changes the claim posture in four separate ways:
+
+- Strategy artifact completion: this document is complete as the strategic parity/exceedance target. It maps competitor pressure to feature areas, proof gates, issue anchors, and claim boundaries.
+- Proof-train completion: the current aggregate proof train is complete. It landed deterministic receipts for replay, cockpit efficiency, memory-provider quality, workflow endurance, one-channel reach, minimal durable workflow state, guardian arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice proof.
+- Parity floors reached: Seraph has reached the named proof floors that train was scoped to prove. Those are evidence-backed floor claims, not broad product parity claims.
+- Remaining gaps: full parity and targeted exceedance are still not complete. The real remaining gaps are production-grade durable orchestration beyond the v1 state kernel, deeper secure execution isolation and privileged-path hardening, broader and harder live reach, stronger live intervention learning, and denser operator control for long-running multi-agent work.
+
+Allowed short wording after PR #473: "The strategy artifact and aggregate proof train are complete; named parity proof floors are reached; full production-grade parity/exceedance remains open."
+
+Forbidden short wording after PR #473: "Seraph is fully at parity", "Seraph is production-ready", "Seraph has IronClaw-class secure execution", or "Seraph has solved durable workflows/reach/operator control."
+
 ## Seraph Vision Boundary
 
 Seraph should not become a generic gateway, plugin farm, or terminal-only coding shell.
@@ -76,7 +95,9 @@ The enduring product shape is:
 
 ## Competitor Pressure Summary
 
-Seraph has already completed a five-wave Hermes/OpenClaw capability import program through core runtime primitives, packaged reach surfaces, selective browser/channel/automation imports, operator-surface governance, and deterministic proof. The remaining question is no longer "did Seraph import those ideas at all?" It is whether the imported surfaces are excellent enough, hardened enough, and guardian-integrated enough to stand beside the strongest reviewed public agent platforms.
+Seraph has already completed a five-wave Hermes/OpenClaw capability import program through core runtime primitives, packaged reach surfaces, selective browser/channel/automation imports, operator-surface governance, and deterministic proof. PR [#473](https://github.com/seraph-quest/seraph/pull/473) then landed the aggregate parity proof train for the current feature set.
+
+The remaining question is no longer "did Seraph import those ideas at all?" or "does Seraph have proof anchors for the named parity floors?" The sharper question is whether those proof-backed surfaces are production-grade, broad enough, live enough, and guardian-integrated enough to stand beside the strongest reviewed public agent platforms. Today the honest answer is mixed: Seraph has deterministic parity-floor proof across the target areas, but full product parity and targeted exceedance remain open.
 
 IronClaw is different. The repo treats IronClaw as a benchmark and security gauntlet, not as an imported package family. There is no equivalent `seraph.ironclaw-*` catalog family today, so IronClaw parity should be planned as a secure-capability-host program rather than a naming or packaging exercise.
 
@@ -148,56 +169,56 @@ The differentiator is not raw package count. It is an ecosystem shape where exte
 
 Hermes still sets a high floor for built-in operator tools, toolsets, code execution, delegation, cron, browser automation, messaging delivery, and provider routing.
 
-Seraph must keep broadening the runtime surface, but every new tool must declare ownership, permissions, trust boundaries, audit behavior, and recovery states.
+Seraph now has capability inventory, runtime primitives, packaged surfaces, and deterministic proof receipts, but it must keep broadening the live runtime surface. Every new tool must declare ownership, permissions, trust boundaries, audit behavior, and recovery states.
 
 ### Channel reach and always-available operation
 
-OpenClaw and Hermes are ahead on raw messaging/channel reach. Seraph has selective reach foundations, but not yet broad daily-life availability across the user's real work and communication surfaces.
+OpenClaw and Hermes are ahead on raw messaging/channel reach. Seraph now has a native-notification reach canary with pairing, revocation, retry, continuity, approval handoff, degraded-state UI, and audit receipts, but not yet broad daily-life availability across the user's real work and communication surfaces.
 
 Seraph should not chase every channel equally. It should first make one or two reach channels excellent, safe, continuous, and guardian-aware.
 
 ### IronClaw-class execution isolation
 
-Seraph has trust foundations, but IronClaw raises the bar for architectural enforcement: per-tool isolation, encrypted credential handling, endpoint allowlists, and leak detection.
+Seraph has trust foundations and deterministic secure-host choke-point proof, but IronClaw raises the bar for architectural enforcement: per-tool Wasm or container isolation, encrypted credential handling, endpoint allowlists, leak detection, and TEE/CVM-style deployment options.
 
 This is the sharpest gap because Seraph's guardian value depends on being trusted with sensitive context and real actions.
 
 ### Workflow endurance and operator control
 
-Seraph ships meaningful workflow foundations, branch-family supervision, activity ledgers, checkpoints, and recovery controls. The gap is still endurance: long-running, multi-session, multi-agent, failure-repair work that remains easy to inspect and steer.
+Seraph ships meaningful workflow foundations, branch-family supervision, activity ledgers, checkpoints, recovery controls, a live endurance canary, and a minimal durable workflow state kernel. The gap is now production-grade endurance: long-running, multi-session, multi-agent, failure-repair work that remains easy to inspect and steer under real interruption, scheduler, concurrency, and crash conditions.
 
 The next layer should make Seraph feel calmer under long work, not merely more powerful.
 
 ### Ecosystem maturity and installation ergonomics
 
-Seraph's extension governance is promising, but Hermes and OpenClaw pressure it on discoverability, install flows, skills, plugin inventories, and practical package breadth.
+Seraph's extension governance is promising and now has local governed-ecosystem plus pack-hardening receipts, but Hermes and OpenClaw pressure it on discoverability, install flows, skills, plugin inventories, third-party package maturity, and practical package breadth.
 
 Seraph needs a marketplace-quality local flow before it can credibly scale third-party capability.
 
 ### Browser and computer-use reliability
 
-Hermes and OpenClaw both document richer browser backends or browser-control modes than Seraph's current practical surface. Seraph also needs clearer task replay, login/session partitioning, cookie and credential boundaries, and failure recovery before computer-use claims become strong.
+Hermes and OpenClaw both document richer browser backends or browser-control modes than Seraph's current practical surface. Seraph now has replayable browser/desktop receipts, browser-provider packaging, and computer-use benchmark coverage, but still needs live remote/managed reliability, deeper website/task breadth, login/session partitioning proof, and failure recovery under real browser-state drift before computer-use claims become strong.
 
 ### Voice, media, and multimodal operation
 
-Hermes and OpenClaw now make voice, media, image, and browser-vision surfaces part of the reviewed platform pressure. Seraph has packaged foundations and some multimodal paths, but still needs a cohesive guardian-safe voice/media strategy.
+Hermes and OpenClaw now make voice, media, image, and browser-vision surfaces part of the reviewed platform pressure. Seraph now has guardian-safe voice/media governance proof and packaged multimodal review foundations, but still lacks live broad voice runtime, production STT/TTS, and full multimodal parity.
 
 ## Goal Feature Set
 
 The goal is to reach parity floors first, then exceed through guardian-specific integration.
 
-| Feature area | Parity floor | Exceedance target | Proof gate |
+| Feature area | Parity floor | Exceedance target | Current proof posture |
 | --- | --- | --- | --- |
-| Capability kernel | Toolsets, skills, workflows, MCP, browser, files, shell, cron, delegation, code execution, messaging, media, and provider routing are inventoried with clear enablement. | Every capability is guardian-governed: memory-aware, trust-scoped, policy-routed, auditable, recoverable, and visible in the cockpit. | M1/M2/M9 capability inventory shows source, owner, trust level, permissions, health, dependencies, actions, and receipts. |
-| Secure capability host | Tools and connectors have stronger isolation, secret handling, endpoint allowlists, network egress controls, and replay/resume boundary checks. | Seraph exceeds by combining isolation with guardian restraint, operator receipts, and automatic refusal or clarification when context is unsafe. | M3 trust-boundary suite covers browser, shell, connector, workflow, delegation, background process, filesystem, and provider paths. |
-| Guardian memory | Canonical memory plus additive provider adapters reach parity with external memory-provider ecosystems. | Memory changes behavior: action choice, timing, channel, restraint, clarification, recovery, and follow-through improve from grounded recall. | M6 memory suite proves long-horizon recall, contradiction handling, stale suppression, provenance, privacy, provider usefulness, and behavior-change receipts. |
-| Intervention intelligence | Proactive delivery uses salience, confidence, interruption cost, feedback, and user-model signals. | Seraph exceeds by acting less but with higher intervention quality: timely, restrained, context-aware interventions that learn from outcomes. | M8 intervention-quality suite proves act, defer, bundle, clarify, approval, and stay-silent decisions against grounded scenarios. |
-| Workflow endurance | Long-running workflows support steps, artifacts, checkpoints, branch/resume, repair, comparison, and background continuation. | Seraph exceeds by making long work legible: anticipatory repair, backup branches, cross-session continuity, operator handoff, and guardian-aware follow-through. | M5 endurance suite proves multi-session continuation, failure taxonomy, repair, handoff, branch comparison, and artifact reuse. |
-| Operator cockpit | Cockpit exposes capabilities, workflows, approvals, artifacts, activity, routing, spend, failures, recovery, and guardian state. | Seraph exceeds through calm dense supervision: fastest path from "what happened?" to "what should I do next?" | M7 cockpit benchmark measures inspection speed, recovery path clarity, receipt completeness, and keyboard-first command coverage. |
-| Selective reach | At least one non-browser channel and one native/browser computer-use lane are excellent, not merely configured. | Reach is guardian-aware: continuity, approvals, memory, thread identity, and action safety survive channel shifts. | M4 canary proves one excellent reach channel plus browser/native continuity with Activity Ledger and cockpit receipts. |
-| Browser/computer use | Local browser, remote CDP, managed browser, session replay, snapshot, vision, and failure recovery are available behind clear trust boundaries. | Seraph exceeds by linking browser work to guardian state, workflow artifacts, approval scopes, and safe credential/session partitions. | M2/M3/M4 computer-use suite proves replayable receipts, login/session partitioning, recovery, and browser/native continuity. |
-| Ecosystem and marketplace | Skills, packs, connectors, runbooks, starter packs, and workflow runtimes have install/update/disable/diagnostic flows. | Seraph exceeds with governed evolution: compatibility checks, trust tiers, review gates, canary rollout, rollback receipts, and semantic-drift prevention. | M9 ecosystem suite proves lifecycle governance, diagnostics, update flow, marketplace composition, and extension review receipts. |
-| Multimodal and voice | Voice, TTS/STT, browser vision, image/media analysis, and media delivery exist as governed capability families. | Seraph exceeds by using voice/media only where they improve guardian timing, accessibility, or situational awareness. | M4/M8 multimodal proof shows channel safety, transcript/audit capture, privacy boundaries, and guardian intervention value. |
+| Capability kernel | Toolsets, skills, workflows, MCP, browser, files, shell, cron, delegation, code execution, messaging, media, and provider routing are inventoried with clear enablement. | Every capability is guardian-governed: memory-aware, trust-scoped, policy-routed, auditable, recoverable, and visible in the cockpit. | Deterministic inventory and governance proof exists; live breadth and ecosystem maturity remain gated by M1/M2/M9 receipts. |
+| Secure capability host | Tools and connectors have stronger isolation, secret handling, endpoint allowlists, network egress controls, and replay/resume boundary checks. | Seraph exceeds by combining isolation with guardian restraint, operator receipts, and automatic refusal or clarification when context is unsafe. | Deterministic secure-host receipts exist; IronClaw-class and production-security wording remain blocked pending stronger architectural isolation proof. |
+| Guardian memory | Canonical memory plus additive provider adapters reach parity with external memory-provider ecosystems. | Memory changes behavior: action choice, timing, channel, restraint, clarification, recovery, and follow-through improve from grounded recall. | Deterministic M6 and provider-quality proofs exist; live external-provider ecosystem parity remains open. |
+| Intervention intelligence | Proactive delivery uses salience, confidence, interruption cost, feedback, and user-model signals. | Seraph exceeds by acting less but with higher intervention quality: timely, restrained, context-aware interventions that learn from outcomes. | Deterministic act/defer/bundle/clarify/approval/stay-silent receipts exist; live longitudinal outcome proof remains open. |
+| Workflow endurance | Long-running workflows support steps, artifacts, checkpoints, branch/resume, repair, comparison, and background continuation. | Seraph exceeds by making long work legible: anticipatory repair, backup branches, cross-session continuity, operator handoff, and guardian-aware follow-through. | Endurance canary and minimal durable-state kernel exist; production long-running workflow-engine parity remains open. |
+| Operator cockpit | Cockpit exposes capabilities, workflows, approvals, artifacts, activity, routing, spend, failures, recovery, and guardian state. | Seraph exceeds through calm dense supervision: fastest path from "what happened?" to "what should I do next?" | Scripted cockpit legibility and efficiency proof exists; live usability or competitor superiority remains unclaimed. |
+| Selective reach | At least one non-browser channel and one native/browser computer-use lane are excellent, not merely configured. | Reach is guardian-aware: continuity, approvals, memory, thread identity, and action safety survive channel shifts. | Native-notification canary and browser/native continuity proof exist; broad OpenClaw-style channel reach remains open. |
+| Browser/computer use | Local browser, remote CDP, managed browser, session replay, snapshot, vision, and failure recovery are available behind clear trust boundaries. | Seraph exceeds by linking browser work to guardian state, workflow artifacts, approval scopes, and safe credential/session partitions. | Replayable browser/desktop receipts and provider packaging exist; live remote/managed reliability and broad task depth remain open. |
+| Ecosystem and marketplace | Skills, packs, connectors, runbooks, starter packs, and workflow runtimes have install/update/disable/diagnostic flows. | Seraph exceeds with governed evolution: compatibility checks, trust tiers, review gates, canary rollout, rollback receipts, and semantic-drift prevention. | Local governed-ecosystem and pack-hardening proof exist; production marketplace security and third-party maturity remain open. |
+| Multimodal and voice | Voice, TTS/STT, browser vision, image/media analysis, and media delivery exist as governed capability families. | Seraph exceeds by using voice/media only where they improve guardian timing, accessibility, or situational awareness. | Guardian-safe voice/media governance proof exists; live voice and full multimodal runtime parity remain open. |
 
 ## Execution Mapping
 
@@ -285,6 +306,8 @@ This goal document is complete as a strategy artifact when:
 - the claim ledger permits any stronger language before it is used
 - the cockpit remains the receipt target for inspecting what Seraph did, why, with what authority, and how to recover
 
+Post-PR #473 status: this strategy artifact is complete, and the aggregate proof train it spawned is complete. That does not complete the full product ambition. The next work remains production-grade durability, hardened trust boundaries, broader live reach, stronger live-learning quality, and denser operator steering over long-running work.
+
 ## Team Review Record
 
 Lead plan:
@@ -298,3 +321,5 @@ Lead plan:
 Critic disposition: accepted. The broad "better today" language was weakened to scoped differentiators, IronClaw security wording was narrowed to source-backed TEE/CVM/vault/Wasm/allowlist language, OpenClaw browser/control docs were added to the source trail, proof gates now name milestone families, the acceptance standard now applies to execution-batch readiness, and the sidebar ordering follows the dependency chain.
 
 Follow-up disposition: accepted. The current-source refresh, execution mapping table, and IronClaw secure-capability-host plan now complete the original "still to do after this PR" items. Dedicated issue [#467](https://github.com/seraph-quest/seraph/issues/467) was created for guardian-safe multimodal and voice proof, added to the Seraph Execution project with required queue/lane/priority/size/status/review fields, and linked back into this document.
+
+Post-merge disposition: accepted. [PR #473](https://github.com/seraph-quest/seraph/pull/473) merged the aggregate proof train, so this document now separates strategy completion and proof-train completion from the remaining product gaps. The stale reach PR [#462](https://github.com/seraph-quest/seraph/pull/462) was closed as superseded, and proof-slice issues [#438](https://github.com/seraph-quest/seraph/issues/438), [#467](https://github.com/seraph-quest/seraph/issues/467), [#470](https://github.com/seraph-quest/seraph/issues/470), [#471](https://github.com/seraph-quest/seraph/issues/471), and [#472](https://github.com/seraph-quest/seraph/issues/472) were closed with explicit claim-boundary comments. The X article is used only through the accessible fxtwitter retrieval and only for bounded Hermes-pressure claims; its benchmark claim remains unverified.

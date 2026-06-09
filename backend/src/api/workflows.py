@@ -1317,6 +1317,7 @@ async def _list_workflow_runs(
         details = _as_record(event.get("details"))
         tool_name = str(event.get("tool_name") or "workflow")
         key = _workflow_projection_key(event, details)
+        event_projection_key = key
         run_fingerprint = _workflow_event_fingerprint(tool_name, details)
         if event.get("event_type") == "tool_call":
             arguments = _as_record(details.get("arguments")) or None
@@ -1573,7 +1574,7 @@ async def _list_workflow_runs(
                     step["recovery_actions"] = []
                     step["recovery_hint"] = None
                     step["is_recoverable"] = False
-        run_identity = key
+        run_identity = event_projection_key
         lineage = _workflow_branch_lineage(
             run_identity=run_identity,
             details=details,

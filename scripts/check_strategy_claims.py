@@ -66,7 +66,7 @@ REQUIRED_LEDGER_SECTIONS = [
     "## Short Replacement Rules",
     "## Completion Gate",
 ]
-REQUIRED_CLAIMS = {f"SCL-{index:03d}" for index in range(1, 11)}
+REQUIRED_CLAIMS = {f"SCL-{index:03d}" for index in range(1, 14)}
 
 
 def _display(path: Path) -> str:

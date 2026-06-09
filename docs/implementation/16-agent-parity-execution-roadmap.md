@@ -78,7 +78,7 @@ The proof train is complete, but the production-grade parity train is now tracke
 
 | Order | Issue | Production-grade gap | Proof gate |
 | ---: | --- | --- | --- |
-| 1 | [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476) | Shared readiness rubric, claim gates, duplicate-issue guardrails, and aggregate proof contracts before implementation claims start. | `production_parity_readiness`, claim-ledger check, Project receipt, duplicate scan. |
+| 1 | [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476) | Shared readiness rubric, claim gates, duplicate-issue guardrails, and aggregate proof contracts before implementation claims start. | `production_parity_readiness`, `/api/operator/production-parity-readiness`, claim-ledger check, Project receipt, duplicate scan. |
 | 2 | [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477) | Live privileged-path hardening beyond deterministic secure-host choke-point proof. | `production_secure_host_hardening`, `secure_capability_host_live_isolation_v2`, expanded trust-boundary receipts. |
 | 3 | [#478 Batch BX: production durable orchestration and multi-agent workflow control](https://github.com/seraph-quest/seraph/issues/478) | Production long-running orchestration beyond the v1 durable state kernel. | `production_durable_orchestration`, `durable_workflow_engine_v2`, cockpit recovery receipts. |
 | 4 | [#479 Batch BY: broad live reach, browser reliability, and voice/media runtime hardening](https://github.com/seraph-quest/seraph/issues/479) | Live channel breadth, browser/computer-use reliability, and guarded voice/media runtime beyond canary proof. | `production_reach_channel_hardening`, `browser_computer_use_reliability_v2`, `guardian_safe_voice_media_runtime`. |
@@ -87,6 +87,8 @@ The proof train is complete, but the production-grade parity train is now tracke
 | 7 | [#482 Batch CB: production operator cockpit control and end-to-end parity verification](https://github.com/seraph-quest/seraph/issues/482) | Dense long-work operator control and final train verification across the production parity batches. | `production_operator_control_parity`, aggregate `production_parity_train`, cockpit no-regression proof. |
 
 Blocked claim boundary for the train: no issue or PR may claim full parity, superiority, production readiness, secure/private by default, IronClaw-class secure execution, solved durable workflows, broad OpenClaw-class reach, voice/multimodal parity, production-secure marketplace, or exceeded reference systems unless the claim ledger permits the exact wording after merged proof.
+
+Batch BV readiness proof is intentionally a contract layer. It proves that later batches have named proof paths, validation classes, operator receipt targets, negative-case requirements, review-role requirements, duplicate-scope guardrails, Project-field requirements, current-source requirements for competitor-dependent claims, receipt-schema fields, and blocked claim wording. It does not prove that the later production-grade implementations are complete.
 
 ## Roadmap Phases
 

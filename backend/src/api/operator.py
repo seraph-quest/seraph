@@ -36,6 +36,7 @@ from src.cockpit.efficiency_benchmark import (
     cockpit_efficiency_scripted_tasks,
 )
 from src.evals.benchmark_catalog import benchmark_suite_report
+from src.evals.production_parity_readiness import build_production_parity_readiness_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
@@ -3377,10 +3378,16 @@ async def get_operator_m8_guardian_brain(
     return _operator_m8_guardian_brain_payload(state, session_id=session_id)
 
 
+@router.get("/operator/production-parity-readiness")
+async def get_operator_production_parity_readiness():
+    return await build_production_parity_readiness_report()
+
+
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
     suites = benchmark_suite_report()
     (
+        production_parity_readiness,
         memory_benchmark,
         user_model_benchmark,
         workflow_endurance_benchmark,
@@ -3404,6 +3411,7 @@ async def get_operator_benchmark_proof():
         m9_governed_ecosystem_benchmark,
         governed_capability_pack_hardening,
     ) = await asyncio.gather(
+        build_production_parity_readiness_report(),
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
@@ -3434,6 +3442,7 @@ async def get_operator_benchmark_proof():
         if str(name).strip()
     }
     child_benchmark_postures = [
+        str(production_parity_readiness["summary"]["benchmark_posture"]),
         str(memory_benchmark["summary"]["benchmark_posture"]),
         str(user_model_benchmark["summary"]["benchmark_posture"]),
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
@@ -3482,6 +3491,8 @@ async def get_operator_benchmark_proof():
             ),
             "operator_status": "operator_visible",
             "remaining_gap": "live_provider_and_real_computer_use_depth",
+            "production_parity_readiness_posture": production_parity_readiness["summary"]["benchmark_posture"],
+            "production_parity_readiness_claim_boundary": production_parity_readiness["summary"]["claim_boundary"],
             "m2_completion_state": m2_execution_benchmark["summary"]["milestone_completion_state"],
             "governed_improvement_status": (
                 "review_gated_canary_required"
@@ -3516,6 +3527,7 @@ async def get_operator_benchmark_proof():
             "governed_capability_pack_hardening_claim_boundary": governed_capability_pack_hardening["policy"]["claim_boundary"],
         },
         "suites": suites,
+        "production_parity_readiness": production_parity_readiness,
         "memory_benchmark": memory_benchmark,
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,

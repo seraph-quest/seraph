@@ -146,7 +146,7 @@ This stack records the proof-train sequence completed by PR [#473](https://githu
 
 The next strategic work is no longer proof-train bookkeeping. It should move only evidence-backed follow-ons into production-grade durability, secure execution hardening, broader reach hardening, live-learning quality, long-work operator control, and marketplace-grade install/update/rollback ergonomics. The GitHub Project owns active state for this train through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475); this section records durable sequencing, not live queue status.
 
-1. [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476).
+1. [#476 Batch BV: production parity readiness, claim gates, and integration proof harness](https://github.com/seraph-quest/seraph/issues/476): adds the `production_parity_readiness` suite and `/api/operator/production-parity-readiness` receipt contract so later production batches inherit named proof paths, Project-field requirements, duplicate-scope guardrails, negative-case requirements, receipt-schema fields, current-source gates, validation classes, and blocked claim boundaries before claiming readiness.
 2. [#477 Batch BW: secure-host architectural isolation and privileged-path hardening](https://github.com/seraph-quest/seraph/issues/477).
 3. [#478 Batch BX: production durable orchestration and multi-agent workflow control](https://github.com/seraph-quest/seraph/issues/478).
 4. [#479 Batch BY: broad live reach, browser reliability, and voice/media runtime hardening](https://github.com/seraph-quest/seraph/issues/479).

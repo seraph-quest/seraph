@@ -46,6 +46,7 @@ from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import apply_memory_operator_control
 from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
+from src.replay.benchmark import build_live_replay_benchmark_report
 from src.security.benchmark import build_trust_boundary_benchmark_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
 from src.observer.insight_queue import insight_queue
@@ -3359,6 +3360,7 @@ async def get_operator_benchmark_proof():
         m6_memory_superiority_benchmark,
         m7_operator_cockpit_benchmark,
         m8_guardian_brain_benchmark,
+        live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
@@ -3373,6 +3375,7 @@ async def get_operator_benchmark_proof():
         build_m6_memory_superiority_benchmark_report(),
         build_m7_operator_cockpit_benchmark_report(),
         build_m8_guardian_brain_benchmark_report(),
+        build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
@@ -3394,6 +3397,7 @@ async def get_operator_benchmark_proof():
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
         str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
+        str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
@@ -3439,6 +3443,7 @@ async def get_operator_benchmark_proof():
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
             "m8_guardian_brain_benchmark_posture": m8_guardian_brain_benchmark["summary"]["benchmark_posture"],
+            "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
@@ -3455,6 +3460,7 @@ async def get_operator_benchmark_proof():
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
         "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
+        "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
@@ -3492,6 +3498,11 @@ async def get_operator_m5_operating_layer_benchmark():
 @router.get("/operator/m6-memory-superiority-benchmark")
 async def get_operator_m6_memory_superiority_benchmark():
     return await build_m6_memory_superiority_benchmark_report()
+
+
+@router.get("/operator/live-long-horizon-replay-benchmark")
+async def get_operator_live_long_horizon_replay_benchmark():
+    return await build_live_replay_benchmark_report()
 
 
 @router.get("/operator/m6-memory-superiority")

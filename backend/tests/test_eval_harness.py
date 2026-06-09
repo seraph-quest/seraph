@@ -205,11 +205,14 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 16
+    assert details["suite_count"] == 17
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["workflow_suite_present"] is True
+    assert details["live_replay_suite_present"] is True
+    assert details["live_replay_suite_scenario_count_matches"] is True
+    assert details["live_replay_suite_axis_matches"] is True
     assert details["m5_suite_present"] is True
     assert details["m5_suite_scenario_count_matches"] is True
     assert details["trust_suite_present"] is True
@@ -233,6 +236,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m9_governed_ecosystem_suite_scenario_count_matches"] is True
     assert details["m9_governed_ecosystem_suite_axis_matches"] is True
     assert details["m9_governed_ecosystem_gate_required"] is True
+    assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
     assert details["gate_blocks_constraint_failure"] is True
@@ -539,6 +543,39 @@ def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
         "workflow_backup_branch_surface_behavior",
         "workflow_multi_session_endurance_behavior",
     }
+
+
+def test_run_benchmark_suites_executes_live_long_horizon_eval_replay_suite():
+    summary = asyncio.run(run_benchmark_suites(["live_long_horizon_eval_replay_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "live_replay_fixture_contract_behavior",
+        "live_replay_cross_surface_failure_taxonomy_behavior",
+        "live_replay_surface_coverage_behavior",
+        "live_replay_operator_receipt_behavior",
+        "operator_live_replay_benchmark_surface_behavior",
+    }
+
+
+def test_operator_live_replay_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_live_replay_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["fixture_state_visible"] is True
+    assert details["coverage_state_visible"] is True
+    assert details["taxonomy_state_visible"] is True
+    assert details["operator_receipt_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["fixture_count_matches_surfaces"] is True
 
 
 def test_run_benchmark_suites_executes_computer_use_browser_desktop_suite():
@@ -878,6 +915,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "m2_execution_supremacy" in captured.out
     assert "m7_operator_cockpit_legibility" in captured.out
     assert "m8_guardian_intervention_quality" in captured.out
+    assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert "m9_governed_ecosystem" in captured.out
@@ -888,6 +926,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "workflow_endurance_and_repair",
+        "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",
         "secure_capability_host",

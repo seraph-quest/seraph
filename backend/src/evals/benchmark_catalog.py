@@ -10,6 +10,10 @@ from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
 )
+from src.cockpit.efficiency_benchmark import (
+    COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES,
+    COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -299,6 +303,22 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live multi-operator usability studies and broader cross-device command latency proof remain future work."
         ),
         scenario_names=M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME,
+        label="Cockpit operator efficiency benchmark",
+        description=(
+            "Pins scripted inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, and audit "
+            "task fixtures with action, time, error-detectability, and receipt metrics."
+        ),
+        benchmark_axis="cockpit_operator_efficiency",
+        operator_summary=(
+            "Cockpit efficiency is measured by deterministic operator task paths and receipts, not by density alone."
+        ),
+        remaining_gap=(
+            "Live multi-operator usability studies and source-dated competitor superiority claims remain future proof work."
+        ),
+        scenario_names=COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="planning_retrieval_reporting",

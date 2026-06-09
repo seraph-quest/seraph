@@ -29,6 +29,12 @@ from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.browser.benchmark import build_computer_use_benchmark_report
 from src.cockpit.benchmark import build_m7_operator_cockpit_benchmark_report
+from src.cockpit.efficiency_benchmark import (
+    build_cockpit_efficiency_benchmark_report,
+    cockpit_efficiency_policy_payload,
+    cockpit_efficiency_scorecard,
+    cockpit_efficiency_scripted_tasks,
+)
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
@@ -3290,6 +3296,8 @@ async def get_operator_m7_cockpit(
         branch_ready_count=int(m5_summary.get("branch_ready_count") or 0),
         artifact_count=len(artifacts),
     )
+    efficiency_scorecard = cockpit_efficiency_scorecard()
+    efficiency_policy = cockpit_efficiency_policy_payload()
     return {
         "summary": {
             "operator_status": "m7_operator_cockpit_visible",
@@ -3310,6 +3318,10 @@ async def get_operator_m7_cockpit(
             "background_session_count": len(background_sessions),
             "recovery_action_count": int(recovery_and_channels["summary"]["recovery_action_count"]),
             "fast_control_count": len(fast_controls),
+            "efficiency_task_count": efficiency_scorecard["task_count"],
+            "efficiency_action_budget": efficiency_scorecard["max_actions_total"],
+            "efficiency_time_budget_seconds": efficiency_scorecard["max_seconds_total"],
+            "efficiency_claim_boundary": efficiency_policy["claim_boundary"],
             "claim_boundary": "composed_operator_projection_from_existing_receipts_not_new_executor_state",
         },
         "active_work": active_work,
@@ -3323,8 +3335,15 @@ async def get_operator_m7_cockpit(
         "background_sessions": background_sessions,
         "channels_and_recovery": recovery_and_channels,
         "fast_controls": fast_controls,
+        "operator_efficiency": {
+            "benchmark_surface": "/api/operator/cockpit-efficiency-benchmark",
+            "scorecard": efficiency_scorecard,
+            "scripted_tasks": cockpit_efficiency_scripted_tasks(),
+            "policy": efficiency_policy,
+        },
         "proof_receipts": [
             "/api/operator/m7-cockpit",
+            "/api/operator/cockpit-efficiency-benchmark",
             "/api/operator/m5-operating-layer",
             "/api/operator/m6-memory-superiority",
             "/api/operator/timeline",
@@ -3359,6 +3378,7 @@ async def get_operator_benchmark_proof():
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         m7_operator_cockpit_benchmark,
+        cockpit_efficiency_benchmark,
         m8_guardian_brain_benchmark,
         live_replay_benchmark,
         trust_boundary_benchmark,
@@ -3374,6 +3394,7 @@ async def get_operator_benchmark_proof():
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_m7_operator_cockpit_benchmark_report(),
+        build_cockpit_efficiency_benchmark_report(),
         build_m8_guardian_brain_benchmark_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
@@ -3396,6 +3417,7 @@ async def get_operator_benchmark_proof():
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
+        str(cockpit_efficiency_benchmark["summary"]["benchmark_posture"]),
         str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
@@ -3442,6 +3464,7 @@ async def get_operator_benchmark_proof():
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
+            "cockpit_efficiency_benchmark_posture": cockpit_efficiency_benchmark["summary"]["benchmark_posture"],
             "m8_guardian_brain_benchmark_posture": m8_guardian_brain_benchmark["summary"]["benchmark_posture"],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
@@ -3459,6 +3482,7 @@ async def get_operator_benchmark_proof():
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
+        "cockpit_efficiency_benchmark": cockpit_efficiency_benchmark,
         "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
@@ -3552,6 +3576,11 @@ async def get_operator_m2_execution_benchmark():
 @router.get("/operator/m7-cockpit-legibility-benchmark")
 async def get_operator_m7_cockpit_legibility_benchmark():
     return await build_m7_operator_cockpit_benchmark_report()
+
+
+@router.get("/operator/cockpit-efficiency-benchmark")
+async def get_operator_cockpit_efficiency_benchmark():
+    return await build_cockpit_efficiency_benchmark_report()
 
 
 @router.get("/operator/m8-guardian-intervention-benchmark")

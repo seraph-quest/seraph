@@ -205,7 +205,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 17
+    assert details["suite_count"] == 18
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -224,6 +224,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m7_operator_cockpit_suite_present"] is True
     assert details["m7_operator_cockpit_suite_scenario_count_matches"] is True
     assert details["m7_operator_cockpit_suite_axis_matches"] is True
+    assert details["cockpit_efficiency_suite_present"] is True
+    assert details["cockpit_efficiency_suite_scenario_count_matches"] is True
+    assert details["cockpit_efficiency_suite_axis_matches"] is True
+    assert details["cockpit_efficiency_gate_required"] is True
     assert details["m8_guardian_brain_suite_present"] is True
     assert details["m8_guardian_brain_suite_scenario_count_matches"] is True
     assert details["m8_guardian_brain_suite_axis_matches"] is True
@@ -655,6 +659,74 @@ def test_operator_m7_cockpit_benchmark_surface_behavior_runtime_eval_details():
     assert details["receipt_surfaces_visible"] is True
 
 
+def test_run_benchmark_suites_executes_cockpit_operator_efficiency_suite():
+    summary = asyncio.run(run_benchmark_suites(["cockpit_operator_efficiency_benchmark"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "cockpit_efficiency_task_fixture_behavior",
+        "cockpit_efficiency_threshold_behavior",
+        "cockpit_efficiency_receipt_coverage_behavior",
+        "cockpit_efficiency_baseline_claim_boundary_behavior",
+        "operator_cockpit_efficiency_benchmark_surface_behavior",
+    }
+
+
+def test_operator_cockpit_efficiency_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_cockpit_efficiency_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["scripted_task_state_visible"] is True
+    assert details["threshold_state_visible"] is True
+    assert details["receipt_coverage_state_visible"] is True
+    assert details["scorecard_task_count_matches"] is True
+    assert details["claim_boundary_visible"] is True
+
+
+def test_cockpit_efficiency_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals([
+        "cockpit_efficiency_task_fixture_behavior",
+        "cockpit_efficiency_threshold_behavior",
+        "cockpit_efficiency_receipt_coverage_behavior",
+        "cockpit_efficiency_baseline_claim_boundary_behavior",
+    ]))
+
+    assert summary.total == 4
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    task_details = details_by_name["cockpit_efficiency_task_fixture_behavior"]
+    assert task_details["required_tasks_present"] is True
+    assert task_details["all_tasks_have_initial_state"] is True
+    assert task_details["all_tasks_have_success_condition"] is True
+    assert task_details["all_tasks_have_measured_counters"] is True
+    assert task_details["task_count"] == 11
+
+    threshold_details = details_by_name["cockpit_efficiency_threshold_behavior"]
+    assert threshold_details["baseline_is_current_seraph"] is True
+    assert threshold_details["baseline_scope_visible"] is True
+    assert threshold_details["no_regression_rule_visible"] is True
+    assert threshold_details["confidence_is_proxy_bounded"] is True
+    assert threshold_details["action_budget_visible"] is True
+    assert threshold_details["time_budget_visible"] is True
+
+    receipt_details = details_by_name["cockpit_efficiency_receipt_coverage_behavior"]
+    assert receipt_details["unique_receipts_for_tasks"] is True
+    assert receipt_details["dedicated_surface_visible"] is True
+
+    boundary_details = details_by_name["cockpit_efficiency_baseline_claim_boundary_behavior"]
+    assert boundary_details["competitor_claim_policy_visible"] is True
+    assert boundary_details["claim_boundary_visible"] is True
+
+
 def test_m7_cockpit_legibility_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals([
         "operator_cockpit_receipt_legibility_behavior",
@@ -914,6 +986,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "channels_presence_device_pairing" in captured.out
     assert "m2_execution_supremacy" in captured.out
     assert "m7_operator_cockpit_legibility" in captured.out
+    assert "cockpit_operator_efficiency_benchmark" in captured.out
     assert "m8_guardian_intervention_quality" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
@@ -934,6 +1007,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "channels_presence_device_pairing",
         "m2_execution_supremacy",
         "m7_operator_cockpit_legibility",
+        "cockpit_operator_efficiency_benchmark",
         "planning_retrieval_reporting",
         "governed_improvement",
         "m9_governed_ecosystem",

@@ -889,6 +889,9 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
     assert payload["summary"]["artifact_count"] == 1
     assert payload["summary"]["job_count"] == 1
     assert payload["summary"]["background_session_count"] == 1
+    assert payload["summary"]["efficiency_task_count"] == 11
+    assert payload["summary"]["efficiency_action_budget"] == 33
+    assert payload["summary"]["efficiency_time_budget_seconds"] == 195
     assert payload["active_work"][0]["approval_required"] is True
     active_controls = {control["action"]: control for control in payload["active_work"][0]["controls"]}
     assert active_controls["approve"]["enabled"] is False
@@ -928,7 +931,12 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
     assert fast_controls["revoke"]["enabled"] is False
     assert fast_controls["revoke"]["target_kind"] == "connector_or_channel"
     assert fast_controls["revoke"]["control_mode"] == "operator_draft_control"
+    assert payload["operator_efficiency"]["benchmark_surface"] == "/api/operator/cockpit-efficiency-benchmark"
+    assert payload["operator_efficiency"]["scorecard"]["confidence_measurement_boundary"] == (
+        "confidence_affordance_proxy_not_operator_reported_confidence"
+    )
     assert "/api/operator/m7-cockpit" in payload["proof_receipts"]
+    assert "/api/operator/cockpit-efficiency-benchmark" in payload["proof_receipts"]
     assert "automatic_control_execution_from_cockpit_payload" in payload["claim_boundaries"]["not_claimed"]
 
 
@@ -1272,6 +1280,57 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_cockpit_efficiency_benchmark_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "cockpit_operator_efficiency_benchmark",
+                    "benchmark_posture": "cockpit_efficiency_ci_gated_operator_visible",
+                    "operator_status": "cockpit_efficiency_receipts_visible",
+                    "scenario_count": 5,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "scripted_task_state": "inspect_to_audit_paths_measured",
+                    "threshold_state": "action_and_time_budgets_visible",
+                    "error_detectability_state": "blocked_degraded_risky_and_lineage_states_visible",
+                    "receipt_coverage_state": "all_scripted_tasks_have_receipts",
+                    "claim_boundary": "deterministic_operator_efficiency_fixture_not_live_multi_operator_usability_study",
+                },
+                "scenario_names": [
+                    "cockpit_efficiency_task_fixture_behavior",
+                    "cockpit_efficiency_threshold_behavior",
+                    "cockpit_efficiency_receipt_coverage_behavior",
+                    "cockpit_efficiency_baseline_claim_boundary_behavior",
+                    "operator_cockpit_efficiency_benchmark_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "scripted_tasks": [],
+                "scorecard": {
+                    "baseline": "current_seraph_fixture",
+                    "task_count": 11,
+                    "max_actions_total": 33,
+                    "max_seconds_total": 195,
+                    "confidence_measurement_boundary": "confidence_affordance_proxy_not_operator_reported_confidence",
+                },
+                "failure_report": [],
+                "policy": {
+                    "measurement_policy": "scripted_tasks_require_action_time_error_and_receipt_metrics",
+                    "baseline_policy": "baseline_is_current_seraph_fixture_not_competitor_superiority_claim",
+                    "competitor_claim_policy": "competitor_informed_expectations_require_source_dated_evidence_before_public_claims",
+                    "claim_boundary": "deterministic_operator_efficiency_fixture_not_live_multi_operator_usability_study",
+                    "receipt_surfaces": [
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/cockpit-efficiency-benchmark",
+                        "/api/operator/m7-cockpit",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_m8_guardian_brain_benchmark_report",
         AsyncMock(
             return_value={
@@ -1497,7 +1556,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 17
+    assert payload["summary"]["suite_count"] == 18
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1509,6 +1568,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
+    assert payload["summary"]["cockpit_efficiency_benchmark_posture"] == "cockpit_efficiency_ci_gated_operator_visible"
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
@@ -1562,6 +1622,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m7_suite = next(item for item in payload["suites"] if item["name"] == "m7_operator_cockpit_legibility")
     assert "operator_fast_control_availability_behavior" in m7_suite["scenario_names"]
     assert m7_suite["scenario_count"] == 4
+    cockpit_efficiency_suite = next(
+        item for item in payload["suites"] if item["name"] == "cockpit_operator_efficiency_benchmark"
+    )
+    assert "cockpit_efficiency_task_fixture_behavior" in cockpit_efficiency_suite["scenario_names"]
+    assert cockpit_efficiency_suite["scenario_count"] == 5
     m8_suite = next(item for item in payload["suites"] if item["name"] == "m8_guardian_intervention_quality")
     assert "m8_risky_capability_approval_behavior" in m8_suite["scenario_names"]
     assert m8_suite["scenario_count"] == 7
@@ -1588,6 +1653,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["m2_execution_benchmark"]["policy"]["milestone_contract"] == "one_milestone_one_ready_pr"
     assert payload["m7_operator_cockpit_benchmark"]["summary"]["suite_name"] == "m7_operator_cockpit_legibility"
     assert payload["m7_operator_cockpit_benchmark"]["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
+    assert payload["cockpit_efficiency_benchmark"]["summary"]["suite_name"] == "cockpit_operator_efficiency_benchmark"
+    assert payload["cockpit_efficiency_benchmark"]["scorecard"]["task_count"] == 11
+    assert (
+        payload["cockpit_efficiency_benchmark"]["policy"]["measurement_policy"]
+        == "scripted_tasks_require_action_time_error_and_receipt_metrics"
+    )
+    assert (
+        payload["cockpit_efficiency_benchmark"]["policy"]["baseline_policy"]
+        == "baseline_is_current_seraph_fixture_not_competitor_superiority_claim"
+    )
     assert payload["m8_guardian_brain_benchmark"]["summary"]["suite_name"] == "m8_guardian_intervention_quality"
     assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
@@ -1660,6 +1735,62 @@ async def test_operator_m7_cockpit_legibility_benchmark_surface_reports_receipts
     assert payload["policy"]["fast_control_policy"] == "active_handoff_items_must_carry_labeled_continue_or_repair_controls"
     assert payload["policy"]["claim_boundary"] == "deterministic_operator_surface_receipts_not_live_external_usability_study"
     assert "/api/operator/control-plane" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_cockpit_efficiency_benchmark_surface_reports_policy_metrics_and_claim_boundary(client):
+    resp = await client.get("/api/operator/cockpit-efficiency-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "cockpit_operator_efficiency_benchmark"
+    assert payload["summary"]["operator_status"] == "cockpit_efficiency_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["scripted_task_state"] == "inspect_to_audit_paths_measured"
+    assert payload["summary"]["threshold_state"] == "action_and_time_budgets_visible"
+    assert payload["summary"]["receipt_coverage_state"] == "all_scripted_tasks_have_receipts"
+    assert payload["scorecard"]["task_count"] == 11
+    assert payload["scorecard"]["max_actions_total"] == 33
+    assert payload["scorecard"]["max_seconds_total"] == 195
+    assert payload["scorecard"]["confidence_measurement_boundary"] == (
+        "confidence_affordance_proxy_not_operator_reported_confidence"
+    )
+    assert payload["policy"]["measurement_policy"] == "scripted_tasks_require_action_time_error_and_receipt_metrics"
+    assert payload["policy"]["baseline_policy"] == "baseline_is_current_seraph_fixture_not_competitor_superiority_claim"
+    assert payload["policy"]["claim_boundary"] == (
+        "deterministic_operator_efficiency_fixture_not_live_multi_operator_usability_study"
+    )
+    assert "/api/operator/m7-cockpit" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_cockpit_efficiency_benchmark_surface_degrades_summary_on_failures(client):
+    summary = SimpleNamespace(
+        total=5,
+        passed=4,
+        failed=1,
+        duration_ms=50,
+        results=[
+            SimpleNamespace(
+                name="cockpit_efficiency_receipt_coverage_behavior",
+                passed=False,
+                error="receipt missing",
+            )
+        ],
+    )
+
+    with patch(
+        "src.cockpit.efficiency_benchmark._run_cockpit_efficiency_benchmark_suite",
+        AsyncMock(return_value=summary),
+    ):
+        resp = await client.get("/api/operator/cockpit-efficiency-benchmark")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "cockpit_efficiency_ci_regressions_detected_operator_visible"
+    assert payload["summary"]["active_failure_count"] == 1
+    assert payload["summary"]["receipt_coverage_state"] == "regressions_detected"
+    assert payload["failure_report"][0]["scenario_name"] == "cockpit_efficiency_receipt_coverage_behavior"
 
 
 @pytest.mark.asyncio

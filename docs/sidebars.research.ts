@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
     'reference-systems-and-evidence',
     'competitive-benchmark',
     'superiority-program',
+    'seraph-agent-parity-and-exceedance-goals',
   ],
 };
 

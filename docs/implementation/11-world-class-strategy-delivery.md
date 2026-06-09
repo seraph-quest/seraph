@@ -15,6 +15,7 @@ title: 11. World-Class Strategy Delivery
 - canonical strategy source of truth: [17. Seraph World-Class Strategy](/research/seraph-world-class-strategy)
 - M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
 - M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
+- agent parity goal overlay: [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals)
 - synthesis context: [00. Research Synthesis](/research)
 
 ## Purpose

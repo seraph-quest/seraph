@@ -35,11 +35,13 @@ If a major concept appears in research but not implementation, or vice versa, th
 - [x] `docs/research/11-superiority-program.md` owns the design-level superiority program
 - [x] `docs/research/18-agent-competition-truth-table.md` owns M0 competitor truth and capability benchmark pressure
 - [x] `docs/research/19-strategy-claim-ledger.md` owns claim status, allowed wording, and proof-gate review rules
+- [x] `docs/research/20-seraph-agent-parity-and-exceedance-goals.md` owns the Hermes/OpenClaw/IronClaw parity pressure overlay and guardian-preserving target feature set
 - [x] `docs/implementation/STATUS.md` owns the fastest shipped snapshot
 - [x] `docs/implementation/00-master-roadmap.md` owns the strategic implementation program, completed-program record, and workstream-to-gap translation
 - [x] `docs/implementation/09-benchmark-status.md` mirrors the benchmark on shipped implementation terms
 - [x] `docs/implementation/10-superiority-delivery.md` mirrors the superiority program on delivery terms
 - [x] `docs/implementation/11-world-class-strategy-delivery.md` mirrors the cross-cutting world-class strategy translation on delivery terms
+- [x] `docs/implementation/16-agent-parity-execution-roadmap.md` mirrors the agent parity and targeted exceedance goal on implementation sequencing, proof gates, board linkage, and duplicate-issue avoidance
 - [x] the GitHub Project owns execution state
 - [x] GitHub issues and PRs own active work tracking, review state, and merge state
 - [x] `docs/docs/` owns historical/archive material that is no longer current truth

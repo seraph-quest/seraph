@@ -33,7 +33,8 @@ When these docs are updated on an open feature branch, they describe the intende
 - `docs/implementation/09-benchmark-status.md` mirrors the benchmark axes from research as shipped implementation status.
 - `docs/implementation/10-superiority-delivery.md` mirrors the superiority program from research as delivery ownership and implementation translation.
 - `docs/implementation/11-world-class-strategy-delivery.md` mirrors the cross-cutting world-class strategy translation as delivery rules.
-- `docs/implementation/01` through `07` are the only workstream docs; `08` through `11` are cross-cutting implementation mirrors, not extra workstreams.
+- `docs/implementation/16-agent-parity-execution-roadmap.md` mirrors the agent parity and targeted exceedance goals from research as implementation sequencing, proof gates, and board linkage rules.
+- `docs/implementation/01` through `07` are the only workstream docs; `08` through `11` and `16` are cross-cutting implementation mirrors, not extra workstreams.
 - if research adds a new benchmark/program layer without an implementation mirror, the docs are incomplete.
 - active execution state belongs in the GitHub Project, issues, and PRs rather than this document
 - M1 capability-kernel contract changes must update this roadmap plus [08. Docs Contract](./08-docs-contract.md) and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md) together, because M2 execution breadth, M3 trust-boundary enforcement, and M9 ecosystem governance all consume that contract.
@@ -41,7 +42,7 @@ When these docs are updated on an open feature branch, they describe the intende
 ## Current Status
 
 Read this roadmap together with [Development Status](./STATUS.md).
-For the implementation-side mirrors of the evidence, benchmark, superiority, and world-class strategy layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md).
+For the implementation-side mirrors of the evidence, benchmark, superiority, world-class strategy, and agent parity goal layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md), and [16. Agent Parity Execution Roadmap](./16-agent-parity-execution-roadmap.md).
 
 ## M1 Capability Contract
 
@@ -649,7 +650,7 @@ Implementation docs `08` through `11` are supporting mirror layers for this road
 
 1. Read [Development Status](./STATUS.md) for the live shipped vs unfinished view.
 2. Read this file for workstream ordering and current scope.
-3. Read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), and [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md) for the implementation-side mirrors of the research benchmark/program docs and cross-cutting strategy translation.
+3. Read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md), and [16. Agent Parity Execution Roadmap](./16-agent-parity-execution-roadmap.md) for the implementation-side mirrors of the research benchmark/program docs, cross-cutting strategy translation, and agent parity execution roadmap.
 4. Read `01` through `07` for detailed per-workstream checklists.
 5. Read the research docs for the benchmark and superiority target.
 6. Treat `/legacy` docs as supporting history, not the live source of truth.

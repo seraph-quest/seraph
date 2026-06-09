@@ -75,6 +75,28 @@ Typed contribution lists keyed by contribution type.
 
 At least one contribution is required.
 
+Memory-provider contributions live under `memory_providers` and should point at
+files in `connectors/memory/`. A memory provider is additive only: canonical
+guardian memory remains authoritative. Provider definitions should declare:
+
+```yaml
+quality_declaration:
+  provenance: external_advisory
+  confidence: provider_confidence_score
+  privacy_boundary: standard_or_shared_only
+  freshness: created_at_required
+  conflict_behavior: guardian_wins
+  suppression_rules:
+    - stale_provider_evidence
+    - irrelevant_provider_evidence
+    - low_confidence_provider_evidence
+    - provider_conflict_yields_to_canonical_memory
+```
+
+Provider hits also need runtime evidence metadata before they can enter guardian
+context: evidence ID, confidence, privacy boundary, freshness, provenance,
+conflict behavior, and suppression rules.
+
 ## Permissions
 
 Current manifest permissions are:

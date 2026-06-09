@@ -240,6 +240,7 @@ def _memory_decision_receipt(
     provider_capabilities_used = _provider_capability_values(provider_diagnostics, "capabilities_used")
     provider_failed_capabilities = _provider_capability_values(provider_diagnostics, "failed_capabilities")
     stale_provider_hit_count = _provider_suppression_count(provider_diagnostics, "stale_hit_count")
+    quality_gate_suppressed_count = _provider_suppression_count(provider_diagnostics, "quality_gate_suppressed_count")
     irrelevant_provider_hit_count = _provider_suppression_count(
         provider_diagnostics,
         "suppressed_irrelevant_hit_count",
@@ -247,6 +248,7 @@ def _memory_decision_receipt(
     contradiction_suppression_count = _hybrid_suppression_count(retrieval_diagnostics)
     suppression_count = (
         stale_provider_hit_count
+        + quality_gate_suppressed_count
         + irrelevant_provider_hit_count
         + contradiction_suppression_count
     )
@@ -280,12 +282,14 @@ def _memory_decision_receipt(
         "suppression": {
             "suppressed_count": suppression_count,
             "lower_ranked_contradiction_count": contradiction_suppression_count,
+            "quality_gate_suppressed_count": quality_gate_suppressed_count,
             "stale_provider_hit_count": stale_provider_hit_count,
             "irrelevant_provider_hit_count": irrelevant_provider_hit_count,
             "reasons": [
                 reason
                 for reason, count in (
                     ("lower_ranked_contradiction", contradiction_suppression_count),
+                    ("provider_quality_gate", quality_gate_suppressed_count),
                     ("stale_provider_evidence", stale_provider_hit_count),
                     ("irrelevant_provider_evidence", irrelevant_provider_hit_count),
                 )
@@ -296,6 +300,16 @@ def _memory_decision_receipt(
             "guardian_canonical": bool(structured_context.strip() or semantic_context.strip() or episodic_context.strip()),
             "external_advisory": bool(provider_context.strip() or provider_capabilities_used),
             "policy": "canonical_first",
+            "provider_declaration_complete": all(
+                bool(item.get("provider_declaration_complete"))
+                for item in provider_diagnostics
+            ) if provider_diagnostics else False,
+            "provider_evidence_ids": [
+                str(evidence_id)
+                for item in provider_diagnostics
+                for evidence_id in item.get("accepted_evidence_ids", [])
+                if isinstance(evidence_id, str) and evidence_id.strip()
+            ],
         },
         "confidence": {
             "degraded": degraded,

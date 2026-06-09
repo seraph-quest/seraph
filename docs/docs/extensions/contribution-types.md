@@ -19,6 +19,7 @@ Each manifest contribution list maps to a canonical on-disk root.
 | `managed_connectors` | `connectors/managed/` |
 | `automation_triggers` | `automation/` |
 | `browser_providers` | `connectors/browser/` |
+| `memory_providers` | `connectors/memory/` |
 | `messaging_connectors` | `connectors/messaging/` |
 | `observer_definitions` | `observers/definitions/` |
 | `observer_connectors` | `observers/connectors/` |
@@ -44,6 +45,7 @@ Today `new_pack.py --with ...` supports:
 - `managed_connectors`
 - `automation_triggers`
 - `browser_providers`
+- `memory_providers`
 - `messaging_connectors`
 - `speech_profiles`
 - `node_adapters`
@@ -112,6 +114,12 @@ Kind note:
 
 - `observer_definitions` are shared-lifecycle reach surfaces, but they are still treated as capability-pack content rather than connector-pack-only surfaces
 - connector-pack manifests must currently use true connector contributions such as `mcp_servers`, `managed_connectors`, `automation_triggers`, `browser_providers`, `messaging_connectors`, `channel_adapters`, or `node_adapters`
+
+Memory provider note:
+
+- `memory_providers` are additive only: canonical guardian memory remains authoritative
+- provider definitions should include `quality_declaration` fields for provenance, confidence, privacy boundary, freshness, conflict behavior, and suppression rules
+- provider evidence must pass the runtime quality gate before entering guardian context; omitted declarations, missing evidence IDs, low confidence, stale evidence, unsafe privacy boundaries, and authority drift are suppressed before context assembly
 
 Current content-validation depth is also uneven by design:
 

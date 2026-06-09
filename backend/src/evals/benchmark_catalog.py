@@ -32,6 +32,10 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
+from src.memory.provider_quality_gate import (
+    MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
+    MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME,
+)
 from src.memory.superiority_benchmark import (
     M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
     M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME,
@@ -166,6 +170,22 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Broader live-provider workloads and external memory benchmark parity remain future proof work after the deterministic M6 lane."
         ),
         scenario_names=M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME,
+        label="Memory provider quality gate",
+        description=(
+            "Pins external memory-provider declarations, quality-gated context entry, noisy/stale/conflict suppression, "
+            "and operator correction, pin, forget, and audit visibility."
+        ),
+        benchmark_axis="memory_provider_quality_gate",
+        operator_summary=(
+            "External memory evidence must pass a canonical-first quality gate before shaping guardian context."
+        ),
+        remaining_gap=(
+            "Broader live-provider workloads and provider-specific quality tuning remain future proof work."
+        ),
+        scenario_names=MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=WORKFLOW_ENDURANCE_BENCHMARK_SUITE_NAME,

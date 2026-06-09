@@ -61,6 +61,12 @@ from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
 )
+from src.memory.provider_quality_gate import (
+    MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
+    MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME,
+    build_memory_provider_quality_gate_report,
+)
+from src.memory.providers import memory_provider_quality_gate_policy_payload
 from src.workflows.operating_layer import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -4595,19 +4601,40 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
                         text="Atlas launch remains the live project anchor.",
                         score=0.66,
                         provider_name=self.name,
+                        evidence_id="graph-memory:project:atlas-live-anchor",
                         bucket="project",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.72,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                     ),
                     MemoryProviderHit(
                         text="Alice owns Atlas launch communications.",
                         score=0.83,
                         provider_name=self.name,
+                        evidence_id="graph-memory:collaborator:alice-atlas",
                         bucket="collaborator",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.86,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                     ),
                     MemoryProviderHit(
                         text="Atlas launch investor note goes out on Friday.",
                         score=0.61,
                         provider_name=self.name,
+                        evidence_id="graph-memory:obligation:atlas-investor-note",
                         bucket="obligation",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.68,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                     ),
                 ),
                 summary="Provider-backed user model available.",
@@ -4654,6 +4681,17 @@ async def _eval_memory_provider_user_model_behavior() -> dict[str, Any]:
                 "  - user_model\n"
                 "canonical_memory_owner: seraph\n"
                 "canonical_write_mode: additive_only\n"
+                "quality_declaration:\n"
+                "  provenance: external_advisory\n"
+                "  confidence: provider_confidence_score\n"
+                "  privacy_boundary: standard_or_shared_only\n"
+                "  freshness: created_at_required\n"
+                "  conflict_behavior: guardian_wins\n"
+                "  suppression_rules:\n"
+                "    - stale_provider_evidence\n"
+                "    - irrelevant_provider_evidence\n"
+                "    - low_confidence_provider_evidence\n"
+                "    - provider_conflict_yields_to_canonical_memory\n"
                 "config_fields:\n"
                 "  - key: api_key\n"
                 "    label: API Key\n"
@@ -4769,6 +4807,7 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
         clear_memory_provider_adapters,
         register_memory_provider_adapter,
     )
+    from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
     from src.memory.retrieval_planner import plan_memory_retrieval
 
     @dataclass
@@ -4790,15 +4829,27 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
                         text="Atlas launch remains the live project anchor.",
                         score=0.71,
                         provider_name=self.name,
+                        evidence_id="graph-memory:project:atlas-fresh",
                         bucket="project",
                         created_at=datetime.now(timezone.utc) - timedelta(days=3),
+                        confidence=0.76,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                     ),
                     MemoryProviderHit(
                         text="Alice owns Atlas launch communications.",
                         score=0.83,
                         provider_name=self.name,
+                        evidence_id="graph-memory:collaborator:alice-stale",
                         bucket="collaborator",
                         created_at=datetime.now(timezone.utc) - timedelta(days=180),
+                        confidence=0.86,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
                     ),
                 ),
                 summary="Provider-backed user model available.",
@@ -4837,6 +4888,17 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
             "  - user_model\n"
             "canonical_memory_owner: seraph\n"
             "canonical_write_mode: additive_only\n"
+            "quality_declaration:\n"
+            "  provenance: external_advisory\n"
+            "  confidence: provider_confidence_score\n"
+            "  privacy_boundary: standard_or_shared_only\n"
+            "  freshness: created_at_required\n"
+            "  conflict_behavior: guardian_wins\n"
+            "  suppression_rules:\n"
+            "    - stale_provider_evidence\n"
+            "    - irrelevant_provider_evidence\n"
+            "    - low_confidence_provider_evidence\n"
+            "    - provider_conflict_yields_to_canonical_memory\n"
             "config_fields:\n"
             "  - key: api_key\n"
             "    label: API Key\n"
@@ -4880,6 +4942,347 @@ async def _eval_memory_provider_stale_evidence_behavior() -> dict[str, Any]:
         "stale_collaborator_bucket": diagnostics["stale_bucket_counts"].get("collaborator") == 1,
         "lane_stays_provider_model": retrieval.lane == "structured_plus_provider_model",
         "quality_state_guarded": diagnostics["quality_state"] == "guarded",
+    }
+
+
+def _memory_provider_quality_gate_manifest(
+    *,
+    provider_name: str = "graph-memory",
+    capabilities: tuple[str, ...] = ("retrieval",),
+) -> str:
+    return (
+        f"name: {provider_name}\n"
+        "description: Quality-gated additive memory provider.\n"
+        "provider_kind: vector_plugin\n"
+        "enabled: true\n"
+        "capabilities:\n"
+        + "".join(f"  - {capability}\n" for capability in capabilities)
+        + "canonical_memory_owner: seraph\n"
+        + "canonical_write_mode: additive_only\n"
+        + "quality_declaration:\n"
+        + "  provenance: external_advisory\n"
+        + "  confidence: provider_confidence_score\n"
+        + "  privacy_boundary: standard_or_shared_only\n"
+        + "  freshness: created_at_required\n"
+        + "  conflict_behavior: guardian_wins\n"
+        + "  suppression_rules:\n"
+        + "    - stale_provider_evidence\n"
+        + "    - irrelevant_provider_evidence\n"
+        + "    - low_confidence_provider_evidence\n"
+        + "    - provider_conflict_yields_to_canonical_memory\n"
+        + "config_fields:\n"
+        + "  - key: api_key\n"
+        + "    label: API Key\n"
+        + "    input: password\n"
+        + "    required: true\n"
+    )
+
+
+def _write_memory_provider_quality_workspace(
+    workspace_dir: str,
+    *,
+    capabilities: tuple[str, ...] = ("retrieval",),
+    include_declaration: bool = True,
+) -> None:
+    from src.extensions.registry import _current_seraph_version
+
+    pack_dir = os.path.join(workspace_dir, "extensions", "graph-memory-pack", "connectors", "memory")
+    os.makedirs(pack_dir, exist_ok=True)
+    current_version = _current_seraph_version()
+    with open(os.path.join(workspace_dir, "extensions", "graph-memory-pack", "manifest.yaml"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "id: seraph.graph-memory-pack\n"
+            f"version: {current_version}\n"
+            "display_name: Graph Memory Pack\n"
+            "kind: connector-pack\n"
+            "compatibility:\n"
+            f"  seraph: \">={current_version}\"\n"
+            "publisher:\n"
+            "  name: Seraph\n"
+            "trust: local\n"
+            "permissions:\n"
+            "  execution_boundaries:\n"
+            "    - secret_management\n"
+            "  network: true\n"
+            "contributes:\n"
+            "  memory_providers:\n"
+            "    - connectors/memory/graph-memory.yaml\n"
+        )
+    provider_text = _memory_provider_quality_gate_manifest(capabilities=capabilities)
+    if not include_declaration:
+        provider_text = provider_text.split("quality_declaration:\n", 1)[0] + "config_fields:\n  - key: api_key\n    label: API Key\n    input: password\n    required: true\n"
+    with open(os.path.join(pack_dir, "graph-memory.yaml"), "w", encoding="utf-8") as handle:
+        handle.write(provider_text)
+    with open(os.path.join(workspace_dir, "extensions-state.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "extensions": {
+                    "seraph.graph-memory-pack": {
+                        "config": {"memory_providers": {"graph-memory": {"api_key": "secret-token"}}},
+                        "connector_state": {
+                            "connectors/memory/graph-memory.yaml": {"enabled": True},
+                        },
+                    }
+                }
+            },
+            handle,
+        )
+
+
+async def _eval_memory_provider_quality_gate_contract_behavior() -> dict[str, Any]:
+    import tempfile
+
+    from src.api.memory import list_memory_providers
+    from src.memory.providers import clear_memory_provider_adapters, register_memory_provider_adapter
+
+    class EvalMemoryProviderAdapter:
+        name = "graph-memory"
+        provider_kind = "vector_plugin"
+        capabilities = ("retrieval",)
+
+        def health(self) -> dict[str, object]:
+            return {"status": "ready", "summary": "Quality-gated provider ready."}
+
+        async def retrieve(self, **_kwargs):
+            return MemoryProviderRetrievalResult()
+
+    workspace_dir = tempfile.mkdtemp(prefix="seraph-memory-provider-quality-contract-")
+    _write_memory_provider_quality_workspace(workspace_dir)
+    register_memory_provider_adapter(EvalMemoryProviderAdapter())
+    try:
+        with patch.object(settings, "workspace_dir", workspace_dir):
+            inventory = await list_memory_providers()
+    finally:
+        clear_memory_provider_adapters()
+
+    provider = inventory["providers"][0]
+    policy = memory_provider_quality_gate_policy_payload()
+    declaration = provider["quality_declaration"]
+    return {
+        "provider_declaration_complete": declaration["complete"] is True,
+        "provider_declares_provenance": declaration["provenance"] == "external_advisory",
+        "provider_declares_confidence": bool(declaration["confidence"]),
+        "provider_declares_privacy_boundary": bool(declaration["privacy_boundary"]),
+        "provider_declares_freshness": bool(declaration["freshness"]),
+        "provider_declares_conflict_behavior": declaration["conflict_behavior"] == "guardian_wins",
+        "provider_declares_suppression_rules": "stale_provider_evidence" in declaration["suppression_rules"],
+        "quality_controls_surface_gate_policy": provider["quality_controls"]["quality_gate"]["minimum_context_confidence"] == policy["minimum_context_confidence"],
+        "quality_controls_declaration_complete": provider["quality_controls"]["provider_declaration_complete"] is True,
+    }
+
+
+async def _eval_memory_provider_quality_gate_improvement_behavior() -> dict[str, Any]:
+    import tempfile
+
+    from src.memory.providers import (
+        MemoryProviderHit,
+        MemoryProviderRetrievalResult,
+        clear_memory_provider_adapters,
+        register_memory_provider_adapter,
+    )
+    from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
+    from src.memory.retrieval_planner import plan_memory_retrieval
+
+    class EvalMemoryProviderAdapter:
+        name = "graph-memory"
+        provider_kind = "vector_plugin"
+        capabilities = ("retrieval",)
+
+        def health(self) -> dict[str, object]:
+            return {"status": "ready", "summary": "Quality-gated provider ready."}
+
+        async def retrieve(self, *, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult(
+                hits=(
+                    MemoryProviderHit(
+                        text="Atlas launch investor brief owner is Priya.",
+                        score=0.82,
+                        provider_name=self.name,
+                        evidence_id="graph-memory:atlas:investor-brief-owner",
+                        bucket="collaborator",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.88,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
+                    ),
+                ),
+                summary="secret-token should be redacted if echoed.",
+                notes=("secret-token echoed in provider note",),
+            )
+
+    workspace_dir = tempfile.mkdtemp(prefix="seraph-memory-provider-quality-improvement-")
+    _write_memory_provider_quality_workspace(workspace_dir)
+    register_memory_provider_adapter(EvalMemoryProviderAdapter())
+    try:
+        with (
+            patch.object(settings, "workspace_dir", workspace_dir),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("", {}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.retrieve_hybrid_memory",
+                return_value=HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=()),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="Atlas investor brief owner", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    diagnostics = retrieval.provider_diagnostics[0]
+    return {
+        "baseline_without_provider_would_be_empty": True,
+        "provider_improved_recall": "Atlas launch investor brief owner is Priya." in retrieval.semantic_context,
+        "provider_declaration_complete": diagnostics["provider_declaration_complete"] is True,
+        "quality_gate_passed": diagnostics["quality_gate_state"] == "passed",
+        "quality_gate_passed_count": diagnostics["quality_gate_passed_count"] == 1,
+        "evidence_id_visible": "graph-memory:atlas:investor-brief-owner" in diagnostics["accepted_evidence_ids"],
+        "decision_receipt_has_evidence_id": "graph-memory:atlas:investor-brief-owner"
+        in retrieval.decision_receipt["provenance"]["provider_evidence_ids"],
+        "provider_secret_redacted_from_summary": "[redacted]" in diagnostics["summary"] and "secret-token" not in diagnostics["summary"],
+        "provider_secret_redacted_from_notes": all("secret-token" not in note for note in diagnostics["notes"]),
+    }
+
+
+async def _eval_memory_provider_quality_gate_suppression_behavior() -> dict[str, Any]:
+    import tempfile
+
+    from src.memory.providers import (
+        MemoryProviderHit,
+        MemoryProviderRetrievalResult,
+        clear_memory_provider_adapters,
+        register_memory_provider_adapter,
+    )
+    from src.memory.hybrid_retrieval import HybridMemoryRetrievalResult
+    from src.memory.retrieval_planner import plan_memory_retrieval
+
+    class EvalMemoryProviderAdapter:
+        name = "graph-memory"
+        provider_kind = "vector_plugin"
+        capabilities = ("retrieval",)
+
+        def health(self) -> dict[str, object]:
+            return {"status": "ready", "summary": "Quality-gated provider ready."}
+
+        async def retrieve(self, *, query: str, active_projects: tuple[str, ...] = (), limit: int = 4, config=None):
+            return MemoryProviderRetrievalResult(
+                hits=(
+                    MemoryProviderHit(
+                        text="Atlas launch uses the old Q1 owner.",
+                        score=0.22,
+                        provider_name=self.name,
+                        evidence_id="graph-memory:atlas:low-confidence",
+                        bucket="project",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.2,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
+                    ),
+                    MemoryProviderHit(
+                        text="Atlas launch credential note: do not surface.",
+                        score=0.91,
+                        provider_name=self.name,
+                        evidence_id="graph-memory:atlas:credential",
+                        bucket="project",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.9,
+                        privacy_boundary="credential",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
+                    ),
+                    MemoryProviderHit(
+                        text="Atlas launch provider wants canonical authority.",
+                        score=0.91,
+                        provider_name=self.name,
+                        evidence_id="graph-memory:atlas:authority-drift",
+                        bucket="project",
+                        created_at=datetime.now(timezone.utc),
+                        confidence=0.9,
+                        privacy_boundary="standard",
+                        provenance="guardian_canonical",
+                        conflict_behavior="provider_wins",
+                        suppression_rules=("stale_provider_evidence",),
+                    ),
+                    MemoryProviderHit(
+                        text="Atlas launch stale provider state.",
+                        score=0.91,
+                        provider_name=self.name,
+                        evidence_id="graph-memory:atlas:stale",
+                        bucket="project",
+                        created_at=datetime.now(timezone.utc) - timedelta(days=120),
+                        confidence=0.9,
+                        privacy_boundary="standard",
+                        provenance="external_advisory",
+                        conflict_behavior="guardian_wins",
+                        suppression_rules=("stale_provider_evidence", "irrelevant_provider_evidence"),
+                    ),
+                ),
+                summary="Noisy provider evidence available.",
+            )
+
+    workspace_dir = tempfile.mkdtemp(prefix="seraph-memory-provider-quality-suppression-")
+    _write_memory_provider_quality_workspace(workspace_dir)
+    register_memory_provider_adapter(EvalMemoryProviderAdapter())
+    try:
+        with (
+            patch.object(settings, "workspace_dir", workspace_dir),
+            patch(
+                "src.memory.retrieval_planner.build_structured_memory_context_bundle",
+                return_value=("- [project] Atlas launch", {"project": ("Atlas launch",)}),
+            ),
+            patch(
+                "src.memory.retrieval_planner.retrieve_hybrid_memory",
+                return_value=HybridMemoryRetrievalResult(context="", buckets={}, degraded=False, hits=()),
+            ),
+        ):
+            retrieval = await plan_memory_retrieval(query="Atlas launch", active_projects=("Atlas launch",))
+    finally:
+        clear_memory_provider_adapters()
+
+    diagnostics = retrieval.provider_diagnostics[0]
+    reasons = diagnostics["quality_gate_suppressed_reason_counts"]
+    return {
+        "low_confidence_suppressed": reasons["low_confidence"] == 1,
+        "low_score_suppressed": reasons["low_score"] == 1,
+        "unsafe_privacy_suppressed": reasons["unsafe_privacy_boundary"] == 1,
+        "invalid_provenance_suppressed": reasons["invalid_provenance"] == 1,
+        "conflict_policy_drift_suppressed": reasons["provider_conflict_policy_drift"] == 1,
+        "missing_rules_suppressed": reasons["missing_suppression_rules"] == 1,
+        "stale_provider_suppressed": diagnostics["stale_hit_count"] == 1,
+        "suppressed_before_context": "credential note" not in retrieval.semantic_context
+        and "canonical authority" not in retrieval.semantic_context,
+        "decision_receipt_counts_quality_gate": retrieval.decision_receipt["suppression"]["quality_gate_suppressed_count"] >= 3,
+    }
+
+
+async def _eval_operator_memory_provider_quality_gate_surface_behavior() -> dict[str, Any]:
+    scenario_names = list(MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES)
+    summary = types.SimpleNamespace(
+        total=len(scenario_names),
+        passed=len(scenario_names),
+        failed=0,
+        duration_ms=35,
+        results=[types.SimpleNamespace(name=name, passed=True, error="") for name in scenario_names],
+    )
+    with patch(
+        "src.memory.provider_quality_gate._run_memory_provider_quality_gate_suite",
+        AsyncMock(return_value=summary),
+    ):
+        payload = await build_memory_provider_quality_gate_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "memory_provider_quality_gate_visible",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES),
+        "declaration_state_visible": payload["summary"]["declaration_state"] == "required_provider_declarations_visible",
+        "suppression_state_visible": payload["summary"]["suppression_state"] == "noisy_stale_conflicting_or_unsafe_provider_evidence_suppressed",
+        "operator_controls_visible": "correct" in " ".join(payload["summary"]["operator_control_state"].split("_")),
+        "policy_requires_declarations": "provenance" in payload["policy"]["required_declarations"],
+        "claim_boundary_visible": payload["summary"]["claim_boundary"] == "deterministic_provider_quality_gate_not_live_external_memory_provider_superiority",
     }
 
 
@@ -4984,6 +5387,17 @@ async def _eval_memory_provider_writeback_behavior() -> dict[str, Any]:
                 "  - consolidation\n"
                 "canonical_memory_owner: seraph\n"
                 "canonical_write_mode: additive_only\n"
+                "quality_declaration:\n"
+                "  provenance: external_advisory\n"
+                "  confidence: provider_confidence_score\n"
+                "  privacy_boundary: standard_or_shared_only\n"
+                "  freshness: created_at_required\n"
+                "  conflict_behavior: guardian_wins\n"
+                "  suppression_rules:\n"
+                "    - stale_provider_evidence\n"
+                "    - irrelevant_provider_evidence\n"
+                "    - low_confidence_provider_evidence\n"
+                "    - provider_conflict_yields_to_canonical_memory\n"
                 "config_fields:\n"
                 "  - key: api_key\n"
                 "    label: API Key\n"
@@ -12490,6 +12904,7 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     cockpit_efficiency_suite = next(item for item in suites if item["name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME)
     m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
+    memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
     m9_governed_ecosystem_suite = next(
@@ -12551,6 +12966,16 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
             m6_memory_suite["scenario_count"] == len(M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES)
         ),
         "m6_memory_suite_axis_matches": m6_memory_suite["benchmark_axis"] == "m6_memory_superiority",
+        "memory_provider_gate_suite_present": (
+            "memory_provider_quality_gate_contract_behavior" in memory_provider_gate_suite["scenario_names"]
+        ),
+        "memory_provider_gate_suite_scenario_count_matches": (
+            memory_provider_gate_suite["scenario_count"] == len(MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES)
+        ),
+        "memory_provider_gate_suite_axis_matches": (
+            memory_provider_gate_suite["benchmark_axis"] == "memory_provider_quality_gate"
+        ),
+        "memory_provider_gate_required": MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "planning_suite_present": "provider_routing_decision_audit" in planning_suite["scenario_names"],
         "governed_suite_present": "governed_preference_diversity_behavior" in governed_suite["scenario_names"],
         "m9_governed_ecosystem_suite_present": (
@@ -14645,6 +15070,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="behavior",
         description="Additive memory-provider writeback runs after canonical persistence and degrades cleanly without taking ownership away from guardian memory.",
         runner=_eval_memory_provider_writeback_behavior,
+    ),
+    EvalScenario(
+        name="memory_provider_quality_gate_contract_behavior",
+        category="behavior",
+        description="Memory providers declare provenance, confidence, privacy, freshness, conflict, and suppression policy before participating in guardian context.",
+        runner=_eval_memory_provider_quality_gate_contract_behavior,
+    ),
+    EvalScenario(
+        name="memory_provider_quality_gate_improvement_behavior",
+        category="behavior",
+        description="Quality-gated provider evidence can improve recall against a canonical-only miss while preserving advisory provenance and redacted receipts.",
+        runner=_eval_memory_provider_quality_gate_improvement_behavior,
+    ),
+    EvalScenario(
+        name="memory_provider_quality_gate_suppression_behavior",
+        category="behavior",
+        description="Noisy, unsafe, stale, and authority-drifting provider evidence is suppressed before guardian context assembly.",
+        runner=_eval_memory_provider_quality_gate_suppression_behavior,
+    ),
+    EvalScenario(
+        name="operator_memory_provider_quality_gate_surface_behavior",
+        category="observability",
+        description="Operator memory-provider quality-gate surface exposes declarations, suppression, control surfaces, and claim boundary.",
+        runner=_eval_operator_memory_provider_quality_gate_surface_behavior,
     ),
     EvalScenario(
         name="bounded_memory_snapshot_behavior",

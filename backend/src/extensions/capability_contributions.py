@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from typing import Any
@@ -254,6 +254,36 @@ class MessagingConnectorDefinition:
 
 
 @dataclass(frozen=True)
+class MemoryProviderQualityDeclaration:
+    provenance: str = ""
+    confidence: str = ""
+    privacy_boundary: str = ""
+    freshness: str = ""
+    conflict_behavior: str = ""
+    suppression_rules: tuple[str, ...] = ()
+
+    def as_metadata(self) -> dict[str, Any]:
+        return {
+            "provenance": self.provenance,
+            "confidence": self.confidence,
+            "privacy_boundary": self.privacy_boundary,
+            "freshness": self.freshness,
+            "conflict_behavior": self.conflict_behavior,
+            "suppression_rules": list(self.suppression_rules),
+            "complete": all(
+                (
+                    self.provenance,
+                    self.confidence,
+                    self.privacy_boundary,
+                    self.freshness,
+                    self.conflict_behavior,
+                    self.suppression_rules,
+                )
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class MemoryProviderDefinition:
     name: str
     provider_kind: str
@@ -263,6 +293,7 @@ class MemoryProviderDefinition:
     config_fields: tuple[ContributionConfigField, ...] = ()
     canonical_memory_owner: str = "seraph"
     canonical_write_mode: str = "additive_only"
+    quality_declaration: MemoryProviderQualityDeclaration = field(default_factory=MemoryProviderQualityDeclaration)
     requires_network: bool = True
 
     def as_metadata(self) -> dict[str, Any]:
@@ -275,6 +306,7 @@ class MemoryProviderDefinition:
             "config_fields": [field.as_metadata() for field in self.config_fields],
             "canonical_memory_owner": self.canonical_memory_owner,
             "canonical_write_mode": self.canonical_write_mode,
+            "quality_declaration": self.quality_declaration.as_metadata(),
             "requires_network": self.requires_network,
         }
 
@@ -645,6 +677,24 @@ def parse_memory_provider_definition(payload: Any, *, source: str) -> MemoryProv
             f"{source}: canonical_write_mode '{canonical_write_mode}' is not supported"
         )
     requires_network = _parse_optional_bool(payload.get("requires_network"), source=source, field_name="requires_network")
+    raw_quality = payload.get("quality_declaration")
+    quality_declaration = MemoryProviderQualityDeclaration()
+    if raw_quality is not None:
+        if not isinstance(raw_quality, dict):
+            raise ConnectorDefinitionError(f"{source}: memory provider quality_declaration must be an object")
+        raw_suppression_rules = raw_quality.get("suppression_rules")
+        quality_declaration = MemoryProviderQualityDeclaration(
+            provenance=str(raw_quality.get("provenance") or "").strip(),
+            confidence=str(raw_quality.get("confidence") or "").strip(),
+            privacy_boundary=str(raw_quality.get("privacy_boundary") or "").strip(),
+            freshness=str(raw_quality.get("freshness") or "").strip(),
+            conflict_behavior=str(raw_quality.get("conflict_behavior") or "").strip(),
+            suppression_rules=_parse_string_list(
+                raw_suppression_rules,
+                source=source,
+                field_name="quality_declaration.suppression_rules",
+            ) if raw_suppression_rules is not None else (),
+        )
     return MemoryProviderDefinition(
         name=name,
         provider_kind=provider_kind,
@@ -654,6 +704,7 @@ def parse_memory_provider_definition(payload: Any, *, source: str) -> MemoryProv
         config_fields=_parse_config_fields(payload.get("config_fields"), source=source),
         canonical_memory_owner=owner,
         canonical_write_mode=canonical_write_mode,
+        quality_declaration=quality_declaration,
         requires_network=True if requires_network is None else requires_network,
     )
 

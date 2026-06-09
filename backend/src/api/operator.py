@@ -50,6 +50,7 @@ from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import apply_memory_operator_control
+from src.memory.provider_quality_gate import build_memory_provider_quality_gate_report
 from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
 from src.replay.benchmark import build_live_replay_benchmark_report
@@ -3377,6 +3378,7 @@ async def get_operator_benchmark_proof():
         workflow_endurance_benchmark,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
+        memory_provider_quality_gate_benchmark,
         m7_operator_cockpit_benchmark,
         cockpit_efficiency_benchmark,
         m8_guardian_brain_benchmark,
@@ -3393,6 +3395,7 @@ async def get_operator_benchmark_proof():
         build_workflow_endurance_benchmark_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
+        build_memory_provider_quality_gate_report(),
         build_m7_operator_cockpit_benchmark_report(),
         build_cockpit_efficiency_benchmark_report(),
         build_m8_guardian_brain_benchmark_report(),
@@ -3416,6 +3419,7 @@ async def get_operator_benchmark_proof():
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
+        str(memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"]),
         str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
         str(cockpit_efficiency_benchmark["summary"]["benchmark_posture"]),
         str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
@@ -3463,6 +3467,7 @@ async def get_operator_benchmark_proof():
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
+            "memory_provider_quality_gate_benchmark_posture": memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"],
             "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
             "cockpit_efficiency_benchmark_posture": cockpit_efficiency_benchmark["summary"]["benchmark_posture"],
             "m8_guardian_brain_benchmark_posture": m8_guardian_brain_benchmark["summary"]["benchmark_posture"],
@@ -3481,6 +3486,7 @@ async def get_operator_benchmark_proof():
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
+        "memory_provider_quality_gate_benchmark": memory_provider_quality_gate_benchmark,
         "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
         "cockpit_efficiency_benchmark": cockpit_efficiency_benchmark,
         "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
@@ -3522,6 +3528,11 @@ async def get_operator_m5_operating_layer_benchmark():
 @router.get("/operator/m6-memory-superiority-benchmark")
 async def get_operator_m6_memory_superiority_benchmark():
     return await build_m6_memory_superiority_benchmark_report()
+
+
+@router.get("/operator/memory-provider-quality-gate")
+async def get_operator_memory_provider_quality_gate():
+    return await build_memory_provider_quality_gate_report()
 
 
 @router.get("/operator/live-long-horizon-replay-benchmark")

@@ -41,6 +41,18 @@ from src.evals.benchmark_catalog import (
     benchmark_suite_report,
     benchmark_suite_scenarios,
 )
+from src.evals.production_parity_readiness import (
+    PRODUCTION_PARITY_BLOCKED_CLAIMS,
+    PRODUCTION_PARITY_READINESS_CLAIM_BOUNDARY,
+    PRODUCTION_PARITY_READINESS_SCENARIO_NAMES,
+    PRODUCTION_PARITY_READINESS_SUITE_NAME,
+    REQUIRED_PROJECT_FIELDS,
+    production_parity_batch_contracts,
+    production_parity_duplicate_guardrails,
+    production_parity_readiness_policy_payload,
+    production_parity_readiness_summary,
+    production_parity_validation_plan,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
@@ -13508,6 +13520,9 @@ async def _eval_operator_governed_capability_pack_hardening_surface_behavior() -
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
+    production_parity_readiness_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_PARITY_READINESS_SUITE_NAME
+    )
     guardian_memory_suite = next(item for item in suites if item["name"] == "guardian_memory_quality")
     guardian_user_model_suite = next(item for item in suites if item["name"] == "guardian_user_model_restraint")
     memory_suite = next(item for item in suites if item["name"] == "memory_continuity_workflows")
@@ -13547,6 +13562,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     return {
         "suite_count": len(suites),
+        "production_parity_readiness_suite_present": (
+            "production_parity_claim_gate_behavior" in production_parity_readiness_suite["scenario_names"]
+        ),
+        "production_parity_readiness_suite_scenario_count_matches": (
+            production_parity_readiness_suite["scenario_count"] == len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES)
+        ),
+        "production_parity_readiness_suite_axis_matches": (
+            production_parity_readiness_suite["benchmark_axis"] == "production_parity_readiness"
+        ),
+        "production_parity_readiness_gate_required": (
+            PRODUCTION_PARITY_READINESS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "guardian_memory_suite_present": "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"],
         "guardian_user_model_suite_present": "guardian_clarification_restraint_behavior" in guardian_user_model_suite["scenario_names"],
         "memory_suite_present": "workflow_operating_layer_behavior" in memory_suite["scenario_names"],
@@ -13705,6 +13732,153 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "gate_requires_review": bool(gate_policy["requires_human_review"]),
         "gate_blocks_constraint_failure": bool(gate_policy["blocks_on_constraint_failure"]),
         "proof_contract": gate_policy["proof_contract"],
+    }
+
+
+def _eval_production_parity_batch_contract_behavior() -> dict[str, Any]:
+    batches = production_parity_batch_contracts()
+    future_batches = [batch for batch in batches if batch["issue"] != 476]
+    return {
+        "parent_issue_visible": all(476 <= int(batch["issue"]) <= 482 for batch in batches),
+        "batch_count_matches": len(batches) == 7,
+        "future_batch_count_matches": len(future_batches) == 6,
+        "every_batch_has_lane": all(bool(batch["lane"]) for batch in batches),
+        "every_batch_has_proof_suite": all(bool(batch["proof_suites"]) for batch in batches),
+        "every_batch_has_operator_receipt": all(bool(batch["operator_receipt_target"]) for batch in batches),
+        "every_batch_has_validation_classes": all(bool(batch["validation_classes"]) for batch in batches),
+        "every_batch_has_negative_cases": all(bool(batch["negative_cases"]) for batch in batches),
+        "every_batch_has_review_roles": all(bool(batch["review_roles"]) for batch in batches),
+        "memory_learning_proof_floors_visible": {
+            "guardian_memory_quality",
+            "m6_memory_superiority",
+            "memory_provider_quality_gate",
+            "guardian_user_model_restraint",
+            "guardian_learning_arbitration_v2",
+            "live_long_horizon_eval_replay_v1",
+        }
+        <= set(next(batch for batch in batches if batch["issue"] == 480).get("existing_proof_floors", [])),
+    }
+
+
+def _eval_production_parity_claim_gate_behavior() -> dict[str, Any]:
+    policy = production_parity_readiness_policy_payload()
+    blocked = set(policy["blocked_claims"])
+    required = set(PRODUCTION_PARITY_BLOCKED_CLAIMS)
+    return {
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_PARITY_READINESS_CLAIM_BOUNDARY,
+        "all_required_blocked_claims_visible": required <= blocked,
+        "full_parity_blocked": "fully_at_parity" in blocked,
+        "superiority_blocked": "reference_systems_exceeded" in blocked,
+        "production_ready_blocked": "production_ready" in blocked,
+        "secure_private_blocked": "secure_private_by_default" in blocked,
+        "ironclaw_class_blocked": "ironclaw_class_secure_execution" in blocked,
+        "broad_reach_blocked": "broad_openclaw_class_reach" in blocked,
+        "voice_parity_blocked": "voice_or_multimodal_parity" in blocked,
+        "marketplace_claim_blocked": "production_secure_marketplace" in blocked,
+        "completion_not_claimed": "full_parity_achieved" in policy["not_claimed"],
+    }
+
+
+def _eval_production_parity_proof_gate_behavior() -> dict[str, Any]:
+    batches = production_parity_batch_contracts()
+    proof_suite_names = {
+        suite_name
+        for batch in batches
+        for suite_name in batch["proof_suites"]
+    }
+    operator_targets = {batch["operator_receipt_target"] for batch in batches}
+    return {
+        "readiness_suite_named": PRODUCTION_PARITY_READINESS_SUITE_NAME in proof_suite_names,
+        "secure_host_v2_path_named": "secure_capability_host_live_isolation_v2" in proof_suite_names,
+        "durable_orchestration_v2_path_named": "durable_workflow_engine_v2" in proof_suite_names,
+        "reach_browser_voice_paths_named": {
+            "production_reach_channel_hardening",
+            "browser_computer_use_reliability_v2",
+            "guardian_safe_voice_media_runtime",
+        }
+        <= proof_suite_names,
+        "learning_marketplace_cockpit_paths_named": {
+            "live_guardian_learning_quality",
+            "marketplace_grade_capability_lifecycle",
+            "production_operator_control_parity",
+            "production_parity_train",
+        }
+        <= proof_suite_names,
+        "operator_targets_include_benchmark_proof": "/api/operator/benchmark-proof" in operator_targets,
+        "operator_targets_include_readiness": "/api/operator/production-parity-readiness" in operator_targets,
+    }
+
+
+def _eval_production_parity_project_board_contract_behavior() -> dict[str, Any]:
+    validation_plan = production_parity_validation_plan()
+    required_fields = set(validation_plan["required_project_fields"])
+    receipt_schema = set(validation_plan["receipt_schema"])
+    return {
+        "required_fields_match_contract": required_fields == set(REQUIRED_PROJECT_FIELDS),
+        "queue_lane_priority_size_required": {"Queue", "Lane", "Priority", "Size"} <= required_fields,
+        "review_and_pr_required": {"Code Review", "PR"} <= required_fields,
+        "new_batch_defaults_visible": validation_plan["status_defaults"]["new_batch"]["Status"] == "Todo",
+        "active_batch_defaults_visible": validation_plan["status_defaults"]["active_batch"]["Status"] == "In Progress",
+        "open_pr_defaults_visible": validation_plan["status_defaults"]["open_pr"]["PR"] == "Open",
+        "merged_pr_defaults_visible": validation_plan["status_defaults"]["merged_pr"]["PR"] == "Merged",
+        "receipt_schema_has_trust_fields": {
+            "trust_boundary",
+            "credential_or_evidence_exposure",
+            "redaction_status",
+            "blocked_claims",
+            "residual_risk",
+            "linked_proof_run",
+        }
+        <= receipt_schema,
+    }
+
+
+def _eval_production_parity_duplicate_scope_boundary_behavior() -> dict[str, Any]:
+    guardrails = production_parity_duplicate_guardrails()
+    anchors = {item["anchor"] for item in guardrails}
+    return {
+        "closed_milestone_anchor_visible": "#424" in anchors and "#436" in anchors,
+        "proof_train_anchor_visible": "#468" in anchors and "PR #473" in anchors,
+        "production_train_anchor_visible": "#475" in anchors and "#477-#482" in anchors,
+        "closed_proof_anchor_visible": "#438/#439/#440/#441/#467/#470/#471/#472" in anchors,
+        "guardrail_count_matches": len(guardrails) >= 7,
+        "every_guardrail_has_reason": all(bool(item["reason"]) for item in guardrails),
+    }
+
+
+def _eval_production_parity_validation_receipt_behavior() -> dict[str, Any]:
+    validation_plan = production_parity_validation_plan()
+    pr_receipts = set(validation_plan["pr_receipts"])
+    commands = set(validation_plan["validation_commands"])
+    return {
+        "claim_gate_command_visible": "python scripts/check_strategy_claims.py" in commands,
+        "diff_check_visible": "git diff --check" in commands,
+        "targeted_tests_visible": any("test_eval_harness.py" in command for command in commands),
+        "critic_receipt_required": "critic_contrarian_disposition" in pr_receipts,
+        "team_receipt_required": "team_passes_and_capacity_limitations" in pr_receipts,
+        "board_receipt_required": "board_field_receipt" in pr_receipts,
+        "claim_boundary_review_required": "claim_boundary_review" in pr_receipts,
+        "current_source_status_required": "current_source_status_for_competitor_claims" in pr_receipts,
+        "source_refresh_policy_visible": "current official source URLs" in validation_plan["source_refresh_policy"],
+    }
+
+
+def _eval_operator_production_parity_readiness_surface_behavior() -> dict[str, Any]:
+    summary = production_parity_readiness_summary(healthy=True)
+    policy = production_parity_readiness_policy_payload()
+    batches = production_parity_batch_contracts()
+    return {
+        "suite_name_visible": summary["suite_name"] == PRODUCTION_PARITY_READINESS_SUITE_NAME,
+        "scenario_count_matches": summary["scenario_count"] == len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES),
+        "batch_count_matches": summary["batch_count"] == len(batches),
+        "negative_cases_visible": summary["negative_case_count"] >= len(batches),
+        "receipt_schema_visible": summary["receipt_schema_field_count"] >= 10,
+        "completion_boundary_visible": summary["completion_state"] == "readiness_contract_only_full_parity_unproven",
+        "claim_boundary_visible": summary["claim_boundary"] == PRODUCTION_PARITY_READINESS_CLAIM_BOUNDARY,
+        "readiness_surface_visible": "/api/operator/production-parity-readiness" in policy["receipt_surfaces"],
+        "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in policy["receipt_surfaces"],
+        "current_source_requirement_visible": "current official source URLs" in policy["current_source_requirement"],
+        "full_parity_not_claimed": "full_parity_achieved" in policy["not_claimed"],
     }
 
 
@@ -14831,6 +15005,48 @@ async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:
 
 
 _SCENARIOS: tuple[EvalScenario, ...] = (
+    EvalScenario(
+        name="production_parity_batch_contract_behavior",
+        category="strategy",
+        description="Production parity readiness names every batch, proof path, operator receipt target, and validation class without claiming implementation completion.",
+        runner=_eval_production_parity_batch_contract_behavior,
+    ),
+    EvalScenario(
+        name="production_parity_claim_gate_behavior",
+        category="strategy",
+        description="Production parity readiness blocks full parity, superiority, production-ready, secure/private, reach, voice, workflow, and marketplace claims until proof lands.",
+        runner=_eval_production_parity_claim_gate_behavior,
+    ),
+    EvalScenario(
+        name="production_parity_proof_gate_behavior",
+        category="strategy",
+        description="Production parity readiness exposes named proof suites and operator receipt targets for every later production-grade batch.",
+        runner=_eval_production_parity_proof_gate_behavior,
+    ),
+    EvalScenario(
+        name="production_parity_project_board_contract_behavior",
+        category="strategy",
+        description="Production parity readiness pins the required GitHub Project fields and status transitions for tracked batch issues.",
+        runner=_eval_production_parity_project_board_contract_behavior,
+    ),
+    EvalScenario(
+        name="production_parity_duplicate_scope_boundary_behavior",
+        category="strategy",
+        description="Production parity readiness records closed M0-M9 and proof-train anchors as non-duplicate foundations.",
+        runner=_eval_production_parity_duplicate_scope_boundary_behavior,
+    ),
+    EvalScenario(
+        name="production_parity_validation_receipt_behavior",
+        category="strategy",
+        description="Production parity readiness requires claim checks, targeted tests, board receipts, and critic disposition before PR completion.",
+        runner=_eval_production_parity_validation_receipt_behavior,
+    ),
+    EvalScenario(
+        name="operator_production_parity_readiness_surface_behavior",
+        category="strategy",
+        description="Operator surfaces expose production parity readiness posture, blocked claims, and the full-parity-not-yet-proven boundary.",
+        runner=_eval_operator_production_parity_readiness_surface_behavior,
+    ),
     EvalScenario(
         name="chat_model_wrapper",
         category="runtime",

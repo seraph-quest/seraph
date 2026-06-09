@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
@@ -25,6 +26,19 @@ def _default_empty_continuity_snapshot():
         ),
     ):
         yield
+
+
+@pytest.mark.asyncio
+async def test_operator_production_parity_readiness_surface_blocks_completion_claims(client):
+    resp = await client.get("/api/operator/production-parity-readiness")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "production_parity_readiness"
+    assert payload["summary"]["completion_state"] == "readiness_contract_only_full_parity_unproven"
+    assert payload["summary"]["scenario_count"] == len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES)
+    assert "fully_at_parity" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/production-parity-readiness" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio
@@ -952,6 +966,72 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             {"target_type": "skill", "source_path": "/tmp/skills/web-briefing.md"},
             {"target_type": "prompt_pack", "source_path": "/tmp/extensions/review-pack/prompts/review.md"},
         ],
+        ))
+        stack.enter_context(patch(
+        "src.api.operator.build_production_parity_readiness_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "production_parity_readiness",
+                    "benchmark_posture": "production_parity_readiness_ci_gated_operator_visible",
+                    "operator_status": "production_parity_readiness_visible",
+                    "scenario_count": len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES),
+                    "batch_count": 7,
+                    "future_batch_count": 6,
+                    "blocked_claim_count": 9,
+                    "proof_path_count": 16,
+                    "operator_receipt_target_count": 5,
+                    "project_field_count": 7,
+                    "duplicate_guardrail_count": 4,
+                    "failure_mode_count": 5,
+                    "active_failure_count": 0,
+                    "claim_boundary": (
+                        "readiness_contract_for_production_parity_train_not_full_parity_or_superiority"
+                    ),
+                    "completion_state": "readiness_contract_only_full_parity_unproven",
+                },
+                "scenario_names": list(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES),
+                "batch_contracts": [
+                    {
+                        "issue": 476,
+                        "proof_suites": ["production_parity_readiness"],
+                        "operator_receipt_target": "/api/operator/production-parity-readiness",
+                    }
+                ],
+                "duplicate_guardrails": [],
+                "validation_plan": {},
+                "failure_taxonomy": [],
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": (
+                        "readiness_contract_for_production_parity_train_not_full_parity_or_superiority"
+                    ),
+                    "blocked_claims": [
+                        "fully_at_parity",
+                        "reference_systems_exceeded",
+                        "production_ready",
+                        "secure_private_by_default",
+                        "ironclaw_class_secure_execution",
+                        "broad_openclaw_class_reach",
+                        "voice_or_multimodal_parity",
+                        "solved_durable_workflows",
+                        "production_secure_marketplace",
+                    ],
+                    "receipt_surfaces": [
+                        "/api/operator/production-parity-readiness",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": ["full_parity_achieved"],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {
+                    "total": len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES),
+                    "passed": len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES),
+                    "failed": 0,
+                    "duration_ms": 100,
+                },
+            }
+        ),
         ))
         stack.enter_context(patch(
         "src.api.operator.build_workflow_endurance_benchmark_report",
@@ -1911,8 +1991,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 25
+    assert payload["summary"]["suite_count"] == 26
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
+    assert (
+        payload["summary"]["production_parity_readiness_posture"]
+        == "production_parity_readiness_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["production_parity_readiness_claim_boundary"]
+        == "readiness_contract_for_production_parity_train_not_full_parity_or_superiority"
+    )
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1979,6 +2067,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["governed_improvement"]["recent_receipts"][0]["acceptance_state"] == "ready_for_canary"
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "production_parity_readiness" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert (
         "guardian_safe_multimodal_voice"
@@ -2002,6 +2091,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     user_model_suite = next(item for item in payload["suites"] if item["name"] == "guardian_user_model_restraint")
     assert "guardian_clarification_restraint_behavior" in user_model_suite["scenario_names"]
     assert user_model_suite["scenario_count"] >= 4
+
+    production_parity_readiness_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_parity_readiness"
+    )
+    assert "production_parity_claim_gate_behavior" in production_parity_readiness_suite["scenario_names"]
+    assert production_parity_readiness_suite["scenario_count"] == len(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES)
+    assert payload["production_parity_readiness"]["summary"]["completion_state"] == (
+        "readiness_contract_only_full_parity_unproven"
+    )
+    assert "fully_at_parity" in payload["production_parity_readiness"]["policy"]["blocked_claims"]
 
     memory_suite = next(item for item in payload["suites"] if item["name"] == "memory_continuity_workflows")
     assert "workflow_operating_layer_behavior" in memory_suite["scenario_names"]

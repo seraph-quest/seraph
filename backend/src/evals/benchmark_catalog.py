@@ -19,6 +19,10 @@ from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
     GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
 )
+from src.evals.production_parity_readiness import (
+    PRODUCTION_PARITY_READINESS_SCENARIO_NAMES,
+    PRODUCTION_PARITY_READINESS_SUITE_NAME,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
@@ -102,6 +106,26 @@ class BenchmarkSuiteDefinition:
 
 
 _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_PARITY_READINESS_SUITE_NAME,
+        label="Production parity readiness",
+        description=(
+            "Pins the production-grade parity train contract before later batches claim implementation readiness: "
+            "batch proof paths, blocked claim language, Project-field receipts, duplicate-scope guardrails, "
+            "operator receipt targets, and validation classes."
+        ),
+        benchmark_axis="production_parity_readiness",
+        operator_summary=(
+            "The production parity train now has an operator-visible readiness contract that blocks full parity, "
+            "superiority, production-ready, secure/private, broad-reach, voice-parity, and marketplace claims "
+            "until the later batch proofs land."
+        ),
+        remaining_gap=(
+            "This readiness suite does not implement production-grade parity; secure host, orchestration, reach, "
+            "learning, marketplace, and final cockpit verification batches remain open."
+        ),
+        scenario_names=PRODUCTION_PARITY_READINESS_SCENARIO_NAMES,
+    ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME,
         label="Guardian memory benchmark",

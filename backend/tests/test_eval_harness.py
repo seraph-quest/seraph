@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from config.settings import settings
+from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
 from src.extensions.benchmark import (
@@ -211,7 +212,11 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 25
+    assert details["suite_count"] == 26
+    assert details["production_parity_readiness_suite_present"] is True
+    assert details["production_parity_readiness_suite_scenario_count_matches"] is True
+    assert details["production_parity_readiness_suite_axis_matches"] is True
+    assert details["production_parity_readiness_gate_required"] is True
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -279,6 +284,26 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["gate_requires_review"] is True
     assert details["gate_blocks_constraint_failure"] is True
     assert details["proof_contract"] == "deterministic_benchmark_suites_plus_review_receipts"
+
+
+def test_run_benchmark_suites_executes_production_parity_readiness_suite():
+    summary = asyncio.run(run_benchmark_suites(["production_parity_readiness"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES)
+    details_by_name = {result.name: result.details for result in summary.results}
+    assert details_by_name["production_parity_batch_contract_behavior"]["batch_count_matches"] is True
+    assert details_by_name["production_parity_claim_gate_behavior"]["full_parity_blocked"] is True
+    assert details_by_name["production_parity_proof_gate_behavior"]["secure_host_v2_path_named"] is True
+    assert details_by_name["production_parity_project_board_contract_behavior"]["review_and_pr_required"] is True
+    assert details_by_name["production_parity_duplicate_scope_boundary_behavior"]["proof_train_anchor_visible"] is True
+    assert details_by_name["production_parity_validation_receipt_behavior"]["critic_receipt_required"] is True
+    assert (
+        details_by_name["operator_production_parity_readiness_surface_behavior"]["full_parity_not_claimed"]
+        is True
+    )
 
 
 def test_run_durable_workflow_engine_benchmark_suite_passes():
@@ -1220,6 +1245,7 @@ def test_main_lists_available_benchmark_suites(capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 0
+    assert "production_parity_readiness" in captured.out
     assert "guardian_memory_quality" in captured.out
     assert "guardian_user_model_restraint" in captured.out
     assert "memory_continuity_workflows" in captured.out
@@ -1243,6 +1269,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "m9_governed_ecosystem" in captured.out
     assert "governed_capability_pack_hardening" in captured.out
     assert available_benchmark_suites() == (
+        "production_parity_readiness",
         "guardian_memory_quality",
         "guardian_user_model_restraint",
         "m8_guardian_intervention_quality",

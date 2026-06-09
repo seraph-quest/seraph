@@ -6,6 +6,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
+from src.extensions.production_reach_hardening import (
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
+    PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
+)
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
@@ -2078,7 +2084,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 30
+    assert payload["summary"]["suite_count"] == 33
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2129,6 +2135,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["guardian_safe_multimodal_voice_claim_boundary"]
         == "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity"
+    )
+    assert (
+        payload["summary"]["production_reach_browser_voice_posture"]
+        == "production_reach_browser_voice_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["production_reach_browser_voice_claim_boundary"] == (
+        "production_reach_browser_voice_receipts_not_broad_reach_voice_or_browser_parity"
     )
     assert (
         payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
@@ -2190,6 +2203,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "durable_workflow_engine_v2" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert (
         "production_durable_orchestration"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "production_reach_channel_hardening"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "browser_computer_use_reliability_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "guardian_safe_voice_media_runtime"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
 
@@ -2275,6 +2300,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     multimodal_voice_suite = next(item for item in payload["suites"] if item["name"] == "guardian_safe_multimodal_voice")
     assert "multimodal_voice_capability_governance_behavior" in multimodal_voice_suite["scenario_names"]
     assert multimodal_voice_suite["scenario_count"] == 6
+    production_reach_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_reach_channel_hardening"
+    )
+    assert "production_reach_external_messaging_pairing_behavior" in production_reach_suite["scenario_names"]
+    assert production_reach_suite["scenario_count"] == len(PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES)
+    browser_reliability_suite = next(
+        item for item in payload["suites"] if item["name"] == "browser_computer_use_reliability_v2"
+    )
+    assert "browser_reliability_session_partition_behavior" in browser_reliability_suite["scenario_names"]
+    assert browser_reliability_suite["scenario_count"] == len(BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES)
+    voice_runtime_suite = next(
+        item for item in payload["suites"] if item["name"] == "guardian_safe_voice_media_runtime"
+    )
+    assert "voice_media_runtime_guardian_value_behavior" in voice_runtime_suite["scenario_names"]
+    assert voice_runtime_suite["scenario_count"] == len(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES)
     learning_arbitration_suite = next(item for item in payload["suites"] if item["name"] == "guardian_learning_arbitration_v2")
     assert "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
     assert learning_arbitration_suite["scenario_count"] == 7
@@ -2338,6 +2378,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["guardian_safe_multimodal_voice_benchmark"]["policy"]["guardian_value_policy"] == (
         "voice_media_must_improve_timing_accessibility_situational_awareness_or_intervention_quality"
     )
+    assert payload["production_reach_browser_voice"]["summary"]["operator_status"] == (
+        "production_reach_browser_voice_receipts_visible"
+    )
+    assert payload["production_reach_browser_voice"]["summary"]["paired_external_messaging_channel_count"] >= 1
+    assert payload["production_reach_browser_voice"]["summary"]["browser_session_partition_count"] >= 2
+    assert payload["production_reach_browser_voice"]["summary"]["voice_media_deletion_path_count"] >= 2
+    assert payload["production_reach_browser_voice"]["policy"]["claim_boundary"] == PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY
     assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
     assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
         "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
@@ -2639,6 +2686,24 @@ async def test_operator_guardian_safe_multimodal_voice_surface_reports_policy_re
     )
     assert "voice_parity" in payload["policy"]["not_claimed"]
     assert "/api/operator/guardian-safe-multimodal-voice" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_production_reach_browser_voice_surface_reports_batch_by_receipts(client):
+    resp = await client.get("/api/operator/production-reach-browser-voice")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "production_reach_browser_voice_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "production_reach_browser_voice_receipts_visible"
+    assert payload["summary"]["paired_external_messaging_channel_count"] >= 1
+    assert payload["summary"]["browser_session_partition_count"] >= 2
+    assert payload["summary"]["browser_crash_recovery_count"] >= 1
+    assert payload["summary"]["voice_media_deletion_path_count"] >= 2
+    assert payload["summary"]["voice_media_revocation_fail_closed_count"] >= 2
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY
+    assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,14 @@ from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
 )
+from src.extensions.production_reach_hardening import (
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SUITE_NAME,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -199,6 +207,57 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "runtime parity remain future implementation work."
         ),
         scenario_names=GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME,
+        label="Production reach channel hardening",
+        description=(
+            "Pins external messaging reach beyond the native notification canary behind pairing, revocation, "
+            "identity binding, threading, approval handoff, privacy redaction, audit, and degraded recovery receipts."
+        ),
+        benchmark_axis="production_reach_channel_hardening",
+        operator_summary=(
+            "External messaging reach now has production-oriented receipts for one paired channel and fail-closed "
+            "degraded surfaces without claiming broad OpenClaw-class reach."
+        ),
+        remaining_gap=(
+            "Live broad mobile, SMS, Slack, Discord, and Telegram delivery at production scale remains future work."
+        ),
+        scenario_names=PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_COMPUTER_USE_RELIABILITY_V2_SUITE_NAME,
+        label="Browser computer-use reliability v2",
+        description=(
+            "Pins browser provider truth, session partitioning, crash recovery, action timelines, and page-drift "
+            "replay receipts for local, managed, and remote browser modes."
+        ),
+        benchmark_axis="browser_computer_use_reliability_v2",
+        operator_summary=(
+            "Browser/computer-use reliability now distinguishes local, managed, and remote provider truth while "
+            "keeping session partitions and recovery receipts operator-visible."
+        ),
+        remaining_gap=(
+            "Broader live browser transports, site-specific automation reliability, and full browser parity remain future work."
+        ),
+        scenario_names=BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME,
+        label="Guardian-safe voice/media runtime",
+        description=(
+            "Pins guarded runtime receipts for voice, STT/TTS, browser vision, and media analysis: guardian value, "
+            "privacy, transcript/audit, correction, deletion, and revocation fail-closed behavior."
+        ),
+        benchmark_axis="guardian_safe_voice_media_runtime",
+        operator_summary=(
+            "Voice/media runtime proof now advances from governance-only receipts to guarded runtime receipts "
+            "without claiming voice or multimodal parity."
+        ),
+        remaining_gap=(
+            "Production STT/TTS, live mobile voice, and full multimodal runtime parity remain future work."
+        ),
+        scenario_names=GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

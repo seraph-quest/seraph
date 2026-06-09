@@ -47,7 +47,7 @@ Verified on June 9, 2026 through GitHub Project GraphQL reads.
 | [#471 Batch BS: guardian arbitration and live-learning receipts](https://github.com/seraph-quest/seraph/issues/471) | active guardian arbitration follow-on | `PVTI_lADOD4qAvs4BS6n3zgvMBLE` | Now | Guardian Intelligence | P1 | L | In Progress | Not Ready | Not Ready |
 | [#472 Batch BT: governed capability-pack hardening receipts](https://github.com/seraph-quest/seraph/issues/472) | active ecosystem hardening follow-on | `PVTI_lADOD4qAvs4BS6n3zgvMBLI` | Now | Ecosystem and Leverage | P1 | L | In Progress | Not Ready | Not Ready |
 
-The current parent hub is [#468](https://github.com/seraph-quest/seraph/issues/468). It coordinates the live proof train without splitting it into micro-issues:
+The current parent hub is [#468](https://github.com/seraph-quest/seraph/issues/468). It coordinates the aggregate proof train without splitting it into micro-issues. Ready PR [#473](https://github.com/seraph-quest/seraph/pull/473) integrates the current replay, cockpit, memory, workflow, reach, durable-state, guardian-learning, ecosystem-hardening, and multimodal/voice proof slices against `develop`:
 
 - [#457](https://github.com/seraph-quest/seraph/issues/457) / [PR #458](https://github.com/seraph-quest/seraph/pull/458): live long-horizon replay and proof substrate
 - [#439](https://github.com/seraph-quest/seraph/issues/439) / [PR #459](https://github.com/seraph-quest/seraph/pull/459): cockpit operator efficiency benchmark
@@ -55,9 +55,6 @@ The current parent hub is [#468](https://github.com/seraph-quest/seraph/issues/4
 - [#440](https://github.com/seraph-quest/seraph/issues/440) / [PR #461](https://github.com/seraph-quest/seraph/pull/461): workflow endurance canary
 - [#438](https://github.com/seraph-quest/seraph/issues/438) / [PR #462](https://github.com/seraph-quest/seraph/pull/462): one excellent reach channel canary
 - [#467](https://github.com/seraph-quest/seraph/issues/467): guardian-safe multimodal and voice proof gate
-
-Blocked roadmap follow-ons are tracked separately so the board can represent the full goal without marking future work active:
-
 - [#470](https://github.com/seraph-quest/seraph/issues/470): durable workflow state after endurance canary
 - [#471](https://github.com/seraph-quest/seraph/issues/471): guardian arbitration and live-learning receipts
 - [#472](https://github.com/seraph-quest/seraph/issues/472): governed capability-pack hardening receipts
@@ -138,5 +135,5 @@ Rejected:
 
 Accepted after follow-up:
 
-- The remaining roadmap-level follow-ons were created as Project items. [#470](https://github.com/seraph-quest/seraph/issues/470) is active after the workflow-endurance canary; [#471](https://github.com/seraph-quest/seraph/issues/471) and [#472](https://github.com/seraph-quest/seraph/issues/472) remain blocked until their prerequisite proof batches land.
+- The remaining roadmap-level follow-ons were created as Project items and then promoted into the aggregate proof train once their prerequisite evidence was available. [#470](https://github.com/seraph-quest/seraph/issues/470), [#471](https://github.com/seraph-quest/seraph/issues/471), and [#472](https://github.com/seraph-quest/seraph/issues/472) are active slices in ready PR [#473](https://github.com/seraph-quest/seraph/pull/473), while their child issue `PR` fields remain `Not Ready` because the parent hub owns the aggregate PR relationship.
 - A duplicate secure execution host v1 ticket was not created because closed [#455](https://github.com/seraph-quest/seraph/issues/455) already owns that batch; future secure-host work needs a narrowed follow-up with named uncovered negative cases.

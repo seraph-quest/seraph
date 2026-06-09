@@ -981,6 +981,60 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
             }
         ),
     ), patch(
+        "src.api.operator.build_live_workflow_endurance_canary_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "live_workflow_endurance_canary",
+                    "benchmark_posture": "live_workflow_canary_ci_gated_operator_visible",
+                    "operator_status": "live_workflow_canary_visible",
+                    "scenario_count": 4,
+                    "session_count": 2,
+                    "run_count": 5,
+                    "branch_run_count": 3,
+                    "checkpoint_count": 4,
+                    "failure_injection_count": 1,
+                    "recovery_action_count": 1,
+                    "artifact_receipt_count": 4,
+                    "approval_preservation_count": 2,
+                    "trust_boundary_block_count": 1,
+                    "audit_receipt_count": 10,
+                    "active_failure_count": 0,
+                    "claim_boundary": "audit_projected_replayable_canary_not_durable_workflow_engine",
+                },
+                "scenario_names": [
+                    "live_workflow_canary_protocol_behavior",
+                    "live_workflow_canary_failure_recovery_behavior",
+                    "live_workflow_canary_approval_preservation_behavior",
+                    "operator_live_workflow_canary_surface_behavior",
+                ],
+                "protocol": {"replay_command": "uv run python -m src.evals.harness --benchmark-suite live_workflow_endurance_canary --indent 0"},
+                "policy": {
+                    "claim_boundary": "audit_projected_replayable_canary_not_durable_workflow_engine",
+                    "receipt_surfaces": [
+                        "/api/operator/live-workflow-endurance-canary",
+                        "/api/operator/workflow-orchestration",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": ["durable_workflow_state_machine"],
+                },
+                "sessions": [],
+                "runs": [],
+                "operator_story": {
+                    "multi_session_visible": True,
+                    "delegated_owner_visible": True,
+                    "checkpoint_branch_visible": True,
+                    "failure_recovery_visible": True,
+                    "artifact_comparison_visible": True,
+                    "approval_preservation_visible": True,
+                    "trust_boundary_fail_closed_visible": True,
+                    "audit_trail_visible": True,
+                },
+                "failure_report": [],
+                "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
+            }
+        ),
+    ), patch(
         "src.api.operator.build_live_replay_benchmark_report",
         AsyncMock(
             return_value={
@@ -1599,12 +1653,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 19
+    assert payload["summary"]["suite_count"] == 20
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["user_model_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["workflow_endurance_benchmark_posture"] == "ci_gated_operator_visible"
+    assert (
+        payload["summary"]["live_workflow_endurance_canary_posture"]
+        == "live_workflow_canary_ci_gated_operator_visible"
+    )
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
@@ -1637,6 +1695,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
@@ -1651,6 +1710,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     workflow_suite = next(item for item in payload["suites"] if item["name"] == "workflow_endurance_and_repair")
     assert "workflow_anticipatory_repair_behavior" in workflow_suite["scenario_names"]
     assert workflow_suite["scenario_count"] >= 4
+    live_workflow_canary_suite = next(item for item in payload["suites"] if item["name"] == "live_workflow_endurance_canary")
+    assert "live_workflow_canary_protocol_behavior" in live_workflow_canary_suite["scenario_names"]
+    assert live_workflow_canary_suite["scenario_count"] == 4
     live_replay_suite = next(item for item in payload["suites"] if item["name"] == "live_long_horizon_eval_replay_v1")
     assert "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"]
     assert live_replay_suite["scenario_count"] == 5
@@ -1693,6 +1755,10 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["user_model_benchmark"]["policy"]["clarify_before_action_policy"] == "required_on_high_ambiguity"
     assert payload["workflow_endurance_benchmark"]["summary"]["suite_name"] == "workflow_endurance_and_repair"
     assert payload["workflow_endurance_benchmark"]["policy"]["backup_branch_policy"] == "checkpoint_backed_branch_receipts_must_remain_operator_selectable"
+    assert payload["live_workflow_endurance_canary"]["summary"]["suite_name"] == "live_workflow_endurance_canary"
+    assert payload["live_workflow_endurance_canary"]["policy"]["claim_boundary"] == (
+        "audit_projected_replayable_canary_not_durable_workflow_engine"
+    )
     assert payload["trust_boundary_benchmark"]["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert payload["secure_capability_host_benchmark"]["summary"]["suite_name"] == "secure_capability_host"
@@ -2077,6 +2143,56 @@ async def test_operator_workflow_endurance_benchmark_surface_degrades_summary_on
     assert payload["summary"]["condensation_fidelity_state"] == "regressions_detected"
     assert payload["summary"]["branch_continuity_state"] == "regressions_detected"
     assert payload["failure_report"][0]["scenario_name"] == "workflow_backup_branch_surface_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_live_workflow_endurance_canary_surface_reports_story_and_claim_boundary(client):
+    resp = await client.get("/api/operator/live-workflow-endurance-canary")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "live_workflow_endurance_canary"
+    assert payload["summary"]["operator_status"] == "live_workflow_canary_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["failure_injection_count"] == 1
+    assert payload["summary"]["recovery_action_count"] == 1
+    assert payload["summary"]["trust_boundary_block_count"] == 1
+    assert payload["operator_story"]["multi_session_visible"] is True
+    assert payload["operator_story"]["artifact_comparison_visible"] is True
+    assert payload["operator_story"]["approval_preservation_visible"] is True
+    assert payload["operator_story"]["trust_boundary_fail_closed_visible"] is True
+    assert payload["policy"]["claim_boundary"] == "audit_projected_replayable_canary_not_durable_workflow_engine"
+    assert "durable_workflow_state_machine" in payload["policy"]["not_claimed"]
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_live_workflow_endurance_canary_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=4,
+        passed=3,
+        failed=1,
+        duration_ms=13,
+        results=[
+            SimpleNamespace(
+                passed=False,
+                name="live_workflow_canary_approval_preservation_behavior",
+                error="approval preservation regression",
+            )
+        ],
+    )
+
+    with patch(
+        "src.workflows.endurance_canary._run_live_workflow_endurance_canary_suite",
+        AsyncMock(return_value=failing_summary),
+    ):
+        resp = await client.get("/api/operator/live-workflow-endurance-canary")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "live_workflow_canary_regressions_detected_operator_visible"
+    assert payload["summary"]["active_failure_count"] == 1
+    assert payload["failure_report"][0]["scenario_name"] == "live_workflow_canary_approval_preservation_behavior"
 
 
 @pytest.mark.asyncio

@@ -205,11 +205,15 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 19
+    assert details["suite_count"] == 20
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
     assert details["workflow_suite_present"] is True
+    assert details["live_workflow_canary_suite_present"] is True
+    assert details["live_workflow_canary_suite_scenario_count_matches"] is True
+    assert details["live_workflow_canary_suite_axis_matches"] is True
+    assert details["live_workflow_canary_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -551,6 +555,57 @@ def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
         "workflow_backup_branch_surface_behavior",
         "workflow_multi_session_endurance_behavior",
     }
+
+
+def test_run_benchmark_suites_executes_live_workflow_endurance_canary_suite():
+    summary = asyncio.run(run_benchmark_suites(["live_workflow_endurance_canary"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "live_workflow_canary_protocol_behavior",
+        "live_workflow_canary_failure_recovery_behavior",
+        "live_workflow_canary_approval_preservation_behavior",
+        "operator_live_workflow_canary_surface_behavior",
+    }
+
+
+def test_live_workflow_endurance_canary_runtime_eval_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "live_workflow_canary_protocol_behavior",
+                "live_workflow_canary_failure_recovery_behavior",
+                "live_workflow_canary_approval_preservation_behavior",
+                "operator_live_workflow_canary_surface_behavior",
+            ]
+        )
+    )
+
+    assert summary.total == 4
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    protocol = details_by_name["live_workflow_canary_protocol_behavior"]
+    assert protocol["suite_name_visible"] is True
+    assert protocol["durable_engine_not_claimed"] is True
+    assert protocol["receipt_contract_covers_core_fields"] is True
+
+    recovery = details_by_name["live_workflow_canary_failure_recovery_behavior"]
+    assert recovery["multi_session_visible"] is True
+    assert recovery["failure_injection_visible"] is True
+    assert recovery["retry_recovery_visible"] is True
+    assert recovery["artifact_comparison_visible"] is True
+
+    approval = details_by_name["live_workflow_canary_approval_preservation_behavior"]
+    assert approval["fingerprint_preserved"] is True
+    assert approval["trust_boundary_drift_blocks_replay"] is True
+    assert approval["drift_checkpoint_suppressed"] is True
+
+    surface = details_by_name["operator_live_workflow_canary_surface_behavior"]
+    assert surface["operator_story_complete"] is True
+    assert surface["benchmark_surface_visible"] is True
 
 
 def test_run_benchmark_suites_executes_live_long_horizon_eval_replay_suite():
@@ -958,6 +1013,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "workflow_condensation_fidelity_behavior" in captured.out
     assert "workflow_backup_branch_surface_behavior" in captured.out
     assert "workflow_multi_session_endurance_behavior" in captured.out
+    assert "live_workflow_canary_protocol_behavior" in captured.out
+    assert "operator_live_workflow_canary_surface_behavior" in captured.out
     assert "engineering_memory_bundle_behavior" in captured.out
     assert "operator_continuity_graph_behavior" in captured.out
     assert "operator_guardian_state_surface_behavior" in captured.out
@@ -1034,6 +1091,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "m6_memory_superiority" in captured.out
     assert "memory_provider_quality_gate" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
+    assert "live_workflow_endurance_canary" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
@@ -1055,6 +1113,7 @@ def test_main_lists_available_benchmark_suites(capsys):
         "m6_memory_superiority",
         "memory_provider_quality_gate",
         "workflow_endurance_and_repair",
+        "live_workflow_endurance_canary",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

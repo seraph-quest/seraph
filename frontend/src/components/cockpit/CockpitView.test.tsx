@@ -5622,8 +5622,8 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 9,
-            scenario_count: 59,
+            suite_count: 10,
+            scenario_count: 63,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
@@ -5631,6 +5631,7 @@ describe("CockpitView", () => {
             memory_benchmark_posture: "ci_gated_operator_visible",
             user_model_benchmark_posture: "ci_gated_operator_visible",
             workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
+            live_workflow_endurance_canary_posture: "live_workflow_canary_ci_gated_operator_visible",
             trust_boundary_benchmark_posture: "ci_gated_operator_visible",
             secure_capability_host_benchmark_posture: "secure_host_ci_gated_operator_visible",
             computer_use_benchmark_posture: "ci_gated_operator_visible",
@@ -5719,6 +5720,127 @@ describe("CockpitView", () => {
               operator_visibility: "workflow_orchestration_and_benchmark_visible",
               ci_gate_mode: "required_benchmark_suite",
             },
+          },
+          live_workflow_endurance_canary: {
+            summary: {
+              suite_name: "live_workflow_endurance_canary",
+              benchmark_posture: "live_workflow_canary_ci_gated_operator_visible",
+              operator_status: "live_workflow_canary_visible",
+              scenario_count: 4,
+              session_count: 2,
+              run_count: 5,
+              branch_run_count: 3,
+              checkpoint_count: 4,
+              failure_injection_count: 1,
+              recovery_action_count: 1,
+              artifact_receipt_count: 4,
+              approval_preservation_count: 2,
+              trust_boundary_block_count: 1,
+              audit_receipt_count: 10,
+              active_failure_count: 0,
+              claim_boundary: "audit_projected_replayable_canary_not_durable_workflow_engine",
+            },
+            scenario_names: [
+              "live_workflow_canary_protocol_behavior",
+              "live_workflow_canary_failure_recovery_behavior",
+              "live_workflow_canary_approval_preservation_behavior",
+              "operator_live_workflow_canary_surface_behavior",
+            ],
+            protocol: {
+              replay_command: "uv run python -m src.evals.harness --benchmark-suite live_workflow_endurance_canary --indent 0",
+              time_anchor: "2026-05-11T09:00:00Z",
+            },
+            policy: {
+              claim_boundary: "audit_projected_replayable_canary_not_durable_workflow_engine",
+              receipt_surfaces: [
+                "/api/operator/live-workflow-endurance-canary",
+                "/api/operator/workflow-orchestration",
+                "/api/operator/benchmark-proof",
+              ],
+              not_claimed: ["durable_workflow_state_machine", "crash_safe_executor"],
+              required_receipts: [
+                "run_identity",
+                "thread_id",
+                "checkpoint_id",
+                "branch_lineage",
+                "failure_injection",
+                "recovery_action",
+                "delegated_owner",
+                "artifact_comparison",
+                "approval_preservation",
+                "trust_boundary_decision",
+                "audit_trail",
+              ],
+            },
+            sessions: [
+              { session_id: "session-canary-a", run_count: 3 },
+              { session_id: "session-canary-b", run_count: 2 },
+            ],
+            runs: [
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:root",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "running",
+                branch_kind: "root",
+                summary: "Primary long-running artifact handoff is paused at comparison before publish.",
+                checkpoint_candidates: [{ step_id: "plan" }],
+                artifact_receipts: [{ artifact_id: "artifact-root" }],
+                audit_receipts: ["audit-root", "audit-artifact"],
+              },
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:branch-compare",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "succeeded",
+                branch_kind: "branch_from_checkpoint",
+                summary: "Checkpoint branch compares the revised artifact against the original output.",
+                checkpoint_candidates: [{ step_id: "compare" }],
+                artifact_receipts: [{ artifact_id: "artifact-compare" }],
+                audit_receipts: ["audit-compare", "audit-artifact"],
+              },
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:branch-repair",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "recovered",
+                branch_kind: "retry_failed_step",
+                summary: "Injected failure recovered through repair branch.",
+                checkpoint_candidates: [{ step_id: "repair" }, { step_id: "compare" }],
+                artifact_receipts: [{ artifact_id: "artifact-repair" }],
+                audit_receipts: ["audit-failure", "audit-recovery"],
+              },
+              {
+                run_identity: "session-canary-b:workflow_live_workflow_endurance_canary:approval-preserved",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "awaiting_approval",
+                branch_kind: "root",
+                summary: "Second session holds a pending operator approval with stable context.",
+                checkpoint_candidates: [{ step_id: "approval_gate" }],
+                artifact_receipts: [],
+                audit_receipts: ["audit-approval", "audit-pending"],
+              },
+              {
+                run_identity: "session-canary-b:workflow_live_workflow_endurance_canary:approval-drift",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "failed",
+                branch_kind: "retry_failed_step",
+                summary: "Replay is blocked because the repair path gained authenticated-source authority.",
+                replay_block_reason: "approval_context_changed",
+                checkpoint_candidates: [],
+                artifact_receipts: [],
+                audit_receipts: ["audit-approval-drift"],
+              },
+            ],
+            operator_story: {
+              multi_session_visible: true,
+              delegated_owner_visible: true,
+              checkpoint_branch_visible: true,
+              failure_recovery_visible: true,
+              artifact_comparison_visible: true,
+              approval_preservation_visible: true,
+              trust_boundary_fail_closed_visible: true,
+              audit_trail_visible: true,
+            },
+            failure_report: [],
+            latest_run: { total: 4, passed: 4, failed: 0, duration_ms: 100 },
           },
           trust_boundary_benchmark: {
             summary: {
@@ -5865,6 +5987,16 @@ describe("CockpitView", () => {
               scenario_names: ["workflow_anticipatory_repair_behavior"],
             },
             {
+              name: "live_workflow_endurance_canary",
+              label: "Live workflow endurance canary",
+              description: "Replayable workflow canary suite",
+              benchmark_axis: "live_workflow_endurance_canary",
+              operator_summary: "Long-running workflow endurance has an operator-visible canary receipt.",
+              remaining_gap: "Durable workflow state machine remains future work.",
+              scenario_count: 4,
+              scenario_names: ["live_workflow_canary_protocol_behavior"],
+            },
+            {
               name: "trust_boundary_and_safety_receipts",
               label: "Trust boundaries and safety receipts",
               description: "Trust-boundary and safety-receipt suite",
@@ -5922,7 +6054,7 @@ describe("CockpitView", () => {
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 9,
+            required_suite_count: 10,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
@@ -5933,6 +6065,7 @@ describe("CockpitView", () => {
                 "guardian_user_model_restraint",
                 "memory_continuity_workflows",
                 "workflow_endurance_and_repair",
+                "live_workflow_endurance_canary",
                 "trust_boundary_and_safety_receipts",
                 "secure_capability_host",
                 "computer_use_browser_desktop",
@@ -6201,10 +6334,11 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/9 suites · 59 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/10 suites · 63 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Live workflow endurance canary/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Secure capability-host benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Computer-use benchmark/).length).toBeGreaterThan(0);
@@ -6219,6 +6353,19 @@ describe("CockpitView", () => {
     expect(within(operatorWindow).getByText(/benchmark regression · ambiguous referent restraint regression · deterministic eval failure/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/checkpoint and pre repair visible · recovery paths and output history retained · backup branch operator selectable/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · backup branch recovery regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/live workflow canary ci gated operator visible · 0 active failures · 2 sessions · 5 runs/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/3 branches · 4 checkpoints · 1 injected failures · 1 recoveries · 4 artifact receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/2 approvals preserved · 1 trust-boundary blocks · 10 audit receipts · 3 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/multi session visible · delegated owner visible · checkpoint branch visible · failure recovery visible · artifact comparison visible · approval preservation visible · trust boundary fail closed visible · audit trail visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/audit projected replayable canary not durable workflow engine · not durable workflow state machine · not crash safe executor/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/uv run python -m src\.evals\.harness --benchmark-suite live_workflow_endurance_canary --indent 0/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/2026-05-11T09:00:00Z · 11 required receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Primary long-running artifact handoff is paused at comparison before publish\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Checkpoint branch compares the revised artifact against the original output\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Injected failure recovered through repair branch\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Second session holds a pending operator approval with stable context\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Replay is blocked because the repair path gained authenticated-source authority\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/blocked approval context changed/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();

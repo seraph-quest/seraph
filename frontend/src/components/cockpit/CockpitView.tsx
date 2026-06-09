@@ -166,6 +166,7 @@ interface OperatorBenchmarkProofSummary {
   memory_benchmark_posture?: string;
   user_model_benchmark_posture?: string;
   workflow_endurance_benchmark_posture?: string;
+  live_workflow_endurance_canary_posture?: string;
   trust_boundary_benchmark_posture?: string;
   secure_capability_host_benchmark_posture?: string;
   computer_use_benchmark_posture?: string;
@@ -236,6 +237,7 @@ interface OperatorBenchmarkProof {
   memory_benchmark: OperatorMemoryBenchmark | null;
   user_model_benchmark: OperatorUserModelBenchmark | null;
   workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
+  live_workflow_endurance_canary: OperatorLiveWorkflowEnduranceCanary | null;
   trust_boundary_benchmark: OperatorTrustBoundaryBenchmark | null;
   secure_capability_host_benchmark: OperatorSecureCapabilityHostBenchmark | null;
   computer_use_benchmark: OperatorComputerUseBenchmark | null;
@@ -347,6 +349,42 @@ interface OperatorWorkflowEnduranceBenchmark {
     operator_visibility: string;
     ci_gate_mode: string;
   };
+}
+
+interface OperatorLiveWorkflowEnduranceCanary {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    session_count: number;
+    run_count: number;
+    branch_run_count: number;
+    checkpoint_count: number;
+    failure_injection_count: number;
+    recovery_action_count: number;
+    artifact_receipt_count: number;
+    approval_preservation_count: number;
+    trust_boundary_block_count: number;
+    audit_receipt_count: number;
+    active_failure_count: number;
+    claim_boundary: string;
+  };
+  protocol: {
+    replay_command: string;
+    time_anchor: string;
+    receipt_contract: string[];
+  };
+  policy: {
+    claim_boundary: string;
+    receipt_surfaces: string[];
+    not_claimed: string[];
+    required_receipts: string[];
+  };
+  sessions: Record<string, unknown>[];
+  runs: Record<string, unknown>[];
+  operator_story: Record<string, boolean>;
+  failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
 }
 
 interface OperatorTrustBoundaryBenchmark {
@@ -3066,6 +3104,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const memoryBenchmark = record.memory_benchmark;
   const userModelBenchmark = record.user_model_benchmark;
   const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
+  const liveWorkflowEnduranceCanary = record.live_workflow_endurance_canary;
   const trustBoundaryBenchmark = record.trust_boundary_benchmark;
   const secureCapabilityHostBenchmark = record.secure_capability_host_benchmark;
   const computerUseBenchmark = record.computer_use_benchmark;
@@ -3074,6 +3113,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
+  let normalizedLiveWorkflowEnduranceCanary: OperatorLiveWorkflowEnduranceCanary | null = null;
   let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
   let normalizedSecureCapabilityHostBenchmark: OperatorSecureCapabilityHostBenchmark | null = null;
   let normalizedComputerUseBenchmark: OperatorComputerUseBenchmark | null = null;
@@ -3227,6 +3267,94 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
             ? workflowPolicyRecord.ci_gate_mode
             : "unknown",
         },
+      };
+    }
+  }
+  if (liveWorkflowEnduranceCanary && typeof liveWorkflowEnduranceCanary === "object" && !Array.isArray(liveWorkflowEnduranceCanary)) {
+    const canaryRecord = liveWorkflowEnduranceCanary as Record<string, unknown>;
+    const canarySummary = canaryRecord.summary;
+    const canaryProtocol = canaryRecord.protocol;
+    const canaryPolicy = canaryRecord.policy;
+    const canaryStory = canaryRecord.operator_story;
+    if (
+      canarySummary && typeof canarySummary === "object" && !Array.isArray(canarySummary)
+      && canaryProtocol && typeof canaryProtocol === "object" && !Array.isArray(canaryProtocol)
+      && canaryPolicy && typeof canaryPolicy === "object" && !Array.isArray(canaryPolicy)
+      && canaryStory && typeof canaryStory === "object" && !Array.isArray(canaryStory)
+    ) {
+      const summaryValue = canarySummary as Record<string, unknown>;
+      const protocolValue = canaryProtocol as Record<string, unknown>;
+      const policyValue = canaryPolicy as Record<string, unknown>;
+      const storyValue = canaryStory as Record<string, unknown>;
+      normalizedLiveWorkflowEnduranceCanary = {
+        summary: {
+          suite_name: typeof summaryValue.suite_name === "string" ? summaryValue.suite_name : "live_workflow_endurance_canary",
+          benchmark_posture: typeof summaryValue.benchmark_posture === "string" ? summaryValue.benchmark_posture : "unknown",
+          operator_status: typeof summaryValue.operator_status === "string" ? summaryValue.operator_status : "unknown",
+          scenario_count: typeof summaryValue.scenario_count === "number" ? summaryValue.scenario_count : 0,
+          session_count: typeof summaryValue.session_count === "number" ? summaryValue.session_count : 0,
+          run_count: typeof summaryValue.run_count === "number" ? summaryValue.run_count : 0,
+          branch_run_count: typeof summaryValue.branch_run_count === "number" ? summaryValue.branch_run_count : 0,
+          checkpoint_count: typeof summaryValue.checkpoint_count === "number" ? summaryValue.checkpoint_count : 0,
+          failure_injection_count: typeof summaryValue.failure_injection_count === "number" ? summaryValue.failure_injection_count : 0,
+          recovery_action_count: typeof summaryValue.recovery_action_count === "number" ? summaryValue.recovery_action_count : 0,
+          artifact_receipt_count: typeof summaryValue.artifact_receipt_count === "number" ? summaryValue.artifact_receipt_count : 0,
+          approval_preservation_count: typeof summaryValue.approval_preservation_count === "number" ? summaryValue.approval_preservation_count : 0,
+          trust_boundary_block_count: typeof summaryValue.trust_boundary_block_count === "number" ? summaryValue.trust_boundary_block_count : 0,
+          audit_receipt_count: typeof summaryValue.audit_receipt_count === "number" ? summaryValue.audit_receipt_count : 0,
+          active_failure_count: typeof summaryValue.active_failure_count === "number" ? summaryValue.active_failure_count : 0,
+          claim_boundary: typeof summaryValue.claim_boundary === "string" ? summaryValue.claim_boundary : "unknown",
+        },
+        protocol: {
+          replay_command: typeof protocolValue.replay_command === "string" ? protocolValue.replay_command : "",
+          time_anchor: typeof protocolValue.time_anchor === "string"
+            ? protocolValue.time_anchor
+            : typeof protocolValue.fixed_time_anchor === "string" ? protocolValue.fixed_time_anchor : "",
+          receipt_contract: Array.isArray(protocolValue.receipt_contract)
+            ? protocolValue.receipt_contract.filter((item): item is string => typeof item === "string")
+            : Array.isArray(policyValue.required_receipts)
+              ? policyValue.required_receipts.filter((item): item is string => typeof item === "string")
+            : [],
+        },
+        policy: {
+          claim_boundary: typeof policyValue.claim_boundary === "string" ? policyValue.claim_boundary : "unknown",
+          receipt_surfaces: Array.isArray(policyValue.receipt_surfaces)
+            ? policyValue.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          not_claimed: Array.isArray(policyValue.not_claimed)
+            ? policyValue.not_claimed.filter((item): item is string => typeof item === "string")
+            : [],
+          required_receipts: Array.isArray(policyValue.required_receipts)
+            ? policyValue.required_receipts.filter((item): item is string => typeof item === "string")
+            : [],
+        },
+        sessions: Array.isArray(canaryRecord.sessions)
+          ? canaryRecord.sessions.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+          : [],
+        runs: Array.isArray(canaryRecord.runs)
+          ? canaryRecord.runs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+          : [],
+        operator_story: {
+          multi_session_visible: Boolean(storyValue.multi_session_visible),
+          delegated_owner_visible: Boolean(storyValue.delegated_owner_visible),
+          checkpoint_branch_visible: Boolean(storyValue.checkpoint_branch_visible),
+          failure_recovery_visible: Boolean(storyValue.failure_recovery_visible),
+          artifact_comparison_visible: Boolean(storyValue.artifact_comparison_visible),
+          approval_preservation_visible: Boolean(storyValue.approval_preservation_visible),
+          trust_boundary_fail_closed_visible: Boolean(storyValue.trust_boundary_fail_closed_visible),
+          audit_trail_visible: Boolean(storyValue.audit_trail_visible),
+        },
+        failure_report: Array.isArray(canaryRecord.failure_report)
+          ? canaryRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : typeof failure.scenario_name === "string" ? failure.scenario_name : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : typeof failure.error === "string" ? failure.error : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "deterministic_eval_failure",
+            }];
+          })
+          : [],
       };
     }
   }
@@ -3470,6 +3598,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       workflow_endurance_benchmark_posture: typeof summaryRecord.workflow_endurance_benchmark_posture === "string"
         ? summaryRecord.workflow_endurance_benchmark_posture
         : "unknown",
+      live_workflow_endurance_canary_posture: typeof summaryRecord.live_workflow_endurance_canary_posture === "string"
+        ? summaryRecord.live_workflow_endurance_canary_posture
+        : "unknown",
       trust_boundary_benchmark_posture: typeof summaryRecord.trust_boundary_benchmark_posture === "string"
         ? summaryRecord.trust_boundary_benchmark_posture
         : "unknown",
@@ -3504,6 +3635,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
     memory_benchmark: normalizedMemoryBenchmark,
     user_model_benchmark: normalizedUserModelBenchmark,
     workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
+    live_workflow_endurance_canary: normalizedLiveWorkflowEnduranceCanary,
     trust_boundary_benchmark: normalizedTrustBoundaryBenchmark,
     secure_capability_host_benchmark: normalizedSecureCapabilityHostBenchmark,
     computer_use_benchmark: normalizedComputerUseBenchmark,
@@ -14325,6 +14457,95 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 ].join(" · ")}
                               </div>
                               {operatorBenchmarkProof.workflow_endurance_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.live_workflow_endurance_canary ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Live workflow endurance canary</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.live_workflow_endurance_canary.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.session_count} sessions`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.run_count} runs`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.branch_run_count} branches`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.checkpoint_count} checkpoints`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.failure_injection_count} injected failures`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.recovery_action_count} recoveries`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.artifact_receipt_count} artifact receipts`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.approval_preservation_count} approvals preserved`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.trust_boundary_block_count} trust-boundary blocks`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.audit_receipt_count} audit receipts`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {Object.entries(operatorBenchmarkProof.live_workflow_endurance_canary.operator_story)
+                                  .filter(([, visible]) => visible)
+                                  .map(([key]) => key.replace(/_/g, " "))
+                                  .join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.live_workflow_endurance_canary.summary.claim_boundary.replace(/_/g, " "),
+                                  operatorBenchmarkProof.live_workflow_endurance_canary.policy.not_claimed.slice(0, 2).map((item) => `not ${item.replace(/_/g, " ")}`).join(" · "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.protocol.replay_command ? (
+                                <div className="cockpit-operator-note">{operatorBenchmarkProof.live_workflow_endurance_canary.protocol.replay_command}</div>
+                              ) : null}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.protocol.time_anchor ? (
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    operatorBenchmarkProof.live_workflow_endurance_canary.protocol.time_anchor,
+                                    `${operatorBenchmarkProof.live_workflow_endurance_canary.policy.required_receipts.length || operatorBenchmarkProof.live_workflow_endurance_canary.protocol.receipt_contract.length} required receipts`,
+                                  ].join(" · ")}
+                                </div>
+                              ) : null}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.runs.map((run, index) => {
+                                const runId = typeof run.run_identity === "string" ? run.run_identity : `canary-run-${index}`;
+                                const workflowName = typeof run.workflow_name === "string" ? run.workflow_name : "workflow";
+                                const status = typeof run.status === "string" ? run.status : "unknown";
+                                const branchKind = typeof run.branch_kind === "string" ? run.branch_kind : "root";
+                                const summary = typeof run.summary === "string" ? run.summary : "";
+                                const replayBlock = typeof run.replay_block_reason === "string" ? run.replay_block_reason : "";
+                                const checkpointCount = Array.isArray(run.checkpoint_candidates) ? run.checkpoint_candidates.length : 0;
+                                const auditCount = Array.isArray(run.audit_receipts) ? run.audit_receipts.length : 0;
+                                const artifacts = Array.isArray(run.artifact_receipts) ? run.artifact_receipts.length : 0;
+                                return (
+                                  <div key={runId} className="cockpit-operator-row cockpit-operator-row--entry">
+                                    <div className="cockpit-operator-details">
+                                      <div className="cockpit-value">{workflowName.replace(/_/g, " ")}</div>
+                                      <div className="cockpit-operator-note">
+                                        {[status.replace(/_/g, " "), branchKind.replace(/_/g, " "), summary].filter(Boolean).join(" · ")}
+                                      </div>
+                                      <div className="cockpit-operator-note">
+                                        {[
+                                          `${checkpointCount} checkpoints`,
+                                          `${artifacts} artifacts`,
+                                          `${auditCount} audit receipts`,
+                                          replayBlock ? `blocked ${replayBlock.replace(/_/g, " ")}` : null,
+                                        ].filter(Boolean).join(" · ")}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.failure_report.slice(0, 2).map((failure) => (
                                 <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
                                   {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
                                 </div>

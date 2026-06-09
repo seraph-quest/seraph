@@ -134,11 +134,11 @@ This stack is the roadmap-level ordering for the next large batches after the me
    promote workflow control from audit-projected receipts toward a minimal durable state kernel with persisted run, step, safe checkpoint, retry or repair rows, durable audit receipt metadata, normal delegated artifact-review lifecycle rows, persisted operator snapshots, and fixture-backed heartbeat or reactive proof while preserving the boundary that this is not a full distributed workflow engine.
 8. [x] `one-excellent-reach-channel-canary`:
    execute #438 for the selected native-notification channel with pairing, revocation, health, retry, thread continuity, memory/context continuity, approval handoff, degraded-state UI, and no channel sprawl.
-9. [ ] `guardian-world-model-learning-quality-v2`:
+9. [x] `guardian-world-model-learning-quality-v2`:
    deepen multi-signal learning, stale and conflicting evidence arbitration, salience and confidence calibration, and false-positive or false-negative accounting with live-ish intervention replay.
    - [x] `guardian_learning_arbitration_v2` now pins act, defer, bundle, clarify, approval, and stay-silent receipts across stale memory, conflicting provider/workflow evidence, ambiguous referents, degraded observer confidence, unsafe capability context, and repeated negative outcomes.
-10. [ ] `governed-extension-marketplace-hardening-foundations`:
-   strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, and authoring ergonomics as production-oriented foundations, not production marketplace security claims.
+10. [x] `governed-extension-marketplace-hardening-foundations`:
+   strengthen pack review and verification, compatibility semantics, supply-chain policy, provider trust downgrade handling, rollback posture, and operator hardening receipts as production-oriented foundations, not production marketplace security claims.
 11. [x] `guardian-safe-multimodal-voice-proof`:
    execute #467 as a governed proof gate for voice, TTS/STT, browser vision, image/media analysis, and media delivery families with owner, trust, permission, capture/provider/privacy, continuity, correction/deletion, revocation, and guardian-value receipts, without claiming live broad voice or multimodal parity.
 

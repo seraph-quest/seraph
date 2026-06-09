@@ -20,6 +20,8 @@ from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
 )
 from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
 )
@@ -500,6 +502,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Production marketplace security, external package verification networks, and broader third-party ecosystem operations remain future work."
         ),
         scenario_names=M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
+        label="Governed capability-pack hardening",
+        description=(
+            "Pins review receipts, compatibility and downgrade truth, permission-creep blocking, "
+            "supply-chain suspicion fail-closed behavior, rollback readiness, and operator-visible hardening proof."
+        ),
+        benchmark_axis="governed_capability_pack_hardening",
+        operator_summary=(
+            "Capability-pack changes now expose what changed, what risk changed, whether rollback is available, "
+            "and which marketplace or trust claims remain blocked."
+        ),
+        remaining_gap=(
+            "This is deterministic governance proof, not production marketplace security or third-party ecosystem maturity."
+        ),
+        scenario_names=GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     ),
 )
 

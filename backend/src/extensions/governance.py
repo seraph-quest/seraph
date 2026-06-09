@@ -264,3 +264,109 @@ def assert_governance_allows_lifecycle(
             f"extension governance blocks {action}: {reason}"
         )
     return status
+
+
+def build_capability_pack_hardening_receipt(
+    manifest: ExtensionManifest | None,
+    *,
+    governance_status: dict[str, Any],
+    compatibility: dict[str, Any] | None = None,
+    lifecycle_plan: dict[str, Any] | None = None,
+    diagnostics_summary: dict[str, Any] | None = None,
+    permission_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    compatibility = compatibility if isinstance(compatibility, dict) else {}
+    lifecycle_plan = lifecycle_plan if isinstance(lifecycle_plan, dict) else {}
+    diagnostics_summary = diagnostics_summary if isinstance(diagnostics_summary, dict) else {}
+    permission_summary = permission_summary if isinstance(permission_summary, dict) else {}
+    current_version = lifecycle_plan.get("current_version")
+    candidate_version = lifecycle_plan.get("candidate_version") or (manifest.version if manifest is not None else None)
+    version_relation = str(lifecycle_plan.get("version_relation") or "unknown")
+    permission_missing = permission_summary.get("missing") if isinstance(permission_summary.get("missing"), dict) else {}
+    has_missing_permissions = any(bool(value) for value in permission_missing.values())
+    compatible = compatibility.get("compatible")
+    incompatible = compatible is False
+    fail_closed = bool(governance_status.get("fail_closed"))
+    review_status = str(governance_status.get("review_status") or "unknown")
+    signature_status = str(governance_status.get("signature_status") or "unknown")
+    trust = str(governance_status.get("trust") or (manifest.trust.value if manifest is not None else "unknown"))
+    degraded_count = int(diagnostics_summary.get("degraded_connector_count") or 0)
+    error_count = int(diagnostics_summary.get("error_issue_count") or 0)
+    package_changed = bool(lifecycle_plan.get("package_changed"))
+    update_supported = bool(lifecycle_plan.get("update_supported"))
+
+    risk_deltas: list[str] = []
+    blocked_claims: list[str] = []
+    negative_cases: list[str] = []
+    if incompatible:
+        risk_deltas.append("compatibility_block")
+        blocked_claims.append("runtime_compatible_pack")
+        negative_cases.append("incompatible_pack_version")
+    if has_missing_permissions:
+        risk_deltas.append("permission_expansion_or_underdeclaration")
+        blocked_claims.append("complete_permission_declaration")
+        negative_cases.append("underdeclared_permissions")
+    if version_relation == "downgrade":
+        risk_deltas.append("provider_or_pack_downgrade")
+        negative_cases.append("provider_downgrade")
+    if signature_status not in {"valid", "bundled", "unsigned_allowed"}:
+        risk_deltas.append("supply_chain_integrity_change")
+        blocked_claims.append("trusted_supply_chain")
+        negative_cases.append("supply_chain_suspicion")
+    if fail_closed:
+        risk_deltas.append("runtime_access_removed")
+        negative_cases.append("failed_update")
+    if review_status in {"permission_drift", "stale"} or bool(governance_status.get("permission_drift")):
+        risk_deltas.append("permission_review_drift")
+        blocked_claims.append("reviewed_permission_envelope")
+        negative_cases.append("extension_permission_creep")
+    if package_changed or update_supported:
+        negative_cases.append("rollback_need")
+    if degraded_count:
+        risk_deltas.append("provider_runtime_degraded")
+        negative_cases.append("provider_downgrade")
+    if error_count:
+        risk_deltas.append("package_validation_errors")
+
+    risk_deltas = sorted(set(risk_deltas)) or ["no_material_risk_delta_detected"]
+    negative_cases = sorted(set(negative_cases))
+    rollback_available = (
+        bool(current_version)
+        and bool(candidate_version)
+        and version_relation in {"upgrade", "downgrade"}
+        and bool(lifecycle_plan.get("current_location"))
+    )
+    rollback_action = "restore_previous_workspace_pack" if rollback_available else "not_available"
+    if version_relation == "new":
+        rollback_action = "remove_new_pack"
+        rollback_available = True
+
+    operator_summary = (
+        "Pack transition is blocked until governance review, compatibility, permissions, and diagnostics are resolved."
+        if fail_closed or incompatible or has_missing_permissions or error_count
+        else "Pack transition is reviewable with explicit compatibility, permission, risk, and rollback posture."
+    )
+    return {
+        "receipt_id": f"capability_pack_hardening:{manifest.id if manifest is not None else 'unknown'}",
+        "extension_id": manifest.id if manifest is not None else None,
+        "trust": trust,
+        "current_version": current_version,
+        "candidate_version": candidate_version,
+        "version_relation": version_relation,
+        "compatibility": compatibility or None,
+        "review_status": review_status,
+        "signature_status": signature_status,
+        "fail_closed": fail_closed,
+        "risk_deltas": risk_deltas,
+        "negative_cases": negative_cases,
+        "rollback": {
+            "available": rollback_available,
+            "action": rollback_action,
+            "requires_review": trust == ExtensionTrust.VERIFIED.value or fail_closed,
+        },
+        "operator_summary": operator_summary,
+        "blocked_claims": sorted(set(blocked_claims)),
+        "claim_boundary": (
+            "governed_capability_pack_hardening_receipts_not_production_marketplace_security"
+        ),
+    }

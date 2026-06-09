@@ -3248,7 +3248,7 @@ describe("CockpitView", () => {
     );
     expect(within(evidence).queryByText("artifact: notes/older.md")).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "E", shiftKey: true });
+    fireEvent.click(await within(evidence).findByRole("button", { name: "Inspect artifact: notes/newer.md" }));
     const useButton = await screen.findByRole("button", { name: "Use In Command Bar" });
     fireEvent.click(useButton);
     await waitFor(() =>

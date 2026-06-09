@@ -50,6 +50,7 @@
 - [x] the operator workflow-orchestration surface now also exposes anticipatory repair drafts, backup-branch candidates, condensation-fidelity state, and thread-level endurance summaries, and the operator benchmark-proof surface now includes a dedicated `workflow_endurance_and_repair` suite instead of leaving long-horizon workflow quality buried inside generic runtime scenario output
 - [x] the execution plane now has a dedicated `m2_execution_supremacy` suite and `/api/operator/m2-execution-benchmark` surface that gates terminal/process/sandbox, browser/HTTP/computer-use, filesystem patching, artifact registry, operator receipts, and the #435 adversarial security gauntlet together instead of spreading M2 completion across small slices
 - [x] patch preview/apply receipts and workflow-run projections now expose stable artifact records with artifact IDs, producer lineage, content hashes, trust-boundary context, and recovery hints instead of leaving execution outputs as raw path strings only
+- [x] workflow execution now also writes a minimal durable workflow state kernel: `workflow_run_states` and `workflow_step_states` persist run identity, lineage, step state, safe checkpoint context, retry or repair state, and redacted durable audit receipt metadata while unsafe secret or authenticated checkpoint payloads stay out of reusable checkpoints; delegated workflow artifacts now emit `workflow_artifact_reviews` rows with owner, reviewer, lineage, approval handoff, and trust-partition metadata; checkpoint resume tries durable state before audit projection; and `/api/operator/durable-workflow-engine` plus `durable_workflow_engine_v1` expose both deterministic proof fixtures and recent persisted state snapshots without claiming a full distributed workflow engine
 
 ## Working On Now
 
@@ -76,6 +77,7 @@
 
 - [ ] richer live-provider browser/computer-use depth beyond the deterministic extract/html/screenshot proof and current local provider model
 - [ ] deeper host/container-grade isolation beyond disposable worker roots, session-scoped process handles, and sandbox timeout/nonzero receipts
+- [ ] production-grade durable orchestration beyond the v1 state kernel, including broader crash/restart replay across arbitrary tools, live trigger executors, and exactly-once external scheduling semantics
 - [ ] broader external system leverage without weakening trust boundaries or the new credential-egress contract
 
 ## M2 Batch Acceptance Notes

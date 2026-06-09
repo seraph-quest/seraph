@@ -20,8 +20,14 @@ from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SUITE_NAME,
 )
 from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
+)
+from src.extensions.reach_channel_canary import (
+    ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
+    ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
 )
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
@@ -30,6 +36,14 @@ from src.guardian.benchmark import (
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
+)
+from src.guardian.learning_arbitration_benchmark import (
+    GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+)
+from src.guardian.multimodal_voice import (
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
 )
 from src.memory.benchmark import GUARDIAN_MEMORY_BENCHMARK_SCENARIO_NAMES, GUARDIAN_MEMORY_BENCHMARK_SUITE_NAME
 from src.memory.provider_quality_gate import (
@@ -55,6 +69,10 @@ from src.workflows.benchmark import (
 from src.workflows.endurance_canary import (
     LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
     LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME,
+)
+from src.workflows.durable_state import (
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
 )
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
@@ -129,6 +147,42 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live long-horizon human outcome studies and external guardian-intelligence superiority claims remain future proof work."
         ),
         scenario_names=M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+        label="Guardian-safe multimodal and voice",
+        description=(
+            "Pins voice, TTS/STT, browser vision, image/media analysis, and media delivery "
+            "behind governance, audit, privacy, continuity, revocation, and guardian-value gates."
+        ),
+        benchmark_axis="guardian_safe_multimodal_voice",
+        operator_summary=(
+            "Voice and media capability families now have a dedicated proof gate that requires "
+            "guardian value and operator-visible capture/provider/privacy/correction receipts."
+        ),
+        remaining_gap=(
+            "Live broad voice runtime, production STT/TTS, mobile voice, and full multimodal "
+            "runtime parity remain future implementation work."
+        ),
+        scenario_names=GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+        label="Guardian learning arbitration v2",
+        description=(
+            "Pins act, defer, bundle, clarify, approval, and stay-silent arbitration over stale, "
+            "conflicting, ambiguous, degraded, unsafe, and repeated-negative intervention cases."
+        ),
+        benchmark_axis="guardian_learning_arbitration_v2",
+        operator_summary=(
+            "Guardian learning proof now exposes why Seraph acts, waits, asks, escalates, bundles, "
+            "or stays silent under conflicting live and durable evidence."
+        ),
+        remaining_gap=(
+            "Live long-horizon human outcome studies, external-channel intervention replay, and "
+            "guardian-intelligence superiority claims remain future proof work."
+        ),
+        scenario_names=GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",
@@ -225,6 +279,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         scenario_names=LIVE_WORKFLOW_ENDURANCE_CANARY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
+        name=DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+        label="Durable workflow engine v1",
+        description=(
+            "Pins durable workflow state reporting, crash-safe continuation posture, heartbeat or trigger receipts, "
+            "and operator-visible recovery policy into one CI-gated proof lane."
+        ),
+        benchmark_axis="durable_workflow_engine_v1",
+        operator_summary=(
+            "Durable workflow engine v1 exposes durable state, recovery, trigger, and operator receipt posture "
+            "through a dedicated benchmark and operator surface."
+        ),
+        remaining_gap=(
+            "Broader production workload replay and external long-running agent benchmark parity remain future proof work."
+        ),
+        scenario_names=DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,
         label="Live-ish long-horizon eval replay",
         description=(
@@ -315,6 +386,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Production-grade live pairing protocols, broader mobile or voice reach, and real external-channel abuse replay still remain future work."
         ),
         scenario_names=CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+        label="One excellent reach channel canary",
+        description=(
+            "Pins the selected native-notification canary across pairing, revocation, health, retry, "
+            "thread and memory continuity, approval handoff, audit receipts, degraded-state UI, "
+            "and one-channel scope control."
+        ),
+        benchmark_axis="one_excellent_reach_channel_canary",
+        operator_summary=(
+            "Seraph now proves one native-notification reach path deeply before claiming broader external-channel reach."
+        ),
+        remaining_gap=(
+            "Real Slack, Discord, Telegram, email, mobile, voice, and production pairing coverage remain future work."
+        ),
+        scenario_names=ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=M2_EXECUTION_BENCHMARK_SUITE_NAME,
@@ -414,6 +502,23 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Production marketplace security, external package verification networks, and broader third-party ecosystem operations remain future work."
         ),
         scenario_names=M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
+        label="Governed capability-pack hardening",
+        description=(
+            "Pins review receipts, compatibility and downgrade truth, permission-creep blocking, "
+            "supply-chain suspicion fail-closed behavior, rollback readiness, and operator-visible hardening proof."
+        ),
+        benchmark_axis="governed_capability_pack_hardening",
+        operator_summary=(
+            "Capability-pack changes now expose what changed, what risk changed, whether rollback is available, "
+            "and which marketplace or trust claims remain blocked."
+        ),
+        remaining_gap=(
+            "This is deterministic governance proof, not production marketplace security or third-party ecosystem maturity."
+        ),
+        scenario_names=GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     ),
 )
 

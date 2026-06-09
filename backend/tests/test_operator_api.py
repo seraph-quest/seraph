@@ -1,8 +1,11 @@
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
 @pytest.fixture(autouse=True)
@@ -942,13 +945,15 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
 
 @pytest.mark.asyncio
 async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
-    with patch(
+    with ExitStack() as stack:
+        stack.enter_context(patch(
         "src.api.operator.list_evolution_targets",
         return_value=[
             {"target_type": "skill", "source_path": "/tmp/skills/web-briefing.md"},
             {"target_type": "prompt_pack", "source_path": "/tmp/extensions/review-pack/prompts/review.md"},
         ],
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_workflow_endurance_benchmark_report",
         AsyncMock(
             return_value={
@@ -980,7 +985,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_live_workflow_endurance_canary_report",
         AsyncMock(
             return_value={
@@ -1034,7 +1040,41 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
+        "src.api.operator.build_durable_workflow_state_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "durable_workflow_engine_v1",
+                    "benchmark_posture": "durable_workflow_engine_ci_gated_operator_visible",
+                    "operator_status": "durable_workflow_engine_visible",
+                    "scenario_count": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                    "active_failure_count": 0,
+                    "durable_state_state": "checkpointed_state_and_resume_metadata_visible",
+                    "recovery_state": "crash_safe_continuation_receipts_visible",
+                    "trigger_state": "heartbeat_and_reactive_trigger_receipts_visible",
+                },
+                "scenario_names": list(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                "policy": {
+                    "operator_visibility": "durable_workflow_engine_state_and_benchmark_proof_visible",
+                    "receipt_surfaces": [
+                        "/api/operator/durable-workflow-engine",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "failure_report": [],
+                "latest_run": {
+                    "total": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                    "passed": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+                    "failed": 0,
+                    "duration_ms": 100,
+                },
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_live_replay_benchmark_report",
         AsyncMock(
             return_value={
@@ -1077,7 +1117,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_trust_boundary_benchmark_report",
         AsyncMock(
             return_value={
@@ -1114,7 +1155,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m5_operating_layer_benchmark_report",
         AsyncMock(
             return_value={
@@ -1153,7 +1195,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_secure_capability_host_benchmark_report",
         AsyncMock(
             return_value={
@@ -1217,7 +1260,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_computer_use_benchmark_report",
         AsyncMock(
             return_value={
@@ -1259,7 +1303,69 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
+        "src.api.operator.build_one_reach_channel_canary_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "one_excellent_reach_channel_canary",
+                    "benchmark_posture": "one_reach_channel_canary_ci_gated_operator_visible",
+                    "operator_status": "one_reach_channel_canary_visible",
+                    "selected_channel": "native_notification",
+                    "scenario_count": 5,
+                    "active_failure_count": 0,
+                    "pairing_state": "paired",
+                    "revocation_state": "revoked",
+                    "health_state": "ready",
+                    "degraded_state": "daemon_offline",
+                    "retry_state": "bounded_retry_with_fallback_visible",
+                    "thread_continuity_state": "channel_thread_session_and_memory_context_linked",
+                    "approval_handoff_state": "pending_operator_approval",
+                    "audit_receipt_count": 7,
+                    "e2e_step_count": 4,
+                    "channel_sprawl_state": "rejected_until_native_notification_canary_meets_bar",
+                    "claim_boundary": "deterministic_native_notification_canary_not_broad_live_channel_reach",
+                },
+                "scenario_names": [
+                    "one_reach_channel_selection_scope_behavior",
+                    "native_notification_pairing_revocation_behavior",
+                    "native_notification_health_retry_degraded_behavior",
+                    "native_notification_continuity_approval_audit_behavior",
+                    "operator_one_reach_channel_canary_surface_behavior",
+                ],
+                "protocol": {"replay_command": "uv run python -m src.evals.harness --benchmark-suite one_excellent_reach_channel_canary --indent 0"},
+                "policy": {
+                    "selected_channel": "native_notification",
+                    "claim_boundary": "deterministic_native_notification_canary_not_broad_live_channel_reach",
+                    "not_claimed": ["live_slack_discord_telegram_delivery"],
+                    "receipt_surfaces": [
+                        "/api/operator/one-reach-channel-canary",
+                        "/api/operator/control-plane",
+                        "/api/operator/benchmark-proof",
+                    ],
+                },
+                "receipt": {},
+                "operator_story": {
+                    "single_channel_selected": True,
+                    "channel_sprawl_rejected": True,
+                    "pairing_visible": True,
+                    "revocation_fail_closed_visible": True,
+                    "health_visible": True,
+                    "retry_visible": True,
+                    "thread_continuity_visible": True,
+                    "memory_context_visible": True,
+                    "approval_handoff_visible": True,
+                    "audit_trail_visible": True,
+                    "degraded_state_ui_visible": True,
+                    "e2e_flow_visible": True,
+                },
+                "failure_report": [],
+                "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m2_execution_benchmark_report",
         AsyncMock(
             return_value={
@@ -1293,7 +1399,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 11, "passed": 11, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m7_operator_cockpit_benchmark_report",
         AsyncMock(
             return_value={
@@ -1333,7 +1440,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_cockpit_efficiency_benchmark_report",
         AsyncMock(
             return_value={
@@ -1384,7 +1492,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 5, "passed": 5, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m8_guardian_brain_benchmark_report",
         AsyncMock(
             return_value={
@@ -1428,7 +1537,107 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
+        "src.api.operator.build_guardian_safe_multimodal_voice_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "guardian_safe_multimodal_voice",
+                    "benchmark_posture": "guardian_safe_multimodal_voice_ci_gated_operator_visible",
+                    "operator_status": "guardian_safe_voice_media_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "capability_governance_state": "owner_trust_permission_data_access_mutation_revocation_visible",
+                    "transcript_audit_privacy_state": "capture_destination_provider_context_correction_deletion_visible",
+                    "continuity_approval_state": "thread_memory_approval_workflow_continuity_preserved",
+                    "exposure_revocation_state": "silent_screen_file_credential_media_network_expansion_blocked",
+                    "guardian_value_state": "voice_media_requires_guardian_value_reason",
+                    "claim_boundary": "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity",
+                },
+                "scenario_names": [
+                    "multimodal_voice_capability_governance_behavior",
+                    "multimodal_voice_transcript_audit_privacy_behavior",
+                    "multimodal_voice_continuity_approval_behavior",
+                    "multimodal_voice_exposure_revocation_behavior",
+                    "multimodal_voice_guardian_value_behavior",
+                    "operator_guardian_safe_multimodal_voice_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "capability_families": [],
+                "governance_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "guardian_value_policy": "voice_media_must_improve_timing_accessibility_situational_awareness_or_intervention_quality",
+                    "claim_boundary": "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity",
+                    "receipt_surfaces": [
+                        "/api/operator/guardian-safe-multimodal-voice",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": [
+                        "live_broad_voice_runtime",
+                        "voice_parity",
+                        "multimodal_parity",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
+        "src.api.operator.build_guardian_learning_arbitration_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "guardian_learning_arbitration_v2",
+                    "benchmark_posture": "guardian_learning_arbitration_ci_gated_operator_visible",
+                    "operator_status": "guardian_learning_arbitration_receipts_visible",
+                    "scenario_count": 7,
+                    "dimension_count": 5,
+                    "failure_mode_count": 6,
+                    "active_failure_count": 0,
+                    "outcome_count": 6,
+                    "negative_case_count": 6,
+                    "outcome_coverage_state": "act_defer_bundle_clarify_approval_stay_silent_receipts_visible",
+                    "negative_case_state": "stale_conflict_ambiguous_degraded_unsafe_negative_outcome_cases_visible",
+                    "guardian_value_state": "learning_improves_restraint_clarification_timing_approval_recovery_or_follow_through",
+                    "claim_boundary": "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority",
+                },
+                "scenario_names": [
+                    "guardian_learning_arbitration_act_behavior",
+                    "guardian_learning_arbitration_defer_behavior",
+                    "guardian_learning_arbitration_bundle_behavior",
+                    "guardian_learning_arbitration_clarify_behavior",
+                    "guardian_learning_arbitration_approval_behavior",
+                    "guardian_learning_arbitration_stay_silent_behavior",
+                    "operator_guardian_learning_arbitration_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "arbitration_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "guardian_value_policy": "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume",
+                    "claim_boundary": "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority",
+                    "receipt_surfaces": [
+                        "/api/operator/guardian-learning-arbitration",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": [
+                        "guardian_intelligence_superiority",
+                        "live_human_outcome_study",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -1459,7 +1668,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m6_memory_superiority_benchmark_report",
         AsyncMock(
             return_value={
@@ -1498,7 +1708,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 7, "passed": 7, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_memory_provider_quality_gate_report",
         AsyncMock(
             return_value={
@@ -1541,7 +1752,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 4, "passed": 4, "failed": 0, "duration_ms": 100},
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_improvement_benchmark_report",
         AsyncMock(
             return_value={
@@ -1605,7 +1817,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 ],
             }
         ),
-    ), patch(
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_m9_governed_ecosystem_benchmark_report",
         AsyncMock(
             return_value={
@@ -1648,12 +1861,57 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
                 "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
             }
         ),
-    ):
+        ))
+        stack.enter_context(patch(
+        "src.api.operator.build_governed_capability_pack_hardening_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "suite_name": "governed_capability_pack_hardening",
+                    "benchmark_posture": "governed_pack_hardening_ci_gated_operator_visible",
+                    "operator_status": "governed_capability_pack_hardening_receipts_visible",
+                    "scenario_count": 6,
+                    "dimension_count": 6,
+                    "failure_mode_count": 7,
+                    "active_failure_count": 0,
+                    "review_receipt_state": "risk_delta_and_blocked_claim_receipts_visible",
+                    "compatibility_downgrade_state": "incompatible_and_downgrade_states_named",
+                    "permission_creep_state": "underdeclaration_and_drift_fail_closed",
+                    "supply_chain_state": "signature_digest_key_revocation_fail_closed",
+                    "rollback_state": "rollback_availability_and_action_visible",
+                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority",
+                },
+                "scenario_names": [
+                    "capability_pack_review_receipt_behavior",
+                    "capability_pack_compatibility_downgrade_behavior",
+                    "capability_pack_permission_creep_behavior",
+                    "capability_pack_supply_chain_suspicion_behavior",
+                    "capability_pack_rollback_ready_behavior",
+                    "operator_governed_capability_pack_hardening_surface_behavior",
+                ],
+                "dimensions": [],
+                "failure_taxonomy": [],
+                "hardening_receipts": [],
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority",
+                    "receipt_surfaces": [
+                        "/api/extensions",
+                        "/api/extensions/validate",
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/governed-capability-pack-hardening",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 6, "passed": 6, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
         resp = await client.get("/api/operator/benchmark-proof")
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 20
+    assert payload["summary"]["suite_count"] == 25
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert payload["summary"]["governed_improvement_status"] == "review_gated_canary_required"
     assert payload["summary"]["memory_benchmark_posture"] == "ci_gated_operator_visible"
@@ -1663,14 +1921,32 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["live_workflow_endurance_canary_posture"]
         == "live_workflow_canary_ci_gated_operator_visible"
     )
+    assert payload["summary"]["durable_workflow_engine_posture"] == "durable_workflow_engine_ci_gated_operator_visible"
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
+    assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
     assert payload["summary"]["m7_operator_cockpit_benchmark_posture"] == "m7_ci_gated_operator_visible"
     assert payload["summary"]["cockpit_efficiency_benchmark_posture"] == "cockpit_efficiency_ci_gated_operator_visible"
     assert payload["summary"]["m8_guardian_brain_benchmark_posture"] == "m8_ci_gated_operator_visible"
+    assert (
+        payload["summary"]["guardian_safe_multimodal_voice_benchmark_posture"]
+        == "guardian_safe_multimodal_voice_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["guardian_safe_multimodal_voice_claim_boundary"]
+        == "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity"
+    )
+    assert (
+        payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
+        == "guardian_learning_arbitration_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["guardian_learning_arbitration_claim_boundary"]
+        == "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority"
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -1682,9 +1958,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["m9_governed_ecosystem_claim_boundary"]
         == "deterministic_local_governance_proof_not_competitor_superiority_or_production_marketplace_security"
     )
+    assert (
+        payload["summary"]["governed_capability_pack_hardening_posture"]
+        == "governed_pack_hardening_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["governed_capability_pack_hardening_claim_boundary"]
+        == "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
+    )
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
+    assert payload["durable_workflow_engine"]["summary"]["suite_name"] == "durable_workflow_engine_v1"
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -1695,7 +1980,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "guardian_memory_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "memory_continuity_workflows" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert "m9_governed_ecosystem" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "guardian_safe_multimodal_voice"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "guardian_learning_arbitration_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "governed_capability_pack_hardening"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "one_excellent_reach_channel_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "durable_workflow_engine_v1" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
@@ -1713,6 +2012,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     live_workflow_canary_suite = next(item for item in payload["suites"] if item["name"] == "live_workflow_endurance_canary")
     assert "live_workflow_canary_protocol_behavior" in live_workflow_canary_suite["scenario_names"]
     assert live_workflow_canary_suite["scenario_count"] == 4
+    durable_workflow_engine_suite = next(item for item in payload["suites"] if item["name"] == "durable_workflow_engine_v1")
+    assert "durable_workflow_state_kernel_behavior" in durable_workflow_engine_suite["scenario_names"]
+    assert durable_workflow_engine_suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
     live_replay_suite = next(item for item in payload["suites"] if item["name"] == "live_long_horizon_eval_replay_v1")
     assert "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"]
     assert live_replay_suite["scenario_count"] == 5
@@ -1726,6 +2028,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
+    one_reach_channel_suite = next(item for item in payload["suites"] if item["name"] == "one_excellent_reach_channel_canary")
+    assert "one_reach_channel_selection_scope_behavior" in one_reach_channel_suite["scenario_names"]
+    assert one_reach_channel_suite["scenario_count"] == 5
     m2_suite = next(item for item in payload["suites"] if item["name"] == "m2_execution_supremacy")
     assert "execution_security_gauntlet_behavior" in m2_suite["scenario_names"]
     m7_suite = next(item for item in payload["suites"] if item["name"] == "m7_operator_cockpit_legibility")
@@ -1739,6 +2044,12 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m8_suite = next(item for item in payload["suites"] if item["name"] == "m8_guardian_intervention_quality")
     assert "m8_risky_capability_approval_behavior" in m8_suite["scenario_names"]
     assert m8_suite["scenario_count"] == 7
+    multimodal_voice_suite = next(item for item in payload["suites"] if item["name"] == "guardian_safe_multimodal_voice")
+    assert "multimodal_voice_capability_governance_behavior" in multimodal_voice_suite["scenario_names"]
+    assert multimodal_voice_suite["scenario_count"] == 6
+    learning_arbitration_suite = next(item for item in payload["suites"] if item["name"] == "guardian_learning_arbitration_v2")
+    assert "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
+    assert learning_arbitration_suite["scenario_count"] == 7
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -1748,6 +2059,9 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     m9_suite = next(item for item in payload["suites"] if item["name"] == "m9_governed_ecosystem")
     assert "m9_manifest_governance_behavior" in m9_suite["scenario_names"]
     assert m9_suite["scenario_count"] == 6
+    hardening_suite = next(item for item in payload["suites"] if item["name"] == "governed_capability_pack_hardening")
+    assert "capability_pack_review_receipt_behavior" in hardening_suite["scenario_names"]
+    assert hardening_suite["scenario_count"] == 6
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -1759,10 +2073,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["live_workflow_endurance_canary"]["policy"]["claim_boundary"] == (
         "audit_projected_replayable_canary_not_durable_workflow_engine"
     )
+    assert payload["one_reach_channel_canary"]["summary"]["suite_name"] == "one_excellent_reach_channel_canary"
+    assert payload["one_reach_channel_canary"]["summary"]["selected_channel"] == "native_notification"
+    assert payload["one_reach_channel_canary"]["policy"]["claim_boundary"] == (
+        "deterministic_native_notification_canary_not_broad_live_channel_reach"
+    )
     assert payload["trust_boundary_benchmark"]["summary"]["suite_name"] == "trust_boundary_and_safety_receipts"
     assert payload["trust_boundary_benchmark"]["policy"]["secret_egress_policy"] == "field_scoped_secret_refs_plus_required_credential_egress_allowlist"
     assert payload["secure_capability_host_benchmark"]["summary"]["suite_name"] == "secure_capability_host"
     assert payload["secure_capability_host_benchmark"]["policy"]["claim_boundary"] == "deterministic_secure_host_choke_points_not_full_host_container_isolation"
+    assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
+    assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
@@ -1781,6 +2102,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["m8_guardian_brain_benchmark"]["summary"]["suite_name"] == "m8_guardian_intervention_quality"
     assert payload["m8_guardian_brain_benchmark"]["policy"]["approval_policy"] == "high_risk_capability_use_requires_operator_approval_receipt"
+    assert payload["guardian_safe_multimodal_voice_benchmark"]["summary"]["suite_name"] == "guardian_safe_multimodal_voice"
+    assert payload["guardian_safe_multimodal_voice_benchmark"]["policy"]["guardian_value_policy"] == (
+        "voice_media_must_improve_timing_accessibility_situational_awareness_or_intervention_quality"
+    )
+    assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
+    assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
+        "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
+    )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -1836,6 +2165,40 @@ async def test_operator_m9_governed_ecosystem_benchmark_surface_reports_policy_r
     )
     assert "/api/operator/m9-governed-ecosystem-benchmark" in payload["policy"]["receipt_surfaces"]
     assert payload["governance_receipts"][0]["scenario_id"] == "m9_manifest_governance_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_governed_capability_pack_hardening_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/governed-capability-pack-hardening")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "governed_capability_pack_hardening"
+    assert payload["summary"]["operator_status"] == "governed_capability_pack_hardening_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["review_receipt_state"] == "risk_delta_and_blocked_claim_receipts_visible"
+    assert payload["summary"]["rollback_state"] == "rollback_availability_and_action_visible"
+    assert payload["summary"]["claim_boundary"] == (
+        "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
+    )
+    assert len(payload["dimensions"]) >= 6
+    assert len(payload["failure_taxonomy"]) >= 7
+    assert payload["policy"]["rollback_policy"] == (
+        "install_update_and_downgrade_previews_expose_rollback_availability_and_action"
+    )
+    assert "/api/operator/governed-capability-pack-hardening" in payload["policy"]["receipt_surfaces"]
+    hardening_receipts = {receipt["scenario_id"]: receipt for receipt in payload["hardening_receipts"]}
+    assert "capability_pack_review_receipt_behavior" in hardening_receipts
+    assert "package_count_superiority" in payload["policy"]["blocked_claims"]
+    permission_receipt = hardening_receipts["capability_pack_permission_creep_behavior"]
+    assert {"underdeclared_permissions", "extension_permission_creep"} <= set(permission_receipt["negative_cases"])
+    assert {"complete_permission_declaration", "reviewed_permission_envelope"} <= set(permission_receipt["blocked_claims"])
+    assert permission_receipt["fail_closed_required"] is True
+    failed_update_receipt = hardening_receipts["capability_pack_supply_chain_suspicion_behavior"]
+    assert "failed_update" in failed_update_receipt["negative_cases"]
+    assert failed_update_receipt["runtime_access_removed"] is True
+    rollback_receipt = hardening_receipts["capability_pack_rollback_ready_behavior"]
+    assert {"remove_new_pack", "restore_previous_workspace_pack"} <= set(rollback_receipt["rollback_actions"])
 
 
 @pytest.mark.asyncio
@@ -2022,6 +2385,64 @@ async def test_operator_m8_guardian_intervention_benchmark_surface_reports_polic
 
 
 @pytest.mark.asyncio
+async def test_operator_guardian_safe_multimodal_voice_surface_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/guardian-safe-multimodal-voice")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "guardian_safe_multimodal_voice"
+    assert payload["summary"]["operator_status"] == "guardian_safe_voice_media_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["capability_governance_state"] == (
+        "owner_trust_permission_data_access_mutation_revocation_visible"
+    )
+    assert payload["summary"]["guardian_value_state"] == "voice_media_requires_guardian_value_reason"
+    assert payload["summary"]["claim_boundary"] == (
+        "governed_voice_media_proof_not_live_broad_multimodal_runtime_or_voice_parity"
+    )
+    assert len(payload["capability_families"]) == 5
+    assert len(payload["governance_receipts"]) == 5
+    assert payload["policy"]["exposure_policy"] == (
+        "browser_vision_and_media_analysis_cannot_expand_screen_file_credential_camera_microphone_or_network_exposure_silently"
+    )
+    assert "voice_parity" in payload["policy"]["not_claimed"]
+    assert "/api/operator/guardian-safe-multimodal-voice" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_guardian_learning_arbitration_surface_reports_policy_receipts_and_claim_boundary(client):
+    resp = await client.get("/api/operator/guardian-learning-arbitration")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
+    assert payload["summary"]["operator_status"] == "guardian_learning_arbitration_receipts_visible"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["outcome_coverage_state"] == (
+        "act_defer_bundle_clarify_approval_stay_silent_receipts_visible"
+    )
+    assert payload["summary"]["negative_case_state"] == (
+        "stale_conflict_ambiguous_degraded_unsafe_negative_outcome_cases_visible"
+    )
+    assert payload["summary"]["claim_boundary"] == (
+        "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority"
+    )
+    assert {receipt["actual_action"] for receipt in payload["arbitration_receipts"]} == {
+        "act",
+        "bundle",
+        "clarify",
+        "defer",
+        "request_approval",
+        "stay_silent",
+    }
+    assert payload["policy"]["guardian_value_policy"] == (
+        "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
+    )
+    assert "guardian_intelligence_superiority" in payload["policy"]["not_claimed"]
+    assert "/api/operator/guardian-learning-arbitration" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
 async def test_operator_live_replay_benchmark_surface_reports_policy_receipts_and_claim_boundary(client):
     resp = await client.get("/api/operator/live-long-horizon-replay-benchmark")
 
@@ -2193,6 +2614,101 @@ async def test_operator_live_workflow_endurance_canary_surface_degrades_summary_
     assert payload["summary"]["benchmark_posture"] == "live_workflow_canary_regressions_detected_operator_visible"
     assert payload["summary"]["active_failure_count"] == 1
     assert payload["failure_report"][0]["scenario_name"] == "live_workflow_canary_approval_preservation_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_one_reach_channel_canary_surface_reports_story_and_claim_boundary(client):
+    resp = await client.get("/api/operator/one-reach-channel-canary")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "one_excellent_reach_channel_canary"
+    assert payload["summary"]["operator_status"] == "one_reach_channel_canary_visible"
+    assert payload["summary"]["selected_channel"] == "native_notification"
+    assert payload["summary"]["scenario_count"] == len(payload["scenario_names"])
+    assert payload["summary"]["pairing_state"] == "paired"
+    assert payload["summary"]["revocation_state"] == "revoked"
+    assert payload["summary"]["degraded_state"] == "daemon_offline"
+    assert payload["summary"]["approval_handoff_state"] == "pending_operator_approval"
+    assert payload["operator_story"]["single_channel_selected"] is True
+    assert payload["operator_story"]["channel_sprawl_rejected"] is True
+    assert payload["operator_story"]["revocation_fail_closed_visible"] is True
+    assert payload["operator_story"]["memory_context_visible"] is True
+    assert payload["operator_story"]["degraded_state_ui_visible"] is True
+    assert payload["operator_story"]["e2e_flow_visible"] is True
+    assert payload["policy"]["claim_boundary"] == "deterministic_native_notification_canary_not_broad_live_channel_reach"
+    assert "live_slack_discord_telegram_delivery" in payload["policy"]["not_claimed"]
+
+
+@pytest.mark.asyncio
+async def test_operator_one_reach_channel_canary_surface_degrades_summary_on_failures(client):
+    failing_summary = SimpleNamespace(
+        total=5,
+        passed=4,
+        failed=1,
+        duration_ms=13,
+        results=[
+            SimpleNamespace(
+                passed=False,
+                name="native_notification_health_retry_degraded_behavior",
+                error="retry receipt regression",
+            )
+        ],
+    )
+
+    with patch(
+        "src.extensions.reach_channel_canary._run_one_reach_channel_canary_suite",
+        AsyncMock(return_value=failing_summary),
+    ):
+        resp = await client.get("/api/operator/one-reach-channel-canary")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "one_reach_channel_canary_regressions_detected_operator_visible"
+    assert payload["summary"]["active_failure_count"] == 1
+    assert payload["failure_report"][0]["scenario_name"] == "native_notification_health_retry_degraded_behavior"
+
+
+@pytest.mark.asyncio
+async def test_operator_durable_workflow_engine_surface_delegates_to_state_report(client):
+    payload = {
+        "summary": {
+            "suite_name": "durable_workflow_engine_v1",
+            "benchmark_posture": "durable_workflow_engine_ci_gated_operator_visible",
+            "operator_status": "durable_workflow_engine_visible",
+            "scenario_count": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+            "active_failure_count": 0,
+            "durable_state_state": "checkpointed_state_and_resume_metadata_visible",
+            "recovery_state": "crash_safe_continuation_receipts_visible",
+            "trigger_state": "heartbeat_and_reactive_trigger_receipts_visible",
+        },
+        "scenario_names": list(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+        "policy": {
+            "receipt_surfaces": [
+                "/api/operator/durable-workflow-engine",
+                "/api/operator/benchmark-proof",
+            ],
+            "ci_gate_mode": "required_benchmark_suite",
+        },
+        "latest_run": {
+            "total": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+            "passed": len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+            "failed": 0,
+            "duration_ms": 11,
+        },
+    }
+
+    with patch(
+        "src.api.operator.build_durable_workflow_state_report",
+        AsyncMock(return_value=payload),
+    ) as build_report:
+        resp = await client.get("/api/operator/durable-workflow-engine")
+
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["suite_name"] == "durable_workflow_engine_v1"
+    assert resp.json()["summary"]["operator_status"] == "durable_workflow_engine_visible"
+    assert "/api/operator/durable-workflow-engine" in resp.json()["policy"]["receipt_surfaces"]
+    build_report.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

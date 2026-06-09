@@ -39,7 +39,11 @@ from src.evals.benchmark_catalog import benchmark_suite_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
 from src.evolution.engine import evolution_benchmark_gate_policy, list_evolution_targets
-from src.extensions.benchmark import build_m9_governed_ecosystem_benchmark_report
+from src.extensions.benchmark import (
+    build_governed_capability_pack_hardening_report,
+    build_m9_governed_ecosystem_benchmark_report,
+)
+from src.extensions.reach_channel_canary import build_one_reach_channel_canary_report
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report, build_m8_guardian_brain_benchmark_report
 from src.guardian.brain import (
     GuardianBrainContext,
@@ -47,6 +51,8 @@ from src.guardian.brain import (
     build_m8_guardian_brain_receipts,
 )
 from src.guardian.feedback import guardian_feedback_repository
+from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
+from src.guardian.multimodal_voice import build_guardian_safe_multimodal_voice_report
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import apply_memory_operator_control
@@ -61,6 +67,7 @@ from src.observer.native_notification_queue import native_notification_queue
 from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.tools.process_tools import process_runtime_manager
 from src.workflows.benchmark import build_m5_operating_layer_benchmark_report, build_workflow_endurance_benchmark_report
+from src.workflows.durable_state import build_durable_workflow_state_report
 from src.workflows.endurance_canary import build_live_workflow_endurance_canary_report
 from src.workflows.operating_layer import build_m5_operating_layer_payload
 
@@ -3378,37 +3385,47 @@ async def get_operator_benchmark_proof():
         user_model_benchmark,
         workflow_endurance_benchmark,
         live_workflow_endurance_canary,
+        durable_workflow_engine,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         memory_provider_quality_gate_benchmark,
         m7_operator_cockpit_benchmark,
         cockpit_efficiency_benchmark,
         m8_guardian_brain_benchmark,
+        guardian_safe_multimodal_voice_benchmark,
+        guardian_learning_arbitration_benchmark,
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
         computer_use_benchmark,
+        one_reach_channel_canary,
         m2_execution_benchmark,
         governed_improvement_benchmark,
         m9_governed_ecosystem_benchmark,
+        governed_capability_pack_hardening,
     ) = await asyncio.gather(
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),
         build_workflow_endurance_benchmark_report(),
         build_live_workflow_endurance_canary_report(),
+        build_durable_workflow_state_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_memory_provider_quality_gate_report(),
         build_m7_operator_cockpit_benchmark_report(),
         build_cockpit_efficiency_benchmark_report(),
         build_m8_guardian_brain_benchmark_report(),
+        build_guardian_safe_multimodal_voice_report(),
+        build_guardian_learning_arbitration_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
         build_computer_use_benchmark_report(),
+        build_one_reach_channel_canary_report(),
         build_m2_execution_benchmark_report(),
         build_governed_improvement_benchmark_report(),
         build_m9_governed_ecosystem_benchmark_report(),
+        build_governed_capability_pack_hardening_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -3421,19 +3438,24 @@ async def get_operator_benchmark_proof():
         str(user_model_benchmark["summary"]["benchmark_posture"]),
         str(workflow_endurance_benchmark["summary"]["benchmark_posture"]),
         str(live_workflow_endurance_canary["summary"]["benchmark_posture"]),
+        str(durable_workflow_engine["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"]),
         str(m7_operator_cockpit_benchmark["summary"]["benchmark_posture"]),
         str(cockpit_efficiency_benchmark["summary"]["benchmark_posture"]),
         str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
+        str(guardian_safe_multimodal_voice_benchmark["summary"]["benchmark_posture"]),
+        str(guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
+        str(one_reach_channel_canary["summary"]["benchmark_posture"]),
         str(m2_execution_benchmark["summary"]["benchmark_posture"]),
         str(governed_improvement_benchmark["summary"]["benchmark_posture"]),
         str(m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"]),
+        str(governed_capability_pack_hardening["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -3470,38 +3492,51 @@ async def get_operator_benchmark_proof():
             "user_model_benchmark_posture": user_model_benchmark["summary"]["benchmark_posture"],
             "workflow_endurance_benchmark_posture": workflow_endurance_benchmark["summary"]["benchmark_posture"],
             "live_workflow_endurance_canary_posture": live_workflow_endurance_canary["summary"]["benchmark_posture"],
+            "durable_workflow_engine_posture": durable_workflow_engine["summary"]["benchmark_posture"],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "memory_provider_quality_gate_benchmark_posture": memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"],
             "m7_operator_cockpit_benchmark_posture": m7_operator_cockpit_benchmark["summary"]["benchmark_posture"],
             "cockpit_efficiency_benchmark_posture": cockpit_efficiency_benchmark["summary"]["benchmark_posture"],
             "m8_guardian_brain_benchmark_posture": m8_guardian_brain_benchmark["summary"]["benchmark_posture"],
+            "guardian_safe_multimodal_voice_benchmark_posture": guardian_safe_multimodal_voice_benchmark["summary"]["benchmark_posture"],
+            "guardian_safe_multimodal_voice_claim_boundary": guardian_safe_multimodal_voice_benchmark["policy"]["claim_boundary"],
+            "guardian_learning_arbitration_benchmark_posture": guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"],
+            "guardian_learning_arbitration_claim_boundary": guardian_learning_arbitration_benchmark["policy"]["claim_boundary"],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
+            "one_reach_channel_canary_posture": one_reach_channel_canary["summary"]["benchmark_posture"],
             "m2_execution_benchmark_posture": m2_execution_benchmark["summary"]["benchmark_posture"],
             "governed_improvement_benchmark_posture": governed_improvement_benchmark["summary"]["benchmark_posture"],
             "m9_governed_ecosystem_benchmark_posture": m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"],
             "m9_governed_ecosystem_claim_boundary": m9_governed_ecosystem_benchmark["policy"]["claim_boundary"],
+            "governed_capability_pack_hardening_posture": governed_capability_pack_hardening["summary"]["benchmark_posture"],
+            "governed_capability_pack_hardening_claim_boundary": governed_capability_pack_hardening["policy"]["claim_boundary"],
         },
         "suites": suites,
         "memory_benchmark": memory_benchmark,
         "user_model_benchmark": user_model_benchmark,
         "workflow_endurance_benchmark": workflow_endurance_benchmark,
         "live_workflow_endurance_canary": live_workflow_endurance_canary,
+        "durable_workflow_engine": durable_workflow_engine,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "memory_provider_quality_gate_benchmark": memory_provider_quality_gate_benchmark,
         "m7_operator_cockpit_benchmark": m7_operator_cockpit_benchmark,
         "cockpit_efficiency_benchmark": cockpit_efficiency_benchmark,
         "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
+        "guardian_safe_multimodal_voice_benchmark": guardian_safe_multimodal_voice_benchmark,
+        "guardian_learning_arbitration_benchmark": guardian_learning_arbitration_benchmark,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "computer_use_benchmark": computer_use_benchmark,
+        "one_reach_channel_canary": one_reach_channel_canary,
         "m2_execution_benchmark": m2_execution_benchmark,
         "m9_governed_ecosystem_benchmark": m9_governed_ecosystem_benchmark,
+        "governed_capability_pack_hardening": governed_capability_pack_hardening,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -3531,9 +3566,24 @@ async def get_operator_live_workflow_endurance_canary():
     return await build_live_workflow_endurance_canary_report()
 
 
+@router.get("/operator/durable-workflow-engine")
+async def get_operator_durable_workflow_engine():
+    return await build_durable_workflow_state_report()
+
+
 @router.get("/operator/m5-operating-layer-benchmark")
 async def get_operator_m5_operating_layer_benchmark():
     return await build_m5_operating_layer_benchmark_report()
+
+
+@router.get("/operator/guardian-safe-multimodal-voice")
+async def get_operator_guardian_safe_multimodal_voice():
+    return await build_guardian_safe_multimodal_voice_report()
+
+
+@router.get("/operator/guardian-learning-arbitration")
+async def get_operator_guardian_learning_arbitration():
+    return await build_guardian_learning_arbitration_report()
 
 
 @router.get("/operator/m6-memory-superiority-benchmark")
@@ -3549,6 +3599,11 @@ async def get_operator_memory_provider_quality_gate():
 @router.get("/operator/live-long-horizon-replay-benchmark")
 async def get_operator_live_long_horizon_replay_benchmark():
     return await build_live_replay_benchmark_report()
+
+
+@router.get("/operator/one-reach-channel-canary")
+async def get_operator_one_reach_channel_canary():
+    return await build_one_reach_channel_canary_report()
 
 
 @router.get("/operator/m6-memory-superiority")
@@ -3613,6 +3668,11 @@ async def get_operator_m8_guardian_intervention_benchmark():
 @router.get("/operator/m9-governed-ecosystem-benchmark")
 async def get_operator_m9_governed_ecosystem_benchmark():
     return await build_m9_governed_ecosystem_benchmark_report()
+
+
+@router.get("/operator/governed-capability-pack-hardening")
+async def get_operator_governed_capability_pack_hardening():
+    return await build_governed_capability_pack_hardening_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

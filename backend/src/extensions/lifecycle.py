@@ -29,6 +29,7 @@ from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinit
 from src.extensions.doctor import doctor_snapshot
 from src.extensions.governance import (
     assert_governance_allows_lifecycle,
+    build_capability_pack_hardening_receipt,
     build_governance_status,
 )
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
@@ -2087,6 +2088,25 @@ def _extension_payload(
         load_errors=extension_load_errors,
         contributions=contributions,
     )
+    lifecycle_plan = _extension_lifecycle_plan(
+        extension.manifest,
+        extension,
+        candidate_digest=package_digest or "",
+    ) if extension.manifest is not None else {}
+    hardening_receipt = build_capability_pack_hardening_receipt(
+        extension.manifest,
+        governance_status=governance,
+        compatibility=compatibility,
+        lifecycle_plan=lifecycle_plan,
+        diagnostics_summary=diagnostics_summary,
+        permission_summary={
+            "status": permission_summary["status"],
+            "ok": permission_summary["ok"],
+            "required": permission_summary["required"],
+            "missing": permission_summary["missing"],
+            "risk_level": permission_summary["risk_level"],
+        },
+    )
     status = "ready" if not issues and not extension_load_errors else "degraded"
     if governance.get("fail_closed"):
         status = "blocked"
@@ -2106,6 +2126,7 @@ def _extension_payload(
         "summary": extension.manifest.summary if extension.manifest is not None else None,
         "description": extension.manifest.description if extension.manifest is not None else None,
         "compatibility": compatibility,
+        "capability_pack_hardening": hardening_receipt,
         "publisher": (
             {
                 "name": extension.manifest.publisher.name,
@@ -2561,6 +2582,30 @@ def validate_extension_path(path: str) -> dict[str, Any]:
             "risk_level": "low",
         },
     }
+    lifecycle_plan = _extension_lifecycle_plan(
+        manifest,
+        existing,
+        candidate_digest=package_digest,
+    )
+    diagnostics_summary = _diagnostics_summary(
+        issues=[
+            asdict(issue)
+            for result in report.results
+            for issue in result.issues
+        ],
+        load_errors=[_serialize_load_error(error) for error in report.load_errors],
+        contributions=[
+            _contribution_payload(extension, contribution, indexes=_contribution_indexes(state_by_id={}), state_entry={})
+            for contribution in (extension.contributions if extension is not None else [])
+        ],
+    )
+    permission_summary_payload = {
+        "status": permission_summary["status"],
+        "ok": permission_summary["ok"],
+        "required": permission_summary["required"],
+        "missing": permission_summary["missing"],
+        "risk_level": permission_summary["risk_level"],
+    }
     return {
         "path": str(package_root),
         "package_digest": package_digest,
@@ -2571,19 +2616,17 @@ def validate_extension_path(path: str) -> dict[str, Any]:
         "version": manifest.version,
         "version_line": _version_line(manifest.version),
         "compatibility": _compatibility_payload(manifest),
-        "lifecycle_plan": _extension_lifecycle_plan(
+        "lifecycle_plan": lifecycle_plan,
+        "capability_pack_hardening": build_capability_pack_hardening_receipt(
             manifest,
-            existing,
-            candidate_digest=package_digest,
+            governance_status=governance,
+            compatibility=_compatibility_payload(manifest),
+            lifecycle_plan=lifecycle_plan,
+            diagnostics_summary=diagnostics_summary,
+            permission_summary=permission_summary_payload,
         ),
         "permissions": permission_summary["declared"],
-        "permission_summary": {
-            "status": permission_summary["status"],
-            "ok": permission_summary["ok"],
-            "required": permission_summary["required"],
-            "missing": permission_summary["missing"],
-            "risk_level": permission_summary["risk_level"],
-        },
+        "permission_summary": permission_summary_payload,
         "approval_profile": permission_summary["approval_profile"],
         "ok": report.ok,
         "load_errors": [_serialize_load_error(error) for error in report.load_errors],
@@ -2595,18 +2638,7 @@ def validate_extension_path(path: str) -> dict[str, Any]:
             }
             for result in report.results
         ],
-        "diagnostics_summary": _diagnostics_summary(
-            issues=[
-                asdict(issue)
-                for result in report.results
-                for issue in result.issues
-            ],
-            load_errors=[_serialize_load_error(error) for error in report.load_errors],
-            contributions=[
-                _contribution_payload(extension, contribution, indexes=_contribution_indexes(state_by_id={}), state_entry={})
-                for contribution in (extension.contributions if extension is not None else [])
-            ],
-        ),
+        "diagnostics_summary": diagnostics_summary,
     }
 
 

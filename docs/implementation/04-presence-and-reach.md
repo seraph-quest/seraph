@@ -28,6 +28,7 @@
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 - [x] browser and desktop execution proof now also has a dedicated benchmark lane: replayable browser-task receipts, desktop notification-action replay, cross-surface continuity, and operator-visible computer-use failure taxonomy now live in the named `computer_use_browser_desktop` suite plus the operator computer-use benchmark surface instead of staying spread across isolated continuity or daemon seams
 - [x] M4 channel proof now also has a named deterministic benchmark lane, `channels_presence_device_pairing`, covering channel identity boundaries, device pairing and revocation fail-closed visibility, external-channel continuity, mutation boundaries, and abuse/failure review receipts; this is benchmark proof of boundary posture, not a claim that broad live mobile or messaging transports are production-ready
+- [x] the one excellent reach-channel canary now selects native notifications as the only canary channel and exposes `one_excellent_reach_channel_canary`, `/api/operator/one-reach-channel-canary`, and the cockpit benchmark-proof card for pairing, revocation, health, retry/fallback, same-thread continuity, memory/context continuity, approval handoff, audit trail, degraded-state UI, and explicit rejection of Slack/Discord/Telegram/channel sprawl until one channel meets the bar
 
 ## Working On Now
 
@@ -44,11 +45,12 @@
 - [x] this workstream now also ships `cross-surface-presence-contracts-v1`
 - [x] this workstream now also ships `broader-reach-inventory-continuity-v2`
 - [x] this workstream now also ships `m4-channels-presence-device-pairing-benchmark-proof-v1`
+- [x] this workstream now also ships `one-excellent-reach-channel-canary`
 
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell, imported capability reach, and typed source-adapter continuity layer
-- [ ] live broad mobile and messaging transports remain future work; the current M4 proof only pins deterministic identity, pairing, revocation, mutation-boundary, continuity, and review receipts
+- [ ] live broad mobile and messaging transports remain future work; the current M4 and one-channel canary proof pin deterministic native-notification identity, pairing, revocation, mutation-boundary, continuity, approval, degraded-state, and review receipts without claiming Slack, Discord, Telegram, voice, or mobile reach
 - [ ] broader external communication channels
 - [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new synthesized continuity summary, imported reach/source-adapter recovery, thread groups, recovery actions, action-card continuation model, and desktop-shell follow-through controls
 
@@ -69,7 +71,9 @@
 - [x] the cockpit now exposes a first actionable desktop shell surface for pending alerts, queued items, and recent interventions
 - [x] native continuation payloads can now resume work back into the cockpit instead of only showing a passive notification
 - [x] M4 benchmark proof names identity, pairing, revocation, mutation, external-continuity, and abuse/failure review boundaries for channel/device reach
-- [ ] live broad mobile or messaging transport execution is not claimed by this proof lane
+- [x] the native-notification canary now proves one selected reach channel with explicit no-sprawl boundaries, approval handoff, memory/context continuity, retry/fallback, and degraded-state receipts
+- [x] guardian-safe multimodal and voice now has a dedicated proof gate: `guardian_safe_multimodal_voice` and `/api/operator/guardian-safe-multimodal-voice` require voice, TTS/STT, browser vision, image/media analysis, and media delivery families to expose owner, trust, permissions, capture/provider/privacy receipts, continuity, correction/deletion, revocation, and guardian-value reasons before being treated as reach
+- [ ] live broad mobile, messaging, voice, STT/TTS, or multimodal transport execution is not claimed by this proof lane
 
 ## Batch I Branch Review Log
 

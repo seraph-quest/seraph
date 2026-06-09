@@ -167,6 +167,7 @@ interface OperatorBenchmarkProofSummary {
   user_model_benchmark_posture?: string;
   workflow_endurance_benchmark_posture?: string;
   live_workflow_endurance_canary_posture?: string;
+  one_reach_channel_canary_posture?: string;
   trust_boundary_benchmark_posture?: string;
   secure_capability_host_benchmark_posture?: string;
   computer_use_benchmark_posture?: string;
@@ -238,6 +239,7 @@ interface OperatorBenchmarkProof {
   user_model_benchmark: OperatorUserModelBenchmark | null;
   workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
   live_workflow_endurance_canary: OperatorLiveWorkflowEnduranceCanary | null;
+  one_reach_channel_canary: OperatorOneReachChannelCanary | null;
   trust_boundary_benchmark: OperatorTrustBoundaryBenchmark | null;
   secure_capability_host_benchmark: OperatorSecureCapabilityHostBenchmark | null;
   computer_use_benchmark: OperatorComputerUseBenchmark | null;
@@ -383,6 +385,40 @@ interface OperatorLiveWorkflowEnduranceCanary {
   };
   sessions: Record<string, unknown>[];
   runs: Record<string, unknown>[];
+  operator_story: Record<string, boolean>;
+  failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
+}
+
+interface OperatorOneReachChannelCanary {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    selected_channel: string;
+    scenario_count: number;
+    active_failure_count: number;
+    pairing_state: string;
+    revocation_state: string;
+    health_state: string;
+    degraded_state: string;
+    retry_state: string;
+    thread_continuity_state: string;
+    approval_handoff_state: string;
+    audit_receipt_count: number;
+    e2e_step_count: number;
+    channel_sprawl_state: string;
+    claim_boundary: string;
+  };
+  protocol: {
+    replay_command: string;
+    time_anchor: string;
+  };
+  policy: {
+    claim_boundary: string;
+    receipt_surfaces: string[];
+    not_claimed: string[];
+  };
+  receipt: Record<string, unknown>;
   operator_story: Record<string, boolean>;
   failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
 }
@@ -3105,6 +3141,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   const userModelBenchmark = record.user_model_benchmark;
   const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
   const liveWorkflowEnduranceCanary = record.live_workflow_endurance_canary;
+  const oneReachChannelCanary = record.one_reach_channel_canary;
   const trustBoundaryBenchmark = record.trust_boundary_benchmark;
   const secureCapabilityHostBenchmark = record.secure_capability_host_benchmark;
   const computerUseBenchmark = record.computer_use_benchmark;
@@ -3114,6 +3151,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
   let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
   let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
   let normalizedLiveWorkflowEnduranceCanary: OperatorLiveWorkflowEnduranceCanary | null = null;
+  let normalizedOneReachChannelCanary: OperatorOneReachChannelCanary | null = null;
   let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
   let normalizedSecureCapabilityHostBenchmark: OperatorSecureCapabilityHostBenchmark | null = null;
   let normalizedComputerUseBenchmark: OperatorComputerUseBenchmark | null = null;
@@ -3343,6 +3381,86 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
           approval_preservation_visible: Boolean(storyValue.approval_preservation_visible),
           trust_boundary_fail_closed_visible: Boolean(storyValue.trust_boundary_fail_closed_visible),
           audit_trail_visible: Boolean(storyValue.audit_trail_visible),
+        },
+        failure_report: Array.isArray(canaryRecord.failure_report)
+          ? canaryRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : typeof failure.scenario_name === "string" ? failure.scenario_name : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : typeof failure.error === "string" ? failure.error : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "deterministic_eval_failure",
+            }];
+          })
+          : [],
+      };
+    }
+  }
+  if (oneReachChannelCanary && typeof oneReachChannelCanary === "object" && !Array.isArray(oneReachChannelCanary)) {
+    const canaryRecord = oneReachChannelCanary as Record<string, unknown>;
+    const canarySummary = canaryRecord.summary;
+    const canaryProtocol = canaryRecord.protocol;
+    const canaryPolicy = canaryRecord.policy;
+    const canaryReceipt = canaryRecord.receipt;
+    const canaryStory = canaryRecord.operator_story;
+    if (
+      canarySummary && typeof canarySummary === "object" && !Array.isArray(canarySummary)
+      && canaryProtocol && typeof canaryProtocol === "object" && !Array.isArray(canaryProtocol)
+      && canaryPolicy && typeof canaryPolicy === "object" && !Array.isArray(canaryPolicy)
+      && canaryReceipt && typeof canaryReceipt === "object" && !Array.isArray(canaryReceipt)
+      && canaryStory && typeof canaryStory === "object" && !Array.isArray(canaryStory)
+    ) {
+      const summaryValue = canarySummary as Record<string, unknown>;
+      const protocolValue = canaryProtocol as Record<string, unknown>;
+      const policyValue = canaryPolicy as Record<string, unknown>;
+      const storyValue = canaryStory as Record<string, unknown>;
+      normalizedOneReachChannelCanary = {
+        summary: {
+          suite_name: typeof summaryValue.suite_name === "string" ? summaryValue.suite_name : "one_excellent_reach_channel_canary",
+          benchmark_posture: typeof summaryValue.benchmark_posture === "string" ? summaryValue.benchmark_posture : "unknown",
+          operator_status: typeof summaryValue.operator_status === "string" ? summaryValue.operator_status : "unknown",
+          selected_channel: typeof summaryValue.selected_channel === "string" ? summaryValue.selected_channel : "unknown",
+          scenario_count: typeof summaryValue.scenario_count === "number" ? summaryValue.scenario_count : 0,
+          active_failure_count: typeof summaryValue.active_failure_count === "number" ? summaryValue.active_failure_count : 0,
+          pairing_state: typeof summaryValue.pairing_state === "string" ? summaryValue.pairing_state : "unknown",
+          revocation_state: typeof summaryValue.revocation_state === "string" ? summaryValue.revocation_state : "unknown",
+          health_state: typeof summaryValue.health_state === "string" ? summaryValue.health_state : "unknown",
+          degraded_state: typeof summaryValue.degraded_state === "string" ? summaryValue.degraded_state : "unknown",
+          retry_state: typeof summaryValue.retry_state === "string" ? summaryValue.retry_state : "unknown",
+          thread_continuity_state: typeof summaryValue.thread_continuity_state === "string" ? summaryValue.thread_continuity_state : "unknown",
+          approval_handoff_state: typeof summaryValue.approval_handoff_state === "string" ? summaryValue.approval_handoff_state : "unknown",
+          audit_receipt_count: typeof summaryValue.audit_receipt_count === "number" ? summaryValue.audit_receipt_count : 0,
+          e2e_step_count: typeof summaryValue.e2e_step_count === "number" ? summaryValue.e2e_step_count : 0,
+          channel_sprawl_state: typeof summaryValue.channel_sprawl_state === "string" ? summaryValue.channel_sprawl_state : "unknown",
+          claim_boundary: typeof summaryValue.claim_boundary === "string" ? summaryValue.claim_boundary : "unknown",
+        },
+        protocol: {
+          replay_command: typeof protocolValue.replay_command === "string" ? protocolValue.replay_command : "",
+          time_anchor: typeof protocolValue.time_anchor === "string" ? protocolValue.time_anchor : "",
+        },
+        policy: {
+          claim_boundary: typeof policyValue.claim_boundary === "string" ? policyValue.claim_boundary : "unknown",
+          receipt_surfaces: Array.isArray(policyValue.receipt_surfaces)
+            ? policyValue.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          not_claimed: Array.isArray(policyValue.not_claimed)
+            ? policyValue.not_claimed.filter((item): item is string => typeof item === "string")
+            : [],
+        },
+        receipt: canaryReceipt as Record<string, unknown>,
+        operator_story: {
+          single_channel_selected: Boolean(storyValue.single_channel_selected),
+          channel_sprawl_rejected: Boolean(storyValue.channel_sprawl_rejected),
+          pairing_visible: Boolean(storyValue.pairing_visible),
+          revocation_fail_closed_visible: Boolean(storyValue.revocation_fail_closed_visible),
+          health_visible: Boolean(storyValue.health_visible),
+          retry_visible: Boolean(storyValue.retry_visible),
+          thread_continuity_visible: Boolean(storyValue.thread_continuity_visible),
+          memory_context_visible: Boolean(storyValue.memory_context_visible),
+          approval_handoff_visible: Boolean(storyValue.approval_handoff_visible),
+          audit_trail_visible: Boolean(storyValue.audit_trail_visible),
+          degraded_state_ui_visible: Boolean(storyValue.degraded_state_ui_visible),
+          e2e_flow_visible: Boolean(storyValue.e2e_flow_visible),
         },
         failure_report: Array.isArray(canaryRecord.failure_report)
           ? canaryRecord.failure_report.flatMap((entry) => {
@@ -3601,6 +3719,9 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
       live_workflow_endurance_canary_posture: typeof summaryRecord.live_workflow_endurance_canary_posture === "string"
         ? summaryRecord.live_workflow_endurance_canary_posture
         : "unknown",
+      one_reach_channel_canary_posture: typeof summaryRecord.one_reach_channel_canary_posture === "string"
+        ? summaryRecord.one_reach_channel_canary_posture
+        : "unknown",
       trust_boundary_benchmark_posture: typeof summaryRecord.trust_boundary_benchmark_posture === "string"
         ? summaryRecord.trust_boundary_benchmark_posture
         : "unknown",
@@ -3636,6 +3757,7 @@ function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof
     user_model_benchmark: normalizedUserModelBenchmark,
     workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
     live_workflow_endurance_canary: normalizedLiveWorkflowEnduranceCanary,
+    one_reach_channel_canary: normalizedOneReachChannelCanary,
     trust_boundary_benchmark: normalizedTrustBoundaryBenchmark,
     secure_capability_host_benchmark: normalizedSecureCapabilityHostBenchmark,
     computer_use_benchmark: normalizedComputerUseBenchmark,
@@ -14546,6 +14668,93 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 );
                               })}
                               {operatorBenchmarkProof.live_workflow_endurance_canary.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.one_reach_channel_canary ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">One reach-channel canary</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.benchmark_posture.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.selected_channel.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.one_reach_channel_canary.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.one_reach_channel_canary.summary.e2e_step_count} E2E steps`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `pairing ${operatorBenchmarkProof.one_reach_channel_canary.summary.pairing_state.replace(/_/g, " ")}`,
+                                  `revocation ${operatorBenchmarkProof.one_reach_channel_canary.summary.revocation_state.replace(/_/g, " ")}`,
+                                  `health ${operatorBenchmarkProof.one_reach_channel_canary.summary.health_state.replace(/_/g, " ")}`,
+                                  `degraded ${operatorBenchmarkProof.one_reach_channel_canary.summary.degraded_state.replace(/_/g, " ")}`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.retry_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.thread_continuity_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.approval_handoff_state.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.one_reach_channel_canary.summary.audit_receipt_count} audit receipts`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {Object.entries(operatorBenchmarkProof.one_reach_channel_canary.operator_story)
+                                  .filter(([, visible]) => visible)
+                                  .map(([key]) => key.replace(/_/g, " "))
+                                  .join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.channel_sprawl_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.claim_boundary.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.policy.not_claimed.slice(0, 2).map((item) => `not ${item.replace(/_/g, " ")}`).join(" · "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.one_reach_channel_canary.protocol.replay_command ? (
+                                <div className="cockpit-operator-note">{operatorBenchmarkProof.one_reach_channel_canary.protocol.replay_command}</div>
+                              ) : null}
+                              {(() => {
+                                const receipt = operatorBenchmarkProof.one_reach_channel_canary.receipt;
+                                const continuity = receipt.continuity && typeof receipt.continuity === "object" && !Array.isArray(receipt.continuity)
+                                  ? receipt.continuity as Record<string, unknown>
+                                  : {};
+                                const degraded = receipt.degraded_state_ui && typeof receipt.degraded_state_ui === "object" && !Array.isArray(receipt.degraded_state_ui)
+                                  ? receipt.degraded_state_ui as Record<string, unknown>
+                                  : {};
+                                const e2eFlow = Array.isArray(receipt.e2e_flow)
+                                  ? receipt.e2e_flow.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+                                  : [];
+                                return (
+                                  <>
+                                    <div className="cockpit-operator-note">
+                                      {[
+                                        typeof continuity.thread_id === "string" ? continuity.thread_id : null,
+                                        typeof continuity.memory_context_id === "string" ? continuity.memory_context_id : null,
+                                        typeof degraded.primary_degraded_reason === "string" ? `degraded ${degraded.primary_degraded_reason.replace(/_/g, " ")}` : null,
+                                        typeof degraded.repair_action === "string" ? `repair ${degraded.repair_action.replace(/_/g, " ")}` : null,
+                                      ].filter(Boolean).join(" · ")}
+                                    </div>
+                                    {e2eFlow.map((step, index) => {
+                                      const stepName = typeof step.step === "string" ? step.step : `step-${index + 1}`;
+                                      const decision = typeof step.decision === "string" ? step.decision : typeof step.action === "string" ? step.action : "";
+                                      const status = typeof step.status === "string" ? step.status : "";
+                                      const reason = typeof step.reason === "string" ? step.reason : "";
+                                      return (
+                                        <div key={`${stepName}:${index}`} className="cockpit-operator-note">
+                                          {[stepName.replace(/_/g, " "), decision.replace(/_/g, " "), status.replace(/_/g, " "), reason].filter(Boolean).join(" · ")}
+                                        </div>
+                                      );
+                                    })}
+                                  </>
+                                );
+                              })()}
+                              {operatorBenchmarkProof.one_reach_channel_canary.failure_report.slice(0, 2).map((failure) => (
                                 <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
                                   {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
                                 </div>

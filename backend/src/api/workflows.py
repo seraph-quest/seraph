@@ -29,6 +29,7 @@ from src.extensions.workspace_package import save_workspace_contribution
 from src.tools.policy import get_current_tool_policy_mode
 from src.workflows.loader import parse_workflow_content
 from src.workflows.manager import approval_context_requires_tracked_lineage, workflow_manager
+from src.workflows.durable_state import workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity, parse_workflow_run_identity
 
 router = APIRouter()
@@ -605,6 +606,9 @@ def _workflow_event_fingerprint(tool_name: str, details: dict[str, Any]) -> str:
 
 
 def _workflow_projection_key(event: dict[str, Any], details: dict[str, Any]) -> str:
+    durable_run_identity = details.get("durable_run_identity")
+    if isinstance(durable_run_identity, str) and durable_run_identity.strip():
+        return durable_run_identity.strip()
     tool_name = str(event.get("tool_name") or "workflow")
     fingerprint = _workflow_event_fingerprint(tool_name, details)
     return build_workflow_run_identity(
@@ -1313,6 +1317,7 @@ async def _list_workflow_runs(
         details = _as_record(event.get("details"))
         tool_name = str(event.get("tool_name") or "workflow")
         key = _workflow_projection_key(event, details)
+        event_projection_key = key
         run_fingerprint = _workflow_event_fingerprint(tool_name, details)
         if event.get("event_type") == "tool_call":
             arguments = _as_record(details.get("arguments")) or None
@@ -1569,12 +1574,7 @@ async def _list_workflow_runs(
                     step["recovery_actions"] = []
                     step["recovery_hint"] = None
                     step["is_recoverable"] = False
-        run_identity = build_workflow_run_identity(
-            run.get("session_id") if isinstance(run.get("session_id"), str) else None,
-            tool_name,
-            run_fingerprint,
-            run_discriminator=run_discriminator,
-        )
+        run_identity = event_projection_key
         lineage = _workflow_branch_lineage(
             run_identity=run_identity,
             details=details,
@@ -1912,6 +1912,46 @@ async def _list_workflow_runs(
                 run["checkpoint_candidates"] = []
                 run["resume_plan"] = None
             completed.append(run)
+
+    try:
+        durable_runs = await workflow_state_repository.list_runs(limit=limit, session_id=session_id)
+    except Exception:
+        durable_runs = []
+    completed_by_identity = {
+        str(run.get("run_identity") or run.get("id")): run
+        for run in completed
+        if run.get("run_identity") or run.get("id")
+    }
+    for durable_run in durable_runs:
+        run_identity = str(durable_run.get("run_identity") or durable_run.get("id"))
+        if not run_identity:
+            continue
+        existing = completed_by_identity.get(run_identity, {})
+        audit_projection_available = bool(existing)
+        durable_only_replay_allowed = False
+        durable_only_replay_block_reason = "durable_projection_missing"
+        merged = {
+            **existing,
+            **durable_run,
+            "status": durable_run.get("status") or existing.get("status"),
+            "availability": existing.get("availability") or "audit_projection_missing",
+            "checkpoint_candidates": existing.get("checkpoint_candidates") or [],
+            "resume_plan": existing.get("resume_plan"),
+            "replay_allowed": (
+                existing.get("replay_allowed", durable_only_replay_allowed)
+                if audit_projection_available
+                else durable_only_replay_allowed
+            ),
+            "replay_block_reason": (
+                existing.get("replay_block_reason")
+                if audit_projection_available
+                else durable_only_replay_block_reason
+            ),
+            "state_source": "durable_workflow_state",
+            "audit_projection_available": audit_projection_available,
+        }
+        completed_by_identity[run_identity] = merged
+    completed = list(completed_by_identity.values())
 
     completed.sort(
         key=lambda item: datetime.fromisoformat(str(item["updated_at"]).replace("Z", "+00:00")),

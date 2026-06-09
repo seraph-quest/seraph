@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.approval.repository import fingerprint_tool_call
+from src.extensions.governance import governance_signature_value
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
 from src.workflows.manager import (
@@ -96,6 +97,55 @@ def _write_manifest_workflow_package(
     workflows_path = package_dir / "workflows"
     workflows_path.mkdir(exist_ok=True)
     (workflows_path / workflow_file_name).write_text(workflow_content, encoding="utf-8")
+    return package_dir
+
+
+def _write_verified_workflow_package_with_stale_digest(root):
+    package_dir = root / "extensions" / "verified-workflow-pack"
+    workflows_path = package_dir / "workflows"
+    workflows_path.mkdir(parents=True, exist_ok=True)
+    stale_digest = "0" * 64
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.verified-workflow-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Verified Workflow Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: verified\n"
+        "governance:\n"
+        "  provenance:\n"
+        "    source: seraph-catalog\n"
+        "    publisher_id: seraph\n"
+        "  signature:\n"
+        "    algorithm: seraph-sha256-v1\n"
+        "    key_id: seraph-root-2026\n"
+        f"    digest: \"{stale_digest}\"\n"
+        f"    signature: \"{governance_signature_value(key_id='seraph-root-2026', digest=stale_digest)}\"\n"
+        "contributes:\n"
+        "  workflows:\n"
+        "    - workflows/verified.md\n"
+        "permissions:\n"
+        "  tools: [web_search]\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (workflows_path / "verified.md").write_text(
+        "---\n"
+        "name: verified-workflow\n"
+        "description: Verified workflow\n"
+        "requires:\n"
+        "  tools: [web_search]\n"
+        "steps:\n"
+        "  - id: search\n"
+        "    tool: web_search\n"
+        "    arguments: {}\n"
+        "---\n\n"
+        "Verified workflow.\n",
+        encoding="utf-8",
+    )
     return package_dir
 
 
@@ -395,6 +445,22 @@ class TestWorkflowManager:
         )
         assert listed["is_available"] is False
         assert listed["missing_tools"] == ["write_file"]
+        assert mgr.get_active_workflows(["web_search"], []) == []
+
+    def test_verified_fail_closed_pack_hides_workflow_runtime_access(self, tmp_path):
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        package_dir = _write_verified_workflow_package_with_stale_digest(tmp_path)
+        mgr = WorkflowManager()
+        mgr.init(str(workflows_dir), manifest_roots=[str(package_dir.parent)])
+
+        listed = mgr.list_workflows(available_tool_names=["web_search"], active_skill_names=[])
+
+        assert len(listed) == 1
+        assert listed[0]["name"] == "verified-workflow"
+        assert listed[0]["is_available"] is False
+        assert listed[0]["governance_runtime_blocked"] is True
+        assert listed[0]["governance_fail_closed_reason"] == "signature_digest_mismatch"
         assert mgr.get_active_workflows(["web_search"], []) == []
 
     def test_enable_disable_persists(self, workflows_dir):
@@ -724,7 +790,47 @@ class TestWorkflowManager:
         assert details["step_records"][0]["status"] == "checkpoint_reused"
         assert details["step_records"][1]["status"] == "failed"
         assert details["step_records"][1]["error_kind"] == "PermissionError"
-        assert details["error"] == "denied"
+        assert details["error"] == "PermissionError (details redacted)"
+
+
+def test_workflow_tool_uses_unique_durable_identity_for_repeated_identical_runs():
+    workflow = Workflow(
+        name="web-brief",
+        description="Search the web",
+        inputs={"query": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+        ],
+        requires_tools=["web_search"],
+        result_template="{{ steps.search.result }}",
+    )
+    workflow_tool = WorkflowTool(
+        workflow,
+        {"web_search": DummyTool("web_search", lambda query: f"fresh result for {query}")},
+    )
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
+
+    with (
+        patch("src.workflows.manager.workflow_state_repository", durable_repository),
+        patch("src.workflows.manager.time.time_ns", side_effect=[101, 202]),
+    ):
+        workflow_tool(query="seraph")
+        workflow_tool(query="seraph")
+
+    identities = [
+        call.kwargs["run_identity"]
+        for call in durable_repository.create_run.await_args_list
+    ]
+    assert identities[0] != identities[1]
+    assert identities[0].endswith(":run-101")
+    assert identities[1].endswith(":run-202")
+
 
 def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
     workflow = Workflow(
@@ -1608,6 +1714,8 @@ async def test_workflow_runs_endpoint_uses_stored_fingerprint_for_redacted_argum
                 }
             ],
         ),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "full")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2476,6 +2584,60 @@ async def test_workflow_runs_endpoint_disambiguates_duplicate_fingerprinted_runs
 
 
 @pytest.mark.asyncio
+async def test_workflow_runs_endpoint_blocks_replay_for_durable_only_rows(client):
+    durable_run = {
+        "run_identity": "session-1:workflow_web_brief_to_file:web-brief-secret:run-1",
+        "root_run_identity": "session-1:workflow_web_brief_to_file:web-brief-secret:run-1",
+        "parent_run_identity": None,
+        "workflow_name": "web-brief-to-file",
+        "tool_name": "workflow_web_brief_to_file",
+        "session_id": "session-1",
+        "status": "succeeded",
+        "run_fingerprint": "web-brief-secret",
+        "arguments": {"query": "[redacted]"},
+        "approval_context": {
+            "workflow_name": "web-brief-to-file",
+            "risk_level": "high",
+            "execution_boundaries": ["secret_injection", "workspace_write"],
+            "accepts_secret_refs": True,
+            "step_tools": ["get_secret_ref", "write_file"],
+        },
+        "checkpoint_context": {},
+        "checkpoint_context_available": False,
+        "artifact_paths": [],
+        "continued_error_steps": [],
+        "last_completed_step_id": "save",
+        "heartbeat_at": "2026-03-18T12:02:00+00:00",
+        "started_at": "2026-03-18T12:01:00+00:00",
+        "updated_at": "2026-03-18T12:02:00+00:00",
+        "finished_at": "2026-03-18T12:02:00+00:00",
+        "metadata": {"content_redacted": True},
+        "step_records": [],
+        "state_source": "durable_workflow_state",
+    }
+    with (
+        patch("src.api.workflows.audit_repository.list_events", return_value=[]),
+        patch("src.api.workflows.workflow_state_repository.list_runs", AsyncMock(return_value=[durable_run])),
+        patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.workflow_manager.list_workflows", return_value=[]),
+        patch(
+            "src.api.workflows.session_manager.list_sessions",
+            return_value=[{"id": "session-1", "title": "Research thread"}],
+        ),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.get("/api/workflows/runs?session_id=session-1")
+
+    assert response.status_code == 200
+    run = response.json()["runs"][0]
+    assert run["audit_projection_available"] is False
+    assert run["availability"] == "audit_projection_missing"
+    assert run["replay_allowed"] is False
+    assert run["replay_block_reason"] == "durable_projection_missing"
+    assert run["resume_plan"] is None
+
+
+@pytest.mark.asyncio
 async def test_workflow_runs_endpoint_uses_approval_context_in_pending_fingerprint_projection(client):
     arguments = {"query": "seraph", "file_path": "notes/brief.md"}
     approval_context = {
@@ -2614,6 +2776,8 @@ async def test_workflow_runs_endpoint_blocks_replay_when_approval_context_change
             ],
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -2729,6 +2893,8 @@ async def test_workflow_runs_endpoint_hides_repair_actions_when_boundary_drift_b
             ],
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -3658,6 +3824,8 @@ async def test_workflow_resume_plan_rejects_when_approval_context_changes(client
             ],
         ),
         patch("src.api.workflows.approval_repository.list_pending", return_value=[]),
+        patch("src.api.workflows.get_base_tools_and_active_skills", return_value=([], [], "balanced")),
+        patch("src.api.workflows.workflow_manager.build_workflow_tools", return_value=[]),
         patch(
             "src.api.workflows.workflow_manager.get_tool_metadata",
             return_value={
@@ -4565,6 +4733,175 @@ class TestWorkflowSurfaces:
             }
         ]
         assert _checkpoint_context_allowed(approval_context) is False
+
+    def test_workflow_tool_redacts_durable_state_when_checkpoint_context_is_disallowed(self):
+        workflow = Workflow(
+            name="secret-sync",
+            description="Handle a secret-backed source",
+            inputs={
+                "token": {"type": "string", "required": True},
+                "prompt": {"type": "string", "required": True},
+            },
+            steps=[
+                WorkflowStep(
+                    id="fetch",
+                    tool="secret_fetch",
+                    arguments={
+                        "token": "{{ token }}",
+                        "prompt": "{{ prompt }}",
+                    },
+                )
+            ],
+            requires_tools=["secret_fetch"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {
+                "secret_fetch": DummyTool(
+                    "secret_fetch",
+                    lambda **_kwargs: {"token": "secret-token", "body": "private-result"},
+                )
+            },
+        )
+        durable_repository = SimpleNamespace(
+            create_run=AsyncMock(),
+            record_step_started=AsyncMock(),
+            record_step_completed=AsyncMock(),
+            record_step_failed=AsyncMock(),
+            finish_run=AsyncMock(),
+        )
+        approval_context = {
+            "risk_level": "high",
+            "accepts_secret_refs": True,
+            "execution_boundaries": ["secret_read"],
+        }
+
+        with (
+            patch.object(workflow_tool, "get_approval_context", return_value=approval_context),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+        ):
+            workflow_tool(token="sref_123", prompt="private prompt")
+
+        create_arguments = durable_repository.create_run.await_args.kwargs["arguments"]
+        assert create_arguments == {
+            "redacted": True,
+            "reason": "checkpoint_context_disallowed",
+            "argument_keys": ["prompt", "token"],
+        }
+        started_arguments = durable_repository.record_step_started.await_args.kwargs["arguments"]
+        assert started_arguments == {
+            "redacted": True,
+            "reason": "checkpoint_context_disallowed",
+            "argument_keys": ["prompt", "token"],
+        }
+        completed_kwargs = durable_repository.record_step_completed.await_args.kwargs
+        assert completed_kwargs["result"] is None
+        assert completed_kwargs["checkpoint"] is None
+        assert durable_repository.finish_run.await_args.kwargs["checkpoint_context"] == {}
+
+    def test_workflow_tool_redacts_durable_failure_exception_text(self):
+        workflow = Workflow(
+            name="secret-failure",
+            description="Fail without leaking provider payloads",
+            inputs={"prompt": {"type": "string", "required": True}},
+            steps=[
+                WorkflowStep(
+                    id="fail",
+                    tool="secret_fetch",
+                    arguments={"prompt": "{{ prompt }}"},
+                )
+            ],
+            requires_tools=["secret_fetch"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {
+                "secret_fetch": DummyTool(
+                    "secret_fetch",
+                    lambda **_kwargs: (_ for _ in ()).throw(
+                        RuntimeError("token=sk-live-123 private file body")
+                    ),
+                )
+            },
+        )
+        durable_repository = SimpleNamespace(
+            create_run=AsyncMock(),
+            record_step_started=AsyncMock(),
+            record_step_completed=AsyncMock(),
+            record_step_failed=AsyncMock(),
+            finish_run=AsyncMock(),
+        )
+
+        with patch("src.workflows.manager.workflow_state_repository", durable_repository):
+            with pytest.raises(RuntimeError):
+                workflow_tool(prompt="private prompt")
+
+        failed_kwargs = durable_repository.record_step_failed.await_args.kwargs
+        finish_kwargs = durable_repository.finish_run.await_args.kwargs
+        assert failed_kwargs["error_summary"] == "RuntimeError (details redacted)"
+        assert finish_kwargs["error"] == "RuntimeError (details redacted)"
+        assert "sk-live" not in failed_kwargs["error_summary"]
+        assert "private file body" not in finish_kwargs["error"]
+
+    def test_workflow_tool_records_delegated_artifact_review_receipts(self):
+        workflow = Workflow(
+            name="delegated-artifact-review",
+            description="Delegate artifact production",
+            inputs={
+                "task": {"type": "string", "required": True},
+                "specialist": {"type": "string", "required": True},
+                "file_path": {"type": "string", "required": True},
+            },
+            steps=[
+                WorkflowStep(
+                    id="delegate",
+                    tool="delegate_task",
+                    arguments={
+                        "task": "{{ task }}",
+                        "specialist": "{{ specialist }}",
+                        "file_path": "{{ file_path }}",
+                    },
+                )
+            ],
+            requires_tools=["delegate_task"],
+        )
+        workflow_tool = WorkflowTool(
+            workflow,
+            {"delegate_task": DummyTool("delegate_task", lambda **_kwargs: "delegated")},
+        )
+        durable_repository = SimpleNamespace(
+            create_run=AsyncMock(),
+            record_step_started=AsyncMock(),
+            record_step_completed=AsyncMock(),
+            record_step_failed=AsyncMock(),
+            finish_run=AsyncMock(),
+            record_artifact_review=AsyncMock(),
+        )
+        approval_context = {
+            "risk_level": "medium",
+            "execution_boundaries": ["delegation", "workspace_filesystem"],
+            "delegated_specialists": ["critic"],
+            "delegated_tool_names": ["review_tool"],
+            "trust_partition": {"mode": "delegated_specialist", "blocked": False},
+        }
+
+        with (
+            patch.object(workflow_tool, "get_approval_context", return_value=approval_context),
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+        ):
+            workflow_tool(
+                task="Draft a review artifact.",
+                specialist="critic",
+                file_path="notes/review.md",
+            )
+
+        review_kwargs = durable_repository.record_artifact_review.await_args.kwargs
+        assert review_kwargs["artifact_path"] == "notes/review.md"
+        assert review_kwargs["owner"] == "delegated_specialist"
+        assert review_kwargs["review_state"] == "pending_operator_review"
+        assert review_kwargs["reviewer"] == "critic"
+        assert review_kwargs["metadata"]["delegated_specialists"] == ["critic"]
+        assert review_kwargs["metadata"]["durable_audit_receipt_id"].endswith(":durable-audit:succeeded")
 
     def test_workflow_tool_approval_context_records_delegated_tool_inventory(self):
         workflow = Workflow(

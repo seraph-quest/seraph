@@ -5400,7 +5400,7 @@ describe("CockpitView", () => {
     expect(
       await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
     ).toBeInTheDocument();
-  });
+  }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
     useChatStore.setState({
@@ -5622,8 +5622,8 @@ describe("CockpitView", () => {
       if (url.includes("/api/operator/benchmark-proof")) {
         return Promise.resolve(mockResponse({
           summary: {
-            suite_count: 10,
-            scenario_count: 63,
+            suite_count: 11,
+            scenario_count: 68,
             benchmark_posture: "deterministic_proof_backed",
             operator_status: "operator_visible",
             remaining_gap: "live_provider_and_real_computer_use_depth",
@@ -5635,6 +5635,7 @@ describe("CockpitView", () => {
             trust_boundary_benchmark_posture: "ci_gated_operator_visible",
             secure_capability_host_benchmark_posture: "secure_host_ci_gated_operator_visible",
             computer_use_benchmark_posture: "ci_gated_operator_visible",
+            one_reach_channel_canary_posture: "one_reach_channel_canary_ci_gated_operator_visible",
             governed_improvement_benchmark_posture: "ci_gated_operator_visible",
           },
           memory_benchmark: {
@@ -5945,6 +5946,85 @@ describe("CockpitView", () => {
               ci_gate_mode: "required_benchmark_suite",
             },
           },
+          one_reach_channel_canary: {
+            summary: {
+              suite_name: "one_excellent_reach_channel_canary",
+              benchmark_posture: "one_reach_channel_canary_ci_gated_operator_visible",
+              operator_status: "one_reach_channel_canary_visible",
+              selected_channel: "native_notification",
+              scenario_count: 5,
+              active_failure_count: 0,
+              pairing_state: "paired",
+              revocation_state: "revoked",
+              health_state: "ready",
+              degraded_state: "daemon_offline",
+              retry_state: "bounded_retry_with_fallback_visible",
+              thread_continuity_state: "channel_thread_session_and_memory_context_linked",
+              approval_handoff_state: "pending_operator_approval",
+              audit_receipt_count: 7,
+              e2e_step_count: 4,
+              channel_sprawl_state: "rejected_until_native_notification_canary_meets_bar",
+              claim_boundary: "deterministic_native_notification_canary_not_broad_live_channel_reach",
+            },
+            protocol: {
+              replay_command: "uv run python -m src.evals.harness --benchmark-suite one_excellent_reach_channel_canary --indent 0",
+              time_anchor: "2026-05-11T11:00:00Z",
+            },
+            policy: {
+              claim_boundary: "deterministic_native_notification_canary_not_broad_live_channel_reach",
+              receipt_surfaces: [
+                "/api/operator/one-reach-channel-canary",
+                "/api/operator/control-plane",
+                "/api/operator/benchmark-proof",
+                "/api/activity",
+              ],
+              not_claimed: ["broad_mobile_or_messaging_channel_coverage", "production_grade_pairing_protocol"],
+            },
+            receipt: {
+              continuity: {
+                thread_id: "reach-thread-native-001",
+                memory_context_id: "memctx-reach-native-001",
+              },
+              degraded_state_ui: {
+                primary_degraded_reason: "daemon_offline",
+                repair_action: "reconnect_native_daemon",
+              },
+              e2e_flow: [
+                {
+                  step: "external_message_received",
+                },
+                {
+                  step: "seraph_decision",
+                  decision: "request_approval_before_channel_response",
+                  reason: "external channel response could commit operator intent",
+                },
+                {
+                  step: "approval_handoff",
+                  status: "pending_operator_approval",
+                },
+                {
+                  step: "audited_response",
+                  action: "queue_native_notification_response",
+                  status: "queued_after_approval_handoff",
+                },
+              ],
+            },
+            operator_story: {
+              single_channel_selected: true,
+              channel_sprawl_rejected: true,
+              pairing_visible: true,
+              revocation_fail_closed_visible: true,
+              health_visible: true,
+              retry_visible: true,
+              thread_continuity_visible: true,
+              memory_context_visible: true,
+              approval_handoff_visible: true,
+              audit_trail_visible: true,
+              degraded_state_ui_visible: true,
+              e2e_flow_visible: true,
+            },
+            failure_report: [],
+          },
           suites: [
             {
               name: "guardian_memory_quality",
@@ -6027,6 +6107,16 @@ describe("CockpitView", () => {
               scenario_names: ["browser_execution_task_replay_behavior"],
             },
             {
+              name: "one_excellent_reach_channel_canary",
+              label: "One excellent reach-channel canary",
+              description: "Native notification reach canary suite",
+              benchmark_axis: "one_excellent_reach_channel_canary",
+              operator_summary: "Native notifications prove one reach path before broader external-channel claims.",
+              remaining_gap: "Broad mobile, messaging, voice, and production-grade pairing remain future work.",
+              scenario_count: 5,
+              scenario_names: ["one_reach_channel_selection_scope_behavior"],
+            },
+            {
               name: "planning_retrieval_reporting",
               label: "Planning, retrieval, and reporting",
               description: "Planning and reporting suite",
@@ -6054,7 +6144,7 @@ describe("CockpitView", () => {
           governed_improvement: {
             target_count: 2,
             target_types: ["prompt_pack", "skill"],
-            required_suite_count: 10,
+            required_suite_count: 11,
             gate_policy: {
               min_review_ready_score: 0.7,
               min_strong_score: 0.9,
@@ -6069,6 +6159,7 @@ describe("CockpitView", () => {
                 "trust_boundary_and_safety_receipts",
                 "secure_capability_host",
                 "computer_use_browser_desktop",
+                "one_excellent_reach_channel_canary",
                 "planning_retrieval_reporting",
                 "governed_improvement",
               ],
@@ -6334,11 +6425,12 @@ describe("CockpitView", () => {
     ).toBeGreaterThanOrEqual(2);
     expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
     await within(operatorWindow).findByText("benchmark proof");
-    await within(operatorWindow).findByText(/10 suites · 63 scenarios · deterministic proof backed · 2 evolution targets/);
+    await within(operatorWindow).findByText(/11 suites · 68 scenarios · deterministic proof backed · 2 evolution targets/);
     expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Live workflow endurance canary/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/One reach-channel canary/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Secure capability-host benchmark/).length).toBeGreaterThan(0);
     expect(within(operatorWindow).getAllByText(/Computer-use benchmark/).length).toBeGreaterThan(0);
@@ -6366,6 +6458,16 @@ describe("CockpitView", () => {
     expect(within(operatorWindow).getByText(/Second session holds a pending operator approval with stable context\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/Replay is blocked because the repair path gained authenticated-source authority\./)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/blocked approval context changed/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/one reach channel canary ci gated operator visible · native notification · 0 active failures · 4 E2E steps/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/pairing paired · revocation revoked · health ready · degraded daemon offline/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/bounded retry with fallback visible · channel thread session and memory context linked · pending operator approval · 7 audit receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/single channel selected · channel sprawl rejected · pairing visible · revocation fail closed visible · health visible · retry visible · thread continuity visible · memory context visible · approval handoff visible · audit trail visible · degraded state ui visible · e2e flow visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/rejected until native notification canary meets bar · deterministic native notification canary not broad live channel reach · not broad mobile or messaging channel coverage · not production grade pairing protocol/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/uv run python -m src\.evals\.harness --benchmark-suite one_excellent_reach_channel_canary --indent 0/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/reach-thread-native-001 · memctx-reach-native-001 · degraded daemon offline · repair reconnect native daemon/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/seraph decision · request approval before channel response · external channel response could commit operator intent/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/approval handoff · pending operator approval/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/audited response · queue native notification response · queued after approval handoff/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
     expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();

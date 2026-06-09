@@ -42,8 +42,18 @@ from src.evals.benchmark_catalog import (
     benchmark_suite_scenarios,
 )
 from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
+)
+from src.extensions.reach_channel_canary import (
+    ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
+    ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
+    ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+    build_one_reach_channel_canary_report,
+    one_reach_channel_canary_policy_payload,
+    one_reach_channel_canary_receipt,
 )
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
@@ -60,6 +70,18 @@ from src.cockpit.efficiency_benchmark import (
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
+)
+from src.guardian.learning_arbitration_benchmark import (
+    GUARDIAN_LEARNING_ARBITRATION_CLAIM_BOUNDARY,
+    GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+    build_guardian_learning_arbitration_receipts,
+)
+from src.guardian.multimodal_voice import (
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
+    GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+    build_guardian_safe_multimodal_voice_receipts,
 )
 from src.memory.provider_quality_gate import (
     MEMORY_PROVIDER_QUALITY_GATE_SCENARIO_NAMES,
@@ -80,6 +102,13 @@ from src.workflows.endurance_canary import (
     live_workflow_endurance_canary_policy_payload,
     live_workflow_endurance_canary_protocol,
     live_workflow_endurance_canary_runs,
+)
+from src.workflows.durable_state import (
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+    DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
+    build_durable_workflow_state_report,
+    build_durable_workflow_state_kernel,
 )
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
@@ -11803,6 +11832,106 @@ def _eval_channel_abuse_failure_review_behavior() -> dict[str, Any]:
     }
 
 
+def _eval_one_reach_channel_selection_scope_behavior() -> dict[str, Any]:
+    policy = one_reach_channel_canary_policy_payload()
+    receipt = one_reach_channel_canary_receipt()
+    selected = receipt["selected_channel"]
+    rejected = set(selected["rejected_channel_sprawl"])
+    _require_eval_contract(selected["transport"] == "native_notification", "Expected native notification canary.")
+    _require_eval_contract(rejected >= {"slack", "discord", "telegram"}, "Expected channel sprawl rejection.")
+    return {
+        "selected_channel": selected["transport"],
+        "native_notification_selected": selected["transport"] == "native_notification",
+        "channel_sprawl_rejected": rejected >= {"slack", "discord", "telegram"},
+        "claim_boundary_visible": policy["claim_boundary"] == ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
+        "broad_live_reach_not_claimed": "live_slack_discord_telegram_delivery" in policy["not_claimed"],
+    }
+
+
+def _eval_native_notification_pairing_revocation_behavior() -> dict[str, Any]:
+    receipt = one_reach_channel_canary_receipt()
+    pairing = receipt["pairing"]
+    revocation = receipt["revocation_probe"]
+    return {
+        "pairing_state_visible": pairing["pairing_state"] == "paired",
+        "pairing_trusted": pairing["trust_state"] == "trusted",
+        "pairing_scopes_visible": {"notify", "reply_action", "approval_handoff"} <= set(pairing["scopes"]),
+        "revocation_state_visible": revocation["pairing_state"] == "revoked",
+        "revoked_follow_up_hidden": revocation["safe_follow_up_hidden"] is True,
+        "revocation_audit_visible": bool(revocation["audit_receipt_id"]),
+    }
+
+
+def _eval_native_notification_health_retry_degraded_behavior() -> dict[str, Any]:
+    receipt = one_reach_channel_canary_receipt()
+    health = receipt["health"]
+    degraded_ui = receipt["degraded_state_ui"]
+    return {
+        "ready_health_visible": health["ready_probe"]["status"] == "ready",
+        "degraded_health_visible": health["degraded_probe"]["status"] == "daemon_offline",
+        "degraded_repair_hint_visible": bool(health["degraded_probe"]["degraded_state_ui"]),
+        "retry_policy_visible": health["retry_policy"]["max_attempts"] == 3,
+        "fallback_transport_visible": health["retry_policy"]["fallback_transport"] == "websocket",
+        "unsafe_follow_up_hidden": degraded_ui["unsafe_follow_up_hidden"] is True,
+    }
+
+
+def _eval_native_notification_continuity_approval_audit_behavior() -> dict[str, Any]:
+    receipt = one_reach_channel_canary_receipt()
+    continuity = receipt["continuity"]
+    e2e_steps = [step["step"] for step in receipt["e2e_flow"]]
+    approval = receipt["approval_handoff"]
+    return {
+        "thread_continuity_visible": bool(continuity["thread_id"])
+        and bool(continuity["channel_thread_key"]),
+        "memory_context_visible": bool(continuity["memory_context_id"]),
+        "context_receipts_visible": len(continuity["context_receipts"]) >= 3,
+        "approval_handoff_visible": approval["status"] == "pending_operator_approval",
+        "mutation_paused_before_approval": approval["mutation_boundary"] == "response_draft_only_until_approved",
+        "audit_receipts_visible": len(receipt["audit_receipts"]) >= 6,
+        "e2e_flow_visible": e2e_steps == [
+            "external_message_received",
+            "seraph_decision",
+            "approval_handoff",
+            "audited_response",
+        ],
+        "content_redacted": receipt["e2e_flow"][0]["content_redacted"] is True,
+    }
+
+
+async def _eval_operator_one_reach_channel_canary_surface_behavior() -> dict[str, Any]:
+    from src.api.operator import get_operator_one_reach_channel_canary
+
+    fake_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="presence",
+                description="One reach channel canary fixture",
+                passed=True,
+                duration_ms=1,
+                details={"fixture": "one_reach_channel_canary"},
+            )
+            for name in ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES
+        ],
+        duration_ms=len(ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.extensions.reach_channel_canary._run_one_reach_channel_canary_suite",
+        AsyncMock(return_value=fake_summary),
+    ):
+        payload = await get_operator_one_reach_channel_canary()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
+        "operator_status_visible": payload["summary"]["operator_status"] == "one_reach_channel_canary_visible",
+        "selected_channel_visible": payload["summary"]["selected_channel"] == "native_notification",
+        "scenario_count_matches": payload["summary"]["scenario_count"] == len(ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES),
+        "operator_story_complete": all(payload["operator_story"].values()),
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"],
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -12878,6 +13007,161 @@ def _eval_m9_manifest_governance_behavior() -> dict[str, Any]:
     }
 
 
+def _multimodal_voice_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in build_guardian_safe_multimodal_voice_receipts()
+    }
+
+
+def _eval_multimodal_voice_capability_governance_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_capability_governance_behavior"]
+    families = receipt["families"]
+    required_fields = {
+        "family",
+        "owner",
+        "trust_level",
+        "permissions",
+        "data_access",
+        "mutation_rights",
+        "revocation_path",
+    }
+    complete = all(required_fields <= set(family) for family in families)
+    _require_eval_contract(complete, "Expected every voice/media family to declare governance fields.")
+    return {
+        "family_count": receipt["family_count"],
+        "required_fields_present": complete,
+        "all_families_have_permissions": all(bool(family["permissions"]) for family in families),
+        "all_families_have_revocation": all(bool(family["revocation_path"]) for family in families),
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_transcript_audit_privacy_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_transcript_audit_privacy_behavior"]
+    expected_fields = {
+        "captured_surface",
+        "destination",
+        "provider_model",
+        "transcript_or_summary_id",
+        "memory_context_used",
+        "privacy_boundary",
+        "retention",
+        "correction_path",
+        "deletion_path",
+    }
+    _require_eval_contract(
+        expected_fields <= set(receipt["operator_receipt_fields"]),
+        "Expected operator receipt to expose capture, provider, privacy, correction, and deletion fields.",
+    )
+    return {
+        "operator_receipt_fields_visible": expected_fields <= set(receipt["operator_receipt_fields"]),
+        "capture_receipt_count": len(receipt["capture_receipts"]),
+        "privacy_boundary_state": receipt["privacy_boundary_state"],
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_continuity_approval_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_continuity_approval_behavior"]
+    expected_preserves = {"thread", "memory_context", "approval_context", "workflow_context"}
+    expected_approval = {"external_send", "memory_import", "mutation"}
+    _require_eval_contract(
+        expected_preserves <= set(receipt["preserves"]),
+        "Expected voice/media continuity receipt to preserve thread, memory, approval, and workflow context.",
+    )
+    return {
+        "preserves_context": expected_preserves <= set(receipt["preserves"]),
+        "approval_required_for_mutations": expected_approval <= set(receipt["approval_required_for"]),
+        "continuity_contract": receipt["continuity_contract"],
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_exposure_revocation_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_exposure_revocation_behavior"]
+    expected_blocked = {
+        "credential_scope",
+        "screen_capture_scope",
+        "file_read_scope",
+        "camera_scope",
+        "microphone_scope",
+        "network_destination_scope",
+    }
+    _require_eval_contract(
+        expected_blocked <= set(receipt["blocked_silent_expansions"]),
+        "Expected voice/media proof to block silent exposure expansion.",
+    )
+    return {
+        "blocked_silent_expansions": expected_blocked <= set(receipt["blocked_silent_expansions"]),
+        "revocation_state": receipt["revocation_state"],
+        "fails_closed_after_revoke": receipt["revocation_state"] == "capability_family_fails_closed_after_revoke",
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_multimodal_voice_guardian_value_behavior() -> dict[str, Any]:
+    receipt = _multimodal_voice_receipts_by_scenario()["multimodal_voice_guardian_value_behavior"]
+    expected_reasons = {"timing", "accessibility", "situational_awareness", "intervention_quality"}
+    _require_eval_contract(
+        expected_reasons <= set(receipt["accepted_value_reasons"]),
+        "Expected guardian-value reasons for voice/media use.",
+    )
+    return {
+        "accepted_value_reasons": expected_reasons <= set(receipt["accepted_value_reasons"]),
+        "raw_feature_presence_rejected": receipt["rejected_reason"] == "raw_feature_presence",
+        "family_value_reason_count": len(receipt["family_value_reasons"]),
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
+    }
+
+
+async def _eval_operator_guardian_safe_multimodal_voice_surface_behavior() -> dict[str, Any]:
+    from src.guardian.multimodal_voice import build_guardian_safe_multimodal_voice_report
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="guardian",
+                description="Guardian-safe multimodal and voice benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
+        ],
+        duration_ms=len(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.guardian.multimodal_voice._run_guardian_safe_multimodal_voice_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_guardian_safe_multimodal_voice_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
+        "operator_status_visible": (
+            payload["summary"]["operator_status"] == "guardian_safe_voice_media_receipts_visible"
+        ),
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+        ),
+        "benchmark_posture_green": (
+            payload["summary"]["benchmark_posture"]
+            == "guardian_safe_multimodal_voice_ci_gated_operator_visible"
+        ),
+        "capability_family_count": len(payload["capability_families"]),
+        "governance_receipt_count": len(payload["governance_receipts"]),
+        "receipt_surface_visible": (
+            "/api/operator/guardian-safe-multimodal-voice" in payload["policy"]["receipt_surfaces"]
+        ),
+        "benchmark_proof_surface_visible": (
+            "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+        ),
+        "claim_boundary_visible": (
+            payload["policy"]["claim_boundary"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY
+        ),
+    }
+
+
 def _eval_m9_lifecycle_review_gate_behavior() -> dict[str, Any]:
     receipt = _m9_receipts_by_scenario()["m9_lifecycle_review_gate_behavior"]
     actions = set(receipt["actions"])
@@ -13000,6 +13284,227 @@ async def _eval_operator_m9_governed_ecosystem_benchmark_surface_behavior() -> d
     }
 
 
+def _learning_arbitration_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in build_guardian_learning_arbitration_receipts()
+    }
+
+
+def _eval_guardian_learning_arbitration_outcome(expected_action: str) -> dict[str, Any]:
+    scenario_name = (
+        "guardian_learning_arbitration_approval_behavior"
+        if expected_action == "request_approval"
+        else f"guardian_learning_arbitration_{expected_action}_behavior"
+    )
+    receipt = _learning_arbitration_receipts_by_scenario()[scenario_name]
+    _require_eval_contract(
+        receipt["actual_action"] == expected_action,
+        f"Expected learning arbitration action {expected_action}.",
+    )
+    return {
+        "expected_action": expected_action,
+        "actual_action": receipt["actual_action"],
+        "negative_case": receipt["negative_case"],
+        "evidence_sources": receipt["evidence_sources"],
+        "guardian_value": receipt["guardian_value"],
+        "operator_explanation_visible": bool(receipt["operator_explanation"]),
+        "false_positive_risk_visible": bool(receipt["quality_receipts"]["false_positive_risk"]),
+        "false_negative_risk_visible": bool(receipt["quality_receipts"]["false_negative_risk"]),
+        "claim_boundary_visible": receipt["claim_boundary"] == GUARDIAN_LEARNING_ARBITRATION_CLAIM_BOUNDARY,
+    }
+
+
+def _eval_guardian_learning_arbitration_act_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("act")
+
+
+def _eval_guardian_learning_arbitration_defer_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("defer")
+
+
+def _eval_guardian_learning_arbitration_bundle_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("bundle")
+
+
+def _eval_guardian_learning_arbitration_clarify_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("clarify")
+
+
+def _eval_guardian_learning_arbitration_approval_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("request_approval")
+
+
+def _eval_guardian_learning_arbitration_stay_silent_behavior() -> dict[str, Any]:
+    return _eval_guardian_learning_arbitration_outcome("stay_silent")
+
+
+async def _eval_operator_guardian_learning_arbitration_surface_behavior() -> dict[str, Any]:
+    from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="guardian",
+                description="Guardian learning arbitration benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
+        ],
+        duration_ms=len(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.guardian.learning_arbitration_benchmark._run_guardian_learning_arbitration_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_guardian_learning_arbitration_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
+        "operator_status_visible": (
+            payload["summary"]["operator_status"] == "guardian_learning_arbitration_receipts_visible"
+        ),
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
+        ),
+        "benchmark_posture_green": (
+            payload["summary"]["benchmark_posture"] == "guardian_learning_arbitration_ci_gated_operator_visible"
+        ),
+        "outcome_count": payload["summary"]["outcome_count"],
+        "negative_case_count": payload["summary"]["negative_case_count"],
+        "receipt_surface_visible": "/api/operator/guardian-learning-arbitration" in payload["policy"]["receipt_surfaces"],
+        "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"],
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == GUARDIAN_LEARNING_ARBITRATION_CLAIM_BOUNDARY,
+    }
+
+
+def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
+    from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
+
+    receipts = build_governed_capability_pack_hardening_receipts()
+    return {
+        str(receipt["scenario_id"]): receipt
+        for receipt in receipts
+        if isinstance(receipt.get("scenario_id"), str)
+    }
+
+
+def _eval_capability_pack_review_receipt_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()["capability_pack_review_receipt_behavior"]
+    expected_fields = {"review_status", "signature_status", "risk_deltas", "rollback", "blocked_claims", "claim_boundary"}
+    _require_eval_contract(expected_fields <= set(receipt["receipt_fields"]), "Expected hardening receipt fields.")
+    return {
+        "receipt_fields_visible": expected_fields <= set(receipt["receipt_fields"]),
+        "operator_summary_visible": receipt["operator_summary_visible"] is True,
+        "extension_surface_visible": "/api/extensions" in receipt["operator_surfaces"],
+        "validation_surface_visible": "/api/extensions/validate" in receipt["operator_surfaces"],
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_capability_pack_compatibility_downgrade_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()[
+        "capability_pack_compatibility_downgrade_behavior"
+    ]
+    expected_cases = {"incompatible_pack_version", "provider_downgrade"}
+    expected_relations = {"new", "same", "upgrade", "downgrade"}
+    _require_eval_contract(expected_cases <= set(receipt["negative_cases"]), "Expected compatibility/downgrade cases.")
+    return {
+        "negative_cases_named": expected_cases <= set(receipt["negative_cases"]),
+        "version_relation_states_visible": expected_relations <= set(receipt["version_relation_states"]),
+        "compatibility_risk_delta_visible": "compatibility_block" in receipt["risk_deltas"],
+        "downgrade_risk_delta_visible": "provider_or_pack_downgrade" in receipt["risk_deltas"],
+        "provider_degradation_visible": "provider_runtime_degraded" in receipt["risk_deltas"],
+    }
+
+
+def _eval_capability_pack_permission_creep_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()["capability_pack_permission_creep_behavior"]
+    expected_cases = {"underdeclared_permissions", "extension_permission_creep"}
+    expected_claims = {"complete_permission_declaration", "reviewed_permission_envelope"}
+    _require_eval_contract(expected_cases <= set(receipt["negative_cases"]), "Expected permission creep cases.")
+    return {
+        "negative_cases_named": expected_cases <= set(receipt["negative_cases"]),
+        "blocked_claims_named": expected_claims <= set(receipt["blocked_claims"]),
+        "fail_closed_required": receipt["fail_closed_required"] is True,
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_capability_pack_supply_chain_suspicion_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()[
+        "capability_pack_supply_chain_suspicion_behavior"
+    ]
+    expected_cases = {"supply_chain_suspicion", "failed_update"}
+    expected_reasons = {"signature_missing", "signature_digest_mismatch", "signature_invalid", "review_stale", "revoked"}
+    _require_eval_contract(expected_cases <= set(receipt["negative_cases"]), "Expected supply-chain suspicion cases.")
+    return {
+        "negative_cases_named": expected_cases <= set(receipt["negative_cases"]),
+        "fail_closed_reasons_named": expected_reasons <= set(receipt["fail_closed_reasons"]),
+        "runtime_access_removed": receipt["runtime_access_removed"] is True,
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+def _eval_capability_pack_rollback_ready_behavior() -> dict[str, Any]:
+    receipt = _governed_capability_pack_hardening_receipts_by_scenario()["capability_pack_rollback_ready_behavior"]
+    expected_actions = {"remove_new_pack", "restore_previous_workspace_pack"}
+    _require_eval_contract("rollback_need" in receipt["negative_cases"], "Expected rollback need case.")
+    return {
+        "rollback_need_named": "rollback_need" in receipt["negative_cases"],
+        "rollback_actions_visible": expected_actions <= set(receipt["rollback_actions"]),
+        "verified_pack_review_required": receipt["review_required_for_verified_pack"] is True,
+        "claim_boundary_visible": "not_production_marketplace_security" in receipt["claim_boundary"],
+    }
+
+
+async def _eval_operator_governed_capability_pack_hardening_surface_behavior() -> dict[str, Any]:
+    from src.extensions.benchmark import (
+        GOVERNED_CAPABILITY_PACK_HARDENING_CLAIM_BOUNDARY,
+        build_governed_capability_pack_hardening_report,
+    )
+
+    benchmark_summary = EvalSummary(
+        results=[
+            EvalResult(
+                name=name,
+                category="extensions",
+                description="Governed capability-pack hardening benchmark contract fixture",
+                passed=True,
+                duration_ms=1,
+            )
+            for name in GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES
+        ],
+        duration_ms=len(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES),
+    )
+    with patch(
+        "src.extensions.benchmark._run_governed_capability_pack_hardening_suite",
+        AsyncMock(return_value=benchmark_summary),
+    ):
+        payload = await build_governed_capability_pack_hardening_report()
+    return {
+        "suite_name_visible": payload["summary"]["suite_name"] == GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
+        "operator_status_visible": (
+            payload["summary"]["operator_status"] == "governed_capability_pack_hardening_receipts_visible"
+        ),
+        "scenario_count_matches": (
+            payload["summary"]["scenario_count"] == len(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+        ),
+        "review_receipt_state_visible": (
+            payload["summary"]["review_receipt_state"] == "risk_delta_and_blocked_claim_receipts_visible"
+        ),
+        "rollback_state_visible": payload["summary"]["rollback_state"] == "rollback_availability_and_action_visible",
+        "failure_taxonomy_covers_issue_cases": len(payload["failure_taxonomy"]) >= 7,
+        "receipt_surfaces_visible": (
+            "/api/operator/governed-capability-pack-hardening" in payload["policy"]["receipt_surfaces"]
+            and "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+        ),
+        "claim_boundary_visible": payload["policy"]["claim_boundary"] == GOVERNED_CAPABILITY_PACK_HARDENING_CLAIM_BOUNDARY,
+        "receipt_count_matches": len(payload["hardening_receipts"]) == 6,
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -13010,22 +13515,35 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     live_workflow_canary_suite = next(
         item for item in suites if item["name"] == LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME
     )
+    durable_workflow_engine_suite = next(
+        item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
     secure_host_suite = next(item for item in suites if item["name"] == "secure_capability_host")
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
+    one_reach_channel_suite = next(item for item in suites if item["name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME)
     m2_execution_suite = next(item for item in suites if item["name"] == "m2_execution_supremacy")
     m7_operator_cockpit_suite = next(item for item in suites if item["name"] == M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME)
     cockpit_efficiency_suite = next(item for item in suites if item["name"] == COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME)
     m8_guardian_brain_suite = next(item for item in suites if item["name"] == M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME)
+    multimodal_voice_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME
+    )
+    learning_arbitration_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
+    )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
     governed_suite = next(item for item in suites if item["name"] == "governed_improvement")
     m9_governed_ecosystem_suite = next(
         item for item in suites if item["name"] == M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME
+    )
+    governed_capability_pack_hardening_suite = next(
+        item for item in suites if item["name"] == GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -13045,6 +13563,21 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "live_workflow_canary_gate_required": (
             LIVE_WORKFLOW_ENDURANCE_CANARY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
+        "durable_workflow_engine_suite_present": (
+            any(
+                name in durable_workflow_engine_suite["scenario_names"]
+                for name in DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
+            )
+        ),
+        "durable_workflow_engine_suite_scenario_count_matches": (
+            durable_workflow_engine_suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
+        ),
+        "durable_workflow_engine_suite_axis_matches": (
+            durable_workflow_engine_suite["benchmark_axis"] == "durable_workflow_engine_v1"
+        ),
+        "durable_workflow_engine_gate_required": (
+            DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
             live_replay_suite["scenario_count"] == len(LIVE_REPLAY_BENCHMARK_SCENARIO_NAMES)
@@ -13059,6 +13592,16 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "channels_suite_scenario_count_matches": (
             channels_suite["scenario_count"] == len(CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES)
         ),
+        "one_reach_channel_suite_present": (
+            "one_reach_channel_selection_scope_behavior" in one_reach_channel_suite["scenario_names"]
+        ),
+        "one_reach_channel_suite_scenario_count_matches": (
+            one_reach_channel_suite["scenario_count"] == len(ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES)
+        ),
+        "one_reach_channel_suite_axis_matches": (
+            one_reach_channel_suite["benchmark_axis"] == "one_excellent_reach_channel_canary"
+        ),
+        "one_reach_channel_gate_required": ONE_REACH_CHANNEL_CANARY_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "m2_execution_suite_present": "execution_artifact_registry_behavior" in m2_execution_suite["scenario_names"],
         "m7_operator_cockpit_suite_present": (
             "operator_fast_control_availability_behavior" in m7_operator_cockpit_suite["scenario_names"]
@@ -13090,6 +13633,30 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "m8_guardian_brain_suite_axis_matches": (
             m8_guardian_brain_suite["benchmark_axis"] == "m8_guardian_intervention_quality"
         ),
+        "guardian_safe_multimodal_voice_suite_present": (
+            "multimodal_voice_capability_governance_behavior" in multimodal_voice_suite["scenario_names"]
+        ),
+        "guardian_safe_multimodal_voice_suite_scenario_count_matches": (
+            multimodal_voice_suite["scenario_count"] == len(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+        ),
+        "guardian_safe_multimodal_voice_suite_axis_matches": (
+            multimodal_voice_suite["benchmark_axis"] == "guardian_safe_multimodal_voice"
+        ),
+        "guardian_safe_multimodal_voice_gate_required": (
+            GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "guardian_learning_arbitration_suite_present": (
+            "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
+        ),
+        "guardian_learning_arbitration_suite_scenario_count_matches": (
+            learning_arbitration_suite["scenario_count"] == len(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
+        ),
+        "guardian_learning_arbitration_suite_axis_matches": (
+            learning_arbitration_suite["benchmark_axis"] == "guardian_learning_arbitration_v2"
+        ),
+        "guardian_learning_arbitration_gate_required": (
+            GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
             m6_memory_suite["scenario_count"] == len(M6_MEMORY_SUPERIORITY_BENCHMARK_SCENARIO_NAMES)
@@ -13119,11 +13686,65 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         "m9_governed_ecosystem_gate_required": (
             M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
+        "governed_capability_pack_hardening_suite_present": (
+            "capability_pack_review_receipt_behavior"
+            in governed_capability_pack_hardening_suite["scenario_names"]
+        ),
+        "governed_capability_pack_hardening_suite_scenario_count_matches": (
+            governed_capability_pack_hardening_suite["scenario_count"]
+            == len(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+        ),
+        "governed_capability_pack_hardening_suite_axis_matches": (
+            governed_capability_pack_hardening_suite["benchmark_axis"] == "governed_capability_pack_hardening"
+        ),
+        "governed_capability_pack_hardening_gate_required": (
+            GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
         "gate_requires_review": bool(gate_policy["requires_human_review"]),
         "gate_blocks_constraint_failure": bool(gate_policy["blocks_on_constraint_failure"]),
         "proof_contract": gate_policy["proof_contract"],
+    }
+
+
+async def _eval_durable_workflow_engine_report_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    suite = next(item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME)
+    kernel = build_durable_workflow_state_kernel()
+    states = kernel["states"]
+    state_phases = {state["phase"] for state in states}
+    resume_receipts = [state["resume"] for state in states]
+    trigger_receipts = [trigger for state in states for trigger in state["triggers"]]
+    artifact_review_receipts = [
+        receipt
+        for state in states
+        for receipt in state["artifact_review"]["receipts"]
+    ]
+    return {
+        "suite_name_visible": suite["name"] == DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME,
+        "scenario_count_matches": suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+        "scenario_names_match_constants": list(suite["scenario_names"])
+        == list(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES),
+        "benchmark_axis_visible": suite["benchmark_axis"] == "durable_workflow_engine_v1",
+        "operator_summary_visible": bool(suite["operator_summary"]),
+        "report_builder_available": callable(build_durable_workflow_state_report),
+        "durable_state_kernel_visible": kernel["summary"]["state_count"] >= 2
+        and kernel["summary"]["transition_count"] >= 2,
+        "crash_safe_resume_receipt_visible": any(receipt["crash_safe"] for receipt in resume_receipts),
+        "heartbeat_reactive_receipts_visible": {"heartbeat", "reactive_signal"}
+        <= {receipt["kind"] for receipt in trigger_receipts},
+        "retry_repair_transition_visible": "repairable_failure" in state_phases
+        and any(transition["reason"] == "retry_failed_step" for transition in kernel["transitions"]),
+        "delegated_artifact_review_visible": any(
+            receipt["approval_handoff"] and receipt["review_state"] == "pending_operator_review"
+            for receipt in artifact_review_receipts
+        ),
+        "claim_boundary_visible": kernel["policy"]["claim_boundary"] == DURABLE_WORKFLOW_ENGINE_CLAIM_BOUNDARY,
+        "receipt_surface_visible": "/api/operator/durable-workflow-engine" in kernel["policy"]["receipt_surfaces"],
+        "benchmark_proof_surface_visible": "/api/operator/benchmark-proof" in kernel["policy"]["receipt_surfaces"],
+        "ci_gate_required": DURABLE_WORKFLOW_ENGINE_BENCHMARK_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
     }
 
 
@@ -14438,6 +15059,15 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         description="Operator live-workflow canary surface exposes the complete canary story without source diving.",
         runner=_eval_operator_live_workflow_canary_surface_behavior,
     ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description="Durable workflow engine v1 report exposes durable state, recovery, trigger, and operator receipt posture.",
+            runner=_eval_durable_workflow_engine_report_behavior,
+        )
+        for name in DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
+    ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",
         category="observability",
@@ -14599,6 +15229,36 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="presence",
         description="M4 channel abuse and failure cases surface operator-visible review receipts before unsafe follow-up can proceed.",
         runner=_eval_channel_abuse_failure_review_behavior,
+    ),
+    EvalScenario(
+        name="one_reach_channel_selection_scope_behavior",
+        category="presence",
+        description="One-channel reach canary selects native notifications and explicitly rejects channel sprawl.",
+        runner=_eval_one_reach_channel_selection_scope_behavior,
+    ),
+    EvalScenario(
+        name="native_notification_pairing_revocation_behavior",
+        category="presence",
+        description="Native notification canary exposes paired trusted state and revoked fail-closed follow-up state.",
+        runner=_eval_native_notification_pairing_revocation_behavior,
+    ),
+    EvalScenario(
+        name="native_notification_health_retry_degraded_behavior",
+        category="presence",
+        description="Native notification canary exposes ready, retry, fallback, daemon-offline, and degraded-state UI receipts.",
+        runner=_eval_native_notification_health_retry_degraded_behavior,
+    ),
+    EvalScenario(
+        name="native_notification_continuity_approval_audit_behavior",
+        category="presence",
+        description="Native notification canary preserves thread and memory continuity, pauses mutation through approval handoff, and records audit receipts.",
+        runner=_eval_native_notification_continuity_approval_audit_behavior,
+    ),
+    EvalScenario(
+        name="operator_one_reach_channel_canary_surface_behavior",
+        category="observability",
+        description="Operator one-reach-channel canary surface exposes the selected native notification canary story without source diving.",
+        runner=_eval_operator_one_reach_channel_canary_surface_behavior,
     ),
     EvalScenario(
         name="m5_operating_layer_payload_behavior",
@@ -14967,6 +15627,84 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         runner=_eval_operator_m8_guardian_brain_surface_behavior,
     ),
     EvalScenario(
+        name="multimodal_voice_capability_governance_behavior",
+        category="guardian",
+        description="Voice and media capability families declare owner, trust, permissions, data access, mutation rights, and revocation paths.",
+        runner=_eval_multimodal_voice_capability_governance_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_transcript_audit_privacy_behavior",
+        category="guardian",
+        description="Voice and media receipts expose capture, provider/model, privacy, retention, correction, and deletion posture.",
+        runner=_eval_multimodal_voice_transcript_audit_privacy_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_continuity_approval_behavior",
+        category="guardian",
+        description="Voice and media flows preserve thread, memory, approval, and workflow continuity before mutation or import.",
+        runner=_eval_multimodal_voice_continuity_approval_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_exposure_revocation_behavior",
+        category="guardian",
+        description="Browser vision and media analysis block silent exposure expansion and fail closed after revocation.",
+        runner=_eval_multimodal_voice_exposure_revocation_behavior,
+    ),
+    EvalScenario(
+        name="multimodal_voice_guardian_value_behavior",
+        category="guardian",
+        description="Voice and media require a real guardian-value reason instead of raw feature presence.",
+        runner=_eval_multimodal_voice_guardian_value_behavior,
+    ),
+    EvalScenario(
+        name="operator_guardian_safe_multimodal_voice_surface_behavior",
+        category="guardian",
+        description="Operator surfaces expose the guardian-safe multimodal and voice benchmark, policy, receipts, and claim boundary.",
+        runner=_eval_operator_guardian_safe_multimodal_voice_surface_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_act_behavior",
+        category="guardian",
+        description="Learning arbitration acts when fresh grounded evidence and urgency make follow-through valuable.",
+        runner=_eval_guardian_learning_arbitration_act_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_defer_behavior",
+        category="guardian",
+        description="Learning arbitration defers when stale memory and repeated negative outcomes make action risky.",
+        runner=_eval_guardian_learning_arbitration_defer_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_bundle_behavior",
+        category="guardian",
+        description="Learning arbitration bundles conflicting provider or workflow evidence during high-interruption windows.",
+        runner=_eval_guardian_learning_arbitration_bundle_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_clarify_behavior",
+        category="guardian",
+        description="Learning arbitration asks for clarification when referents or project anchors are ambiguous.",
+        runner=_eval_guardian_learning_arbitration_clarify_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_approval_behavior",
+        category="guardian",
+        description="Learning arbitration escalates to approval when useful follow-through crosses unsafe capability context.",
+        runner=_eval_guardian_learning_arbitration_approval_behavior,
+    ),
+    EvalScenario(
+        name="guardian_learning_arbitration_stay_silent_behavior",
+        category="guardian",
+        description="Learning arbitration stays silent for degraded low-value observer cues under repeated negative outcomes.",
+        runner=_eval_guardian_learning_arbitration_stay_silent_behavior,
+    ),
+    EvalScenario(
+        name="operator_guardian_learning_arbitration_surface_behavior",
+        category="guardian",
+        description="Operator surfaces expose guardian learning arbitration receipts, policy, failure taxonomy, and claim boundary.",
+        runner=_eval_operator_guardian_learning_arbitration_surface_behavior,
+    ),
+    EvalScenario(
         name="m9_manifest_governance_behavior",
         category="extensions",
         description="M9 ecosystem packages expose manifest governance fields before capability breadth is treated as governed.",
@@ -15001,6 +15739,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="extensions",
         description="Operator surfaces expose the M9 governed ecosystem benchmark, policy, receipts, and claim boundary.",
         runner=_eval_operator_m9_governed_ecosystem_benchmark_surface_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_review_receipt_behavior",
+        category="extensions",
+        description="Capability-pack transitions expose review, risk-delta, rollback, blocked-claim, and claim-boundary receipts.",
+        runner=_eval_capability_pack_review_receipt_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_compatibility_downgrade_behavior",
+        category="extensions",
+        description="Capability-pack hardening names incompatible-version and downgrade risk before lifecycle mutation.",
+        runner=_eval_capability_pack_compatibility_downgrade_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_permission_creep_behavior",
+        category="extensions",
+        description="Capability-pack hardening blocks underdeclared permissions and permission drift claims.",
+        runner=_eval_capability_pack_permission_creep_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_supply_chain_suspicion_behavior",
+        category="extensions",
+        description="Capability-pack hardening fails closed for signature, digest, key, revocation, and failed-update suspicion.",
+        runner=_eval_capability_pack_supply_chain_suspicion_behavior,
+    ),
+    EvalScenario(
+        name="capability_pack_rollback_ready_behavior",
+        category="extensions",
+        description="Capability-pack hardening exposes rollback availability and operator action for risky pack changes.",
+        runner=_eval_capability_pack_rollback_ready_behavior,
+    ),
+    EvalScenario(
+        name="operator_governed_capability_pack_hardening_surface_behavior",
+        category="extensions",
+        description="Operator surfaces expose governed capability-pack hardening policy, receipts, taxonomy, and claim boundary.",
+        runner=_eval_operator_governed_capability_pack_hardening_surface_behavior,
     ),
     EvalScenario(
         name="guardian_feedback_loop",

@@ -9,7 +9,13 @@ import pytest
 from config.settings import settings
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
-from src.extensions.benchmark import M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES
+from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+)
+from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
+from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
+from src.workflows.durable_state import DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -205,7 +211,7 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert summary.failed == 0
 
     details = summary.results[0].details
-    assert details["suite_count"] == 20
+    assert details["suite_count"] == 25
     assert details["guardian_memory_suite_present"] is True
     assert details["guardian_user_model_suite_present"] is True
     assert details["memory_suite_present"] is True
@@ -214,6 +220,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["live_workflow_canary_suite_scenario_count_matches"] is True
     assert details["live_workflow_canary_suite_axis_matches"] is True
     assert details["live_workflow_canary_gate_required"] is True
+    assert details["durable_workflow_engine_suite_present"] is True
+    assert details["durable_workflow_engine_suite_scenario_count_matches"] is True
+    assert details["durable_workflow_engine_suite_axis_matches"] is True
+    assert details["durable_workflow_engine_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -224,6 +234,10 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["computer_suite_present"] is True
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
+    assert details["one_reach_channel_suite_present"] is True
+    assert details["one_reach_channel_suite_scenario_count_matches"] is True
+    assert details["one_reach_channel_suite_axis_matches"] is True
+    assert details["one_reach_channel_gate_required"] is True
     assert details["m2_execution_suite_present"] is True
     assert details["m7_operator_cockpit_suite_present"] is True
     assert details["m7_operator_cockpit_suite_scenario_count_matches"] is True
@@ -235,6 +249,14 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m8_guardian_brain_suite_present"] is True
     assert details["m8_guardian_brain_suite_scenario_count_matches"] is True
     assert details["m8_guardian_brain_suite_axis_matches"] is True
+    assert details["guardian_safe_multimodal_voice_suite_present"] is True
+    assert details["guardian_safe_multimodal_voice_suite_scenario_count_matches"] is True
+    assert details["guardian_safe_multimodal_voice_suite_axis_matches"] is True
+    assert details["guardian_safe_multimodal_voice_gate_required"] is True
+    assert details["guardian_learning_arbitration_suite_present"] is True
+    assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
+    assert details["guardian_learning_arbitration_suite_axis_matches"] is True
+    assert details["guardian_learning_arbitration_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -248,11 +270,44 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["m9_governed_ecosystem_suite_scenario_count_matches"] is True
     assert details["m9_governed_ecosystem_suite_axis_matches"] is True
     assert details["m9_governed_ecosystem_gate_required"] is True
+    assert details["governed_capability_pack_hardening_suite_present"] is True
+    assert details["governed_capability_pack_hardening_suite_scenario_count_matches"] is True
+    assert details["governed_capability_pack_hardening_suite_axis_matches"] is True
+    assert details["governed_capability_pack_hardening_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
     assert details["gate_blocks_constraint_failure"] is True
     assert details["proof_contract"] == "deterministic_benchmark_suites_plus_review_receipts"
+
+
+def test_run_durable_workflow_engine_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["durable_workflow_engine_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["suite_name_visible"] is True
+        assert result.details["receipt_surface_visible"] is True
+        assert result.details["benchmark_proof_surface_visible"] is True
+
+
+def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_safe_multimodal_voice"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+
+
+def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_learning_arbitration_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():
@@ -365,6 +420,33 @@ def test_run_benchmark_suites_executes_m9_governed_ecosystem_suite():
 
     assert summary.failed == 0
     assert result_names == set(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES)
+
+
+def test_run_benchmark_suites_executes_governed_capability_pack_hardening_suite():
+    summary = asyncio.run(run_benchmark_suites(["governed_capability_pack_hardening"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+
+
+def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["review_receipt_state_visible"] is True
+    assert details["rollback_state_visible"] is True
+    assert details["failure_taxonomy_covers_issue_cases"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_count_matches"] is True
 
 
 def test_m9_lifecycle_review_gate_behavior_exercises_real_fail_closed_paths():
@@ -673,6 +755,21 @@ def test_run_benchmark_suites_executes_channels_presence_device_pairing_suite():
     }
 
 
+def test_run_benchmark_suites_executes_one_excellent_reach_channel_canary_suite():
+    summary = asyncio.run(run_benchmark_suites(["one_excellent_reach_channel_canary"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "one_reach_channel_selection_scope_behavior",
+        "native_notification_pairing_revocation_behavior",
+        "native_notification_health_retry_degraded_behavior",
+        "native_notification_continuity_approval_audit_behavior",
+        "operator_one_reach_channel_canary_surface_behavior",
+    }
+
+
 def test_run_benchmark_suites_executes_m5_jobs_routines_workflows_delegation_suite():
     summary = asyncio.run(run_benchmark_suites(["m5_jobs_routines_workflows_delegation"]))
 
@@ -913,6 +1010,42 @@ def test_channels_presence_device_pairing_runtime_eval_details():
     assert review["blocked_case_count"] == 1
 
 
+def test_one_excellent_reach_channel_canary_runtime_eval_details():
+    summary = asyncio.run(run_benchmark_suites(["one_excellent_reach_channel_canary"]))
+
+    assert summary.total == 5
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    selection = details_by_name["one_reach_channel_selection_scope_behavior"]
+    assert selection["native_notification_selected"] is True
+    assert selection["channel_sprawl_rejected"] is True
+    assert selection["broad_live_reach_not_claimed"] is True
+
+    pairing = details_by_name["native_notification_pairing_revocation_behavior"]
+    assert pairing["pairing_state_visible"] is True
+    assert pairing["revoked_follow_up_hidden"] is True
+
+    health = details_by_name["native_notification_health_retry_degraded_behavior"]
+    assert health["ready_health_visible"] is True
+    assert health["degraded_health_visible"] is True
+    assert health["retry_policy_visible"] is True
+    assert health["unsafe_follow_up_hidden"] is True
+
+    continuity = details_by_name["native_notification_continuity_approval_audit_behavior"]
+    assert continuity["thread_continuity_visible"] is True
+    assert continuity["memory_context_visible"] is True
+    assert continuity["approval_handoff_visible"] is True
+    assert continuity["audit_receipts_visible"] is True
+    assert continuity["e2e_flow_visible"] is True
+    assert continuity["content_redacted"] is True
+
+    surface = details_by_name["operator_one_reach_channel_canary_surface_behavior"]
+    assert surface["selected_channel_visible"] is True
+    assert surface["operator_story_complete"] is True
+    assert surface["claim_boundary_visible"] is True
+
+
 def test_browser_execution_task_replay_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["browser_execution_task_replay_behavior"]))
 
@@ -1033,6 +1166,8 @@ def test_main_lists_available_scenarios(capsys):
     assert "device_pairing_revocation_fail_closed" in captured.out
     assert "channel_mutation_boundary_behavior" in captured.out
     assert "channel_abuse_failure_review_behavior" in captured.out
+    assert "one_reach_channel_selection_scope_behavior" in captured.out
+    assert "operator_one_reach_channel_canary_surface_behavior" in captured.out
     assert "operator_governed_improvement_benchmark_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
@@ -1097,6 +1232,7 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "secure_capability_host" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
+    assert "one_excellent_reach_channel_canary" in captured.out
     assert "m2_execution_supremacy" in captured.out
     assert "m7_operator_cockpit_legibility" in captured.out
     assert "cockpit_operator_efficiency_benchmark" in captured.out
@@ -1105,27 +1241,33 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
     assert "m9_governed_ecosystem" in captured.out
+    assert "governed_capability_pack_hardening" in captured.out
     assert available_benchmark_suites() == (
         "guardian_memory_quality",
         "guardian_user_model_restraint",
         "m8_guardian_intervention_quality",
+        "guardian_safe_multimodal_voice",
+        "guardian_learning_arbitration_v2",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",
         "workflow_endurance_and_repair",
         "live_workflow_endurance_canary",
+        "durable_workflow_engine_v1",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",
         "secure_capability_host",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
+        "one_excellent_reach_channel_canary",
         "m2_execution_supremacy",
         "m7_operator_cockpit_legibility",
         "cockpit_operator_efficiency_benchmark",
         "planning_retrieval_reporting",
         "governed_improvement",
         "m9_governed_ecosystem",
+        "governed_capability_pack_hardening",
     )
 
 

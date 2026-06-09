@@ -37,6 +37,25 @@ External sources checked for this refresh:
 - [IronClaw GitHub repository](https://github.com/nearai/ironclaw)
 - [IronClaw feature parity matrix](https://github.com/nearai/ironclaw/blob/staging/FEATURE_PARITY.md)
 
+## Current Source Refresh
+
+Primary-source refresh completed on June 9, 2026:
+
+- Hermes still presents a broad agent platform rather than a narrow chat agent: the current feature overview lists toolsets, skills, persistent memory, checkpoints, scheduled tasks, subagent delegation, code execution, voice, browser automation, multimodal image/vision support, MCP, provider routing, fallback providers, credential pools, memory providers, API server, IDE integration, and plugins.
+- Hermes' tools page still supports the parity pressure from broad built-in tools: web search/extract, terminal/process/file tools, browser text/vision, multimodal media tools, `todo`, `clarify`, `execute_code`, `delegate_task`, `memory`, `session_search`, `cronjob`, `send_message`, MCP tools, and container/SSH/cloud execution backends.
+- OpenClaw still presents the raw reach/control-plane benchmark: the current overview frames OpenClaw as an any-OS gateway across Discord, Google Chat, iMessage, Matrix, Microsoft Teams, Signal, Slack, Telegram, WhatsApp, Zalo, WebChat, and mobile nodes, with the Gateway as source of truth for sessions, routing, and channel connections.
+- OpenClaw's current Control UI docs show a real operator surface with pairing, browser-local identity, runtime config endpoint, chat/history behavior, PWA/web push, auth/device-identity constraints, content security policy, authenticated avatar/media routes, and debugging/testing flows.
+- OpenClaw's browser docs still support the browser-mode pressure: OpenClaw documents openclaw-managed profiles, remote CDP profiles, and existing-session attachment through Chrome DevTools MCP, with remote CDP token handling called out as a secret-bearing path.
+- OpenClaw's plugin docs still support ecosystem breadth pressure: plugins can extend channels, model providers, agent harnesses, tools, skills, speech, realtime transcription, voice, media understanding/generation, web fetch, web search, and other runtime capabilities.
+- IronClaw's current official site still supports treating IronClaw as the secure-capability-host pressure point: it advertises encrypted vaults, host-boundary credential injection only for approved endpoints, per-tool Wasm containers with capability-based permissions and strict resource limits, TEE deployment on NEAR AI Cloud, leak detection, Rust implementation, and network allowlisting.
+- IronClaw's current GitHub README and feature parity matrix still support treating IronClaw as a real runtime competitor, not only a security wrapper: the repository frames IronClaw as a secure personal AI assistant, and the parity matrix lists WebSocket control plane, Control UI endpoints, web dashboard with chat/memory/jobs/logs/extensions, channels, session management, HTTP API, diagnostics, TUI, webhooks, and WASM channels.
+
+Refresh disposition:
+
+- The existing Hermes/OpenClaw/IronClaw pressure summaries remain valid.
+- No new public superiority or parity claim is introduced here.
+- Future public wording still needs a fresh source check because these systems are active and source-stable claims can age quickly.
+
 Claim boundary:
 
 - This document may say Seraph has a scoped advantage where repo evidence supports it.
@@ -161,7 +180,7 @@ Hermes and OpenClaw both document richer browser backends or browser-control mod
 
 ### Voice, media, and multimodal operation
 
-Hermes and OpenClaw now make voice, media, image, and browser-vision surfaces part of the expected agent platform. Seraph has packaged foundations and some multimodal paths, but still needs a cohesive guardian-safe voice/media strategy.
+Hermes and OpenClaw now make voice, media, image, and browser-vision surfaces part of the reviewed platform pressure. Seraph has packaged foundations and some multimodal paths, but still needs a cohesive guardian-safe voice/media strategy.
 
 ## Goal Feature Set
 
@@ -179,6 +198,59 @@ The goal is to reach parity floors first, then exceed through guardian-specific 
 | Browser/computer use | Local browser, remote CDP, managed browser, session replay, snapshot, vision, and failure recovery are available behind clear trust boundaries. | Seraph exceeds by linking browser work to guardian state, workflow artifacts, approval scopes, and safe credential/session partitions. | M2/M3/M4 computer-use suite proves replayable receipts, login/session partitioning, recovery, and browser/native continuity. |
 | Ecosystem and marketplace | Skills, packs, connectors, runbooks, starter packs, and workflow runtimes have install/update/disable/diagnostic flows. | Seraph exceeds with governed evolution: compatibility checks, trust tiers, review gates, canary rollout, rollback receipts, and semantic-drift prevention. | M9 ecosystem suite proves lifecycle governance, diagnostics, update flow, marketplace composition, and extension review receipts. |
 | Multimodal and voice | Voice, TTS/STT, browser vision, image/media analysis, and media delivery exist as governed capability families. | Seraph exceeds by using voice/media only where they improve guardian timing, accessibility, or situational awareness. | M4/M8 multimodal proof shows channel safety, transcript/audit capture, privacy boundaries, and guardian intervention value. |
+
+## Execution Mapping
+
+This document does not create a live queue. It maps the parity floors to existing milestone and proof anchors so future execution can move without another strategic translation pass.
+
+| Feature area | Milestone and issue scope | Named proof path |
+| --- | --- | --- |
+| Capability kernel | `M1` capability contract [#425](https://github.com/seraph-quest/seraph/issues/425), `M2` execution surface [#427](https://github.com/seraph-quest/seraph/issues/427), and `M9` governed ecosystem [#432](https://github.com/seraph-quest/seraph/issues/432). | Capability inventory and cockpit capability panes must show source, owner, trust level, provenance, permissions, boundary, health, dependencies, actions, and receipts before a capability counts as parity-ready. |
+| Secure capability host | `M3` secure capability host [#428](https://github.com/seraph-quest/seraph/issues/428) plus IronClaw-class security gauntlet [#435](https://github.com/seraph-quest/seraph/issues/435). | Trust-boundary and safety-receipt suites must cover secret exfiltration, credential boundary leaks, SSRF/private IP access, shell injection, plugin permission creep, replay approval drift, prompt injection through external content, delegated/background execution privilege drift, and operator-readable receipts. |
+| Guardian memory | `M6` memory superiority and behavior-changing recall [#433](https://github.com/seraph-quest/seraph/issues/433) plus memory-provider quality gate [#441](https://github.com/seraph-quest/seraph/issues/441). | `guardian_memory_quality` and provider-quality proofs must show long-horizon recall, contradiction handling, stale-memory override, source trust/privacy boundaries, provider usefulness, suppression of noisy provider evidence, and receipts showing memory changed behavior. |
+| Intervention intelligence | `M8` guardian brain [#431](https://github.com/seraph-quest/seraph/issues/431) plus guardian intervention benchmark [#437](https://github.com/seraph-quest/seraph/issues/437). | M8 intervention-quality scenarios must prove act, defer, bundle, clarify, approval, and stay-silent choices across ambiguous evidence, stale memory, conflicting commitments, interruption cost, channel choice, risky capability use, and no-action cases. |
+| Workflow endurance | `M5` jobs/routines/workflows/delegation [#429](https://github.com/seraph-quest/seraph/issues/429) plus live workflow endurance canary [#440](https://github.com/seraph-quest/seraph/issues/440). | `workflow_endurance_and_repair` proof must cover multi-session work, delegated ownership, checkpoint/branch, failure injection, recovery, artifact comparison, approval preservation, and a final audit trail visible from the cockpit. |
+| Operator cockpit | `M7` cockpit legibility [#430](https://github.com/seraph-quest/seraph/issues/430) plus cockpit operator efficiency benchmark [#439](https://github.com/seraph-quest/seraph/issues/439). | M7 cockpit proof must measure inspect, approve, deny, pause, resume, retry, repair, branch, compare, revoke, and audit flows with time, clicks or keystrokes, error detectability, and operator-visible receipts. |
+| Selective reach | `M4` channels/presence/device pairing [#426](https://github.com/seraph-quest/seraph/issues/426) plus one excellent reach channel canary [#438](https://github.com/seraph-quest/seraph/issues/438). | M4 reach proof must show pairing, revocation, health, retry, thread continuity, memory/context continuity, audit receipts, approval handoff, degraded-state UI, and one live external-message-to-audited-action flow. |
+| Browser/computer use | `M2` execution [#427](https://github.com/seraph-quest/seraph/issues/427), `M3` trust boundaries [#428](https://github.com/seraph-quest/seraph/issues/428), and `M4` selective reach [#426](https://github.com/seraph-quest/seraph/issues/426). | `computer_use_browser_desktop` proof must show replayable browser receipts, login/session partitioning, cookie and credential boundary behavior, recovery, and browser/native continuity. |
+| Ecosystem and marketplace | `M9` governed ecosystem [#432](https://github.com/seraph-quest/seraph/issues/432), with capability kernel dependencies on `M1` [#425](https://github.com/seraph-quest/seraph/issues/425). | `m9_governed_ecosystem` proof must show manifest governance, lifecycle review gates, managed-connector degradation truth, marketplace composition, diagnostics/update triage, compatibility checks, rollback posture, and operator receipts. |
+| Multimodal and voice | `M4` reach [#426](https://github.com/seraph-quest/seraph/issues/426), `M8` guardian brain [#431](https://github.com/seraph-quest/seraph/issues/431), `M9` governed packs [#432](https://github.com/seraph-quest/seraph/issues/432), and dedicated guardian-safe multimodal/voice proof [#467](https://github.com/seraph-quest/seraph/issues/467). | Multimodal/voice proof must show transcript/audit capture, privacy and channel boundaries, speech/media package governance, user correction or revocation, and a demonstrated guardian-value reason for voice/media use rather than raw feature presence. |
+
+## IronClaw Secure-Capability-Host Plan
+
+IronClaw parity is a secure-capability-host program. It should not become an `ironclaw-*` branding/import wave unless Seraph later needs a compatibility adapter.
+
+### Parity floor
+
+Seraph reaches the IronClaw pressure floor when `M3` plus the IronClaw-class gauntlet prove:
+
+- per-capability isolation strategy for shell, browser, connector, workflow, delegation, background process, filesystem, provider fallback, and extension paths
+- secret references that resolve only at declared injection-safe host boundaries
+- endpoint allowlists or equivalent egress controls for secret-bearing connectors and browser/tool sessions
+- network-egress receipts that explain where data could leave the host
+- prompt-injection and hostile-content checks before external content can steer privileged actions
+- replay/resume approval drift blocking when the capability boundary changes
+- extension permission creep detection and lifecycle gating
+- operator-visible receipts for what ran, where, with what data, why it was allowed, and how it failed closed
+
+### Exceedance target
+
+Seraph exceeds the IronClaw pressure by combining host-level containment with guardian judgment:
+
+- the guardian state can lower action posture, request clarification, or require approval when memory, observer confidence, source provenance, or user-model evidence makes a capability unsafe
+- the cockpit explains both the mechanical boundary and the guardian reason for restraint
+- recovery actions preserve memory, workflow, approval, and audit context instead of forcing the operator to reconstruct state
+- secure execution is benchmarked as a user-facing trust surface, not only an internal runtime property
+
+### Proof gates
+
+The secure-capability-host program is complete for this strategy document only when:
+
+- [#428](https://github.com/seraph-quest/seraph/issues/428) owns the milestone-level trust-boundary contract
+- [#435](https://github.com/seraph-quest/seraph/issues/435) owns the IronClaw-class gauntlet cases
+- the named M3 suite emits cockpit-readable safety receipts
+- the claim ledger still blocks `secure`, `private`, `production-ready`, or `IronClaw-class secure execution` wording unless those exact paths pass
+- any future TEE/Wasm/container work is treated as implementation means, not a substitute for permission, egress, replay, prompt-injection, and operator-receipt proof
 
 ## Strategic Delivery Order
 
@@ -204,13 +276,14 @@ Seraph should not:
 
 ## Acceptance Standard
 
-This goal document is ready to become an execution batch when:
+This goal document is complete as a strategy artifact when:
 
-- each parity floor maps to an implementation milestone, issue, and named proof path
+- each parity floor maps to an implementation milestone, issue scope, and named proof path
 - each exceedance target preserves the guardian-workspace vision
-- competitor claims are refreshed from current primary sources before public use
-- the claim ledger permits any stronger language
-- the cockpit exposes enough receipts that a power user can inspect what Seraph did, why, with what authority, and how to recover
+- competitor claims have a current primary-source refresh date and source trail
+- IronClaw parity is defined as a secure-capability-host program rather than an imported package family
+- the claim ledger permits any stronger language before it is used
+- the cockpit remains the receipt target for inspecting what Seraph did, why, with what authority, and how to recover
 
 ## Team Review Record
 
@@ -219,5 +292,9 @@ Lead plan:
 - Explorer pass `Avicenna`: Seraph vision, shipped truth, and non-negotiables.
 - Capability import pass `Linnaeus`: Hermes/OpenClaw/IronClaw references and catalog-extension status.
 - Critic/Contrarian pass `Boole`: claim strength, stale source risk, proof gaps, and scope drift.
+- Execution mapping pass `Lovelace`: mapped every feature area to milestone, issue, and proof anchors; identified multimodal/voice as the only genuine missing dedicated issue.
+- Follow-up Critic/Contrarian pass `Cicero`: confirmed the multimodal/voice issue was not duplicated, accepted creation after narrowing it to a proof/governance anchor, and requested the wording/source-map revisions now reflected above.
 
 Critic disposition: accepted. The broad "better today" language was weakened to scoped differentiators, IronClaw security wording was narrowed to source-backed TEE/CVM/vault/Wasm/allowlist language, OpenClaw browser/control docs were added to the source trail, proof gates now name milestone families, the acceptance standard now applies to execution-batch readiness, and the sidebar ordering follows the dependency chain.
+
+Follow-up disposition: accepted. The current-source refresh, execution mapping table, and IronClaw secure-capability-host plan now complete the original "still to do after this PR" items. Dedicated issue [#467](https://github.com/seraph-quest/seraph/issues/467) was created for guardian-safe multimodal and voice proof, added to the Seraph Execution project with required queue/lane/priority/size/status/review fields, and linked back into this document.

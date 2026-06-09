@@ -28,6 +28,7 @@
 - [x] backend reach/integration proof now runs through isolated per-file backend shard execution instead of one shared shard-wide pytest process, reducing async teardown contamination in CI
 - [x] browser and desktop execution proof now also has a dedicated benchmark lane: replayable browser-task receipts, desktop notification-action replay, cross-surface continuity, and operator-visible computer-use failure taxonomy now live in the named `computer_use_browser_desktop` suite plus the operator computer-use benchmark surface instead of staying spread across isolated continuity or daemon seams
 - [x] M4 channel proof now also has a named deterministic benchmark lane, `channels_presence_device_pairing`, covering channel identity boundaries, device pairing and revocation fail-closed visibility, external-channel continuity, mutation boundaries, and abuse/failure review receipts; this is benchmark proof of boundary posture, not a claim that broad live mobile or messaging transports are production-ready
+- [x] Batch BY reach/browser/voice hardening now also has named deterministic lanes: `production_reach_channel_hardening`, `browser_computer_use_reliability_v2`, and `guardian_safe_voice_media_runtime`, plus `/api/operator/production-reach-browser-voice`, covering paired external messaging identity, revocation, approval handoff, privacy redaction, degraded recovery, browser provider truth, session partitioning, crash recovery, page-drift replay blocking, and guarded voice/media correction/deletion/revocation paths without claiming broad live reach, voice parity, or safe browser automation
 - [x] the one excellent reach-channel canary now selects native notifications as the only canary channel and exposes `one_excellent_reach_channel_canary`, `/api/operator/one-reach-channel-canary`, and the cockpit benchmark-proof card for pairing, revocation, health, retry/fallback, same-thread continuity, memory/context continuity, approval handoff, audit trail, degraded-state UI, and explicit rejection of Slack/Discord/Telegram/channel sprawl until one channel meets the bar
 
 ## Working On Now
@@ -50,7 +51,7 @@
 ## Still To Do On `develop`
 
 - [ ] richer interruption channels outside the browser/native desktop shell, imported capability reach, and typed source-adapter continuity layer
-- [ ] live broad mobile and messaging transports remain future work; the current M4 and one-channel canary proof pin deterministic native-notification identity, pairing, revocation, mutation-boundary, continuity, approval, degraded-state, and review receipts without claiming Slack, Discord, Telegram, voice, or mobile reach
+- [ ] live broad mobile and messaging transports remain future work; the current M4, one-channel canary, and Batch BY hardening proof pin deterministic native-notification identity plus paired external messaging, revocation, mutation-boundary, continuity, approval, privacy, degraded-state, and review receipts without claiming Slack, Discord, Telegram, voice, mobile, or full browser reach at production scale
 - [ ] broader external communication channels
 - [ ] better cross-surface continuity between ambient observation and deliberate interaction beyond the new synthesized continuity summary, imported reach/source-adapter recovery, thread groups, recovery actions, action-card continuation model, and desktop-shell follow-through controls
 
@@ -73,7 +74,8 @@
 - [x] M4 benchmark proof names identity, pairing, revocation, mutation, external-continuity, and abuse/failure review boundaries for channel/device reach
 - [x] the native-notification canary now proves one selected reach channel with explicit no-sprawl boundaries, approval handoff, memory/context continuity, retry/fallback, and degraded-state receipts
 - [x] guardian-safe multimodal and voice now has a dedicated proof gate: `guardian_safe_multimodal_voice` and `/api/operator/guardian-safe-multimodal-voice` require voice, TTS/STT, browser vision, image/media analysis, and media delivery families to expose owner, trust, permissions, capture/provider/privacy receipts, continuity, correction/deletion, revocation, and guardian-value reasons before being treated as reach
-- [ ] live broad mobile, messaging, voice, STT/TTS, or multimodal transport execution is not claimed by this proof lane
+- [x] Batch BY adds `guardian_safe_voice_media_runtime` receipts for guarded voice/STT and browser-vision runtime paths with guardian-value reasons, transcript or media-summary privacy, operator correction, deletion, and revocation fail-closed checks
+- [ ] live broad mobile, messaging, voice, STT/TTS, or multimodal transport execution is not claimed by these proof lanes
 
 ## Batch I Branch Review Log
 

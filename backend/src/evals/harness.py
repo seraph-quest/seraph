@@ -67,6 +67,18 @@ from src.extensions.reach_channel_canary import (
     one_reach_channel_canary_policy_payload,
     one_reach_channel_canary_receipt,
 )
+from src.extensions.production_reach_hardening import (
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SUITE_NAME,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME,
+    PRODUCTION_REACH_BROWSER_VOICE_BLOCKED_CLAIMS,
+    PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME,
+    build_production_reach_browser_voice_contract,
+    build_production_reach_browser_voice_report,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -12290,6 +12302,68 @@ async def _eval_operator_one_reach_channel_canary_surface_behavior() -> dict[str
     }
 
 
+async def _eval_production_reach_browser_voice_behavior() -> dict[str, Any]:
+    contract = build_production_reach_browser_voice_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    channels = contract["channels"]
+    browsers = contract["browser_reliability"]
+    voice_media = contract["voice_media_runtimes"]
+    suites = benchmark_suite_report()
+    production_reach_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME
+    )
+    browser_suite = next(
+        item for item in suites if item["name"] == BROWSER_COMPUTER_USE_RELIABILITY_V2_SUITE_NAME
+    )
+    voice_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME
+    )
+    paired_external = [
+        item for item in channels
+        if item.get("surface_kind") == "external_messaging"
+        and item.get("pairing", {}).get("state") == "paired"
+    ]
+    return {
+        "operator_status_visible": summary["operator_status"] == "production_reach_browser_voice_receipts_visible",
+        "production_reach_suite_visible": production_reach_suite["scenario_count"]
+        == len(PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES),
+        "browser_reliability_suite_visible": browser_suite["scenario_count"]
+        == len(BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES),
+        "voice_media_runtime_suite_visible": voice_suite["scenario_count"]
+        == len(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES),
+        "external_messaging_beyond_native_visible": any(
+            item.get("transport") in {"telegram", "slack"} for item in channels
+        ),
+        "paired_external_channel_visible": len(paired_external) >= 1,
+        "revocation_fail_closed_visible": summary["revoked_follow_up_hidden_count"] >= 1,
+        "privacy_redaction_visible": summary["privacy_redaction_count"] >= 1,
+        "approval_handoff_visible": any(
+            item.get("approval_handoff", {}).get("status") == "pending_operator_approval"
+            for item in channels
+        ),
+        "degraded_recovery_visible": summary["degraded_recovery_count"] >= 2,
+        "provider_truth_visible": {item["provider_mode"] for item in browsers} >= {"local", "managed_remote"},
+        "session_partition_visible": summary["browser_session_partition_count"] >= 2,
+        "crash_recovery_visible": summary["browser_crash_recovery_count"] >= 1,
+        "page_drift_replay_blocks_external_action": summary["browser_page_drift_block_count"] >= 1,
+        "voice_media_guardian_value_visible": all(
+            bool(item.get("guardian_value_reason")) for item in voice_media
+        ),
+        "voice_media_privacy_visible": all(
+            item.get("privacy", {}).get("secret_payload_present") is False for item in voice_media
+        ),
+        "voice_media_deletion_visible": summary["voice_media_deletion_path_count"] >= 2,
+        "voice_media_revocation_visible": summary["voice_media_revocation_fail_closed_count"] >= 2,
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_REACH_BROWSER_VOICE_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": (
+            "/api/operator/production-reach-browser-voice" in policy["receipt_surfaces"]
+        ),
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -13905,6 +13979,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     multimodal_voice_suite = next(
         item for item in suites if item["name"] == GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME
     )
+    production_reach_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME
+    )
+    browser_reliability_v2_suite = next(
+        item for item in suites if item["name"] == BROWSER_COMPUTER_USE_RELIABILITY_V2_SUITE_NAME
+    )
+    voice_media_runtime_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME
+    )
     learning_arbitration_suite = next(
         item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
     )
@@ -14082,6 +14165,42 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "guardian_safe_multimodal_voice_gate_required": (
             GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_reach_channel_hardening_suite_present": (
+            "production_reach_external_messaging_pairing_behavior" in production_reach_suite["scenario_names"]
+        ),
+        "production_reach_channel_hardening_suite_scenario_count_matches": (
+            production_reach_suite["scenario_count"] == len(PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES)
+        ),
+        "production_reach_channel_hardening_suite_axis_matches": (
+            production_reach_suite["benchmark_axis"] == "production_reach_channel_hardening"
+        ),
+        "production_reach_channel_hardening_gate_required": (
+            PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_computer_use_reliability_v2_suite_present": (
+            "browser_reliability_session_partition_behavior" in browser_reliability_v2_suite["scenario_names"]
+        ),
+        "browser_computer_use_reliability_v2_suite_scenario_count_matches": (
+            browser_reliability_v2_suite["scenario_count"] == len(BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES)
+        ),
+        "browser_computer_use_reliability_v2_suite_axis_matches": (
+            browser_reliability_v2_suite["benchmark_axis"] == "browser_computer_use_reliability_v2"
+        ),
+        "browser_computer_use_reliability_v2_gate_required": (
+            BROWSER_COMPUTER_USE_RELIABILITY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "guardian_safe_voice_media_runtime_suite_present": (
+            "voice_media_runtime_guardian_value_behavior" in voice_media_runtime_suite["scenario_names"]
+        ),
+        "guardian_safe_voice_media_runtime_suite_scenario_count_matches": (
+            voice_media_runtime_suite["scenario_count"] == len(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES)
+        ),
+        "guardian_safe_voice_media_runtime_suite_axis_matches": (
+            voice_media_runtime_suite["benchmark_axis"] == "guardian_safe_voice_media_runtime"
+        ),
+        "guardian_safe_voice_media_runtime_gate_required": (
+            GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "guardian_learning_arbitration_suite_present": (
             "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
@@ -15844,6 +15963,33 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_durable_workflow_engine_v2_report_behavior,
         )
         for name in PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description="Production reach hardening proves external messaging pairing, revocation, privacy, approval handoff, audit, and degraded recovery receipts.",
+            runner=_eval_production_reach_browser_voice_behavior,
+        )
+        for name in PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description="Browser computer-use reliability v2 proves provider truth, session partitioning, crash recovery, action timelines, and page-drift replay receipts.",
+            runner=_eval_production_reach_browser_voice_behavior,
+        )
+        for name in BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description="Guardian-safe voice/media runtime proves guardian value, privacy, transcript audit, correction, deletion, and revocation fail-closed receipts.",
+            runner=_eval_production_reach_browser_voice_behavior,
+        )
+        for name in GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

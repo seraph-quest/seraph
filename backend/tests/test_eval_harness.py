@@ -14,6 +14,11 @@ from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
 )
+from src.extensions.production_reach_hardening import (
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
+)
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
 from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
 from src.workflows.durable_state import (
@@ -278,6 +283,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["guardian_safe_multimodal_voice_suite_scenario_count_matches"] is True
     assert details["guardian_safe_multimodal_voice_suite_axis_matches"] is True
     assert details["guardian_safe_multimodal_voice_gate_required"] is True
+    assert details["production_reach_channel_hardening_suite_present"] is True
+    assert details["production_reach_channel_hardening_suite_scenario_count_matches"] is True
+    assert details["production_reach_channel_hardening_suite_axis_matches"] is True
+    assert details["production_reach_channel_hardening_gate_required"] is True
+    assert details["browser_computer_use_reliability_v2_suite_present"] is True
+    assert details["browser_computer_use_reliability_v2_suite_scenario_count_matches"] is True
+    assert details["browser_computer_use_reliability_v2_suite_axis_matches"] is True
+    assert details["browser_computer_use_reliability_v2_gate_required"] is True
+    assert details["guardian_safe_voice_media_runtime_suite_present"] is True
+    assert details["guardian_safe_voice_media_runtime_suite_scenario_count_matches"] is True
+    assert details["guardian_safe_voice_media_runtime_suite_axis_matches"] is True
+    assert details["guardian_safe_voice_media_runtime_gate_required"] is True
     assert details["guardian_learning_arbitration_suite_present"] is True
     assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
     assert details["guardian_learning_arbitration_suite_axis_matches"] is True
@@ -367,6 +384,33 @@ def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
 
     assert summary.failed == 0
     assert result_names == set(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+
+
+def test_run_production_reach_channel_hardening_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_reach_channel_hardening"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES)
+    assert all(result.details["paired_external_channel_visible"] for result in summary.results)
+    assert all(result.details["revocation_fail_closed_visible"] for result in summary.results)
+
+
+def test_run_browser_computer_use_reliability_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_computer_use_reliability_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES)
+    assert all(result.details["session_partition_visible"] for result in summary.results)
+    assert all(result.details["page_drift_replay_blocks_external_action"] for result in summary.results)
+
+
+def test_run_guardian_safe_voice_media_runtime_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["guardian_safe_voice_media_runtime"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES)
+    assert all(result.details["voice_media_deletion_visible"] for result in summary.results)
+    assert all(result.details["voice_media_revocation_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
@@ -1356,6 +1400,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "m7_operator_cockpit_legibility" in captured.out
     assert "cockpit_operator_efficiency_benchmark" in captured.out
     assert "m8_guardian_intervention_quality" in captured.out
+    assert "production_reach_channel_hardening" in captured.out
+    assert "browser_computer_use_reliability_v2" in captured.out
+    assert "guardian_safe_voice_media_runtime" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -1367,6 +1414,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_user_model_restraint",
         "m8_guardian_intervention_quality",
         "guardian_safe_multimodal_voice",
+        "production_reach_channel_hardening",
+        "browser_computer_use_reliability_v2",
+        "guardian_safe_voice_media_runtime",
         "guardian_learning_arbitration_v2",
         "memory_continuity_workflows",
         "m6_memory_superiority",

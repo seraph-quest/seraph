@@ -7,6 +7,8 @@ import pytest
 from src.workflows.durable_state import (
     DURABLE_STATE_CLAIM_BOUNDARY,
     build_durable_workflow_state_report,
+    build_durable_workflow_v2_contract,
+    build_durable_workflow_v2_report,
     durable_workflow_snapshot_dict,
     workflow_state_repository,
 )
@@ -308,6 +310,282 @@ async def test_workflow_state_repository_marks_stale_runs_interrupted(async_db):
 
 
 @pytest.mark.asyncio
+async def test_workflow_state_repository_v2_lease_transition_trigger_and_recovery_receipts(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_release:abc",
+        workflow_name="release-v2",
+        tool_name="workflow_release_v2",
+        session_id="session-v2",
+        run_fingerprint="abc",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+
+    lease = await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_release:abc",
+        owner="worker-a",
+        lease_id="lease-a",
+    )
+    blocked_lease = await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_release:abc",
+        owner="worker-b",
+        lease_id="lease-b",
+    )
+    same_lease_takeover = await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_release:abc",
+        owner="worker-b",
+        lease_id="lease-a",
+    )
+    transition = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_release:abc",
+        transition_key="resume:draft",
+        transition_type="resume",
+        owner="worker-a",
+        step_id="draft",
+    )
+    non_owner_transition = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_release:abc",
+        transition_key="resume:publish",
+        transition_type="resume",
+        owner="worker-b",
+        step_id="publish",
+    )
+    deduped_transition = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_release:abc",
+        transition_key="resume:draft",
+        transition_type="resume",
+        owner="worker-a",
+        step_id="draft",
+    )
+    trigger = await workflow_state_repository.record_v2_trigger(
+        run_identity="session-v2:workflow_release:abc",
+        trigger_key="heartbeat:release-v2",
+        trigger_kind="heartbeat",
+        source="scheduler",
+    )
+    deduped_trigger = await workflow_state_repository.record_v2_trigger(
+        run_identity="session-v2:workflow_release:abc",
+        trigger_key="heartbeat:release-v2",
+        trigger_kind="heartbeat",
+        source="scheduler",
+    )
+    blocked_recovery = await workflow_state_repository.build_v2_recovery_plan(
+        run_identity="session-v2:workflow_release:abc",
+        owner="worker-a",
+        approval_context={"risk_level": "high", "execution_boundaries": ["external_mcp_credential_egress"]},
+    )
+
+    assert lease is not None
+    assert lease["receipt"]["status"] == "acquired"
+    assert blocked_lease is not None
+    assert blocked_lease["receipt"]["status"] == "blocked"
+    assert blocked_lease["receipt"]["blocked_reason"] == "active_lease_owned_by_another_worker"
+    assert blocked_lease["orchestration_v2"]["lease_conflict_receipts"][-1]["owner"] == "worker-b"
+    assert same_lease_takeover is not None
+    assert same_lease_takeover["receipt"]["status"] == "blocked"
+    assert same_lease_takeover["receipt"]["blocked_reason"] == "active_lease_owned_by_another_worker"
+    assert same_lease_takeover["orchestration_v2"]["lease_conflict_receipts"][-1]["lease_id"] == "lease-a"
+    assert transition is not None
+    assert transition["receipt"]["status"] == "recorded"
+    assert non_owner_transition is not None
+    assert non_owner_transition["receipt"]["status"] == "blocked"
+    assert non_owner_transition["receipt"]["blocked_reason"] == "active_owner_lease_required"
+    assert (
+        non_owner_transition["orchestration_v2"]["transition_block_receipts"][-1]["blocked_reason"]
+        == "active_owner_lease_required"
+    )
+    assert deduped_transition is not None
+    assert deduped_transition["receipt"]["status"] == "deduped"
+    assert trigger is not None
+    assert trigger["receipt"]["external_action_allowed"] is True
+    assert deduped_trigger is not None
+    assert deduped_trigger["receipt"]["status"] == "deduped"
+    assert deduped_trigger["receipt"]["external_action_allowed"] is False
+    assert blocked_recovery is not None
+    assert blocked_recovery["receipt"]["status"] == "blocked"
+    assert blocked_recovery["receipt"]["blocked_reason"] == "approval_context_changed"
+    assert blocked_recovery["receipt"]["requires_fresh_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_blocks_transition_without_active_owner_lease(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_missing_lease:abc",
+        workflow_name="missing-lease-v2",
+        tool_name="workflow_missing_lease_v2",
+        session_id="session-v2",
+        run_fingerprint="missing-lease",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+
+    missing_lease_transition = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_missing_lease:abc",
+        transition_key="resume:without-lease",
+        transition_type="resume",
+        owner="worker-a",
+        step_id="draft",
+    )
+
+    assert missing_lease_transition is not None
+    assert missing_lease_transition["receipt"]["status"] == "blocked"
+    assert missing_lease_transition["receipt"]["blocked_reason"] == "active_owner_lease_required"
+    assert missing_lease_transition["receipt"]["lease_owner"] is None
+    assert (
+        missing_lease_transition["orchestration_v2"]["transition_block_receipts"][-1]["transition_key"]
+        == "resume:without-lease"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_blocks_transition_with_expired_lease(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_expired_lease:abc",
+        workflow_name="expired-lease-v2",
+        tool_name="workflow_expired_lease_v2",
+        session_id="session-v2",
+        run_fingerprint="expired-lease",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_expired_lease:abc",
+        owner="worker-a",
+        lease_id="lease-expired",
+        ttl_seconds=-1,
+    )
+
+    expired_lease_transition = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_expired_lease:abc",
+        transition_key="resume:expired-lease",
+        transition_type="resume",
+        owner="worker-a",
+        step_id="draft",
+    )
+
+    assert expired_lease_transition is not None
+    assert expired_lease_transition["receipt"]["status"] == "blocked"
+    assert expired_lease_transition["receipt"]["blocked_reason"] == "active_owner_lease_required"
+    assert expired_lease_transition["receipt"]["lease_owner"] == "worker-a"
+    assert (
+        expired_lease_transition["orchestration_v2"]["transition_block_receipts"][-1]["transition_key"]
+        == "resume:expired-lease"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_blocks_artifact_adoption_without_review(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_review:abc",
+        workflow_name="review-v2",
+        tool_name="workflow_review_v2",
+        session_id="session-v2",
+        run_fingerprint="review",
+        arguments={},
+        approval_context={"risk_level": "medium", "delegated_specialists": ["critic"]},
+    )
+
+    blocked = await workflow_state_repository.record_v2_artifact_adoption(
+        run_identity="session-v2:workflow_review:abc",
+        artifact_path="notes/review.md",
+        adopter="operator",
+    )
+    await workflow_state_repository.record_artifact_review(
+        run_identity="session-v2:workflow_review:abc",
+        root_run_identity="session-v2:workflow_review:abc",
+        workflow_name="review-v2",
+        artifact_path="notes/review.md",
+        owner="delegated_specialist",
+        review_state="approved",
+        reviewer="critic",
+        approval_id="approval-v2",
+    )
+    approved = await workflow_state_repository.record_v2_artifact_adoption(
+        run_identity="session-v2:workflow_review:abc",
+        artifact_path="notes/review.md",
+        adopter="operator",
+    )
+
+    assert blocked is not None
+    assert blocked["receipt"]["status"] == "blocked"
+    assert blocked["receipt"]["blocked_reason"] == "missing_delegated_artifact_review_approval"
+    assert approved is not None
+    assert approved["receipt"]["status"] == "recorded"
+    assert approved["receipt"]["approval_ids"] == ["approval-v2"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_blocks_pending_artifact_handoff_with_approval_id(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_pending_review:abc",
+        workflow_name="pending-review-v2",
+        tool_name="workflow_pending_review_v2",
+        session_id="session-v2",
+        run_fingerprint="pending-review",
+        arguments={},
+        approval_context={"risk_level": "medium", "delegated_specialists": ["critic"]},
+    )
+    await workflow_state_repository.record_artifact_review(
+        run_identity="session-v2:workflow_pending_review:abc",
+        root_run_identity="session-v2:workflow_pending_review:abc",
+        workflow_name="pending-review-v2",
+        artifact_path="notes/pending.md",
+        owner="delegated_specialist",
+        review_state="pending_operator_review",
+        reviewer="critic",
+        approval_id="approval-pending",
+    )
+
+    blocked = await workflow_state_repository.record_v2_artifact_adoption(
+        run_identity="session-v2:workflow_pending_review:abc",
+        artifact_path="notes/pending.md",
+        adopter="operator",
+    )
+
+    assert blocked is not None
+    assert blocked["receipt"]["status"] == "blocked"
+    assert blocked["receipt"]["blocked_reason"] == "missing_delegated_artifact_review_approval"
+    assert blocked["receipt"]["approval_ids"] == []
+    assert blocked["receipt"]["approved_review_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_blocks_rejected_artifact_handoff_with_approval_id(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_rejected_review:abc",
+        workflow_name="rejected-review-v2",
+        tool_name="workflow_rejected_review_v2",
+        session_id="session-v2",
+        run_fingerprint="rejected-review",
+        arguments={},
+        approval_context={"risk_level": "medium", "delegated_specialists": ["critic"]},
+    )
+    await workflow_state_repository.record_artifact_review(
+        run_identity="session-v2:workflow_rejected_review:abc",
+        root_run_identity="session-v2:workflow_rejected_review:abc",
+        workflow_name="rejected-review-v2",
+        artifact_path="notes/rejected.md",
+        owner="delegated_specialist",
+        review_state="rejected",
+        reviewer="critic",
+        decision="rejected",
+        approval_id="approval-rejected",
+    )
+
+    blocked = await workflow_state_repository.record_v2_artifact_adoption(
+        run_identity="session-v2:workflow_rejected_review:abc",
+        artifact_path="notes/rejected.md",
+        adopter="operator",
+    )
+
+    assert blocked is not None
+    assert blocked["receipt"]["status"] == "blocked"
+    assert blocked["receipt"]["blocked_reason"] == "missing_delegated_artifact_review_approval"
+    assert blocked["receipt"]["approval_ids"] == []
+    assert blocked["receipt"]["approved_review_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_workflow_state_repository_records_delegated_artifact_review(async_db):
     review = await workflow_state_repository.record_artifact_review(
         run_identity="session-3:workflow_review:abc",
@@ -393,3 +671,33 @@ async def test_durable_workflow_state_report_includes_persisted_snapshots(async_
     assert persisted_state["artifact_review"]["receipts"][0]["review_state"] == "pending_operator_review"
     snapshot = report["persisted_run_snapshots"][0]
     assert snapshot["record"]["receipts"]["delegated_artifact_review"]["review_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_workflow_v2_contract_and_report_expose_recovery_receipts(async_db):
+    contract = build_durable_workflow_v2_contract()
+    report = await build_durable_workflow_v2_report()
+
+    assert contract["summary"]["lease_receipt_count"] >= 2
+    assert contract["summary"]["blocked_lease_count"] >= 1
+    assert contract["summary"]["transition_receipt_count"] >= 1
+    assert contract["summary"]["blocked_transition_count"] >= 1
+    assert contract["summary"]["deduped_trigger_count"] >= 1
+    assert contract["summary"]["blocked_recovery_count"] >= 1
+    assert contract["summary"]["blocked_artifact_adoption_count"] >= 1
+    assert any(
+        receipt["latest_lease_conflict"].get("blocked_reason")
+        == "active_lease_owned_by_another_worker"
+        for receipt in contract["receipts"]
+    )
+    assert any(
+        receipt["latest_transition_block"].get("blocked_reason") == "active_owner_lease_required"
+        for receipt in contract["receipts"]
+    )
+    assert "langgraph_class_durable_workflows" in contract["policy"]["blocked_claims"]
+    assert report["summary"]["suite_name"] == "durable_workflow_engine_v2"
+    assert report["summary"]["production_suite_name"] == "production_durable_orchestration"
+    assert report["summary"]["blocked_lease_count"] >= 1
+    assert report["summary"]["blocked_transition_count"] >= 1
+    assert report["summary"]["benchmark_posture"] == "durable_workflow_engine_v2_ci_gated_operator_visible"
+    assert "/api/operator/durable-workflow-engine-v2" in report["policy"]["operator_surfaces"]

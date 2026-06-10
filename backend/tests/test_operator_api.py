@@ -40,6 +40,13 @@ from src.guardian.live_learning_quality import (
     MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
     PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
 )
+from src.guardian.live_human_outcome_learning import (
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES,
+    LIVE_HUMAN_OUTCOME_LEARNING_BLOCKED_CLAIMS,
+    LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
+)
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
@@ -2003,6 +2010,95 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_live_human_outcome_learning_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "live_human_outcome_learning_receipts_visible",
+                    "benchmark_posture": "live_human_outcome_learning_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES)
+                        + len(GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES)
+                        + len(MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES)
+                    ),
+                    "study_mode": "recorded_live_anonymized",
+                    "outcome_cohort_count": 7,
+                    "typed_outcome_count": 7,
+                    "consented_cohort_count": 7,
+                    "anonymized_cohort_count": 7,
+                    "bias_limitation_count": 7,
+                    "causal_attribution_count": 4,
+                    "bounded_causal_claim_count": 4,
+                    "reversible_learning_change_count": 7,
+                    "provider_monitor_count": 4,
+                    "provider_quarantine_count": 2,
+                    "stale_decay_monitor_count": 4,
+                    "privacy_regression_count": 1,
+                    "claim_boundary": LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "live_human_outcome_quality_study": list(
+                        LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES
+                    ),
+                    "guardian_learning_causal_attribution": list(
+                        GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES
+                    ),
+                    "memory_provider_live_regression_monitor": list(
+                        MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "live_human_outcome_learning_receipts_visible",
+                        "study_mode": "recorded_live_anonymized",
+                        "outcome_cohort_count": 7,
+                        "causal_attribution_count": 4,
+                        "provider_monitor_count": 4,
+                    },
+                    "study_receipts": [
+                        {"outcome": "accepted", "consent": {"operator_consent_recorded": True}},
+                        {"outcome": "ignored", "consent": {"operator_consent_recorded": True}},
+                        {"outcome": "corrected", "consent": {"operator_consent_recorded": True}},
+                        {"outcome": "deferred", "consent": {"operator_consent_recorded": True}},
+                        {"outcome": "harmful", "consent": {"operator_consent_recorded": True}},
+                        {"outcome": "helpful", "consent": {"operator_consent_recorded": True}},
+                        {"outcome": "followthrough", "consent": {"operator_consent_recorded": True}},
+                    ],
+                    "causal_attribution": [
+                        {
+                            "attribution_id": "cf-causal-restraint-counterfactual",
+                            "claim_scope": "bounded_to_recorded_live_matched_contexts",
+                            "counterfactual_outcome": "similar_context_would_have_interrupted",
+                        }
+                    ],
+                    "memory_provider_monitors": [
+                        {
+                            "provider_id": "noisy_archive_provider",
+                            "quarantine_state": "quarantined",
+                            "behavior_change_allowed": False,
+                        }
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY,
+                    "blocked_claims": list(LIVE_HUMAN_OUTCOME_LEARNING_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/live-human-outcome-learning-proof",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": [
+                        "randomized_controlled_trial",
+                        "guardian_intelligence_superiority",
+                        "solved_live_learning",
+                    ],
+                },
+                "latest_run": {"total": 15, "passed": 15, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -2433,7 +2529,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 51
+    assert payload["summary"]["suite_count"] == 54
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2527,6 +2623,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["live_guardian_learning_quality_claim_boundary"]
         == LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
     )
+    assert (
+        payload["summary"]["live_human_outcome_learning_posture"]
+        == "live_human_outcome_learning_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["live_human_outcome_learning_claim_boundary"]
+        == LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -2596,6 +2700,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert "provider_usefulness_regression" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "live_human_outcome_quality_study"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "guardian_learning_causal_attribution"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "memory_provider_live_regression_monitor"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
     assert (
         "governed_capability_pack_hardening"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -2835,6 +2951,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     provider_regression_suite = next(item for item in payload["suites"] if item["name"] == "provider_usefulness_regression")
     assert "provider_usefulness_quarantine_regression_behavior" in provider_regression_suite["scenario_names"]
     assert provider_regression_suite["scenario_count"] == len(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
+    human_outcome_suite = next(item for item in payload["suites"] if item["name"] == "live_human_outcome_quality_study")
+    assert "live_human_outcome_cohort_consent_behavior" in human_outcome_suite["scenario_names"]
+    assert human_outcome_suite["scenario_count"] == len(LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES)
+    causal_suite = next(item for item in payload["suites"] if item["name"] == "guardian_learning_causal_attribution")
+    assert "causal_attribution_counterfactual_restraint_behavior" in causal_suite["scenario_names"]
+    assert causal_suite["scenario_count"] == len(GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES)
+    provider_monitor_suite = next(
+        item for item in payload["suites"] if item["name"] == "memory_provider_live_regression_monitor"
+    )
+    assert "memory_provider_live_usefulness_delta_behavior" in provider_monitor_suite["scenario_names"]
+    assert provider_monitor_suite["scenario_count"] == len(MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES)
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -2984,6 +3111,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
     )
     assert "guardian_intelligence_superiority" in payload["live_guardian_learning_quality"]["policy"]["blocked_claims"]
+    assert payload["live_human_outcome_learning"]["summary"]["operator_status"] == (
+        "live_human_outcome_learning_receipts_visible"
+    )
+    assert payload["live_human_outcome_learning"]["summary"]["study_mode"] == "recorded_live_anonymized"
+    assert payload["live_human_outcome_learning"]["summary"]["outcome_cohort_count"] == 7
+    assert payload["live_human_outcome_learning"]["summary"]["causal_attribution_count"] == 4
+    assert payload["live_human_outcome_learning"]["summary"]["provider_monitor_count"] == 4
+    assert payload["live_human_outcome_learning"]["policy"]["claim_boundary"] == (
+        LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY
+    )
+    assert "live_human_outcome_superiority" in payload["live_human_outcome_learning"]["policy"]["blocked_claims"]
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -3297,6 +3435,36 @@ async def test_operator_live_guardian_learning_quality_surface_reports_batch_bz_
         "followthrough",
     }
     assert payload["contract"]["canonical_reconciliation"]["canonical_precedence"]["provider_override_blocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_operator_live_human_outcome_learning_surface_reports_batch_cf_receipts(client):
+    resp = await client.get("/api/operator/live-human-outcome-learning-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "live_human_outcome_learning_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "live_human_outcome_learning_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == 15
+    assert payload["summary"]["study_mode"] == "recorded_live_anonymized"
+    assert payload["summary"]["outcome_cohort_count"] == 7
+    assert payload["summary"]["consented_cohort_count"] == 7
+    assert payload["summary"]["anonymized_cohort_count"] == 7
+    assert payload["summary"]["causal_attribution_count"] == 4
+    assert payload["summary"]["bounded_causal_claim_count"] == 4
+    assert payload["summary"]["provider_quarantine_count"] == 2
+    assert payload["policy"]["claim_boundary"] == LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY
+    assert set(LIVE_HUMAN_OUTCOME_LEARNING_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/live-human-outcome-learning-proof" in payload["policy"]["receipt_surfaces"]
+    assert "guardian_intelligence_superiority" in payload["policy"]["not_claimed"]
+    outcomes = {item["outcome"] for item in payload["contract"]["study_receipts"]}
+    assert outcomes >= {"accepted", "ignored", "corrected", "harmful", "helpful", "followthrough"}
+    assert all(item["claim_scope"].startswith("bounded_to_") for item in payload["contract"]["causal_attribution"])
+    assert any(
+        item["quarantine_state"] == "quarantined"
+        and item["behavior_change_allowed"] is False
+        for item in payload["contract"]["memory_provider_monitors"]
+    )
 
 
 @pytest.mark.asyncio

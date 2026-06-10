@@ -41,6 +41,11 @@ from src.guardian.live_learning_quality import (
     MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
     PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
 )
+from src.guardian.live_human_outcome_learning import (
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
+)
 from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
@@ -381,6 +386,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["provider_usefulness_regression_suite_scenario_count_matches"] is True
     assert details["provider_usefulness_regression_suite_axis_matches"] is True
     assert details["provider_usefulness_regression_gate_required"] is True
+    assert details["live_human_outcome_quality_study_suite_present"] is True
+    assert details["live_human_outcome_quality_study_suite_scenario_count_matches"] is True
+    assert details["live_human_outcome_quality_study_suite_axis_matches"] is True
+    assert details["live_human_outcome_quality_study_gate_required"] is True
+    assert details["guardian_learning_causal_attribution_suite_present"] is True
+    assert details["guardian_learning_causal_attribution_suite_scenario_count_matches"] is True
+    assert details["guardian_learning_causal_attribution_suite_axis_matches"] is True
+    assert details["guardian_learning_causal_attribution_gate_required"] is True
+    assert details["memory_provider_live_regression_monitor_suite_present"] is True
+    assert details["memory_provider_live_regression_monitor_suite_scenario_count_matches"] is True
+    assert details["memory_provider_live_regression_monitor_suite_axis_matches"] is True
+    assert details["memory_provider_live_regression_monitor_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -634,6 +651,36 @@ def test_run_provider_usefulness_regression_benchmark_suite_passes():
     assert {result.name for result in summary.results} == set(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
     assert all(result.details["provider_regressions_visible"] for result in summary.results)
     assert all(result.details["provider_quarantine_visible"] for result in summary.results)
+
+
+def test_run_live_human_outcome_quality_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_human_outcome_quality_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES)
+    assert all(result.details["recorded_live_mode_visible"] for result in summary.results)
+    assert all(result.details["consent_visible"] for result in summary.results)
+    assert all(result.details["bias_limitations_visible"] for result in summary.results)
+
+
+def test_run_guardian_learning_causal_attribution_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["guardian_learning_causal_attribution"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES)
+    assert all(result.details["bounded_causal_claims_visible"] for result in summary.results)
+    assert all(result.details["counterfactuals_visible"] for result in summary.results)
+    assert all(result.details["reversible_learning_visible"] for result in summary.results)
+
+
+def test_run_memory_provider_live_regression_monitor_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_live_regression_monitor"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES)
+    assert all(result.details["provider_monitors_visible"] for result in summary.results)
+    assert all(result.details["provider_quarantine_visible"] for result in summary.results)
+    assert all(result.details["unsafe_provider_behavior_blocked"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():
@@ -1688,6 +1735,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
     assert "canonical_memory_reconciliation_v2" in captured.out
     assert "provider_usefulness_regression" in captured.out
+    assert "live_human_outcome_quality_study" in captured.out
+    assert "guardian_learning_causal_attribution" in captured.out
+    assert "memory_provider_live_regression_monitor" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -1718,6 +1768,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "memory_provider_ecosystem_maturity_v1",
         "canonical_memory_reconciliation_v2",
         "provider_usefulness_regression",
+        "live_human_outcome_quality_study",
+        "guardian_learning_causal_attribution",
+        "memory_provider_live_regression_monitor",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

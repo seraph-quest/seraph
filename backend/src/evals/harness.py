@@ -148,6 +148,17 @@ from src.guardian.live_learning_quality import (
     build_live_guardian_learning_quality_contract,
     build_live_guardian_learning_quality_report,
 )
+from src.guardian.live_human_outcome_learning import (
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SUITE_NAME,
+    LIVE_HUMAN_OUTCOME_LEARNING_BLOCKED_CLAIMS,
+    LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SUITE_NAME,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
+    build_live_human_outcome_learning_contract,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
@@ -14130,6 +14141,70 @@ async def _eval_live_guardian_learning_quality_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_live_human_outcome_learning_behavior() -> dict[str, Any]:
+    contract = build_live_human_outcome_learning_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    study = contract["study_receipts"]
+    causal = contract["causal_attribution"]
+    monitors = contract["memory_provider_monitors"]
+    suites = benchmark_suite_report()
+    study_suite = next(
+        item for item in suites if item["name"] == LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SUITE_NAME
+    )
+    causal_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SUITE_NAME
+    )
+    monitor_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME
+    )
+    outcome_names = {item["outcome"] for item in study}
+    return {
+        "operator_status_visible": summary["operator_status"] == "live_human_outcome_learning_receipts_visible",
+        "study_suite_visible": study_suite["scenario_count"] == len(LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES),
+        "causal_suite_visible": causal_suite["scenario_count"] == len(GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES),
+        "monitor_suite_visible": monitor_suite["scenario_count"]
+        == len(MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES),
+        "recorded_live_mode_visible": summary["study_mode"] == "recorded_live_anonymized",
+        "typed_outcomes_visible": outcome_names >= {
+            "accepted",
+            "ignored",
+            "corrected",
+            "deferred",
+            "harmful",
+            "helpful",
+            "followthrough",
+        },
+        "consent_visible": summary["consented_cohort_count"] == summary["outcome_cohort_count"],
+        "anonymization_visible": summary["anonymized_cohort_count"] == summary["outcome_cohort_count"],
+        "bias_limitations_visible": summary["bias_limitation_count"] == summary["outcome_cohort_count"],
+        "correction_and_harm_visible": {"corrected", "harmful"} <= outcome_names,
+        "followthrough_visible": "followthrough" in outcome_names,
+        "causal_attribution_visible": summary["causal_attribution_count"] >= 4,
+        "bounded_causal_claims_visible": (
+            summary["bounded_causal_claim_count"] == summary["causal_attribution_count"]
+        ),
+        "counterfactuals_visible": all(bool(item.get("counterfactual_outcome")) for item in causal),
+        "confounders_visible": all(bool(item.get("confounders")) for item in causal),
+        "reversible_learning_visible": (
+            summary["reversible_learning_change_count"] == summary["outcome_cohort_count"]
+        ),
+        "provider_monitors_visible": summary["provider_monitor_count"] >= 4,
+        "provider_quarantine_visible": summary["provider_quarantine_count"] >= 2,
+        "stale_decay_visible": summary["stale_decay_monitor_count"] == summary["provider_monitor_count"],
+        "privacy_regression_visible": summary["privacy_regression_count"] >= 1,
+        "unsafe_provider_behavior_blocked": any(
+            item.get("quarantine_state") == "quarantined"
+            and item.get("behavior_change_allowed") is False
+            for item in monitors
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(LIVE_HUMAN_OUTCOME_LEARNING_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/live-human-outcome-learning-proof" in policy["receipt_surfaces"],
+    }
+
+
 def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 
@@ -14516,6 +14591,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     provider_usefulness_regression_suite = next(
         item for item in suites if item["name"] == PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME
+    )
+    live_human_outcome_quality_study_suite = next(
+        item for item in suites if item["name"] == LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SUITE_NAME
+    )
+    guardian_learning_causal_attribution_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SUITE_NAME
+    )
+    memory_provider_live_regression_monitor_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME
     )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
@@ -14925,6 +15009,49 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "provider_usefulness_regression_gate_required": (
             PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "live_human_outcome_quality_study_suite_present": (
+            "live_human_outcome_cohort_consent_behavior"
+            in live_human_outcome_quality_study_suite["scenario_names"]
+        ),
+        "live_human_outcome_quality_study_suite_scenario_count_matches": (
+            live_human_outcome_quality_study_suite["scenario_count"]
+            == len(LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES)
+        ),
+        "live_human_outcome_quality_study_suite_axis_matches": (
+            live_human_outcome_quality_study_suite["benchmark_axis"] == "live_human_outcome_quality_study"
+        ),
+        "live_human_outcome_quality_study_gate_required": (
+            LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "guardian_learning_causal_attribution_suite_present": (
+            "causal_attribution_counterfactual_restraint_behavior"
+            in guardian_learning_causal_attribution_suite["scenario_names"]
+        ),
+        "guardian_learning_causal_attribution_suite_scenario_count_matches": (
+            guardian_learning_causal_attribution_suite["scenario_count"]
+            == len(GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES)
+        ),
+        "guardian_learning_causal_attribution_suite_axis_matches": (
+            guardian_learning_causal_attribution_suite["benchmark_axis"] == "guardian_learning_causal_attribution"
+        ),
+        "guardian_learning_causal_attribution_gate_required": (
+            GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "memory_provider_live_regression_monitor_suite_present": (
+            "memory_provider_live_usefulness_delta_behavior"
+            in memory_provider_live_regression_monitor_suite["scenario_names"]
+        ),
+        "memory_provider_live_regression_monitor_suite_scenario_count_matches": (
+            memory_provider_live_regression_monitor_suite["scenario_count"]
+            == len(MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES)
+        ),
+        "memory_provider_live_regression_monitor_suite_axis_matches": (
+            memory_provider_live_regression_monitor_suite["benchmark_axis"]
+            == "memory_provider_live_regression_monitor"
+        ),
+        "memory_provider_live_regression_monitor_gate_required": (
+            MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -17613,6 +17740,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_live_guardian_learning_quality_behavior,
         )
         for name in PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch CF exposes consent-aware recorded-live human outcome study receipts, correction and harm "
+                "cohorts, follow-through effects, and coverage limitations."
+            ),
+            runner=_eval_live_human_outcome_learning_behavior,
+        )
+        for name in LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch CF bounds guardian-learning causal claims to counterfactual receipts, effect sizes, "
+                "confidence intervals, confounders, and reversible learning changes."
+            ),
+            runner=_eval_live_human_outcome_learning_behavior,
+        )
+        for name in GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch CF monitors live memory-provider usefulness deltas, stale-evidence decay, privacy and bias "
+                "regressions, quarantine, and operator-reviewed reversals."
+            ),
+            runner=_eval_live_human_outcome_learning_behavior,
+        )
+        for name in MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

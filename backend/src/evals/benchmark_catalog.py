@@ -87,6 +87,14 @@ from src.guardian.live_learning_quality import (
     PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
     PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME,
 )
+from src.guardian.live_human_outcome_learning import (
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES,
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SUITE_NAME,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SUITE_NAME,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
@@ -452,6 +460,51 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Live provider-specific regression telemetry remains future proof work.",
         scenario_names=PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SUITE_NAME,
+        label="Live human outcome quality study",
+        description=(
+            "Pins recorded-live, consent-aware, anonymized human-outcome cohorts with correction, harm, "
+            "follow-through, and bias or coverage limitation receipts."
+        ),
+        benchmark_axis="live_human_outcome_quality_study",
+        operator_summary=(
+            "Guardian learning now exposes bounded recorded-live human outcome study receipts beyond deterministic "
+            "outcome fixtures."
+        ),
+        remaining_gap=(
+            "Larger independent live studies and generalized guardian-intelligence superiority evidence remain future proof work."
+        ),
+        scenario_names=LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SUITE_NAME,
+        label="Guardian learning causal attribution",
+        description=(
+            "Pins counterfactual, negative-control, switchback, and harmful-intervention reversal receipts with bounded "
+            "confidence, effect size, and confounder disclosure."
+        ),
+        benchmark_axis="guardian_learning_causal_attribution",
+        operator_summary=(
+            "Guardian learning changes now carry causal-attribution receipts that explain what the study can and cannot prove."
+        ),
+        remaining_gap="Independent causal studies and production superiority claims remain future proof work.",
+        scenario_names=GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
+        label="Memory provider live regression monitor",
+        description=(
+            "Pins live-window usefulness deltas, stale-evidence decay, privacy and bias monitoring, quarantine, and "
+            "reviewable reversal for memory-provider learning changes."
+        ),
+        benchmark_axis="memory_provider_live_regression_monitor",
+        operator_summary=(
+            "Provider-backed learning now exposes live regression monitors before provider evidence can change behavior."
+        ),
+        remaining_gap="Broader external-provider telemetry and provider-specific production attestation remain future proof work.",
+        scenario_names=MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

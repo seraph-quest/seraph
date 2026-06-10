@@ -81,6 +81,11 @@ from src.security.production_isolation import (
     PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
     SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
 )
+from src.security.independent_review import (
+    INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -348,6 +353,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["security_incident_recovery_drill_suite_scenario_count_matches"] is True
     assert details["security_incident_recovery_drill_suite_axis_matches"] is True
     assert details["security_incident_recovery_drill_gate_required"] is True
+    assert details["independent_secure_host_review_suite_present"] is True
+    assert details["independent_secure_host_review_suite_scenario_count_matches"] is True
+    assert details["independent_secure_host_review_suite_axis_matches"] is True
+    assert details["independent_secure_host_review_gate_required"] is True
+    assert details["live_hostile_isolation_drills_suite_present"] is True
+    assert details["live_hostile_isolation_drills_suite_scenario_count_matches"] is True
+    assert details["live_hostile_isolation_drills_suite_axis_matches"] is True
+    assert details["live_hostile_isolation_drills_gate_required"] is True
+    assert details["secure_host_recovery_authority_suite_present"] is True
+    assert details["secure_host_recovery_authority_suite_scenario_count_matches"] is True
+    assert details["secure_host_recovery_authority_suite_axis_matches"] is True
+    assert details["secure_host_recovery_authority_gate_required"] is True
     assert details["computer_suite_present"] is True
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
@@ -1225,6 +1242,33 @@ def test_run_security_incident_recovery_drill_benchmark_suite_passes():
     assert result_names == set(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES)
 
 
+def test_run_independent_secure_host_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_secure_host_review"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES)
+
+
+def test_run_live_hostile_isolation_drills_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_hostile_isolation_drills"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES)
+
+
+def test_run_secure_host_recovery_authority_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["secure_host_recovery_authority"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES)
+
+
 def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_secure_capability_host_benchmark_surface_behavior"]))
 
@@ -1984,6 +2028,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "production_isolation_hardening_v2",
         "privileged_path_red_team_gauntlet_v2",
         "security_incident_recovery_drill",
+        "independent_secure_host_review",
+        "live_hostile_isolation_drills",
+        "secure_host_recovery_authority",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

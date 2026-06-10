@@ -47,14 +47,20 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     orchestration_gap = next(
         item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-orchestration-sla"
     )
+    security_gap = next(
+        item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-security-independent"
+    )
 
     assert policy["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
     assert set(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
     assert "fully_at_parity" in policy["blocked_claims"]
     assert "/api/operator/production-sla-orchestration" in policy["receipt_surfaces"]
-    assert {505, 497, 496, 475} <= {issue for item in claims for issue in item["issue_links"]}
+    assert {506, 505, 497, 496, 475} <= {issue for item in claims for issue in item["issue_links"]}
     assert "production_sla_orchestration" in orchestration_gap["current_batch_evidence"]
     assert "exactly_once_or_crash_proof_orchestration" in orchestration_gap["blocking_claims"]
+    assert "independent_secure_host_review" in security_gap["current_batch_evidence"]
+    assert "/api/operator/independent-secure-host-review" in security_gap["current_batch_evidence"]
+    assert "ironclaw_class_secure_execution" in security_gap["blocking_claims"]
     assert all(item["disposition"] == "accepted" for item in critic)
 
 

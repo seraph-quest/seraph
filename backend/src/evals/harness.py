@@ -323,6 +323,17 @@ from src.security.production_isolation import (
     SECURITY_INCIDENT_RECOVERY_DRILL_SUITE_NAME,
     build_production_isolation_security_contract,
 )
+from src.security.independent_review import (
+    INDEPENDENT_SECURE_HOST_REVIEW_BLOCKED_CLAIMS,
+    INDEPENDENT_SECURE_HOST_REVIEW_CLAIM_BOUNDARY,
+    INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES,
+    INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME,
+    SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME,
+    build_independent_secure_host_review_contract,
+)
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
@@ -2641,6 +2652,126 @@ async def _eval_production_isolation_security_behavior() -> dict[str, Any]:
             "/api/operator/trust-boundary-benchmark",
         }
         <= required_surfaces,
+    }
+
+
+async def _eval_independent_secure_host_review_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    gate_policy = evolution_benchmark_gate_policy()
+    review_suite = next(item for item in suites if item["name"] == INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME)
+    hostile_suite = next(item for item in suites if item["name"] == LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME)
+    recovery_suite = next(item for item in suites if item["name"] == SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME)
+    contract = build_independent_secure_host_review_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    review_receipts = contract["review_receipts"]
+    isolation_matrix = contract["isolation_evidence_matrix"]
+    hostile_drills = contract["hostile_drill_receipts"]
+    recovery_authority = contract["recovery_authority_receipts"]
+    required_suites = set(gate_policy["required_benchmark_suites"])
+    required_surfaces = set(policy["receipt_surfaces"])
+    blocked = set(policy["blocked_claims"])
+    not_claimed = set(policy["not_claimed"])
+    reviewed_surfaces = set(review_receipts[0]["target_surfaces"])
+    recovery_actions = {item["action"] for item in recovery_authority}
+
+    return {
+        "independent_review_suite_present": (
+            "independent_security_review_scope_behavior" in review_suite["scenario_names"]
+        ),
+        "independent_review_suite_scenario_count_matches": (
+            review_suite["scenario_count"] == len(INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES)
+        ),
+        "independent_review_suite_axis_matches": review_suite["benchmark_axis"] == "independent_secure_host_review",
+        "hostile_drill_suite_present": (
+            "live_hostile_credential_exfiltration_drill_behavior" in hostile_suite["scenario_names"]
+        ),
+        "hostile_drill_suite_scenario_count_matches": (
+            hostile_suite["scenario_count"] == len(LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES)
+        ),
+        "hostile_drill_suite_axis_matches": hostile_suite["benchmark_axis"] == "live_hostile_isolation_drills",
+        "recovery_authority_suite_present": (
+            "secure_host_post_incident_audit_behavior" in recovery_suite["scenario_names"]
+        ),
+        "recovery_authority_suite_scenario_count_matches": (
+            recovery_suite["scenario_count"] == len(SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES)
+        ),
+        "recovery_authority_suite_axis_matches": recovery_suite["benchmark_axis"] == "secure_host_recovery_authority",
+        "all_new_suites_gate_required": {
+            INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME,
+            LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME,
+            SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME,
+        }
+        <= required_suites,
+        "operator_status_visible": summary["operator_status"] == "independent_secure_host_review_receipts_visible",
+        "review_scope_covers_privileged_surfaces": {
+            "tool_runtime",
+            "browser_computer_use",
+            "connector_credentials",
+            "workflow_replay",
+            "extension_runtime_contributions",
+            "background_execution",
+        }
+        <= reviewed_surfaces,
+        "findings_remediated_or_documented": (
+            summary["remediated_or_documented_finding_count"] == summary["finding_count"]
+            and summary["finding_count"] >= 4
+        ),
+        "isolation_evidence_matrix_visible": summary["isolation_evidence_count"] >= 6,
+        "unsupported_isolation_claim_visible": summary["unsupported_isolation_claim_visible"] is True,
+        "hostile_drills_fail_closed": summary["hostile_drill_fail_closed_count"] == len(hostile_drills),
+        "hostile_drills_cover_required_attacks": {
+            "prompt_injection",
+            "ssrf_private_egress",
+            "filesystem_escape",
+            "credential_exfiltration",
+            "extension_permission_creep",
+            "workflow_replay_approval_drift",
+            "browser_session_bleed",
+        }
+        <= {item["attack_family"] for item in hostile_drills},
+        "operator_recovery_authority_visible": {
+            "allow",
+            "deny",
+            "quarantine",
+            "rotate",
+            "recover",
+            "post_incident_audit",
+        }
+        <= recovery_actions,
+        "recovery_receipts_leave_audit": all(bool(item["receipt_after_action"]) for item in recovery_authority),
+        "claim_boundary_visible": summary["claim_boundary"] == INDEPENDENT_SECURE_HOST_REVIEW_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(INDEPENDENT_SECURE_HOST_REVIEW_BLOCKED_CLAIMS) <= blocked,
+        "security_overclaims_remain_blocked": {
+            "secure_private_by_default",
+            "production_security_solved",
+            "ironclaw_class_secure_execution",
+            "full_host_container_isolation",
+            "tee_cvm_or_wasm_isolation_implemented",
+            "production_ready_product",
+            "full_parity",
+        }
+        <= blocked,
+        "not_claimed_boundary_visible": {
+            "ironclaw_class_secure_execution",
+            "full_host_container_isolation",
+            "tee_cvm_wasm_or_container_runtime_isolation",
+            "production_ready_product",
+            "full_parity_achieved",
+        }
+        <= not_claimed,
+        "receipt_surfaces_visible": {
+            "/api/operator/independent-secure-host-review",
+            "/api/operator/benchmark-proof",
+            "/api/operator/final-parity-readiness-report",
+        }
+        <= required_surfaces,
+        "all_receipts_operator_visible": (
+            all(item["operator_visible"] is True for item in review_receipts)
+            and all(item["operator_visible"] is True for item in isolation_matrix)
+            and all(item["operator_visible"] is True for item in hostile_drills)
+            and all(item["operator_visible"] is True for item in recovery_authority)
+        ),
     }
 
 
@@ -14844,6 +14975,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     security_incident_drill_suite = next(
         item for item in suites if item["name"] == SECURITY_INCIDENT_RECOVERY_DRILL_SUITE_NAME
     )
+    independent_secure_host_review_suite = next(
+        item for item in suites if item["name"] == INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME
+    )
+    live_hostile_isolation_drills_suite = next(
+        item for item in suites if item["name"] == LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME
+    )
+    secure_host_recovery_authority_suite = next(
+        item for item in suites if item["name"] == SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME
+    )
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     one_reach_channel_suite = next(item for item in suites if item["name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME)
@@ -15154,6 +15294,48 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "security_incident_recovery_drill_gate_required": (
             SECURITY_INCIDENT_RECOVERY_DRILL_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "independent_secure_host_review_suite_present": (
+            "independent_security_review_scope_behavior"
+            in independent_secure_host_review_suite["scenario_names"]
+        ),
+        "independent_secure_host_review_suite_scenario_count_matches": (
+            independent_secure_host_review_suite["scenario_count"]
+            == len(INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES)
+        ),
+        "independent_secure_host_review_suite_axis_matches": (
+            independent_secure_host_review_suite["benchmark_axis"] == "independent_secure_host_review"
+        ),
+        "independent_secure_host_review_gate_required": (
+            INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "live_hostile_isolation_drills_suite_present": (
+            "live_hostile_prompt_injection_drill_behavior"
+            in live_hostile_isolation_drills_suite["scenario_names"]
+        ),
+        "live_hostile_isolation_drills_suite_scenario_count_matches": (
+            live_hostile_isolation_drills_suite["scenario_count"]
+            == len(LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES)
+        ),
+        "live_hostile_isolation_drills_suite_axis_matches": (
+            live_hostile_isolation_drills_suite["benchmark_axis"] == "live_hostile_isolation_drills"
+        ),
+        "live_hostile_isolation_drills_gate_required": (
+            LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "secure_host_recovery_authority_suite_present": (
+            "secure_host_operator_allow_deny_quarantine_behavior"
+            in secure_host_recovery_authority_suite["scenario_names"]
+        ),
+        "secure_host_recovery_authority_suite_scenario_count_matches": (
+            secure_host_recovery_authority_suite["scenario_count"]
+            == len(SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES)
+        ),
+        "secure_host_recovery_authority_suite_axis_matches": (
+            secure_host_recovery_authority_suite["benchmark_axis"] == "secure_host_recovery_authority"
+        ),
+        "secure_host_recovery_authority_gate_required": (
+            SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
         "channels_suite_present": "device_pairing_revocation_fail_closed" in channels_suite["scenario_names"],
@@ -17345,6 +17527,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_isolation_security_behavior,
         )
         for name in SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Independent secure-host review receipts expose reviewer scope, finding remediation, "
+                "isolation evidence, operator surfaces, and blocked security claims."
+            ),
+            runner=_eval_independent_secure_host_review_behavior,
+        )
+        for name in INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Live hostile isolation drills fail closed for prompt injection, private egress, "
+                "filesystem escape, credential exfiltration, permission creep, replay drift, and browser bleed."
+            ),
+            runner=_eval_independent_secure_host_review_behavior,
+        )
+        for name in LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="recovery",
+            description=(
+                "Secure-host recovery authority receipts expose allow, deny, quarantine, rotate, recover, "
+                "and post-incident audit controls after hostile security findings."
+            ),
+            runner=_eval_independent_secure_host_review_behavior,
+        )
+        for name in SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES
     ),
     EvalScenario(
         name="delegated_tool_workflow_behavior",

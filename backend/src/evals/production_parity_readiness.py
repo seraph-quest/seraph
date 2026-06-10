@@ -204,9 +204,10 @@ def production_parity_batch_contracts() -> list[dict[str, Any]]:
             "lane": "Ecosystem and Leverage",
             "proof_suites": [
                 "marketplace_grade_capability_lifecycle",
-                "governed_capability_hardening_v2",
+                "governed_capability_lifecycle_v2",
+                "capability_rollback_failure_diagnostics",
             ],
-            "operator_receipt_target": "/api/operator/governed-capability-pack-hardening",
+            "operator_receipt_target": "/api/operator/marketplace-lifecycle-maturity",
             "validation_classes": [
                 "install_update_downgrade_rollback",
                 "supply_chain_suspicion_fail_closed",

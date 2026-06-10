@@ -44,6 +44,7 @@ from src.extensions.benchmark import (
     build_governed_capability_pack_hardening_report,
     build_m9_governed_ecosystem_benchmark_report,
 )
+from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
 from src.extensions.production_reach_hardening import build_production_reach_browser_voice_report
 from src.extensions.reach_channel_canary import build_one_reach_channel_canary_report
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report, build_m8_guardian_brain_benchmark_report
@@ -3417,6 +3418,7 @@ async def get_operator_benchmark_proof():
         governed_improvement_benchmark,
         m9_governed_ecosystem_benchmark,
         governed_capability_pack_hardening,
+        marketplace_lifecycle_maturity,
     ) = await asyncio.gather(
         build_production_parity_readiness_report(),
         build_guardian_memory_benchmark_report(),
@@ -3445,6 +3447,7 @@ async def get_operator_benchmark_proof():
         build_governed_improvement_benchmark_report(),
         build_m9_governed_ecosystem_benchmark_report(),
         build_governed_capability_pack_hardening_report(),
+        build_marketplace_lifecycle_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -3480,6 +3483,7 @@ async def get_operator_benchmark_proof():
         str(governed_improvement_benchmark["summary"]["benchmark_posture"]),
         str(m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"]),
         str(governed_capability_pack_hardening["summary"]["benchmark_posture"]),
+        str(marketplace_lifecycle_maturity["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -3548,6 +3552,8 @@ async def get_operator_benchmark_proof():
             "m9_governed_ecosystem_claim_boundary": m9_governed_ecosystem_benchmark["policy"]["claim_boundary"],
             "governed_capability_pack_hardening_posture": governed_capability_pack_hardening["summary"]["benchmark_posture"],
             "governed_capability_pack_hardening_claim_boundary": governed_capability_pack_hardening["policy"]["claim_boundary"],
+            "marketplace_lifecycle_maturity_posture": marketplace_lifecycle_maturity["summary"]["benchmark_posture"],
+            "marketplace_lifecycle_maturity_claim_boundary": marketplace_lifecycle_maturity["policy"]["claim_boundary"],
         },
         "suites": suites,
         "production_parity_readiness": production_parity_readiness,
@@ -3576,6 +3582,7 @@ async def get_operator_benchmark_proof():
         "m2_execution_benchmark": m2_execution_benchmark,
         "m9_governed_ecosystem_benchmark": m9_governed_ecosystem_benchmark,
         "governed_capability_pack_hardening": governed_capability_pack_hardening,
+        "marketplace_lifecycle_maturity": marketplace_lifecycle_maturity,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -3732,6 +3739,11 @@ async def get_operator_m9_governed_ecosystem_benchmark():
 @router.get("/operator/governed-capability-pack-hardening")
 async def get_operator_governed_capability_pack_hardening():
     return await build_governed_capability_pack_hardening_report()
+
+
+@router.get("/operator/marketplace-lifecycle-maturity")
+async def get_operator_marketplace_lifecycle_maturity():
+    return await build_marketplace_lifecycle_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

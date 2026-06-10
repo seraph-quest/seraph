@@ -14,6 +14,11 @@ from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
 )
+from src.extensions.marketplace_lifecycle import (
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -343,6 +348,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["governed_capability_pack_hardening_suite_scenario_count_matches"] is True
     assert details["governed_capability_pack_hardening_suite_axis_matches"] is True
     assert details["governed_capability_pack_hardening_gate_required"] is True
+    assert details["marketplace_grade_capability_lifecycle_suite_present"] is True
+    assert details["marketplace_grade_capability_lifecycle_suite_scenario_count_matches"] is True
+    assert details["marketplace_grade_capability_lifecycle_suite_axis_matches"] is True
+    assert details["marketplace_grade_capability_lifecycle_gate_required"] is True
+    assert details["governed_capability_lifecycle_v2_suite_present"] is True
+    assert details["governed_capability_lifecycle_v2_suite_scenario_count_matches"] is True
+    assert details["governed_capability_lifecycle_v2_suite_axis_matches"] is True
+    assert details["governed_capability_lifecycle_v2_gate_required"] is True
+    assert details["capability_rollback_failure_diagnostics_suite_present"] is True
+    assert details["capability_rollback_failure_diagnostics_suite_scenario_count_matches"] is True
+    assert details["capability_rollback_failure_diagnostics_suite_axis_matches"] is True
+    assert details["capability_rollback_failure_diagnostics_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
@@ -613,6 +630,39 @@ def test_run_benchmark_suites_executes_governed_capability_pack_hardening_suite(
 
     assert summary.failed == 0
     assert result_names == set(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+
+
+def test_run_marketplace_grade_capability_lifecycle_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_grade_capability_lifecycle"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] is True for result in summary.results)
+    assert all(result.details["rollback_receipts_visible"] is True for result in summary.results)
+
+
+def test_run_governed_capability_lifecycle_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["governed_capability_lifecycle_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES)
+    assert all(result.details["cross_family_coverage_visible"] is True for result in summary.results)
+    assert all(result.details["package_count_substitution_blocked"] is True for result in summary.results)
+
+
+def test_run_capability_rollback_failure_diagnostics_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["capability_rollback_failure_diagnostics"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+    assert all(result.details["failed_update_rolls_back"] is True for result in summary.results)
+    assert all(result.details["negative_cases_fail_closed"] is True for result in summary.results)
 
 
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
@@ -1485,6 +1535,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "governed_improvement" in captured.out
     assert "m9_governed_ecosystem" in captured.out
     assert "governed_capability_pack_hardening" in captured.out
+    assert "marketplace_grade_capability_lifecycle" in captured.out
+    assert "governed_capability_lifecycle_v2" in captured.out
+    assert "capability_rollback_failure_diagnostics" in captured.out
     assert available_benchmark_suites() == (
         "production_parity_readiness",
         "guardian_memory_quality",
@@ -1524,6 +1577,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "governed_improvement",
         "m9_governed_ecosystem",
         "governed_capability_pack_hardening",
+        "marketplace_grade_capability_lifecycle",
+        "governed_capability_lifecycle_v2",
+        "capability_rollback_failure_diagnostics",
     )
 
 

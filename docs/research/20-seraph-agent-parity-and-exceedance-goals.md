@@ -308,7 +308,7 @@ This goal document is complete as a strategy artifact when:
 - the claim ledger permits any stronger language before it is used
 - the cockpit remains the receipt target for inspecting what Seraph did, why, with what authority, and how to recover
 
-Post-PR #473 status: this strategy artifact is complete, and the aggregate proof train it spawned is complete. Batch BW adds secure-host hardening proof receipts to the production parity train, but that does not complete the full product ambition. The next work remains production-grade durability, broader live reach, stronger live-learning quality, marketplace-grade capability lifecycle, broader browser/computer-use reliability, and denser operator steering over long-running work.
+Post-PR #473 status: this strategy artifact is complete, and the aggregate proof train it spawned is complete. Batches BW-BZ and CA add secure-host, durable-orchestration, reach/browser/voice, live-learning/provider-outcome, and marketplace-lifecycle receipts to the production parity train, but that does not complete the full product ambition. The next work remains live third-party marketplace attestation and operations, live human outcome studies, broader live reach, production STT/TTS/mobile execution, external browser-provider attestation, and denser operator steering over long-running work.
 
 ## Production-Grade Execution Roadmap
 

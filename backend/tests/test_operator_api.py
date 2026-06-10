@@ -6,6 +6,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
+from src.extensions.marketplace_lifecycle import (
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS,
+    MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -2138,6 +2145,81 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_marketplace_lifecycle_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "marketplace_lifecycle_maturity_receipts_visible",
+                    "benchmark_posture": "marketplace_lifecycle_maturity_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES)
+                        + len(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES)
+                        + len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+                    ),
+                    "lifecycle_action_count": 9,
+                    "family_count": 11,
+                    "negative_case_count": 5,
+                    "staged_rollout_count": 2,
+                    "permission_delta_receipt_count": 2,
+                    "risk_delta_receipt_count": 9,
+                    "rollback_receipt_count": 8,
+                    "quarantine_receipt_count": 2,
+                    "failed_update_recovery_visible": True,
+                    "cross_family_coverage_visible": True,
+                    "package_count_substitution_blocked": True,
+                    "claim_boundary": MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "marketplace_grade_capability_lifecycle": list(
+                        MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES
+                    ),
+                    "governed_capability_lifecycle_v2": list(
+                        GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES
+                    ),
+                    "capability_rollback_failure_diagnostics": list(
+                        CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "marketplace_lifecycle_maturity_receipts_visible",
+                        "lifecycle_action_count": 9,
+                        "family_count": 11,
+                        "negative_case_count": 5,
+                        "staged_rollout_count": 2,
+                        "package_count_substitution_blocked": True,
+                    },
+                    "lifecycle_receipts": [
+                        {
+                            "action": "update",
+                            "permission_delta": {"added": ["network.request"], "removed": []},
+                            "risk_delta": {"risk_after": "high"},
+                            "rollback": {"available": True},
+                        }
+                    ],
+                    "negative_cases": [
+                        {"case_id": "failed-update", "state": "rolled_back", "fails_closed": True},
+                        {"case_id": "permission-creep", "state": "quarantined", "fails_closed": True},
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+                    "blocked_claims": list(MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/extensions",
+                        "/api/extensions/validate",
+                        "/api/operator/marketplace-lifecycle-maturity",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 21, "passed": 21, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_capability_pack_hardening_report",
         AsyncMock(
             return_value={
@@ -2186,7 +2268,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 38
+    assert payload["summary"]["suite_count"] == 41
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2280,6 +2362,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["governed_capability_pack_hardening_claim_boundary"]
         == "governed_capability_pack_hardening_receipts_not_production_marketplace_security_or_ecosystem_maturity_or_package_count_superiority"
     )
+    assert (
+        payload["summary"]["marketplace_lifecycle_maturity_posture"]
+        == "marketplace_lifecycle_maturity_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["marketplace_lifecycle_maturity_claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -2319,6 +2406,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "provider_usefulness_regression" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert (
         "governed_capability_pack_hardening"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "marketplace_grade_capability_lifecycle"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "governed_capability_lifecycle_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "capability_rollback_failure_diagnostics"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -2473,6 +2572,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     hardening_suite = next(item for item in payload["suites"] if item["name"] == "governed_capability_pack_hardening")
     assert "capability_pack_review_receipt_behavior" in hardening_suite["scenario_names"]
     assert hardening_suite["scenario_count"] == 6
+    marketplace_lifecycle_suite = next(
+        item for item in payload["suites"] if item["name"] == "marketplace_grade_capability_lifecycle"
+    )
+    assert "marketplace_lifecycle_install_receipt_behavior" in marketplace_lifecycle_suite["scenario_names"]
+    assert marketplace_lifecycle_suite["scenario_count"] == len(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES)
+    governed_lifecycle_suite = next(
+        item for item in payload["suites"] if item["name"] == "governed_capability_lifecycle_v2"
+    )
+    assert "capability_lifecycle_permission_delta_behavior" in governed_lifecycle_suite["scenario_names"]
+    assert governed_lifecycle_suite["scenario_count"] == len(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES)
+    rollback_diagnostics_suite = next(
+        item for item in payload["suites"] if item["name"] == "capability_rollback_failure_diagnostics"
+    )
+    assert "capability_failed_update_recovery_behavior" in rollback_diagnostics_suite["scenario_names"]
+    assert rollback_diagnostics_suite["scenario_count"] == len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -2499,6 +2613,15 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
+    assert payload["marketplace_lifecycle_maturity"]["summary"]["operator_status"] == (
+        "marketplace_lifecycle_maturity_receipts_visible"
+    )
+    assert payload["marketplace_lifecycle_maturity"]["summary"]["lifecycle_action_count"] == 9
+    assert payload["marketplace_lifecycle_maturity"]["summary"]["family_count"] == 11
+    assert payload["marketplace_lifecycle_maturity"]["summary"]["negative_case_count"] == 5
+    assert payload["marketplace_lifecycle_maturity"]["summary"]["staged_rollout_count"] == 2
+    assert payload["marketplace_lifecycle_maturity"]["policy"]["claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
+    assert "production_secure_marketplace" in payload["marketplace_lifecycle_maturity"]["policy"]["blocked_claims"]
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
@@ -2631,6 +2754,38 @@ async def test_operator_governed_capability_pack_hardening_reports_policy_receip
     assert failed_update_receipt["runtime_access_removed"] is True
     rollback_receipt = hardening_receipts["capability_pack_rollback_ready_behavior"]
     assert {"remove_new_pack", "restore_previous_workspace_pack"} <= set(rollback_receipt["rollback_actions"])
+
+
+@pytest.mark.asyncio
+async def test_operator_marketplace_lifecycle_maturity_surface_reports_batch_ca_receipts(client):
+    resp = await client.get("/api/operator/marketplace-lifecycle-maturity")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "marketplace_lifecycle_maturity_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "marketplace_lifecycle_maturity_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES)
+        + len(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES)
+        + len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["lifecycle_action_count"] == 9
+    assert payload["summary"]["family_count"] == 11
+    assert payload["summary"]["negative_case_count"] == 5
+    assert payload["summary"]["staged_rollout_count"] == 2
+    assert payload["summary"]["failed_update_recovery_visible"] is True
+    assert payload["summary"]["package_count_substitution_blocked"] is True
+    assert payload["policy"]["claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
+    assert set(MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/marketplace-lifecycle-maturity" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["marketplace_grade_capability_lifecycle"] == list(
+        MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES
+    )
+    failed_update = next(
+        item for item in payload["contract"]["negative_cases"] if item["case_id"] == "failed-update"
+    )
+    assert failed_update["state"] == "rolled_back"
 
 
 @pytest.mark.asyncio

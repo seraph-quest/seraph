@@ -203,6 +203,17 @@ from src.guardian.live_human_outcome_learning import (
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
     build_live_human_outcome_learning_contract,
 )
+from src.guardian.independent_learning_memory_parity import (
+    INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
+    INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
+    INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
+    INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME,
+    MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
+    MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME,
+    TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
+    TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME,
+    build_independent_learning_memory_parity_contract,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
@@ -14528,6 +14539,86 @@ async def _eval_live_human_outcome_learning_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_independent_learning_memory_parity_behavior() -> dict[str, Any]:
+    contract = build_independent_learning_memory_parity_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    cohorts = contract["independent_outcome_cohorts"]
+    causal = contract["task_scoped_causal_attribution"]
+    providers = contract["memory_provider_parity_matrix"]
+    suites = benchmark_suite_report()
+    cohort_suite = next(
+        item for item in suites if item["name"] == INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME
+    )
+    causal_suite = next(
+        item for item in suites if item["name"] == TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME
+    )
+    provider_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME
+    )
+    return {
+        "operator_status_visible": summary["operator_status"]
+        == "independent_learning_memory_parity_receipts_visible",
+        "cohort_suite_visible": cohort_suite["scenario_count"] == len(INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES),
+        "causal_suite_visible": causal_suite["scenario_count"] == len(TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES),
+        "provider_suite_visible": provider_suite["scenario_count"] == len(MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES),
+        "independent_evaluators_visible": summary["independent_evaluator_count"] == summary["cohort_count"],
+        "implementation_independence_visible": (
+            summary["implementation_independent_evaluator_count"] == summary["cohort_count"]
+        ),
+        "protocol_versions_visible": summary["protocol_version_count"] >= 1,
+        "reviewer_notes_visible": summary["reviewer_notes_visible_count"] == summary["cohort_count"],
+        "sample_size_threshold_visible": summary["sample_size_total"] >= 150,
+        "consent_visible": summary["consented_cohort_count"] == summary["cohort_count"],
+        "anonymization_visible": summary["anonymized_cohort_count"] == summary["cohort_count"],
+        "adverse_event_review_visible": summary["adverse_event_review_count"] == summary["cohort_count"],
+        "bounded_outcome_claims_visible": summary["bounded_outcome_claim_count"] == summary["cohort_count"],
+        "cohort_threshold_metadata_visible": all(
+            item.get("workload")
+            and item.get("environment")
+            and item.get("baseline_or_rationale")
+            and item.get("failure_budget")
+            and item.get("raw_receipt_location")
+            and item.get("residual_gaps")
+            and item.get("recruitment_source")
+            and item.get("study_window")
+            for item in cohorts
+        ),
+        "causal_attribution_visible": summary["causal_attribution_count"] >= 3,
+        "bounded_causal_claims_visible": (
+            summary["bounded_causal_claim_count"] == summary["causal_attribution_count"]
+        ),
+        "counterfactuals_visible": all(bool(item.get("counterfactual_outcome")) for item in causal),
+        "confounders_visible": all(bool(item.get("confounders")) for item in causal),
+        "causal_task_scope_visible": all(bool(item.get("task_class")) for item in causal),
+        "rollback_authority_visible": summary["rollback_authority_count"] == summary["causal_attribution_count"],
+        "provider_matrix_visible": summary["provider_count"] >= 4 and summary["provider_parity_dimension_count"] >= 10,
+        "canonical_override_blocked": summary["provider_canonical_override_blocked_count"] >= 3,
+        "delete_export_visible": summary["delete_export_receipt_count"] == summary["provider_count"],
+        "provider_privacy_regression_visible": summary["provider_privacy_regression_count"] >= 1,
+        "provider_failed_dimensions_visible": summary["provider_failed_dimension_count"] >= 1,
+        "provider_promotion_blocks_visible": summary["provider_promotion_blocked_count"] >= 2,
+        "privacy_regression_fails_privacy_dimension": all(
+            "privacy_boundary" in (item.get("failed_dimensions") or [])
+            and "privacy_boundary" not in (item.get("passed_dimensions") or [])
+            and item.get("promotion_blocked") is True
+            for item in providers
+            if item.get("privacy_regression_detected") is True
+        ),
+        "secret_leak_zero_tolerance_visible": summary["secret_or_credential_leak_count"] == 0,
+        "provider_quarantine_visible": summary["provider_quarantine_count"] >= 2,
+        "unsafe_provider_behavior_blocked": any(
+            item.get("quarantine_state") == "quarantined"
+            and item.get("behavior_change_allowed") is False
+            for item in providers
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/independent-learning-memory-parity" in policy["receipt_surfaces"],
+    }
+
+
 def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 
@@ -15136,6 +15227,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     memory_provider_live_regression_monitor_suite = next(
         item for item in suites if item["name"] == MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME
+    )
+    independent_outcome_cohort_review_suite = next(
+        item for item in suites if item["name"] == INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME
+    )
+    task_scoped_causal_learning_suite = next(
+        item for item in suites if item["name"] == TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME
+    )
+    memory_provider_parity_matrix_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME
     )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
@@ -15762,6 +15862,45 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "memory_provider_live_regression_monitor_gate_required": (
             MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "independent_outcome_cohort_review_suite_present": (
+            "independent_outcome_protocol_evaluator_behavior"
+            in independent_outcome_cohort_review_suite["scenario_names"]
+        ),
+        "independent_outcome_cohort_review_suite_scenario_count_matches": (
+            independent_outcome_cohort_review_suite["scenario_count"]
+            == len(INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES)
+        ),
+        "independent_outcome_cohort_review_suite_axis_matches": (
+            independent_outcome_cohort_review_suite["benchmark_axis"] == "independent_outcome_cohort_review"
+        ),
+        "independent_outcome_cohort_review_gate_required": (
+            INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "task_scoped_causal_learning_suite_present": (
+            "task_scoped_causal_transfer_behavior" in task_scoped_causal_learning_suite["scenario_names"]
+        ),
+        "task_scoped_causal_learning_suite_scenario_count_matches": (
+            task_scoped_causal_learning_suite["scenario_count"] == len(TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES)
+        ),
+        "task_scoped_causal_learning_suite_axis_matches": (
+            task_scoped_causal_learning_suite["benchmark_axis"] == "task_scoped_causal_learning"
+        ),
+        "task_scoped_causal_learning_gate_required": (
+            TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "memory_provider_parity_matrix_suite_present": (
+            "memory_provider_parity_canonical_advisory_behavior"
+            in memory_provider_parity_matrix_suite["scenario_names"]
+        ),
+        "memory_provider_parity_matrix_suite_scenario_count_matches": (
+            memory_provider_parity_matrix_suite["scenario_count"] == len(MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES)
+        ),
+        "memory_provider_parity_matrix_suite_axis_matches": (
+            memory_provider_parity_matrix_suite["benchmark_axis"] == "memory_provider_parity_matrix"
+        ),
+        "memory_provider_parity_matrix_gate_required": (
+            MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -18741,6 +18880,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_live_human_outcome_learning_behavior,
         )
         for name in MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch CM exposes independent outcome cohorts with evaluator protocol, sample rationale, harm, "
+                "correction, follow-through, and bounded claim-scope receipts."
+            ),
+            runner=_eval_independent_learning_memory_parity_behavior,
+        )
+        for name in INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch CM keeps causal-learning claims scoped to measured task classes with counterfactuals, "
+                "confounders, time windows, and rollback authority."
+            ),
+            runner=_eval_independent_learning_memory_parity_behavior,
+        )
+        for name in TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch CM compares memory providers across canonical, advisory, delete/export, privacy, freshness, "
+                "conflict, usefulness, quarantine, and reinstatement dimensions without granting canonical authority."
+            ),
+            runner=_eval_independent_learning_memory_parity_behavior,
+        )
+        for name in MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

@@ -61,6 +61,7 @@ from src.guardian.brain import (
 )
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
+from src.guardian.independent_learning_memory_parity import build_independent_learning_memory_parity_report
 from src.guardian.live_human_outcome_learning import build_live_human_outcome_learning_report
 from src.guardian.live_learning_quality import build_live_guardian_learning_quality_report
 from src.guardian.multimodal_voice import build_guardian_safe_multimodal_voice_report
@@ -3421,6 +3422,7 @@ async def get_operator_benchmark_proof():
         guardian_learning_arbitration_benchmark,
         live_guardian_learning_quality,
         live_human_outcome_learning,
+        independent_learning_memory_parity,
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
@@ -3461,6 +3463,7 @@ async def get_operator_benchmark_proof():
         build_guardian_learning_arbitration_report(),
         build_live_guardian_learning_quality_report(),
         build_live_human_outcome_learning_report(),
+        build_independent_learning_memory_parity_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
@@ -3508,6 +3511,7 @@ async def get_operator_benchmark_proof():
         str(guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"]),
         str(live_guardian_learning_quality["summary"]["benchmark_posture"]),
         str(live_human_outcome_learning["summary"]["benchmark_posture"]),
+        str(independent_learning_memory_parity["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
@@ -3587,6 +3591,12 @@ async def get_operator_benchmark_proof():
             "live_guardian_learning_quality_claim_boundary": live_guardian_learning_quality["policy"]["claim_boundary"],
             "live_human_outcome_learning_posture": live_human_outcome_learning["summary"]["benchmark_posture"],
             "live_human_outcome_learning_claim_boundary": live_human_outcome_learning["policy"]["claim_boundary"],
+            "independent_learning_memory_parity_posture": independent_learning_memory_parity["summary"][
+                "benchmark_posture"
+            ],
+            "independent_learning_memory_parity_claim_boundary": independent_learning_memory_parity["policy"][
+                "claim_boundary"
+            ],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
@@ -3641,6 +3651,7 @@ async def get_operator_benchmark_proof():
         "guardian_learning_arbitration_benchmark": guardian_learning_arbitration_benchmark,
         "live_guardian_learning_quality": live_guardian_learning_quality,
         "live_human_outcome_learning": live_human_outcome_learning,
+        "independent_learning_memory_parity": independent_learning_memory_parity,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
@@ -3732,6 +3743,11 @@ async def get_operator_live_guardian_learning_quality():
 @router.get("/operator/live-human-outcome-learning-proof")
 async def get_operator_live_human_outcome_learning_proof():
     return await build_live_human_outcome_learning_report()
+
+
+@router.get("/operator/independent-learning-memory-parity")
+async def get_operator_independent_learning_memory_parity():
+    return await build_independent_learning_memory_parity_report()
 
 
 @router.get("/operator/m6-memory-superiority-benchmark")

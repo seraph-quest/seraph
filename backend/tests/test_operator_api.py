@@ -74,6 +74,10 @@ from src.guardian.live_human_outcome_learning import (
     LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
 )
+from src.guardian.independent_learning_memory_parity import (
+    INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
+    INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
+)
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
@@ -2827,7 +2831,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 72
+    assert payload["summary"]["suite_count"] == 75
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2943,6 +2947,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["live_human_outcome_learning_claim_boundary"]
         == LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["independent_learning_memory_parity_posture"]
+        == "independent_learning_memory_parity_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["independent_learning_memory_parity_claim_boundary"]
+        == INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY
     )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
@@ -3434,7 +3446,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 15
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 16
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -3594,6 +3606,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         LIVE_HUMAN_OUTCOME_LEARNING_CLAIM_BOUNDARY
     )
     assert "live_human_outcome_superiority" in payload["live_human_outcome_learning"]["policy"]["blocked_claims"]
+    assert payload["independent_learning_memory_parity"]["summary"]["operator_status"] == (
+        "independent_learning_memory_parity_receipts_visible"
+    )
+    assert payload["independent_learning_memory_parity"]["summary"]["cohort_count"] == 3
+    assert payload["independent_learning_memory_parity"]["summary"]["bounded_causal_claim_count"] == 3
+    assert payload["independent_learning_memory_parity"]["summary"]["provider_parity_dimension_count"] >= 10
+    assert payload["independent_learning_memory_parity"]["summary"]["secret_or_credential_leak_count"] == 0
+    assert payload["independent_learning_memory_parity"]["policy"]["claim_boundary"] == (
+        INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY
+    )
+    assert "full_memory_provider_parity" in (
+        payload["independent_learning_memory_parity"]["policy"]["blocked_claims"]
+    )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -3842,12 +3867,19 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 15
+    assert payload["summary"]["completed_batch_count"] == 16
     cl_batch = next(
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CL"
     )
-    assert cl_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert cl_batch["status"] == "done"
+    assert cl_batch["merged_pr"] == 516
+    cm_batch = next(
+        item for item in payload["contract"]["batch_reconciliation_receipts"]
+        if item["batch"] == "CM"
+    )
+    assert cm_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert cm_batch["merged_pr"] is None
     assert payload["summary"]["residual_gap_count"] == 6
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False
@@ -4104,6 +4136,42 @@ async def test_operator_live_human_outcome_learning_surface_reports_batch_cf_rec
         item["quarantine_state"] == "quarantined"
         and item["behavior_change_allowed"] is False
         for item in payload["contract"]["memory_provider_monitors"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_independent_learning_memory_parity_surface_reports_batch_cm_receipts(client):
+    resp = await client.get("/api/operator/independent-learning-memory-parity")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "independent_learning_memory_parity_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "independent_learning_memory_parity_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == 14
+    assert payload["summary"]["cohort_count"] == 3
+    assert payload["summary"]["independent_evaluator_count"] == 3
+    assert payload["summary"]["implementation_independent_evaluator_count"] == 3
+    assert payload["summary"]["sample_size_total"] >= 150
+    assert payload["summary"]["bounded_causal_claim_count"] == 3
+    assert payload["summary"]["provider_parity_dimension_count"] >= 10
+    assert payload["summary"]["provider_failed_dimension_count"] >= 1
+    assert payload["summary"]["provider_promotion_blocked_count"] == 2
+    assert payload["summary"]["secret_or_credential_leak_count"] == 0
+    assert payload["policy"]["claim_boundary"] == INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY
+    assert set(INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/independent-learning-memory-parity" in payload["policy"]["receipt_surfaces"]
+    assert "memory_superiority" in payload["policy"]["not_claimed"]
+    assert all(
+        item["claim_scope"].startswith("bounded_to_")
+        for item in payload["contract"]["task_scoped_causal_attribution"]
+    )
+    assert any(
+        item["quarantine_state"] == "quarantined"
+        and item["behavior_change_allowed"] is False
+        and "privacy_boundary" in item["failed_dimensions"]
+        and "privacy_boundary" not in item["passed_dimensions"]
+        and item["promotion_blocked"] is True
+        for item in payload["contract"]["memory_provider_parity_matrix"]
     )
 
 

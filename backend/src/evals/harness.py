@@ -177,6 +177,17 @@ from src.extensions.production_reach_voice_mobile import (
     PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME,
     build_production_reach_voice_mobile_contract,
 )
+from src.extensions.field_reach_operations import (
+    ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES,
+    ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME,
+    BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES,
+    BROAD_REACH_FIELD_OPERATIONS_SUITE_NAME,
+    BROAD_REACH_FIELD_OPS_BLOCKED_CLAIMS,
+    BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY,
+    VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME,
+    build_broad_reach_field_ops_contract,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -13078,6 +13089,69 @@ async def _eval_production_reach_voice_mobile_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_broad_reach_field_ops_behavior() -> dict[str, Any]:
+    contract = build_broad_reach_field_ops_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    channels = contract["provider_channel_field_matrix"]
+    voice_media = contract["voice_media_quality_operations"]
+    slo = contract["reach_slo_operations"]
+    suites = benchmark_suite_report()
+    field_ops_suite = next(
+        item for item in suites if item["name"] == BROAD_REACH_FIELD_OPERATIONS_SUITE_NAME
+    )
+    voice_ops_suite = next(
+        item for item in suites if item["name"] == VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME
+    )
+    slo_suite = next(item for item in suites if item["name"] == ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME)
+    return {
+        "operator_status_visible": summary["operator_status"] == "broad_reach_field_ops_receipts_visible",
+        "broad_reach_field_operations_suite_visible": (
+            field_ops_suite["scenario_count"] == len(BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "voice_media_quality_operations_suite_visible": (
+            voice_ops_suite["scenario_count"] == len(VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "always_available_reach_slo_suite_visible": (
+            slo_suite["scenario_count"] == len(ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES)
+        ),
+        "provider_matrix_breadth_visible": summary["channel_provider_count"] >= 6,
+        "paired_provider_field_windows_visible": summary["paired_channel_count"] >= 5,
+        "recorded_live_field_windows_visible": summary["recorded_live_field_window_count"] >= 2,
+        "auth_consent_revocation_visible": summary["auth_consent_revocation_visible_count"] >= 6,
+        "field_window_slos_visible": summary["field_window_met_count"] >= 5,
+        "rate_limit_abuse_drills_visible": summary["rate_limit_abuse_drill_count"] >= 6,
+        "degraded_recovery_drills_visible": summary["degraded_recovery_drill_count"] >= 6,
+        "cross_surface_continuity_visible": summary["continuity_receipt_count"] >= 6,
+        "safe_receipt_redaction_visible": summary["safe_receipt_redaction_count"] >= (
+            len(channels) + len(voice_media) + len(slo)
+        ),
+        "coverage_gap_visible": summary["coverage_gap_count"] >= 4,
+        "unpaired_channel_closed": any(
+            item.get("operator_identity", {}).get("pairing_state") == "requires_pairing"
+            and item.get("degraded_recovery", {}).get("unsafe_mutation_blocked") is True
+            for item in channels
+        ),
+        "voice_media_quality_gates_visible": summary["voice_media_quality_gate_pass_count"] >= 4,
+        "voice_media_latency_fallback_visible": summary["voice_media_latency_gate_pass_count"] >= 4
+        and all(item.get("fallback", {}).get("fallback_surface") for item in voice_media),
+        "voice_media_privacy_controls_visible": summary["voice_media_privacy_control_count"] >= 4,
+        "voice_media_memory_boundaries_visible": summary["voice_media_memory_boundary_count"] >= 4,
+        "slo_budget_receipts_visible": summary["slo_budget_met_count"] >= 2,
+        "provider_failure_recovery_visible": summary["provider_failure_recovery_count"] >= 2,
+        "offline_recovery_visible": summary["offline_recovery_count"] >= 2,
+        "operator_recovery_actions_visible": summary["operator_recovery_action_count"] >= 7,
+        "always_available_claim_boundary_visible": all(
+            "always_available" in item.get("claim_boundary", "") or "complete_channel" in item.get("claim_boundary", "")
+            for item in slo
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(BROAD_REACH_FIELD_OPS_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/broad-reach-field-ops" in policy["receipt_surfaces"],
+    }
+
+
 async def _eval_browser_provider_usability_behavior() -> dict[str, Any]:
     contract = build_browser_provider_usability_contract()
     summary = contract["summary"]
@@ -15879,6 +15953,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     mobile_execution_continuity_suite = next(
         item for item in suites if item["name"] == MOBILE_EXECUTION_CONTINUITY_SUITE_NAME
     )
+    broad_reach_field_operations_suite = next(
+        item for item in suites if item["name"] == BROAD_REACH_FIELD_OPERATIONS_SUITE_NAME
+    )
+    voice_media_quality_operations_suite = next(
+        item for item in suites if item["name"] == VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME
+    )
+    always_available_reach_slo_suite = next(
+        item for item in suites if item["name"] == ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME
+    )
     managed_browser_provider_attestation_suite = next(
         item for item in suites if item["name"] == MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME
     )
@@ -16507,6 +16590,46 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "mobile_execution_continuity_gate_required": (
             MOBILE_EXECUTION_CONTINUITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "broad_reach_field_operations_suite_present": (
+            "broad_reach_provider_matrix_behavior" in broad_reach_field_operations_suite["scenario_names"]
+        ),
+        "broad_reach_field_operations_suite_scenario_count_matches": (
+            broad_reach_field_operations_suite["scenario_count"]
+            == len(BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "broad_reach_field_operations_suite_axis_matches": (
+            broad_reach_field_operations_suite["benchmark_axis"] == "broad_reach_field_operations"
+        ),
+        "broad_reach_field_operations_gate_required": (
+            BROAD_REACH_FIELD_OPERATIONS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "voice_media_quality_operations_suite_present": (
+            "voice_media_field_quality_gate_behavior"
+            in voice_media_quality_operations_suite["scenario_names"]
+        ),
+        "voice_media_quality_operations_suite_scenario_count_matches": (
+            voice_media_quality_operations_suite["scenario_count"]
+            == len(VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "voice_media_quality_operations_suite_axis_matches": (
+            voice_media_quality_operations_suite["benchmark_axis"] == "voice_media_quality_operations"
+        ),
+        "voice_media_quality_operations_gate_required": (
+            VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "always_available_reach_slo_suite_present": (
+            "reach_slo_window_budget_behavior" in always_available_reach_slo_suite["scenario_names"]
+        ),
+        "always_available_reach_slo_suite_scenario_count_matches": (
+            always_available_reach_slo_suite["scenario_count"]
+            == len(ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES)
+        ),
+        "always_available_reach_slo_suite_axis_matches": (
+            always_available_reach_slo_suite["benchmark_axis"] == "always_available_reach_slo"
+        ),
+        "always_available_reach_slo_gate_required": (
+            ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "managed_browser_provider_attestation_suite_present": (
             "managed_browser_provider_identity_evidence_behavior"
@@ -19256,6 +19379,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_reach_voice_mobile_behavior,
         )
         for name in MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CU exposes broader provider/channel field operations with consent, auth, revocation, "
+                "rate limits, abuse handling, degraded recovery, coverage gaps, and cross-surface continuity."
+            ),
+            runner=_eval_broad_reach_field_ops_behavior,
+        )
+        for name in BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CU exposes voice/media field quality operations with quality gates, latency budgets, "
+                "fallback, correction, deletion, privacy, and memory-import boundaries."
+            ),
+            runner=_eval_broad_reach_field_ops_behavior,
+        )
+        for name in VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CU exposes bounded reach SLO receipts for observed windows, provider-failure drills, "
+                "offline recovery, operator recovery actions, and explicit always-available claim boundaries."
+            ),
+            runner=_eval_broad_reach_field_ops_behavior,
+        )
+        for name in ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

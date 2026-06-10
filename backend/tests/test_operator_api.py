@@ -81,6 +81,12 @@ from src.extensions.production_reach_voice_mobile import (
     PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY,
     PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
 )
+from src.extensions.field_reach_operations import (
+    ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES,
+    BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES,
+    BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY,
+    VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
+)
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
     GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
@@ -2868,7 +2874,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 95
+    assert payload["summary"]["suite_count"] == 98
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2974,6 +2980,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["production_reach_voice_mobile_claim_boundary"]
         == PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["broad_reach_field_ops_posture"]
+        == "broad_reach_field_ops_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["broad_reach_field_ops_claim_boundary"]
+        == BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY
     )
     assert (
         payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
@@ -3212,6 +3226,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "secret_egress_certification_drill"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "broad_reach_field_operations"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "voice_media_quality_operations"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "always_available_reach_slo"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
@@ -3564,6 +3590,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "mobile_execution_notification_approval_handoff_behavior" in mobile_execution_suite["scenario_names"]
     assert mobile_execution_suite["scenario_count"] == len(MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES)
+    broad_field_ops_suite = next(
+        item for item in payload["suites"] if item["name"] == "broad_reach_field_operations"
+    )
+    assert "broad_reach_provider_matrix_behavior" in broad_field_ops_suite["scenario_names"]
+    assert broad_field_ops_suite["scenario_count"] == len(BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES)
+    voice_ops_suite = next(
+        item for item in payload["suites"] if item["name"] == "voice_media_quality_operations"
+    )
+    assert "voice_media_field_quality_gate_behavior" in voice_ops_suite["scenario_names"]
+    assert voice_ops_suite["scenario_count"] == len(VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES)
+    reach_slo_suite = next(item for item in payload["suites"] if item["name"] == "always_available_reach_slo")
+    assert "reach_slo_window_budget_behavior" in reach_slo_suite["scenario_names"]
+    assert reach_slo_suite["scenario_count"] == len(ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES)
     assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
@@ -4748,6 +4787,55 @@ async def test_operator_production_reach_voice_mobile_surface_reports_batch_cl_r
     assert payload["scenario_names"]["mobile_execution_continuity"] == list(
         MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_broad_reach_field_ops_surface_reports_batch_cu_receipts(client):
+    resp = await client.get("/api/operator/broad-reach-field-ops")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "broad_reach_field_ops_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "broad_reach_field_ops_receipts_visible"
+    assert payload["summary"]["channel_provider_count"] >= 6
+    assert payload["summary"]["paired_channel_count"] >= 5
+    assert payload["summary"]["recorded_live_field_window_count"] >= 2
+    assert payload["summary"]["auth_consent_revocation_visible_count"] >= 6
+    assert payload["summary"]["rate_limit_abuse_drill_count"] >= 6
+    assert payload["summary"]["degraded_recovery_drill_count"] >= 6
+    assert payload["summary"]["continuity_receipt_count"] >= 6
+    assert payload["summary"]["safe_receipt_redaction_count"] >= 12
+    assert payload["summary"]["coverage_gap_count"] >= 4
+    assert payload["summary"]["voice_media_quality_gate_pass_count"] >= 4
+    assert payload["summary"]["voice_media_latency_gate_pass_count"] >= 4
+    assert payload["summary"]["voice_media_privacy_control_count"] >= 4
+    assert payload["summary"]["slo_budget_met_count"] >= 2
+    assert payload["summary"]["provider_failure_recovery_count"] >= 2
+    assert payload["summary"]["offline_recovery_count"] >= 2
+    assert payload["summary"]["claim_boundary"] == BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["broad_reach_field_operations"] == list(
+        BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["voice_media_quality_operations"] == list(
+        VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["always_available_reach_slo"] == list(
+        ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES
+    )
+    assert "always_available_operation" in payload["policy"]["blocked_claims"]
+    assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert payload["policy"]["safe_receipt_redaction_boundary"] == (
+        "redacted_no_message_body_secret_contact_audio_or_media_payload"
+    )
+    assert "/api/operator/broad-reach-field-ops" in payload["policy"]["receipt_surfaces"]
+    signal = next(
+        item
+        for item in payload["contract"]["provider_channel_field_matrix"]
+        if item["provider"] == "signal-bridge"
+    )
+    assert signal["operator_identity"]["pairing_state"] == "requires_pairing"
+    assert signal["field_window"]["window_met"] is False
+    assert signal["safe_receipt"]["contains_contact_identifier"] is False
 
 
 @pytest.mark.asyncio

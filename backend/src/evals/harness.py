@@ -107,6 +107,17 @@ from src.extensions.production_marketplace_security import (
     PUBLISHER_TRUST_VULNERABILITY_HANDLING_SUITE_NAME,
     build_production_marketplace_security_contract,
 )
+from src.extensions.marketplace_security_corpus import (
+    CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES,
+    CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME,
+    MARKETPLACE_SECURITY_CORPUS_BLOCKED_CLAIMS,
+    MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY,
+    MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CORPUS_SUITE_NAME,
+    PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_OPERATIONS_SUITE_NAME,
+    build_marketplace_security_corpus_contract,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -15622,6 +15633,168 @@ async def _eval_production_marketplace_security_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_marketplace_security_corpus_behavior() -> dict[str, Any]:
+    contract = build_marketplace_security_corpus_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    corpus = contract["registry_corpus"]
+    monitors = contract["continuous_monitoring"]
+    publishers = contract["publisher_trust_operations"]
+    operations = contract["lifecycle_diagnostics"]
+    network = contract["package_network_boundaries"]
+    safe_receipts = [
+        item["safe_receipt"]
+        for item in [*corpus, *monitors, *publishers, *operations, *network]
+    ]
+    suites = benchmark_suite_report()
+    corpus_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_SECURITY_CORPUS_SUITE_NAME
+    )
+    monitoring_suite = next(
+        item for item in suites if item["name"] == CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME
+    )
+    publisher_suite = next(
+        item for item in suites if item["name"] == PUBLISHER_TRUST_OPERATIONS_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    required_surfaces = {
+        "/api/operator/marketplace-security-corpus",
+        "/api/operator/production-marketplace-security",
+        "/api/operator/live-marketplace-attestation-proof",
+        "/api/operator/marketplace-lifecycle-maturity",
+        "/api/operator/benchmark-proof",
+    }
+    required_families = {
+        "managed_connectors",
+        "browser_providers",
+        "voice_media_profiles",
+        "memory_providers",
+        "workflows",
+        "skills",
+        "connectors",
+        "runbooks",
+    }
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "marketplace_security_corpus_receipts_visible"
+        ),
+        "marketplace_security_corpus_suite_visible": (
+            corpus_suite["scenario_count"] == len(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+        ),
+        "continuous_vulnerability_monitoring_suite_visible": (
+            monitoring_suite["scenario_count"] == len(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+        ),
+        "publisher_trust_operations_suite_visible": (
+            publisher_suite["scenario_count"] == len(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "corpus_package_count_matches": summary["corpus_package_count"] >= 8,
+        "package_family_count_matches": summary["package_family_count"] >= len(required_families),
+        "continuous_monitor_count_matches": summary["continuous_monitor_count"] >= 5,
+        "scanner_source_count_matches": summary["scanner_source_count"] >= 3,
+        "publisher_operation_count_matches": summary["publisher_operation_count"] >= 5,
+        "lifecycle_operation_count_matches": summary["lifecycle_operation_count"] >= 6,
+        "package_network_boundary_count_matches": summary["package_network_boundary_count"] >= 5,
+        "signature_verified_count_matches": summary["signature_verified_count"] >= 6,
+        "sbom_dependency_digest_count_matches": summary["sbom_dependency_digest_count"] == len(corpus),
+        "review_state_visible_count_matches": summary["review_state_visible_count"] == len(corpus),
+        "fresh_monitor_count_matches": summary["fresh_monitor_count"] >= 3,
+        "critical_or_high_denials_visible": summary["critical_or_high_denied_count"] >= 2,
+        "expired_waiver_denials_visible": summary["expired_waiver_denied_count"] >= 1,
+        "quarantine_reentry_diagnostics_visible": summary["quarantine_or_reentry_diagnostic_count"] >= 2,
+        "package_network_denials_visible": summary["package_network_denial_count"] == len(network),
+        "package_families_visible": required_families <= {item["family"] for item in corpus},
+        "provenance_signature_sbom_visible": all(
+            item.get("package_digest")
+            and item.get("signed_digest")
+            and item.get("publisher_id")
+            and item.get("publisher_key_state")
+            and item.get("sbom_digest")
+            and item.get("dependency_graph_digest")
+            for item in corpus
+        ),
+        "package_count_claims_blocked": all(
+            item["package_count_claim_allowed"] is False
+            for item in corpus
+        ),
+        "scanner_waiver_remediation_visible": all(
+            item.get("scanner")
+            and item.get("waiver_state")
+            and item.get("remediation_sla_hours") is not None
+            for item in monitors
+        ),
+        "critical_unwaived_package_quarantined": any(
+            item["finding_state"] == "critical_unwaived"
+            and item["operator_action"] == "deny_and_quarantine"
+            for item in monitors
+        ),
+        "stale_database_denied": any(
+            item["database_freshness_at"] < "2026-06-10"
+            and item["operator_action"] == "deny_until_rescan"
+            for item in monitors
+        ),
+        "publisher_actions_cover_allow_hold_deny": {
+            "allow_reviewed_install",
+            "hold_for_canary",
+            "deny_and_quarantine",
+            "deny_until_rescan",
+        }
+        <= {item["operator_action"] for item in publishers},
+        "publisher_identity_and_key_state_visible": all(
+            item.get("identity_status")
+            and item.get("key_rotation_state")
+            and item.get("review_state")
+            and item.get("incident_state")
+            for item in publishers
+        ),
+        "lifecycle_diagnostics_visible": all(
+            item["diagnostics_visible"] is True
+            and item["recovery_receipt_visible"] is True
+            and item.get("rollback_snapshot_id")
+            for item in operations
+        ),
+        "network_secret_workspace_denials_visible": {
+            "secret_ref_injection",
+            "workspace_escape_attempt",
+            "private_network_ssrf",
+            "redirect_to_private_network",
+            "dns_private_resolution",
+        }
+        <= {item["boundary_class"] for item in network},
+        "network_boundaries_audited": all(
+            item["decision"].startswith("deny")
+            and item["audit_visible"] is True
+            for item in network
+        ),
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt["contains_secret"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["raw_receipt_path_exposed"] is False
+                and receipt["workspace_dir_exposed"] is False
+                and receipt["package_path_exposed"] is False
+                and receipt["redaction_layer"] == "marketplace_security_corpus_v1"
+                for receipt in safe_receipts
+            )
+        ),
+        "production_secure_marketplace_claim_blocked": (
+            summary["production_secure_marketplace_claim_allowed"] is False
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(MARKETPLACE_SECURITY_CORPUS_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "marketplace_security_corpus_gate_required": (
+            MARKETPLACE_SECURITY_CORPUS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "continuous_vulnerability_monitoring_gate_required": (
+            CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "publisher_trust_operations_gate_required": (
+            PUBLISHER_TRUST_OPERATIONS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
     contract = build_production_operator_control_contract()
     summary = contract["summary"]
@@ -16333,6 +16506,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     marketplace_rollback_quarantine_diagnostics_suite = next(
         item for item in suites if item["name"] == MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SUITE_NAME
+    )
+    marketplace_security_corpus_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_SECURITY_CORPUS_SUITE_NAME
+    )
+    continuous_vulnerability_monitoring_suite = next(
+        item for item in suites if item["name"] == CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME
+    )
+    publisher_trust_operations_suite = next(
+        item for item in suites if item["name"] == PUBLISHER_TRUST_OPERATIONS_SUITE_NAME
     )
     production_operator_control_suite = next(
         item for item in suites if item["name"] == PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME
@@ -17429,6 +17611,48 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "marketplace_rollback_quarantine_diagnostics_gate_required": (
             MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_security_corpus_suite_present": (
+            "marketplace_corpus_inventory_behavior"
+            in marketplace_security_corpus_suite["scenario_names"]
+        ),
+        "marketplace_security_corpus_suite_scenario_count_matches": (
+            marketplace_security_corpus_suite["scenario_count"]
+            == len(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+        ),
+        "marketplace_security_corpus_suite_axis_matches": (
+            marketplace_security_corpus_suite["benchmark_axis"] == "marketplace_security_corpus_v1"
+        ),
+        "marketplace_security_corpus_gate_required": (
+            MARKETPLACE_SECURITY_CORPUS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "continuous_vulnerability_monitoring_suite_present": (
+            "continuous_vulnerability_source_freshness_behavior"
+            in continuous_vulnerability_monitoring_suite["scenario_names"]
+        ),
+        "continuous_vulnerability_monitoring_suite_scenario_count_matches": (
+            continuous_vulnerability_monitoring_suite["scenario_count"]
+            == len(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+        ),
+        "continuous_vulnerability_monitoring_suite_axis_matches": (
+            continuous_vulnerability_monitoring_suite["benchmark_axis"] == "continuous_vulnerability_monitoring"
+        ),
+        "continuous_vulnerability_monitoring_gate_required": (
+            CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "publisher_trust_operations_suite_present": (
+            "publisher_ops_identity_key_rotation_behavior"
+            in publisher_trust_operations_suite["scenario_names"]
+        ),
+        "publisher_trust_operations_suite_scenario_count_matches": (
+            publisher_trust_operations_suite["scenario_count"]
+            == len(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "publisher_trust_operations_suite_axis_matches": (
+            publisher_trust_operations_suite["benchmark_axis"] == "publisher_trust_operations"
+        ),
+        "publisher_trust_operations_gate_required": (
+            PUBLISHER_TRUST_OPERATIONS_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "production_operator_control_parity_suite_present": (
             "operator_control_train_receipt_behavior"
@@ -20890,6 +21114,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_marketplace_security_behavior,
         )
         for name in MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CX exposes marketplace registry corpus receipts for package families, provenance, signatures, "
+                "publisher keys, SBOM/dependency graphs, compatibility, review state, diagnostics, and claim boundaries."
+            ),
+            runner=_eval_marketplace_security_corpus_behavior,
+        )
+        for name in MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CX keeps continuous vulnerability scanner source freshness, waiver expiry, remediation SLA, "
+                "critical blocks, and stale-database denial receipts operator-visible."
+            ),
+            runner=_eval_marketplace_security_corpus_behavior,
+        )
+        for name in CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CX records publisher identity, key rotation, review freshness, quarantine/re-entry, package "
+                "network, secret, workspace denial, and operator diagnostic receipts without production-security claims."
+            ),
+            runner=_eval_marketplace_security_corpus_behavior,
+        )
+        for name in PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

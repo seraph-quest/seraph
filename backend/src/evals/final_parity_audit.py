@@ -8,6 +8,7 @@ production-ready evidence.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
@@ -38,6 +39,30 @@ OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES = (
     "operator_final_cq_merged_state_behavior",
     "operator_final_no_false_completion_behavior",
 )
+POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME = "post_cq_claim_ledger_reconciliation"
+POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES = (
+    "post_cq_issue_pr_project_reconciliation_behavior",
+    "post_cq_claim_ledger_allowed_wording_behavior",
+    "post_cq_blocked_claim_boundary_behavior",
+    "post_cq_critic_disposition_behavior",
+    "post_cq_no_duplicate_tracking_behavior",
+)
+REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME = "reference_system_source_refresh_v2"
+REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES = (
+    "reference_system_source_urls_access_date_behavior",
+    "reference_system_pressure_axis_mapping_behavior",
+    "reference_system_access_caveat_behavior",
+    "reference_system_stale_source_uncertainty_behavior",
+    "reference_system_claim_lift_block_behavior",
+)
+FALSE_COMPLETION_SCAN_V2_SUITE_NAME = "false_completion_scan_v2"
+FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES = (
+    "false_completion_docs_scan_behavior",
+    "false_completion_code_operator_scan_behavior",
+    "false_completion_issue_pr_scan_behavior",
+    "false_completion_claim_ledger_replacement_behavior",
+    "false_completion_final_gate_behavior",
+)
 FINAL_PARITY_AUDIT_CLAIM_BOUNDARY = (
     "final_claim_lift_audit_permits_only_exact_bounded_wording_not_full_parity"
 )
@@ -57,6 +82,75 @@ FINAL_PARITY_AUDIT_BLOCKED_CLAIMS = (
     "guardian_intelligence_superiority",
     "memory_superiority",
     "exactly_once_or_crash_proof_orchestration",
+)
+POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY = (
+    "post_cq_final_audit_permits_only_exact_bounded_receipt_wording_not_full_parity"
+)
+POST_CQ_CLAIM_READINESS_ALLOWED_WORDING = (
+    "Seraph has completed a post-CQ production-evidence claim-readiness audit "
+    "with bounded receipts."
+)
+POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS = (
+    "fully_at_parity",
+    "reference_systems_exceeded",
+    "production_ready_product",
+    "secure_private_by_default",
+    "production_security_solved",
+    "ironclaw_class_secure_execution",
+    "openclaw_class_reach",
+    "voice_or_multimodal_parity",
+    "safe_browser_automation",
+    "safe_autonomous_browser_computer_use",
+    "full_browser_parity",
+    "production_secure_marketplace",
+    "third_party_package_security_solved",
+    "solved_operator_control",
+    "best_cockpit",
+    "world_class_cockpit",
+    "guardian_intelligence_superiority",
+    "solved_live_or_long_term_learning",
+    "live_human_outcome_superiority",
+    "memory_superiority",
+    "full_memory_provider_parity",
+    "exactly_once_or_crash_proof_orchestration",
+    "hardware_backed_tee_cvm_wasm_or_container_isolation_implemented_or_certified",
+)
+POST_CQ_FALSE_COMPLETION_FORBIDDEN_PHRASES = (
+    "Seraph is fully at parity",
+    "Seraph has exceeded Hermes/OpenClaw/IronClaw",
+    "Seraph is production-ready",
+    "Seraph is secure/private by default",
+    "Seraph has IronClaw-class secure execution",
+    "Seraph has OpenClaw-class reach",
+    "Seraph has safe browser automation",
+    "Seraph has safe autonomous browser/computer use",
+    "Seraph has full browser parity",
+    "Seraph has a production-secure marketplace",
+    "Third-party package security is solved",
+    "Operator control is solved",
+    "Seraph has guardian intelligence superiority",
+    "Seraph has memory superiority",
+    "Seraph has exactly-once or crash-proof orchestration",
+    "TEE/CVM/Wasm/container isolation is implemented or certified",
+)
+POST_CQ_FALSE_COMPLETION_ALLOWED_CONTEXT_MARKERS = (
+    "blocked",
+    "blocked_claims",
+    "not claim",
+    "not claimed",
+    "not_claimed",
+    "not itself prove",
+    "without claiming",
+    "does not permit",
+    "does not prove",
+    "remain blocked",
+    "remains blocked",
+    "still blocked",
+    "aspirational",
+    "forbidden",
+    "replacement",
+    "false-completion",
+    "false_completion",
 )
 
 
@@ -1066,6 +1160,462 @@ async def build_final_parity_readiness_report() -> dict[str, Any]:
         },
         "contract": contract,
         "failure_report": _failure_report(summary, suite_name="final_parity_audit"),
+        "policy": contract["policy"],
+        "latest_run": {
+            "total": int(getattr(summary, "total", 0) or 0),
+            "passed": int(getattr(summary, "passed", 0) or 0),
+            "failed": int(getattr(summary, "failed", 0) or 0),
+            "duration_ms": int(getattr(summary, "duration_ms", 0) or 0),
+        },
+    }
+
+
+def post_cq_claim_readiness_policy_payload() -> dict[str, Any]:
+    return {
+        "benchmark_suites": [
+            POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+            REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
+            FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
+        ],
+        "claim_boundary": POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+        "allowed_wording": POST_CQ_CLAIM_READINESS_ALLOWED_WORDING,
+        "source_policy": (
+            "post-CQ competitor-dependent wording requires official/source URLs checked on 2026-06-11, "
+            "pressure-axis mapping, access caveats, and explicit stale-source uncertainty"
+        ),
+        "board_policy": (
+            "Batch CZ reconciles parent #475 and batches #522-#530 without creating duplicate parent issues "
+            "or mutating the historical CQ final-audit contract"
+        ),
+        "claim_policy": (
+            "only the exact post-CQ bounded receipt wording is allowed; full parity, production readiness, "
+            "security, reach, browser, marketplace, operator-control, guardian-superiority, memory-superiority, "
+            "and reference-system-exceeded wording remains blocked"
+        ),
+        "receipt_surfaces": [
+            "/api/operator/post-cq-claim-readiness",
+            "/api/operator/benchmark-proof",
+            "/api/operator/final-parity-readiness-report",
+            "/api/operator/continuous-orchestration-slo",
+            "/api/operator/container-grade-secure-host",
+            "/api/operator/broad-reach-field-ops",
+            "/api/operator/longitudinal-guardian-outcomes",
+            "/api/operator/operator-control-population-study",
+            "/api/operator/marketplace-security-corpus",
+            "/api/operator/browser-computer-use-parity-depth",
+            "docs/research/19-strategy-claim-ledger.md",
+            "docs/research/20-seraph-agent-parity-and-exceedance-goals.md",
+            "docs/implementation/16-agent-parity-execution-roadmap.md",
+            "docs/implementation/09-benchmark-status.md",
+        ],
+        "blocked_claims": list(POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS),
+        "not_claimed": [
+            "full_product_parity",
+            "reference_systems_exceeded",
+            "production_ready",
+            "ironclaw_class_secure_execution",
+            "openclaw_class_reach",
+            "safe_autonomous_browser_computer_use",
+            "production_secure_marketplace",
+        ],
+    }
+
+
+def reference_system_source_refresh_v2_receipts() -> list[dict[str, Any]]:
+    receipts = current_competitor_source_receipts()
+    source_line_receipts = {
+        "hermes-features-overview": "lines_45_82_cover_memory_context_delegation_browser_voice_integrations",
+        "hermes-tools-toolsets": "lines_61_82_cover_tool_registry_categories_and_gateway",
+        "openclaw-control-ui": "docs_navigation_confirms_gateway_ops_control_surface",
+        "openclaw-browser": "lines_63_69_and_462_482_cover_profiles_tabs_snapshots_ssrf_and_control_api",
+        "openclaw-plugins": "lines_57_93_cover_plugin_capability_scope_install_sources_allow_deny",
+        "ironclaw-security-site": "lines_40_160_cover_tee_vault_allowlist_wasm_and_near_ai_cloud_pressure",
+        "ironclaw-feature-parity-matrix": "lines_0_3_cover_feature_matrix_and_2026_03_10_review_date",
+    }
+    for receipt in receipts:
+        receipt["checked_on"] = "2026-06-11"
+        receipt["accessed_on"] = "2026-06-11"
+        receipt["verification_method"] = "static_snapshot_external_critic_reachability_review_2026_06_11"
+        receipt["runtime_fetch_performed"] = False
+        receipt["external_reachability_receipt"] = (
+            "Independent Critic/Contrarian Rawls reported the named source URLs reachable on 2026-06-11; "
+            "the deterministic eval does not perform network fetches."
+        )
+        receipt["source_refresh_version"] = "v2_post_cq"
+        receipt["source_freshness_status"] = "external_critic_reachability_reviewed_on_2026_06_11"
+        receipt["evidence_locator"] = source_line_receipts.get(receipt["source_id"], "current_source_opened")
+        receipt["claim_lift_allowed"] = False
+    return receipts
+
+
+def post_cq_batch_reconciliation_receipts() -> list[dict[str, Any]]:
+    completed_batches = [
+        ("CR", 522, "post_cq_shipped_truth_and_board_baseline_reconciliation", 531),
+        ("CS", 523, "continuous_orchestration_slo_monitor", 532),
+        ("CT", 524, "container_grade_capability_isolation", 533),
+        ("CU", 525, "broad_reach_field_operations", 534),
+        ("CV", 526, "longitudinal_guardian_outcome_study", 535),
+        ("CW", 527, "operator_control_population_study", 536),
+        ("CX", 528, "marketplace_security_corpus_v1", 537),
+        ("CY", 529, "browser_task_breadth_matrix", 538),
+    ]
+    receipts = [
+        {
+            "batch": batch,
+            "issue": issue,
+            "primary_suite": suite,
+            "merged_pr": pr,
+            "status": "done",
+            "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "reconciliation_mode": "static_issue_pr_receipt_snapshot",
+            "live_project_verification_required": True,
+            "operator_visible": True,
+        }
+        for batch, issue, suite, pr in completed_batches
+    ]
+    receipts.append({
+        "batch": "CZ",
+        "issue": 530,
+        "primary_suite": POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+        "merged_pr": None,
+        "closing_pr": "GitHub linked PR is authoritative after creation",
+        "status": "cz_gate_receipts_visible",
+        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
+        "project_status": "GitHub Project is authoritative for live PR state",
+        "project_pr": "GitHub Project is authoritative for live PR state",
+        "code_review": "GitHub Project is authoritative for live review state",
+        "reconciliation_mode": "external_github_project_workflow_required",
+        "live_project_verification_required": True,
+        "operator_visible": True,
+    })
+    return receipts
+
+
+def post_cq_claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
+    rows = [
+        ("SCL-034", "continuous_orchestration_slo_and_recovery_operations", 523, "/api/operator/continuous-orchestration-slo"),
+        ("SCL-035", "container_grade_secure_host_validation", 524, "/api/operator/container-grade-secure-host"),
+        ("SCL-036", "broad_reach_field_and_voice_media_operations", 525, "/api/operator/broad-reach-field-ops"),
+        ("SCL-037", "longitudinal_guardian_learning_and_memory_outcomes", 526, "/api/operator/longitudinal-guardian-outcomes"),
+        ("SCL-038", "dense_operator_mission_control_and_long_work_debugging", 527, "/api/operator/operator-control-population-study"),
+        ("SCL-039", "marketplace_registry_corpus_and_continuous_security_operations", 528, "/api/operator/marketplace-security-corpus"),
+        ("SCL-040", "managed_browser_computer_use_parity_depth", 529, "/api/operator/browser-computer-use-parity-depth"),
+        ("SCL-041", "post_cq_final_production_evidence_claim_readiness", 530, "/api/operator/post-cq-claim-readiness"),
+    ]
+    receipts = []
+    for claim_id, area, issue, surface in rows:
+        receipts.append({
+            "claim_id": claim_id,
+            "area": area,
+            "issue_links": [475, issue],
+            "operator_surface": surface,
+            "allowed_wording": (
+                POST_CQ_CLAIM_READINESS_ALLOWED_WORDING
+                if claim_id == "SCL-041"
+                else "bounded post-CQ production-evidence receipts are visible"
+            ),
+            "blocked_claims": list(POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS),
+            "status": (
+                "backed_for_post_cq_bounded_claim_readiness_receipts"
+                if claim_id == "SCL-041"
+                else "backed_for_bounded_post_cq_receipts_broad_claims_continue_blocked"
+            ),
+        })
+    return receipts
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _scan_false_completion_scope(globs: list[str]) -> dict[str, Any]:
+    root = _repo_root()
+    scanned_files: set[str] = set()
+    violations: list[dict[str, Any]] = []
+    for pattern in globs:
+        for path in root.glob(pattern):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            relative_path = path.relative_to(root).as_posix()
+            scanned_files.add(relative_path)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                lower_line = line.lower()
+                is_claim_ledger_control_row = (
+                    relative_path == "docs/research/19-strategy-claim-ledger.md"
+                    and (line.startswith("| `SCL-") or line.startswith("| \""))
+                )
+                is_scanner_forbidden_phrase_constant = (
+                    relative_path == "backend/src/evals/final_parity_audit.py"
+                    and line.strip().startswith("\"")
+                    and any(
+                        phrase.lower() in lower_line
+                        for phrase in POST_CQ_FALSE_COMPLETION_FORBIDDEN_PHRASES
+                    )
+                )
+                if is_claim_ledger_control_row or is_scanner_forbidden_phrase_constant:
+                    continue
+                has_allowed_context = any(
+                    marker in lower_line
+                    for marker in POST_CQ_FALSE_COMPLETION_ALLOWED_CONTEXT_MARKERS
+                )
+                if has_allowed_context:
+                    continue
+                for phrase in POST_CQ_FALSE_COMPLETION_FORBIDDEN_PHRASES:
+                    if phrase.lower() in lower_line:
+                        violations.append({
+                            "file": relative_path,
+                            "line": line_number,
+                            "phrase": phrase,
+                        })
+    return {
+        "files_scanned": sorted(scanned_files),
+        "violations": violations,
+        "violations_found": len(violations),
+    }
+
+
+def false_completion_scan_v2_receipts() -> list[dict[str, Any]]:
+    docs_scope = [
+        "README.md",
+        "SECURITY.md",
+        "SUPPORT.md",
+        "docs/research/**/*.md",
+        "docs/implementation/**/*.md",
+        "docs/docs/**/*.md",
+    ]
+    code_operator_scope = [
+        "backend/src/api/operator.py",
+        "backend/src/evals/**/*.py",
+        "backend/src/extensions/**/*.py",
+        "backend/src/security/**/*.py",
+        "backend/src/guardian/**/*.py",
+        "backend/src/memory/**/*.py",
+        "backend/src/cockpit/**/*.py",
+        "frontend/src/**/*.ts",
+        "frontend/src/**/*.tsx",
+        "backend/tests/**/*.py",
+        "scripts/**/*.py",
+    ]
+    allowed_contexts = [
+        "claim ledger blocked-claim rows",
+        "benchmark suite identifiers",
+        "route names that include historical parity language",
+        "explicit target or aspirational wording",
+        "negative assertions that stronger claims remain blocked",
+    ]
+    docs_scan = _scan_false_completion_scope(docs_scope)
+    code_scan = _scan_false_completion_scope(code_operator_scope)
+    return [
+        {
+            "scan_id": "post-cq-docs-false-completion-scan",
+            "scan_mode": "local_repository_file_scan",
+            "scope": docs_scope,
+            "files_scanned_count": len(docs_scan["files_scanned"]),
+            "forbidden_phrases": list(POST_CQ_FALSE_COMPLETION_FORBIDDEN_PHRASES),
+            "allowed_contexts": allowed_contexts,
+            "violations_found": docs_scan["violations_found"],
+            "violations": docs_scan["violations"],
+            "replacement_rule": "use exact SCL-041 bounded receipt wording or a blocked-claim sentence",
+        },
+        {
+            "scan_id": "post-cq-code-operator-false-completion-scan",
+            "scan_mode": "local_repository_file_scan",
+            "scope": code_operator_scope,
+            "files_scanned_count": len(code_scan["files_scanned"]),
+            "forbidden_phrases": list(POST_CQ_FALSE_COMPLETION_FORBIDDEN_PHRASES),
+            "allowed_contexts": allowed_contexts,
+            "violations_found": code_scan["violations_found"],
+            "violations": code_scan["violations"],
+            "replacement_rule": "operator payloads must expose booleans showing broad claims remain false",
+        },
+        {
+            "scan_id": "post-cq-github-false-completion-scan",
+            "scan_mode": "external_github_pr_issue_review_required",
+            "scope": [
+                "GitHub issue #530 completion receipt",
+                "GitHub parent issue #475 disposition comment",
+                "CZ PR body before ready-for-review",
+                "GitHub Project fields for #530",
+            ],
+            "runtime_static_scan": False,
+            "violations_found": None,
+            "external_scan_status": "required_before_pr_creation_or_merge",
+            "replacement_rule": "PR/issue bodies must distinguish audit completion from product-wide parity",
+            "external_authority": "PR body, issue comments, and GitHub Project fields are checked during PR creation/merge workflow",
+        },
+    ]
+
+
+def post_cq_critic_disposition_receipts() -> list[dict[str, Any]]:
+    return [
+        {
+            "review_id": "rawls-cz-critic-source-refresh-static-boundary",
+            "role": "Critic/Contrarian",
+            "reviewer": "Rawls",
+            "review_agent_id": "019eb3b1-8ea1-7832-8e65-7af456350d08",
+            "finding": "source reachability was self-attested by the deterministic contract instead of fetched",
+            "disposition": "accepted_fixed",
+            "resolution": "source receipts now declare static snapshot mode, no runtime fetch, and external critic reachability review",
+            "operator_visible": True,
+        },
+        {
+            "review_id": "rawls-cz-critic-github-scan-boundary",
+            "role": "Critic/Contrarian",
+            "reviewer": "Rawls",
+            "review_agent_id": "019eb3b1-8ea1-7832-8e65-7af456350d08",
+            "finding": "GitHub issue/PR false-completion scan is external and must not be counted as a local passing scan",
+            "disposition": "accepted_fixed",
+            "resolution": "summary separates local clean scans from the required external GitHub workflow scan",
+            "operator_visible": True,
+        },
+        {
+            "review_id": "rawls-cz-critic-board-reconciliation-boundary",
+            "role": "Critic/Contrarian",
+            "reviewer": "Rawls",
+            "review_agent_id": "019eb3b1-8ea1-7832-8e65-7af456350d08",
+            "finding": "Project reconciliation is a static receipt snapshot unless GitHub Project is queried in the PR workflow",
+            "disposition": "accepted_fixed",
+            "resolution": "batch receipts now expose static snapshot mode plus live Project verification requirement",
+            "operator_visible": True,
+        },
+        {
+            "review_id": "rawls-cz-critic-doc-wording-boundary",
+            "role": "Critic/Contrarian",
+            "reviewer": "Rawls",
+            "review_agent_id": "019eb3b1-8ea1-7832-8e65-7af456350d08",
+            "finding": "docs were ahead of evidence when they implied source refresh, false-completion scan, board reconciliation, and critic disposition were all locally proven",
+            "disposition": "accepted_fixed",
+            "resolution": "docs and receipts now distinguish deterministic local evidence from external workflow gates",
+            "operator_visible": True,
+        },
+    ]
+
+
+def build_post_cq_claim_readiness_contract() -> dict[str, Any]:
+    sources = reference_system_source_refresh_v2_receipts()
+    batches = post_cq_batch_reconciliation_receipts()
+    claims = post_cq_claim_ledger_reconciliation_receipts()
+    scans = false_completion_scan_v2_receipts()
+    critic = post_cq_critic_disposition_receipts()
+    policy = post_cq_claim_readiness_policy_payload()
+    completed_batches = [item for item in batches if item["status"] == "done"]
+    local_scans = [item for item in scans if item.get("scan_mode") == "local_repository_file_scan"]
+    external_scans = [item for item in scans if item.get("scan_mode") == "external_github_pr_issue_review_required"]
+    local_false_completion_violation_count = sum(
+        int(item["violations_found"])
+        for item in local_scans
+        if isinstance(item.get("violations_found"), int)
+    )
+    return {
+        "summary": {
+            "operator_status": "post_cq_claim_readiness_visible",
+            "source_receipt_count": len(sources),
+            "competitor_count": len({item["system"] for item in sources}),
+            "current_source_date": "2026-06-11",
+            "completed_post_cq_batch_count": len(completed_batches),
+            "post_cq_batch_count": len(batches),
+            "cz_batch_status": next(item["status"] for item in batches if item["batch"] == "CZ"),
+            "claim_ledger_receipt_count": len(claims),
+            "false_completion_scan_count": len(scans),
+            "local_false_completion_violation_count": local_false_completion_violation_count,
+            "false_completion_violation_count": local_false_completion_violation_count,
+            "all_local_false_completion_scans_clean": all(item.get("violations_found") == 0 for item in local_scans),
+            "false_completion_external_tracking_scan_required": any(
+                item.get("scan_mode") == "external_github_pr_issue_review_required"
+                for item in scans
+            ),
+            "false_completion_external_tracking_scan_pending": any(
+                item.get("external_scan_status") == "required_before_pr_creation_or_merge"
+                for item in external_scans
+            ),
+            "false_completion_public_claim_gate_clear": False,
+            "critic_disposition_count": len(critic),
+            "all_sources_have_urls_and_dates": all(item.get("url") and item.get("checked_on") for item in sources),
+            "all_sources_static_snapshot_no_runtime_fetch": all(
+                item.get("runtime_fetch_performed") is False for item in sources
+            ),
+            "all_sources_have_external_critic_reachability_receipts": all(
+                item.get("external_reachability_receipt") for item in sources
+            ),
+            "all_sources_reachable_with_caveats": all(
+                item.get("access_status") == "reachable"
+                and item.get("access_caveat")
+                and item.get("competitor_claim_uncertainty")
+                for item in sources
+            ),
+            "all_completed_post_cq_batches_done_merged_passed": all(
+                item["project_status"] == "Done"
+                and item["project_pr"] == "Merged"
+                and item["code_review"] == "Passed"
+                for item in completed_batches
+            ),
+            "live_project_verification_required": any(
+                item.get("live_project_verification_required") for item in batches
+            ),
+            "post_cq_bounded_claim_readiness_wording_allowed": True,
+            "post_cq_bounded_claim_readiness_allowed_wording": POST_CQ_CLAIM_READINESS_ALLOWED_WORDING,
+            "full_parity_claim_allowed": False,
+            "reference_systems_exceeded_claim_allowed": False,
+            "production_ready_claim_allowed": False,
+            "secure_private_by_default_claim_allowed": False,
+            "claim_boundary": POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+        },
+        "reference_system_source_refresh_v2": sources,
+        "post_cq_batch_reconciliation_receipts": batches,
+        "post_cq_claim_ledger_reconciliation": claims,
+        "false_completion_scan_v2": scans,
+        "critic_disposition_receipts": critic,
+        "policy": policy,
+    }
+
+
+async def _run_post_cq_claim_readiness_suites():
+    from src.evals.harness import run_benchmark_suites
+
+    return await run_benchmark_suites([
+        POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+        REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
+        FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
+    ])
+
+
+async def build_post_cq_claim_readiness_report() -> dict[str, Any]:
+    summary = await _run_post_cq_claim_readiness_suites()
+    contract = build_post_cq_claim_readiness_contract()
+    healthy = int(getattr(summary, "failed", 0) or 0) == 0
+    return {
+        "summary": {
+            **contract["summary"],
+            "benchmark_posture": (
+                "post_cq_claim_readiness_ci_gated_operator_visible"
+                if healthy
+                else "post_cq_claim_readiness_regressions_detected_operator_visible"
+            ),
+            "scenario_count": (
+                len(POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+                + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES)
+                + len(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
+            ),
+            "active_failure_count": int(getattr(summary, "failed", 0) or 0),
+        },
+        "scenario_names": {
+            POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME: list(
+                POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES
+            ),
+            REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME: list(
+                REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES
+            ),
+            FALSE_COMPLETION_SCAN_V2_SUITE_NAME: list(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES),
+        },
+        "contract": contract,
+        "failure_report": _failure_report(summary, suite_name="post_cq_claim_readiness"),
         "policy": contract["policy"],
         "latest_run": {
             "total": int(getattr(summary, "total", 0) or 0),

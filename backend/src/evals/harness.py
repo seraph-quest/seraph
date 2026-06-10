@@ -60,9 +60,18 @@ from src.evals.final_parity_audit import (
     FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
+    POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
     build_final_parity_audit_contract,
+    build_post_cq_claim_readiness_contract,
 )
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
@@ -16382,6 +16391,133 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_cq_claim_readiness_behavior() -> dict[str, Any]:
+    contract = build_post_cq_claim_readiness_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    sources = contract["reference_system_source_refresh_v2"]
+    batches = contract["post_cq_batch_reconciliation_receipts"]
+    claims = contract["post_cq_claim_ledger_reconciliation"]
+    scans = contract["false_completion_scan_v2"]
+    critic = contract["critic_disposition_receipts"]
+    suites = benchmark_suite_report()
+    post_cq_suite = next(
+        item for item in suites if item["name"] == POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME
+    )
+    source_refresh_suite = next(
+        item for item in suites if item["name"] == REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME
+    )
+    false_completion_suite = next(
+        item for item in suites if item["name"] == FALSE_COMPLETION_SCAN_V2_SUITE_NAME
+    )
+    completed_batches = [item for item in batches if item["status"] == "done"]
+    required_systems = {"Hermes", "OpenClaw", "IronClaw"}
+    required_issue_links = {475, 522, 523, 524, 525, 526, 527, 528, 529, 530}
+    required_claim_rows = {"SCL-034", "SCL-035", "SCL-036", "SCL-037", "SCL-038", "SCL-039", "SCL-040", "SCL-041"}
+    required_surfaces = {
+        "/api/operator/post-cq-claim-readiness",
+        "/api/operator/benchmark-proof",
+        "/api/operator/final-parity-readiness-report",
+        "/api/operator/continuous-orchestration-slo",
+        "/api/operator/container-grade-secure-host",
+        "/api/operator/broad-reach-field-ops",
+        "/api/operator/longitudinal-guardian-outcomes",
+        "/api/operator/operator-control-population-study",
+        "/api/operator/marketplace-security-corpus",
+        "/api/operator/browser-computer-use-parity-depth",
+    }
+    blocked_claims = set(policy["blocked_claims"])
+    return {
+        "operator_status_visible": summary["operator_status"] == "post_cq_claim_readiness_visible",
+        "post_cq_suite_visible": (
+            post_cq_suite["scenario_count"] == len(POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+        ),
+        "source_refresh_suite_visible": (
+            source_refresh_suite["scenario_count"] == len(REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES)
+        ),
+        "false_completion_suite_visible": (
+            false_completion_suite["scenario_count"] == len(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
+        ),
+        "current_sources_have_urls_and_dates": summary["all_sources_have_urls_and_dates"] is True,
+        "all_sources_checked_today": {item["checked_on"] for item in sources} == {"2026-06-11"},
+        "source_refresh_static_snapshot_boundary_visible": (
+            summary["all_sources_static_snapshot_no_runtime_fetch"] is True
+            and summary["all_sources_have_external_critic_reachability_receipts"] is True
+            and all(item.get("runtime_fetch_performed") is False for item in sources)
+        ),
+        "current_sources_have_access_caveats": summary["all_sources_reachable_with_caveats"] is True,
+        "competitor_systems_visible": required_systems <= {item["system"] for item in sources},
+        "pressure_axes_visible": all(item.get("pressure_axes") for item in sources),
+        "source_refresh_v2_visible": all(item.get("source_refresh_version") == "v2_post_cq" for item in sources),
+        "source_claim_use_bounded": all(item["claim_use"] == "source_backed_pressure_only" for item in sources),
+        "source_claim_lift_blocked": all(item.get("claim_lift_allowed") is False for item in sources),
+        "completed_post_cq_batches_done_merged_passed": (
+            len(completed_batches) == 8 and summary["all_completed_post_cq_batches_done_merged_passed"] is True
+        ),
+        "cy_completed_by_pr_538": (
+            next(item for item in batches if item["batch"] == "CY")["issue"] == 529
+            and next(item for item in batches if item["batch"] == "CY")["merged_pr"] == 538
+            and next(item for item in batches if item["batch"] == "CY")["project_pr"] == "Merged"
+        ),
+        "cz_gate_visible": (
+            next(item for item in batches if item["batch"] == "CZ")["issue"] == 530
+            and next(item for item in batches if item["batch"] == "CZ")["status"]
+            == "cz_gate_receipts_visible"
+        ),
+        "project_fields_required_visible": all(
+            {"Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"}
+            <= set(item["project_fields_required"])
+            for item in batches
+        ),
+        "live_project_verification_boundary_visible": (
+            summary["live_project_verification_required"] is True
+            and all(item.get("live_project_verification_required") is True for item in batches)
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS) <= blocked_claims,
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "claim_ledger_issue_links_visible": required_issue_links <= {
+            issue
+            for item in claims
+            for issue in item.get("issue_links", [])
+        },
+        "claim_ledger_rows_visible": required_claim_rows <= {item["claim_id"] for item in claims},
+        "post_cq_allowed_wording_exact": summary["post_cq_bounded_claim_readiness_allowed_wording"] == (
+            "Seraph has completed a post-CQ production-evidence claim-readiness audit with bounded receipts."
+        ),
+        "full_parity_claim_still_blocked": (
+            summary["full_parity_claim_allowed"] is False
+            and summary["reference_systems_exceeded_claim_allowed"] is False
+            and summary["production_ready_claim_allowed"] is False
+            and summary["secure_private_by_default_claim_allowed"] is False
+        ),
+        "false_completion_scans_visible": (
+            summary["false_completion_scan_count"] >= 3
+            and summary["local_false_completion_violation_count"] == 0
+            and summary["all_local_false_completion_scans_clean"] is True
+            and all(
+                item["violations_found"] == 0
+                for item in scans
+                if item.get("scan_mode") == "local_repository_file_scan"
+            )
+            and any(
+                item.get("scan_mode") == "external_github_pr_issue_review_required"
+                and item.get("runtime_static_scan") is False
+                and item.get("external_scan_status") == "required_before_pr_creation_or_merge"
+                for item in scans
+            )
+            and summary["false_completion_external_tracking_scan_required"] is True
+            and summary["false_completion_external_tracking_scan_pending"] is True
+            and summary["false_completion_public_claim_gate_clear"] is False
+        ),
+        "critic_disposition_visible": summary["critic_disposition_count"] >= 4,
+        "critic_disposition_accepted": all(item["disposition"].startswith("accepted") for item in critic),
+        "no_duplicate_tracking": (
+            {item["issue"] for item in batches} == {522, 523, 524, 525, 526, 527, 528, 529, 530}
+        ),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -21435,6 +21571,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_final_parity_audit_behavior,
         )
         for name in OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch CZ reconciles post-CQ issue, PR, Project, operator, and claim-ledger receipts while "
+                "preserving broad blocked claims."
+            ),
+            runner=_eval_post_cq_claim_readiness_behavior,
+        )
+        for name in POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch CZ refreshes Hermes, OpenClaw, and IronClaw source receipts as pressure evidence only "
+                "with 2026-06-11 access dates and caveats."
+            ),
+            runner=_eval_post_cq_claim_readiness_behavior,
+        )
+        for name in REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch CZ scans docs, code, operator surfaces, issues, and PR wording for false completion "
+                "or unsupported broad parity claims."
+            ),
+            runner=_eval_post_cq_claim_readiness_behavior,
+        )
+        for name in FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES
     ),
     EvalScenario(
         name="guardian_feedback_loop",

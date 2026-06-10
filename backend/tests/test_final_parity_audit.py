@@ -5,9 +5,16 @@ from src.evals.final_parity_audit import (
     FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
     FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
+    POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     build_final_parity_audit_contract,
     build_final_parity_readiness_report,
+    build_post_cq_claim_readiness_contract,
+    build_post_cq_claim_readiness_report,
 )
 
 
@@ -210,3 +217,94 @@ def test_final_parity_readiness_report_runs_all_batch_ci_suites():
     assert payload["summary"]["active_failure_count"] == 0
     assert payload["failure_report"] == []
     assert payload["policy"]["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
+
+
+def test_post_cq_claim_readiness_contract_reconciles_sources_batches_and_claims():
+    contract = build_post_cq_claim_readiness_contract()
+    summary = contract["summary"]
+    sources = contract["reference_system_source_refresh_v2"]
+    batches = contract["post_cq_batch_reconciliation_receipts"]
+    claims = contract["post_cq_claim_ledger_reconciliation"]
+
+    assert summary["operator_status"] == "post_cq_claim_readiness_visible"
+    assert summary["source_receipt_count"] == 7
+    assert summary["competitor_count"] == 3
+    assert summary["current_source_date"] == "2026-06-11"
+    assert summary["completed_post_cq_batch_count"] == 8
+    assert summary["post_cq_batch_count"] == 9
+    assert summary["cz_batch_status"] == "cz_gate_receipts_visible"
+    assert summary["all_sources_have_urls_and_dates"] is True
+    assert summary["all_sources_static_snapshot_no_runtime_fetch"] is True
+    assert summary["all_sources_have_external_critic_reachability_receipts"] is True
+    assert summary["all_sources_reachable_with_caveats"] is True
+    assert all(item["source_refresh_version"] == "v2_post_cq" for item in sources)
+    assert all(item["checked_on"] == "2026-06-11" for item in sources)
+    assert all(item["runtime_fetch_performed"] is False for item in sources)
+    assert all(item["claim_lift_allowed"] is False for item in sources)
+    assert {"Hermes", "OpenClaw", "IronClaw"} <= {item["system"] for item in sources}
+    assert next(item for item in batches if item["batch"] == "CR")["merged_pr"] == 531
+    assert next(item for item in batches if item["batch"] == "CY")["merged_pr"] == 538
+    assert next(item for item in batches if item["batch"] == "CZ")["issue"] == 530
+    assert summary["all_completed_post_cq_batches_done_merged_passed"] is True
+    assert summary["live_project_verification_required"] is True
+    assert {item["claim_id"] for item in claims} >= {
+        "SCL-034",
+        "SCL-035",
+        "SCL-036",
+        "SCL-037",
+        "SCL-038",
+        "SCL-039",
+        "SCL-040",
+        "SCL-041",
+    }
+    scl_041 = next(item for item in claims if item["claim_id"] == "SCL-041")
+    assert scl_041["operator_surface"] == "/api/operator/post-cq-claim-readiness"
+    assert "post-CQ production-evidence claim-readiness audit" in scl_041["allowed_wording"]
+
+
+def test_post_cq_claim_readiness_contract_blocks_false_completion_claims():
+    contract = build_post_cq_claim_readiness_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    scans = contract["false_completion_scan_v2"]
+    critic = contract["critic_disposition_receipts"]
+
+    assert policy["claim_boundary"] == POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY
+    assert set(POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
+    assert "/api/operator/post-cq-claim-readiness" in policy["receipt_surfaces"]
+    assert summary["post_cq_bounded_claim_readiness_wording_allowed"] is True
+    assert summary["full_parity_claim_allowed"] is False
+    assert summary["reference_systems_exceeded_claim_allowed"] is False
+    assert summary["production_ready_claim_allowed"] is False
+    assert summary["secure_private_by_default_claim_allowed"] is False
+    assert summary["false_completion_scan_count"] == 3
+    assert summary["local_false_completion_violation_count"] == 0
+    assert summary["all_local_false_completion_scans_clean"] is True
+    assert summary["false_completion_public_claim_gate_clear"] is False
+    assert all(
+        item["violations_found"] == 0
+        for item in scans
+        if item.get("scan_mode") == "local_repository_file_scan"
+    )
+    assert any(
+        item.get("scan_mode") == "external_github_pr_issue_review_required"
+        and item.get("runtime_static_scan") is False
+        and item.get("external_scan_status") == "required_before_pr_creation_or_merge"
+        for item in scans
+    )
+    assert all(item["disposition"].startswith("accepted") for item in critic)
+    assert {item["reviewer"] for item in critic} == {"Rawls"}
+
+
+def test_post_cq_claim_readiness_report_runs_all_batch_cz_suites():
+    payload = asyncio.run(build_post_cq_claim_readiness_report())
+
+    assert payload["summary"]["benchmark_posture"] == "post_cq_claim_readiness_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+        + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES)
+        + len(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["active_failure_count"] == 0
+    assert payload["failure_report"] == []
+    assert payload["policy"]["claim_boundary"] == POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY

@@ -48,6 +48,11 @@ from src.extensions.live_reach_media import (
     LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
     PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
 )
+from src.extensions.production_reach_voice_mobile import (
+    BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES,
+    MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
+)
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
@@ -411,6 +416,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["cross_surface_continuity_recovery_suite_scenario_count_matches"] is True
     assert details["cross_surface_continuity_recovery_suite_axis_matches"] is True
     assert details["cross_surface_continuity_recovery_gate_required"] is True
+    assert details["broad_channel_sla_operations_suite_present"] is True
+    assert details["broad_channel_sla_operations_suite_scenario_count_matches"] is True
+    assert details["broad_channel_sla_operations_suite_axis_matches"] is True
+    assert details["broad_channel_sla_operations_gate_required"] is True
+    assert details["production_voice_media_quality_gates_suite_present"] is True
+    assert details["production_voice_media_quality_gates_suite_scenario_count_matches"] is True
+    assert details["production_voice_media_quality_gates_suite_axis_matches"] is True
+    assert details["production_voice_media_quality_gates_gate_required"] is True
+    assert details["mobile_execution_continuity_suite_present"] is True
+    assert details["mobile_execution_continuity_suite_scenario_count_matches"] is True
+    assert details["mobile_execution_continuity_suite_axis_matches"] is True
+    assert details["mobile_execution_continuity_gate_required"] is True
     assert details["guardian_learning_arbitration_suite_present"] is True
     assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
     assert details["guardian_learning_arbitration_suite_axis_matches"] is True
@@ -730,6 +747,38 @@ def test_run_cross_surface_continuity_recovery_benchmark_suite_passes():
     assert {result.name for result in summary.results} == set(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES)
     assert all(result.details["continuity_thread_memory_visible"] for result in summary.results)
     assert all(result.details["approval_survives_surface_shift_visible"] for result in summary.results)
+
+
+def test_run_broad_channel_sla_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["broad_channel_sla_operations"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["sla_windows_visible"] for result in summary.results)
+    assert all(result.details["rate_limit_abuse_visible"] for result in summary.results)
+    assert all(result.details["coverage_gap_visible"] for result in summary.results)
+
+
+def test_run_production_voice_media_quality_gates_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_voice_media_quality_gates"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES)
+    assert all(result.details["voice_media_quality_gates_visible"] for result in summary.results)
+    assert all(result.details["voice_media_privacy_memory_boundary_visible"] for result in summary.results)
+    assert all(result.details["voice_media_revocation_visible"] for result in summary.results)
+    assert all(result.details["voice_media_correction_visible"] for result in summary.results)
+    assert all(result.details["voice_media_regression_fallback_visible"] for result in summary.results)
+
+
+def test_run_mobile_execution_continuity_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["mobile_execution_continuity"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES)
+    assert all(result.details["mobile_approval_handoff_visible"] for result in summary.results)
+    assert all(result.details["mobile_action_continuity_visible"] for result in summary.results)
+    assert all(result.details["mobile_revocation_fail_closed_visible"] for result in summary.results)
 
 
 def test_run_managed_browser_provider_attestation_benchmark_suite_passes():
@@ -1950,6 +1999,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "live_broad_reach_channel_attestation" in captured.out
     assert "production_voice_media_provider_runtime" in captured.out
     assert "cross_surface_continuity_recovery" in captured.out
+    assert "broad_channel_sla_operations" in captured.out
+    assert "production_voice_media_quality_gates" in captured.out
+    assert "mobile_execution_continuity" in captured.out
     assert "managed_browser_provider_attestation" in captured.out
     assert "live_multi_operator_usability_study" in captured.out
     assert "browser_computer_use_recovery_drill" in captured.out
@@ -1994,6 +2046,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "live_broad_reach_channel_attestation",
         "production_voice_media_provider_runtime",
         "cross_surface_continuity_recovery",
+        "broad_channel_sla_operations",
+        "production_voice_media_quality_gates",
+        "mobile_execution_continuity",
         "managed_browser_provider_attestation",
         "live_multi_operator_usability_study",
         "browser_computer_use_recovery_drill",

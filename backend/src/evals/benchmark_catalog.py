@@ -87,6 +87,14 @@ from src.extensions.live_reach_media import (
     PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
     PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME,
 )
+from src.extensions.production_reach_voice_mobile import (
+    BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES,
+    BROAD_CHANNEL_SLA_OPERATIONS_SUITE_NAME,
+    MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
+    MOBILE_EXECUTION_CONTINUITY_SUITE_NAME,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -405,6 +413,57 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live multi-surface operational scale and independent reliability evidence remain future work."
         ),
         scenario_names=CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROAD_CHANNEL_SLA_OPERATIONS_SUITE_NAME,
+        label="Broad channel SLA operations",
+        description=(
+            "Pins Batch CL channel SLA receipts for provider identity, consent, pairing, revocation, health, "
+            "delivery windows, rate limits, abuse handling, degraded recovery, and coverage gaps."
+        ),
+        benchmark_axis="broad_channel_sla_operations",
+        operator_summary=(
+            "Reach proof now exposes production-oriented channel SLA and abuse-operation receipts while "
+            "still blocking OpenClaw-class reach and always-available wording."
+        ),
+        remaining_gap=(
+            "Complete channel coverage, broad always-available operation, and OpenClaw-class reach remain blocked."
+        ),
+        scenario_names=BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME,
+        label="Production voice/media quality gates",
+        description=(
+            "Pins Batch CL STT/TTS/media quality, latency, privacy, correction, deletion, memory-import, "
+            "provider regression, and fallback receipts."
+        ),
+        benchmark_axis="production_voice_media_quality_gates",
+        operator_summary=(
+            "Voice/media proof now exposes quality gates and regression fallback receipts while still blocking "
+            "voice parity, multimodal parity, and production STT/TTS solved claims."
+        ),
+        remaining_gap=(
+            "Independent large-scale quality studies and full voice/media parity remain future proof work."
+        ),
+        scenario_names=PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MOBILE_EXECUTION_CONTINUITY_SUITE_NAME,
+        label="Mobile execution continuity",
+        description=(
+            "Pins Batch CL mobile notification, approval handoff, action continuity, memory/thread continuity, "
+            "offline recovery, and revocation fail-closed receipts."
+        ),
+        benchmark_axis="mobile_execution_continuity",
+        operator_summary=(
+            "Mobile execution proof now exposes continuity and recovery receipts while blocking production "
+            "mobile execution solved or always-available operation wording."
+        ),
+        remaining_gap=(
+            "Production mobile execution at scale and always-available reach remain future proof work."
+        ),
+        scenario_names=MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,

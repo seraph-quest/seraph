@@ -51,6 +51,7 @@ from src.extensions.live_marketplace_attestation import build_live_marketplace_a
 from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
 from src.extensions.live_reach_media import build_live_reach_media_report
 from src.extensions.production_reach_hardening import build_production_reach_browser_voice_report
+from src.extensions.production_reach_voice_mobile import build_production_reach_voice_mobile_report
 from src.extensions.reach_channel_canary import build_one_reach_channel_canary_report
 from src.guardian.benchmark import build_guardian_user_model_benchmark_report, build_m8_guardian_brain_benchmark_report
 from src.guardian.brain import (
@@ -3428,6 +3429,7 @@ async def get_operator_benchmark_proof():
         independent_secure_host_review,
         production_reach_browser_voice,
         live_reach_media,
+        production_reach_voice_mobile,
         computer_use_benchmark,
         one_reach_channel_canary,
         m2_execution_benchmark,
@@ -3467,6 +3469,7 @@ async def get_operator_benchmark_proof():
         build_independent_secure_host_review_report(),
         build_production_reach_browser_voice_report(),
         build_live_reach_media_report(),
+        build_production_reach_voice_mobile_report(),
         build_computer_use_benchmark_report(),
         build_one_reach_channel_canary_report(),
         build_m2_execution_benchmark_report(),
@@ -3513,6 +3516,7 @@ async def get_operator_benchmark_proof():
         str(independent_secure_host_review["summary"]["benchmark_posture"]),
         str(production_reach_browser_voice["summary"]["benchmark_posture"]),
         str(live_reach_media["summary"]["benchmark_posture"]),
+        str(production_reach_voice_mobile["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
         str(one_reach_channel_canary["summary"]["benchmark_posture"]),
         str(m2_execution_benchmark["summary"]["benchmark_posture"]),
@@ -3596,6 +3600,8 @@ async def get_operator_benchmark_proof():
             "production_reach_browser_voice_claim_boundary": production_reach_browser_voice["policy"]["claim_boundary"],
             "live_reach_media_posture": live_reach_media["summary"]["benchmark_posture"],
             "live_reach_media_claim_boundary": live_reach_media["policy"]["claim_boundary"],
+            "production_reach_voice_mobile_posture": production_reach_voice_mobile["summary"]["benchmark_posture"],
+            "production_reach_voice_mobile_claim_boundary": production_reach_voice_mobile["policy"]["claim_boundary"],
             "computer_use_benchmark_posture": computer_use_benchmark["summary"]["benchmark_posture"],
             "one_reach_channel_canary_posture": one_reach_channel_canary["summary"]["benchmark_posture"],
             "m2_execution_benchmark_posture": m2_execution_benchmark["summary"]["benchmark_posture"],
@@ -3643,6 +3649,7 @@ async def get_operator_benchmark_proof():
         "independent_secure_host_review": independent_secure_host_review,
         "production_reach_browser_voice": production_reach_browser_voice,
         "live_reach_media": live_reach_media,
+        "production_reach_voice_mobile": production_reach_voice_mobile,
         "computer_use_benchmark": computer_use_benchmark,
         "one_reach_channel_canary": one_reach_channel_canary,
         "m2_execution_benchmark": m2_execution_benchmark,
@@ -3804,6 +3811,11 @@ async def get_operator_production_reach_browser_voice():
 @router.get("/operator/live-reach-media-proof")
 async def get_operator_live_reach_media_proof():
     return await build_live_reach_media_report()
+
+
+@router.get("/operator/production-reach-voice-mobile")
+async def get_operator_production_reach_voice_mobile():
+    return await build_production_reach_voice_mobile_report()
 
 
 @router.get("/operator/computer-use-benchmark")

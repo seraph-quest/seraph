@@ -30,12 +30,17 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     summary = contract["summary"]
     batches = contract["batch_reconciliation_receipts"]
 
-    assert summary["completed_batch_count"] == 13
+    assert summary["completed_batch_count"] == 15
     assert summary["all_completed_batches_done_merged_passed"] is True
     assert summary["final_batch_status"] == "self_referential_final_audit_batch"
     assert summary["full_parity_claim_allowed"] is False
     assert summary["reference_systems_exceeded_claim_allowed"] is False
     assert next(item for item in batches if item["batch"] == "CH")["merged_pr"] == 503
+    cl_batch = next(item for item in batches if item["batch"] == "CL")
+    assert cl_batch["issue"] == 509
+    assert cl_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert cl_batch["project_status"] == "owned_by_github_project_until_pr_merge"
+    assert cl_batch["project_pr"] == "owned_by_linked_pull_request_until_pr_merge"
     assert next(item for item in batches if item["batch"] == "CI")["issue"] == 497
 
 
@@ -50,17 +55,24 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     security_gap = next(
         item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-security-independent"
     )
+    reach_gap = next(
+        item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-reach-media-production"
+    )
 
     assert policy["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
     assert set(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
     assert "fully_at_parity" in policy["blocked_claims"]
     assert "/api/operator/production-sla-orchestration" in policy["receipt_surfaces"]
-    assert {506, 505, 497, 496, 475} <= {issue for item in claims for issue in item["issue_links"]}
+    assert "/api/operator/production-reach-voice-mobile" in policy["receipt_surfaces"]
+    assert {509, 506, 505, 497, 496, 475} <= {issue for item in claims for issue in item["issue_links"]}
     assert "production_sla_orchestration" in orchestration_gap["current_batch_evidence"]
     assert "exactly_once_or_crash_proof_orchestration" in orchestration_gap["blocking_claims"]
     assert "independent_secure_host_review" in security_gap["current_batch_evidence"]
     assert "/api/operator/independent-secure-host-review" in security_gap["current_batch_evidence"]
     assert "ironclaw_class_secure_execution" in security_gap["blocking_claims"]
+    assert "broad_channel_sla_operations" in reach_gap["current_batch_evidence"]
+    assert "mobile_execution_continuity" in reach_gap["current_batch_evidence"]
+    assert "/api/operator/production-reach-voice-mobile" in reach_gap["current_batch_evidence"]
     assert all(item["disposition"] == "accepted" for item in critic)
 
 

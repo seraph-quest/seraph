@@ -82,6 +82,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
             "/api/operator/benchmark-proof",
             "/api/operator/production-operator-control-parity",
             "/api/operator/production-sla-orchestration",
+            "/api/operator/production-reach-voice-mobile",
             "/api/operator/browser-provider-usability-proof",
             "/api/operator/live-marketplace-attestation-proof",
             "docs/research/19-strategy-claim-ledger.md",
@@ -249,6 +250,8 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CF", 494, "live_human_outcome_quality_study", 501),
         ("CG", 495, "third_party_marketplace_attestation", 502),
         ("CH", 496, "managed_browser_provider_attestation", 503),
+        ("CJ", 505, "production_sla_orchestration", 514),
+        ("CK", 506, "independent_secure_host_review", 515),
     ]
     receipts = [
         {
@@ -276,6 +279,19 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "project_pr": "owned_by_linked_pull_request_until_pr_merge",
         "code_review": "owned_by_linked_pull_request_until_pr_merge",
         "project_truth_source": "GitHub issue #497 and its Project item are authoritative for live PR/review fields",
+        "operator_visible": True,
+    })
+    receipts.append({
+        "batch": "CL",
+        "issue": 509,
+        "primary_suite": "broad_channel_sla_operations",
+        "merged_pr": None,
+        "status": "active_branch_receipts_visible_until_pr_merge",
+        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
+        "project_status": "owned_by_github_project_until_pr_merge",
+        "project_pr": "owned_by_linked_pull_request_until_pr_merge",
+        "code_review": "owned_by_linked_pull_request_until_pr_merge",
+        "project_truth_source": "GitHub issue #509 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
     return receipts
@@ -383,6 +399,23 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "status": "backed_for_final_audit_receipts",
             "operator_surface": "/api/operator/final-parity-readiness-report",
         },
+        {
+            "claim_id": "SCL-028",
+            "area": "broad_reach_production_voice_media_and_mobile_execution",
+            "issue_links": [475, 509],
+            "allowed_wording": (
+                "bounded broad-channel SLA, production voice/media quality-gate, and mobile execution "
+                "continuity receipts are visible"
+            ),
+            "blocked_claims": [
+                "openclaw_class_reach",
+                "voice_or_multimodal_parity",
+                "always_available_operation",
+                "production_ready_product",
+            ],
+            "status": "backed_for_bounded_receipts_after_batch_cl_pr_merge",
+            "operator_surface": "/api/operator/production-reach-voice-mobile",
+        },
     ]
 
 
@@ -434,9 +467,25 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
         {
             "gap_id": "ci-gap-reach-media-production",
             "area": "presence_and_reach",
-            "gap": "broad always-available reach, production STT/TTS quality, and production mobile execution remain unproven",
+            "gap": (
+                "Batch CL narrows the reach/media/mobile gap with channel SLA, production voice/media "
+                "quality-gate, mobile execution continuity, abuse/rate-limit, and coverage-gap receipts; "
+                "OpenClaw-class reach, voice/media parity, always-available operation, and production-ready "
+                "wording remain blocked"
+            ),
             "blocking_claims": ["openclaw_class_reach", "voice_or_multimodal_parity"],
-            "required_stronger_evidence": "live channel SLA, mobile execution receipts, STT/TTS quality gates, and abuse/rate-limit operations",
+            "current_batch_evidence": [
+                "broad_channel_sla_operations",
+                "production_voice_media_quality_gates",
+                "mobile_execution_continuity",
+                "/api/operator/production-reach-voice-mobile",
+                "GitHub issue #509",
+            ],
+            "required_stronger_evidence": (
+                "larger independent channel/provider monitoring, broader real-world mobile operations, and "
+                "current-source final audit before broad reach, voice/media parity, always-available, or "
+                "production-ready wording"
+            ),
         },
         {
             "gap_id": "ci-gap-human-outcomes-independent",

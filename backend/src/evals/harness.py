@@ -134,6 +134,17 @@ from src.extensions.live_reach_media import (
     PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME,
     build_live_reach_media_contract,
 )
+from src.extensions.production_reach_voice_mobile import (
+    BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES,
+    BROAD_CHANNEL_SLA_OPERATIONS_SUITE_NAME,
+    MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
+    MOBILE_EXECUTION_CONTINUITY_SUITE_NAME,
+    PRODUCTION_REACH_VOICE_MOBILE_BLOCKED_CLAIMS,
+    PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME,
+    build_production_reach_voice_mobile_contract,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -12797,6 +12808,75 @@ async def _eval_live_reach_media_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_production_reach_voice_mobile_behavior() -> dict[str, Any]:
+    contract = build_production_reach_voice_mobile_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    channels = contract["channel_sla_receipts"]
+    voice_media = contract["voice_media_quality_receipts"]
+    mobile = contract["mobile_execution_receipts"]
+    suites = benchmark_suite_report()
+    channel_suite = next(
+        item for item in suites if item["name"] == BROAD_CHANNEL_SLA_OPERATIONS_SUITE_NAME
+    )
+    voice_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME
+    )
+    mobile_suite = next(
+        item for item in suites if item["name"] == MOBILE_EXECUTION_CONTINUITY_SUITE_NAME
+    )
+    return {
+        "operator_status_visible": summary["operator_status"] == "production_reach_voice_mobile_receipts_visible",
+        "channel_sla_suite_visible": channel_suite["scenario_count"]
+        == len(BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES),
+        "voice_media_quality_suite_visible": voice_suite["scenario_count"]
+        == len(PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES),
+        "mobile_execution_suite_visible": mobile_suite["scenario_count"]
+        == len(MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES),
+        "multiple_channel_providers_visible": summary["channel_provider_count"] >= 4,
+        "recorded_live_channel_sla_visible": summary["recorded_live_channel_count"] >= 3,
+        "paired_channel_sla_visible": summary["paired_channel_count"] >= 3,
+        "sla_windows_visible": summary["sla_window_visible_count"] >= 3,
+        "rate_limit_abuse_visible": summary["rate_limit_abuse_visible_count"] >= 4,
+        "degraded_recovery_fail_closed_visible": summary["degraded_recovery_visible_count"] >= 4,
+        "coverage_gap_visible": summary["coverage_gap_visible_count"] >= 2,
+        "unpaired_channel_closed": any(
+            item.get("pairing_state") == "requires_pairing"
+            and item.get("degraded_recovery", {}).get("unsafe_follow_up_hidden") is True
+            for item in channels
+        ),
+        "voice_media_quality_gates_visible": summary["voice_media_quality_gate_pass_count"] >= 3,
+        "voice_media_latency_gates_visible": summary["voice_media_latency_gate_pass_count"] >= 3,
+        "voice_media_privacy_memory_boundary_visible": summary["voice_media_privacy_boundary_count"] >= 3,
+        "voice_media_regression_fallback_visible": summary["voice_media_regression_fallback_count"] >= 3,
+        "voice_media_revocation_visible": all(
+            item.get("operator_controls", {}).get("revocation_blocks_capture") is True
+            for item in voice_media
+        ),
+        "voice_media_correction_visible": all(
+            bool(item.get("operator_controls", {}).get("correction_path"))
+            for item in voice_media
+        ),
+        "voice_media_no_unsafe_provider_regression": all(
+            item.get("provider_regression", {}).get("unsafe_action_allowed") is False
+            for item in voice_media
+        ),
+        "mobile_approval_handoff_visible": summary["mobile_approval_handoff_count"] >= 2,
+        "mobile_action_continuity_visible": summary["mobile_action_continuity_count"] >= 2,
+        "mobile_memory_continuity_visible": summary["mobile_memory_continuity_count"] >= 2,
+        "mobile_revocation_fail_closed_visible": summary["mobile_revocation_fail_closed_count"] >= 2,
+        "mobile_offline_recovery_visible": any(
+            item.get("offline_recovery", {}).get("offline_detected") is True
+            and item.get("offline_recovery", {}).get("operator_visible") is True
+            for item in mobile
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_REACH_VOICE_MOBILE_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/production-reach-voice-mobile" in policy["receipt_surfaces"],
+    }
+
+
 async def _eval_browser_provider_usability_behavior() -> dict[str, Any]:
     contract = build_browser_provider_usability_contract()
     summary = contract["summary"]
@@ -14871,7 +14951,7 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     }
     completed_batches = [item for item in batches if item["status"] == "done"]
     required_systems = {"Hermes", "OpenClaw", "IronClaw"}
-    required_issue_links = {475, 496, 497, 505}
+    required_issue_links = {475, 496, 497, 505, 509}
     blocked_claims = set(policy["blocked_claims"])
     return {
         "operator_status_visible": summary["operator_status"] == "final_parity_readiness_report_visible",
@@ -15011,6 +15091,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     cross_surface_continuity_recovery_suite = next(
         item for item in suites if item["name"] == CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME
+    )
+    broad_channel_sla_operations_suite = next(
+        item for item in suites if item["name"] == BROAD_CHANNEL_SLA_OPERATIONS_SUITE_NAME
+    )
+    production_voice_media_quality_gates_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME
+    )
+    mobile_execution_continuity_suite = next(
+        item for item in suites if item["name"] == MOBILE_EXECUTION_CONTINUITY_SUITE_NAME
     )
     managed_browser_provider_attestation_suite = next(
         item for item in suites if item["name"] == MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME
@@ -15470,6 +15559,45 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "cross_surface_continuity_recovery_gate_required": (
             CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "broad_channel_sla_operations_suite_present": (
+            "channel_sla_provider_window_behavior" in broad_channel_sla_operations_suite["scenario_names"]
+        ),
+        "broad_channel_sla_operations_suite_scenario_count_matches": (
+            broad_channel_sla_operations_suite["scenario_count"] == len(BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES)
+        ),
+        "broad_channel_sla_operations_suite_axis_matches": (
+            broad_channel_sla_operations_suite["benchmark_axis"] == "broad_channel_sla_operations"
+        ),
+        "broad_channel_sla_operations_gate_required": (
+            BROAD_CHANNEL_SLA_OPERATIONS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_voice_media_quality_gates_suite_present": (
+            "voice_media_stt_quality_gate_behavior"
+            in production_voice_media_quality_gates_suite["scenario_names"]
+        ),
+        "production_voice_media_quality_gates_suite_scenario_count_matches": (
+            production_voice_media_quality_gates_suite["scenario_count"]
+            == len(PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES)
+        ),
+        "production_voice_media_quality_gates_suite_axis_matches": (
+            production_voice_media_quality_gates_suite["benchmark_axis"] == "production_voice_media_quality_gates"
+        ),
+        "production_voice_media_quality_gates_gate_required": (
+            PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "mobile_execution_continuity_suite_present": (
+            "mobile_execution_notification_approval_handoff_behavior"
+            in mobile_execution_continuity_suite["scenario_names"]
+        ),
+        "mobile_execution_continuity_suite_scenario_count_matches": (
+            mobile_execution_continuity_suite["scenario_count"] == len(MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES)
+        ),
+        "mobile_execution_continuity_suite_axis_matches": (
+            mobile_execution_continuity_suite["benchmark_axis"] == "mobile_execution_continuity"
+        ),
+        "mobile_execution_continuity_gate_required": (
+            MOBILE_EXECUTION_CONTINUITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "managed_browser_provider_attestation_suite_present": (
             "managed_browser_provider_identity_evidence_behavior"
@@ -17809,6 +17937,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_live_reach_media_behavior,
         )
         for name in CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CL exposes production-oriented channel SLA, health, rate-limit, abuse, degraded-recovery, "
+                "and coverage-gap receipts without claiming OpenClaw-class reach."
+            ),
+            runner=_eval_production_reach_voice_mobile_behavior,
+        )
+        for name in BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CL exposes STT/TTS/media quality gates, privacy, correction/deletion, memory boundaries, "
+                "and provider-regression fallback without claiming voice or multimodal parity."
+            ),
+            runner=_eval_production_reach_voice_mobile_behavior,
+        )
+        for name in PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CL exposes mobile notification, approval handoff, action continuity, memory/thread "
+                "continuity, offline recovery, and revocation fail-closed receipts."
+            ),
+            runner=_eval_production_reach_voice_mobile_behavior,
+        )
+        for name in MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

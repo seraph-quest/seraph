@@ -52,6 +52,12 @@ from src.extensions.live_reach_media import (
     LIVE_REACH_MEDIA_CLAIM_BOUNDARY,
     PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
 )
+from src.extensions.production_reach_voice_mobile import (
+    BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES,
+    MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
+    PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
+)
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
     GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
@@ -2821,7 +2827,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 69
+    assert payload["summary"]["suite_count"] == 72
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2906,6 +2912,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == "live_reach_media_ci_gated_operator_visible"
     )
     assert payload["summary"]["live_reach_media_claim_boundary"] == LIVE_REACH_MEDIA_CLAIM_BOUNDARY
+    assert (
+        payload["summary"]["production_reach_voice_mobile_posture"]
+        == "production_reach_voice_mobile_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["production_reach_voice_mobile_claim_boundary"]
+        == PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY
+    )
     assert (
         payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
         == "guardian_learning_arbitration_ci_gated_operator_visible"
@@ -3384,6 +3398,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "browser_recovery_provider_crash_behavior" in recovery_drill_suite["scenario_names"]
     assert recovery_drill_suite["scenario_count"] == len(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+    broad_channel_suite = next(
+        item for item in payload["suites"] if item["name"] == "broad_channel_sla_operations"
+    )
+    assert "channel_sla_provider_window_behavior" in broad_channel_suite["scenario_names"]
+    assert broad_channel_suite["scenario_count"] == len(BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES)
+    voice_quality_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_voice_media_quality_gates"
+    )
+    assert "voice_media_stt_quality_gate_behavior" in voice_quality_suite["scenario_names"]
+    assert voice_quality_suite["scenario_count"] == len(PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES)
+    mobile_execution_suite = next(
+        item for item in payload["suites"] if item["name"] == "mobile_execution_continuity"
+    )
+    assert "mobile_execution_notification_approval_handoff_behavior" in mobile_execution_suite["scenario_names"]
+    assert mobile_execution_suite["scenario_count"] == len(MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES)
     assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
@@ -3405,7 +3434,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 13
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 15
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -3530,6 +3559,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["live_reach_media"]["summary"]["voice_media_provider_count"] >= 3
     assert payload["live_reach_media"]["summary"]["cross_surface_recovery_count"] >= 2
     assert payload["live_reach_media"]["policy"]["claim_boundary"] == LIVE_REACH_MEDIA_CLAIM_BOUNDARY
+    assert payload["production_reach_voice_mobile"]["summary"]["operator_status"] == (
+        "production_reach_voice_mobile_receipts_visible"
+    )
+    assert payload["production_reach_voice_mobile"]["summary"]["channel_provider_count"] >= 4
+    assert payload["production_reach_voice_mobile"]["summary"]["voice_media_quality_gate_pass_count"] >= 3
+    assert payload["production_reach_voice_mobile"]["summary"]["mobile_action_continuity_count"] >= 2
+    assert (
+        payload["production_reach_voice_mobile"]["policy"]["claim_boundary"]
+        == PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY
+    )
     assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
     assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
         "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
@@ -3803,7 +3842,12 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 13
+    assert payload["summary"]["completed_batch_count"] == 15
+    cl_batch = next(
+        item for item in payload["contract"]["batch_reconciliation_receipts"]
+        if item["batch"] == "CL"
+    )
+    assert cl_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
     assert payload["summary"]["residual_gap_count"] == 6
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False
@@ -4214,6 +4258,35 @@ async def test_operator_live_reach_media_surface_reports_batch_ce_receipts(clien
     assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
     assert "voice_parity" in payload["policy"]["blocked_claims"]
     assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_production_reach_voice_mobile_surface_reports_batch_cl_receipts(client):
+    resp = await client.get("/api/operator/production-reach-voice-mobile")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "production_reach_voice_mobile_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "production_reach_voice_mobile_receipts_visible"
+    assert payload["summary"]["channel_provider_count"] >= 4
+    assert payload["summary"]["sla_window_visible_count"] >= 3
+    assert payload["summary"]["rate_limit_abuse_visible_count"] >= 4
+    assert payload["summary"]["voice_media_quality_gate_pass_count"] >= 3
+    assert payload["summary"]["voice_media_regression_fallback_count"] >= 3
+    assert payload["summary"]["mobile_approval_handoff_count"] >= 2
+    assert payload["summary"]["mobile_revocation_fail_closed_count"] >= 2
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY
+    assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert "production_ready_product" in payload["policy"]["blocked_claims"]
+    assert payload["scenario_names"]["broad_channel_sla_operations"] == list(
+        BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["production_voice_media_quality_gates"] == list(
+        PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["mobile_execution_continuity"] == list(
+        MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES
+    )
 
 
 @pytest.mark.asyncio

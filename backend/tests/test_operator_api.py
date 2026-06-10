@@ -140,6 +140,13 @@ from src.security.independent_review import (
     LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
     SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
 )
+from src.security.container_grade_host import (
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES,
+    CONTAINER_GRADE_SECURE_HOST_BLOCKED_CLAIMS,
+    CONTAINER_GRADE_SECURE_HOST_CLAIM_BOUNDARY,
+    EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -2861,7 +2868,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 92
+    assert payload["summary"]["suite_count"] == 95
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2926,6 +2933,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["production_isolation_security_claim_boundary"] == (
         PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["container_grade_secure_host_posture"]
+        == "container_grade_secure_host_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["container_grade_secure_host_claim_boundary"] == (
+        CONTAINER_GRADE_SECURE_HOST_CLAIM_BOUNDARY
     )
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
@@ -3189,6 +3203,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
+        "container_grade_capability_isolation"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "external_security_validation_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "secret_egress_certification_drill"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
         "production_reach_channel_hardening"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
@@ -3337,6 +3363,28 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert set(INDEPENDENT_SECURE_HOST_REVIEW_BLOCKED_CLAIMS) <= set(
         payload["independent_secure_host_review"]["policy"]["blocked_claims"]
     )
+    container_grade_suite = next(
+        item for item in payload["suites"] if item["name"] == "container_grade_capability_isolation"
+    )
+    assert "container_grade_isolation_model_behavior" in container_grade_suite["scenario_names"]
+    assert container_grade_suite["scenario_count"] == len(CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES)
+    external_validation_suite = next(
+        item for item in payload["suites"] if item["name"] == "external_security_validation_v1"
+    )
+    assert "external_security_review_scope_behavior" in external_validation_suite["scenario_names"]
+    assert external_validation_suite["scenario_count"] == len(EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES)
+    secret_egress_suite = next(
+        item for item in payload["suites"] if item["name"] == "secret_egress_certification_drill"
+    )
+    assert "secret_egress_raw_value_denial_behavior" in secret_egress_suite["scenario_names"]
+    assert secret_egress_suite["scenario_count"] == len(SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES)
+    assert payload["container_grade_secure_host"]["summary"]["operator_status"] == (
+        "container_grade_secure_host_validation_visible"
+    )
+    assert set(CONTAINER_GRADE_SECURE_HOST_BLOCKED_CLAIMS) <= set(
+        payload["container_grade_secure_host"]["policy"]["blocked_claims"]
+    )
+    assert "hardware_backed_isolation" in payload["container_grade_secure_host"]["policy"]["blocked_claims"]
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
@@ -5209,6 +5257,57 @@ async def test_operator_independent_secure_host_review_surface_reports_batch_ck_
         for item in payload["contract"]["hostile_drill_receipts"]
     )
     assert any(item["action"] == "rotate" for item in payload["contract"]["recovery_authority_receipts"])
+
+
+@pytest.mark.asyncio
+async def test_operator_container_grade_secure_host_surface_reports_batch_ct_receipts(client):
+    resp = await client.get("/api/operator/container-grade-secure-host")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "container_grade_secure_host"
+    assert payload["summary"]["benchmark_posture"] == "container_grade_secure_host_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "container_grade_secure_host_validation_visible"
+    assert payload["summary"]["isolation_decision_count"] >= 6
+    assert payload["summary"]["implemented_boundary_count"] >= 5
+    assert payload["summary"]["unsupported_boundary_count"] >= 1
+    assert payload["summary"]["missing_hardware_boundary_visible"] is True
+    assert payload["summary"]["finding_count"] >= 4
+    assert payload["summary"]["remediated_or_waived_findings"] == payload["summary"]["finding_count"]
+    assert payload["summary"]["secret_egress_drill_count"] >= 4
+    assert payload["summary"]["secret_leak_count"] == 0
+    assert payload["summary"]["all_secret_drills_safe"] is True
+    assert payload["summary"]["recovery_authority_count"] >= 5
+    assert payload["summary"]["claim_boundary"] == CONTAINER_GRADE_SECURE_HOST_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["container_grade_capability_isolation"] == list(
+        CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["external_security_validation_v1"] == list(
+        EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secret_egress_certification_drill"] == list(
+        SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES
+    )
+    assert payload["latest_run"]["failed"] == 0
+    assert "/api/operator/container-grade-secure-host" in payload["policy"]["receipt_surfaces"]
+    assert set(CONTAINER_GRADE_SECURE_HOST_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "hardware_backed_isolation" in payload["policy"]["blocked_claims"]
+    assert "external_security_certification" in payload["policy"]["blocked_claims"]
+    assert all(
+        "raw_report_path" not in receipt
+        and receipt["real_external_certification"] is False
+        and receipt["evidence_boundary"] == "fixture_validation_record_not_external_security_certification"
+        for receipt in payload["contract"]["external_security_validation_receipts"]
+    )
+    assert any(
+        item["capability_class"] == "hardware_backed_runtime" and item["implemented"] is False
+        for item in payload["contract"]["isolation_model_decisions"]
+    )
+    assert any(
+        item["destination_host"] == "169.254.169.254" and item["decision"] == "blocked"
+        for item in payload["contract"]["secret_egress_certification_drills"]
+    )
+    assert any(item["action"] == "rotate" for item in payload["contract"]["incident_recovery_validation_receipts"])
 
 
 @pytest.mark.asyncio

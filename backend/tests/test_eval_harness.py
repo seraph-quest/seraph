@@ -10,6 +10,10 @@ from config.settings import settings
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
+from src.cockpit.production_operator_control import (
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
+    PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
@@ -360,6 +364,14 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["capability_rollback_failure_diagnostics_suite_scenario_count_matches"] is True
     assert details["capability_rollback_failure_diagnostics_suite_axis_matches"] is True
     assert details["capability_rollback_failure_diagnostics_gate_required"] is True
+    assert details["production_operator_control_parity_suite_present"] is True
+    assert details["production_operator_control_parity_suite_scenario_count_matches"] is True
+    assert details["production_operator_control_parity_suite_axis_matches"] is True
+    assert details["production_operator_control_parity_gate_required"] is True
+    assert details["production_parity_train_suite_present"] is True
+    assert details["production_parity_train_suite_scenario_count_matches"] is True
+    assert details["production_parity_train_suite_axis_matches"] is True
+    assert details["production_parity_train_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
@@ -419,6 +431,26 @@ def test_run_production_durable_orchestration_benchmark_suite_passes():
         assert result.details["production_suite_visible"] is True
         assert result.details["production_ci_gate_required"] is True
         assert result.details["unsafe_recovery_block_visible"] is True
+
+
+def test_run_production_operator_control_parity_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_operator_control_parity"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["required_actions_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_production_parity_train_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_parity_train"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+    assert all(result.details["train_batch_count_matches"] for result in summary.results)
+    assert all(result.details["prior_train_prs_merged"] for result in summary.results)
+    assert all(result.details["cb_active_state_truthful"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
@@ -1538,6 +1570,8 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "marketplace_grade_capability_lifecycle" in captured.out
     assert "governed_capability_lifecycle_v2" in captured.out
     assert "capability_rollback_failure_diagnostics" in captured.out
+    assert "production_operator_control_parity" in captured.out
+    assert "production_parity_train" in captured.out
     assert available_benchmark_suites() == (
         "production_parity_readiness",
         "guardian_memory_quality",
@@ -1580,6 +1614,8 @@ def test_main_lists_available_benchmark_suites(capsys):
         "marketplace_grade_capability_lifecycle",
         "governed_capability_lifecycle_v2",
         "capability_rollback_failure_diagnostics",
+        "production_operator_control_parity",
+        "production_parity_train",
     )
 
 

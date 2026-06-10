@@ -102,6 +102,15 @@ from src.cockpit.efficiency_benchmark import (
     cockpit_efficiency_scorecard,
     cockpit_efficiency_scripted_tasks,
 )
+from src.cockpit.production_operator_control import (
+    PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS,
+    PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY,
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,
+    PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
+    PRODUCTION_PARITY_TRAIN_SUITE_NAME,
+    build_production_operator_control_contract,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -14118,6 +14127,92 @@ async def _eval_marketplace_lifecycle_maturity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
+    contract = build_production_operator_control_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    controls = contract["control_receipts"]
+    train = contract["train_receipts"]
+    audits = contract["final_audit_receipts"]
+    suites = benchmark_suite_report()
+    operator_control_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME
+    )
+    parity_train_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_PARITY_TRAIN_SUITE_NAME
+    )
+    required_surfaces = {
+        "/api/operator/production-operator-control-parity",
+        "/api/operator/benchmark-proof",
+        "/api/operator/production-parity-readiness",
+        "/api/operator/secure-capability-host-hardening",
+        "/api/operator/durable-workflow-engine-v2",
+        "/api/operator/production-reach-browser-voice",
+        "/api/operator/live-guardian-learning-quality",
+        "/api/operator/marketplace-lifecycle-maturity",
+        "/api/operator/cockpit-efficiency-benchmark",
+    }
+    required_batches = {"BV", "BW", "BX", "BY", "BZ", "CA", "CB"}
+    required_actions = {
+        "inspect",
+        "approve",
+        "deny",
+        "pause",
+        "resume",
+        "cancel",
+        "retry",
+        "repair",
+        "branch",
+        "compare",
+        "revoke",
+        "audit",
+    }
+    all_controls = [
+        control
+        for receipt in controls
+        for control in receipt["controls"]
+    ]
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "production_operator_control_parity_receipts_visible"
+        ),
+        "operator_control_suite_visible": (
+            operator_control_suite["scenario_count"] == len(PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES)
+        ),
+        "parity_train_suite_visible": (
+            parity_train_suite["scenario_count"] == len(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+        ),
+        "control_surface_count_matches": summary["control_surface_count"] >= 6,
+        "train_batch_count_matches": summary["train_batch_count"] == 7,
+        "merged_prior_batch_count_matches": summary["merged_prior_batch_count"] >= 6,
+        "recovery_controls_visible": summary["recovery_control_count"] >= 10,
+        "authority_receipts_visible": summary["authority_receipt_count"] == len(controls),
+        "residual_risks_visible": summary["residual_risk_count"] == len(controls),
+        "final_audits_visible": summary["final_audit_count"] >= 3,
+        "required_actions_visible": summary["required_actions_visible"] is True,
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "all_controls_have_receipts": all(
+            control.get("enabled") is True and bool(control.get("receipt_after_action"))
+            for control in all_controls
+        ),
+        "required_action_names_visible": required_actions <= {control["action"] for control in all_controls},
+        "train_batches_visible": required_batches == {item["batch"] for item in train},
+        "prior_train_prs_merged": all(
+            item.get("evidence_state") == "merged_to_develop"
+            for item in train
+            if item["batch"] != "CB"
+        ),
+        "cb_active_state_truthful": next(
+            item for item in train if item["batch"] == "CB"
+        )["evidence_state"] == "active_branch_receipts_visible_until_pr_merge",
+        "train_operator_surfaces_visible": all(bool(item.get("operator_surface")) for item in train),
+        "train_blocked_claims_visible": all(item.get("blocked_claims_visible") is True for item in train),
+        "final_audit_requires_critic": any(item["audit_id"] == "cb-audit-critic" for item in audits),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -14205,6 +14300,12 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     capability_rollback_failure_diagnostics_suite = next(
         item for item in suites if item["name"] == CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME
+    )
+    production_operator_control_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME
+    )
+    production_parity_train_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_PARITY_TRAIN_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -14571,6 +14672,33 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "capability_rollback_failure_diagnostics_gate_required": (
             CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_operator_control_parity_suite_present": (
+            "operator_control_train_receipt_behavior"
+            in production_operator_control_suite["scenario_names"]
+        ),
+        "production_operator_control_parity_suite_scenario_count_matches": (
+            production_operator_control_suite["scenario_count"]
+            == len(PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES)
+        ),
+        "production_operator_control_parity_suite_axis_matches": (
+            production_operator_control_suite["benchmark_axis"] == "production_operator_control_parity"
+        ),
+        "production_operator_control_parity_gate_required": (
+            PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_parity_train_suite_present": (
+            "production_parity_train_batch_merge_receipt_behavior"
+            in production_parity_train_suite["scenario_names"]
+        ),
+        "production_parity_train_suite_scenario_count_matches": (
+            production_parity_train_suite["scenario_count"] == len(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+        ),
+        "production_parity_train_suite_axis_matches": (
+            production_parity_train_suite["benchmark_axis"] == "production_parity_train"
+        ),
+        "production_parity_train_gate_required": (
+            PRODUCTION_PARITY_TRAIN_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -17109,6 +17237,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_marketplace_lifecycle_maturity_behavior,
         )
         for name in CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CB exposes dense long-work operator control receipts across durable orchestration, secure host, "
+                "reach/browser/voice recovery, learning, marketplace, approvals, and audit surfaces."
+            ),
+            runner=_eval_production_operator_control_parity_behavior,
+        )
+        for name in PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CB verifies the production parity train across linked issues, merged prior PRs, proof suites, "
+                "operator surfaces, residual risks, board receipts, and final critic/audit boundaries."
+            ),
+            runner=_eval_production_operator_control_parity_behavior,
+        )
+        for name in PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES
     ),
     EvalScenario(
         name="guardian_feedback_loop",

@@ -75,7 +75,7 @@ That merge changes the claim posture in four separate ways:
 - Strategy artifact completion: this document is complete as the strategic parity/exceedance target. It maps competitor pressure to feature areas, proof gates, issue anchors, and claim boundaries.
 - Proof-train completion: the current aggregate proof train is complete. It landed deterministic receipts for replay, cockpit efficiency, memory-provider quality, workflow endurance, one-channel reach, minimal durable workflow state, guardian arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice proof.
 - Parity floors reached: Seraph has reached the named proof floors that train was scoped to prove. Those are evidence-backed floor claims, not broad product parity claims.
-- Remaining gaps: full parity and targeted exceedance are still not complete. The real remaining gaps are production-grade durable orchestration beyond the v1 state kernel, deeper secure execution isolation and privileged-path hardening, broader and harder live reach, stronger live intervention learning, and denser operator control for long-running multi-agent work.
+- Remaining gaps: full parity and targeted exceedance are still not complete. The real remaining gaps are live external orchestration and crash studies beyond deterministic durable-orchestration receipts, deeper secure execution isolation and privileged-path hardening beyond deterministic hardening receipts, broader and harder live reach, stronger live intervention learning with human outcome evidence, live marketplace attestation and operations, and live multi-operator usability beyond deterministic operator-control receipts.
 
 Allowed short wording after PR #473: "The strategy artifact and aggregate proof train are complete; named parity proof floors are reached; full production-grade parity/exceedance remains open."
 
@@ -308,7 +308,7 @@ This goal document is complete as a strategy artifact when:
 - the claim ledger permits any stronger language before it is used
 - the cockpit remains the receipt target for inspecting what Seraph did, why, with what authority, and how to recover
 
-Post-PR #473 status: this strategy artifact is complete, and the aggregate proof train it spawned is complete. Batches BW-BZ and CA add secure-host, durable-orchestration, reach/browser/voice, live-learning/provider-outcome, and marketplace-lifecycle receipts to the production parity train, but that does not complete the full product ambition. The next work remains live third-party marketplace attestation and operations, live human outcome studies, broader live reach, production STT/TTS/mobile execution, external browser-provider attestation, and denser operator steering over long-running work.
+Post-PR #473 status: this strategy artifact is complete, and the aggregate proof train it spawned is complete. Batches BW-CB add secure-host, durable-orchestration, reach/browser/voice, live-learning/provider-outcome, marketplace-lifecycle, and production operator-control/train-verification receipts to the production parity train, but that does not complete the full product ambition. The next work remains live third-party marketplace attestation and operations, live human outcome studies, broader live reach, production STT/TTS/mobile execution, external browser-provider attestation, live multi-operator usability, and production security/superiority evidence.
 
 ## Production-Grade Execution Roadmap
 

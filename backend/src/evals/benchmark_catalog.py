@@ -14,6 +14,12 @@ from src.cockpit.efficiency_benchmark import (
     COCKPIT_EFFICIENCY_BENCHMARK_SCENARIO_NAMES,
     COCKPIT_EFFICIENCY_BENCHMARK_SUITE_NAME,
 )
+from src.cockpit.production_operator_control import (
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,
+    PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
+    PRODUCTION_PARITY_TRAIN_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -829,6 +835,41 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live marketplace incident drills and external package attestation remain future proof work."
         ),
         scenario_names=CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,
+        label="Production operator control parity",
+        description=(
+            "Pins dense long-work operator controls across durable orchestration, secure-host receipts, reach/browser/voice "
+            "recovery, learning explanations, marketplace lifecycle events, approvals, and activity audit receipts."
+        ),
+        benchmark_axis="production_operator_control_parity",
+        operator_summary=(
+            "Operator control parity is judged by state, authority, risk, recovery, and receipt visibility across the "
+            "production parity train, not by visual density or unsupported cockpit superiority claims."
+        ),
+        remaining_gap=(
+            "Live multi-operator usability studies and solved operator-control claims remain outside this bounded proof gate."
+        ),
+        scenario_names=PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_PARITY_TRAIN_SUITE_NAME,
+        label="Production parity train",
+        description=(
+            "Pins final train verification across Batch BV through CB: linked issues, merged prior PRs, proof suites, "
+            "operator surfaces, residual risks, board receipts, and final critic/audit requirements."
+        ),
+        benchmark_axis="production_parity_train",
+        operator_summary=(
+            "The production parity train has an aggregate operator-visible verification surface while full parity, "
+            "superiority, and production-ready wording remain claim-ledger gated."
+        ),
+        remaining_gap=(
+            "Live third-party attestations, broad external reach, live human outcome studies, and production security "
+            "claims still require separate proof before stronger wording is allowed."
+        ),
+        scenario_names=PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
     ),
 )
 

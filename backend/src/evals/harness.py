@@ -220,6 +220,17 @@ from src.cockpit.dense_operator_recovery import (
     OPERATOR_CONTROL_DENSITY_SUITE_NAME,
     build_dense_operator_recovery_contract,
 )
+from src.cockpit.operator_mission_control import (
+    LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
+    LONG_WORK_DEBUGGING_SLO_SUITE_NAME,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME,
+    OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
+    OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME,
+    OPERATOR_MISSION_CONTROL_BLOCKED_CLAIMS,
+    OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY,
+    build_operator_mission_control_contract,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -15832,6 +15843,144 @@ async def _eval_dense_operator_recovery_control_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_operator_mission_control_population_behavior() -> dict[str, Any]:
+    contract = build_operator_mission_control_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    workbench = contract["workbench_receipts"]
+    population = contract["population_study_receipts"]
+    baselines = contract["named_baseline_comparisons"]
+    slos = contract["debugging_slo_receipts"]
+    suites = benchmark_suite_report()
+    population_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME
+    )
+    baseline_suite = next(
+        item for item in suites if item["name"] == NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME
+    )
+    slo_suite = next(
+        item for item in suites if item["name"] == LONG_WORK_DEBUGGING_SLO_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    required_surfaces = {
+        "/api/operator/operator-control-population-study",
+        "/api/operator/dense-operator-recovery-control",
+        "/api/operator/production-operator-control-parity",
+        "/api/operator/benchmark-proof",
+    }
+    required_workbench_surfaces = {
+        "timeline_search",
+        "log_diff_replay",
+        "runbook_repair",
+        "multi_operator_handoff",
+    }
+    blocked_words = {
+        "winner",
+        "superior",
+        "superiority",
+        "best",
+        "world_class",
+        "world-class",
+        "solved",
+        "full parity",
+        "exceeded",
+    }
+    all_safe_receipts = [
+        item.get("safe_receipt", {})
+        for item in [*workbench, *population, *baselines, *slos]
+    ]
+    handoff_policy = next(
+        item for item in workbench if item["surface"] == "multi_operator_handoff"
+    )["handoff_authority_policy"]
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "operator_mission_control_population_receipts_visible"
+        ),
+        "operator_population_study_suite_visible": (
+            population_suite["scenario_count"] == len(OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES)
+        ),
+        "named_baseline_cockpit_suite_visible": (
+            baseline_suite["scenario_count"] == len(NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES)
+        ),
+        "long_work_debugging_slo_suite_visible": (
+            slo_suite["scenario_count"] == len(LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES)
+        ),
+        "workbench_surface_count_matches": summary["workbench_surface_count"] >= 4,
+        "population_study_count_matches": summary["population_study_count"] >= 4,
+        "baseline_comparison_count_matches": summary["baseline_comparison_count"] >= 3,
+        "debugging_slo_count_matches": summary["debugging_slo_count"] >= 5,
+        "population_operator_count_matches": summary["population_operator_count"] >= 60,
+        "independent_evaluators_visible": summary["independent_evaluator_count"] >= 2,
+        "recovery_success_floor_met": summary["recovery_success_floor_met"] is True,
+        "keyboard_accessibility_floor_met": all(item["keyboard_only_success_rate"] >= 0.85 for item in population),
+        "all_slos_met": summary["all_slos_met"] is True,
+        "claim_boundary_visible": policy["claim_boundary"] == OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(OPERATOR_MISSION_CONTROL_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "required_workbench_surfaces_visible": required_workbench_surfaces <= {item["surface"] for item in workbench},
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt.get("contains_secret") is False
+                and receipt.get("contains_private_path") is False
+                and receipt.get("raw_receipt_path_exposed") is False
+                and receipt.get("workspace_dir_exposed") is False
+                and receipt.get("package_path_exposed") is False
+                and receipt.get("redaction_layer") == "operator_mission_control_v1"
+                for receipt in all_safe_receipts
+            )
+        ),
+        "population_receipts_have_metadata_and_metrics": all(
+            item.get("participant_profile")
+            and item.get("evaluator_independence")
+            and item.get("operator_count", 0) >= 10
+            and item.get("raw_receipt_handle")
+            and item["error_rate"] <= 0.1
+            and item["recovery_success_rate"] >= 0.9
+            and item["keyboard_only_success_rate"] >= 0.85
+            and item.get("caveats")
+            for item in population
+        ),
+        "named_baselines_pressure_only": (
+            summary["named_baselines_pressure_only"] is True
+            and all(
+                item["source_type"] == "current_source_refresh_required_by_final_audit"
+                and item.get("source_version")
+                and item.get("task_scope")
+                and item.get("limitations")
+                and item.get("winner_claimed") is False
+                and not any(word in item["behavior_change_scope"] for word in blocked_words)
+                for item in baselines
+            )
+        ),
+        "handoff_requires_receiver_scope_renewal": (
+            handoff_policy["sender_acceptance_required"] is True
+            and handoff_policy["receiver_acceptance_required"] is True
+            and handoff_policy["receiver_scope_renewal_required"] is True
+            and handoff_policy["checkpoint_fingerprint_match_required"] is True
+            and handoff_policy["stale_context_blocks_resume"] is True
+            and handoff_policy["approval_reuse_allowed"] is False
+        ),
+        "replay_and_runbook_actions_stay_read_only_until_context_matches": all(
+            item["replay_and_repair_policy"]["read_only_draft_until_approval_context_matches"] is True
+            and item["replay_and_repair_policy"]["trust_partition_match_required"] is True
+            and item["replay_and_repair_policy"]["actor_authority_required"] is True
+            and item["replay_and_repair_policy"]["checkpoint_hash_required"] is True
+            and item["replay_and_repair_policy"]["side_effect_boundary_required"] is True
+            for item in slos
+        ),
+        "operator_population_study_gate_required": (
+            OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "named_baseline_cockpit_gate_required": (
+            NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "long_work_debugging_slo_gate_required": (
+            LONG_WORK_DEBUGGING_SLO_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     contract = build_final_parity_audit_contract()
     summary = contract["summary"]
@@ -16199,6 +16348,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     independent_operator_usability_accessibility_suite = next(
         item for item in suites if item["name"] == INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME
+    )
+    operator_population_study_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME
+    )
+    named_baseline_cockpit_suite = next(
+        item for item in suites if item["name"] == NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME
+    )
+    long_work_debugging_slo_suite = next(
+        item for item in suites if item["name"] == LONG_WORK_DEBUGGING_SLO_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -17340,6 +17498,47 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "independent_operator_usability_accessibility_gate_required": (
             INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_control_population_study_suite_present": (
+            "operator_population_task_matrix_behavior"
+            in operator_population_study_suite["scenario_names"]
+        ),
+        "operator_control_population_study_suite_scenario_count_matches": (
+            operator_population_study_suite["scenario_count"]
+            == len(OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES)
+        ),
+        "operator_control_population_study_suite_axis_matches": (
+            operator_population_study_suite["benchmark_axis"] == "operator_control_population_study"
+        ),
+        "operator_control_population_study_gate_required": (
+            OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "named_baseline_cockpit_comparison_suite_present": (
+            "cockpit_baseline_pressure_boundary_behavior"
+            in named_baseline_cockpit_suite["scenario_names"]
+        ),
+        "named_baseline_cockpit_comparison_suite_scenario_count_matches": (
+            named_baseline_cockpit_suite["scenario_count"]
+            == len(NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES)
+        ),
+        "named_baseline_cockpit_comparison_suite_axis_matches": (
+            named_baseline_cockpit_suite["benchmark_axis"] == "named_baseline_cockpit_comparison"
+        ),
+        "named_baseline_cockpit_comparison_gate_required": (
+            NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "long_work_debugging_slo_suite_present": (
+            "operator_mission_control_surface_behavior"
+            in long_work_debugging_slo_suite["scenario_names"]
+        ),
+        "long_work_debugging_slo_suite_scenario_count_matches": (
+            long_work_debugging_slo_suite["scenario_count"] == len(LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES)
+        ),
+        "long_work_debugging_slo_suite_axis_matches": (
+            long_work_debugging_slo_suite["benchmark_axis"] == "long_work_debugging_slo"
+        ),
+        "long_work_debugging_slo_gate_required": (
+            LONG_WORK_DEBUGGING_SLO_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -20751,6 +20950,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_dense_operator_recovery_control_behavior,
         )
         for name in INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CW records broader operator population evidence for long-work mission control, including "
+                "task metrics, evaluator independence, keyboard paths, safe handoff, and redacted receipt handles."
+            ),
+            runner=_eval_operator_mission_control_population_behavior,
+        )
+        for name in OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CW uses Hermes, OpenClaw, and IronClaw as named cockpit-pressure baselines with source-refresh "
+                "requirements, limitations, and no winner or superiority claims."
+            ),
+            runner=_eval_operator_mission_control_population_behavior,
+        )
+        for name in NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CW pins long-work debugging SLOs for timeline search, log/diff replay, runbook repair, "
+                "handoff resume, and residual-risk drill-down while preserving approval and trust boundaries."
+            ),
+            runner=_eval_operator_mission_control_population_behavior,
+        )
+        for name in LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

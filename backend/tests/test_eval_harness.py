@@ -24,6 +24,11 @@ from src.cockpit.dense_operator_recovery import (
     LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES,
     OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
 )
+from src.cockpit.operator_mission_control import (
+    LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
+    OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
@@ -618,6 +623,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["production_parity_train_suite_scenario_count_matches"] is True
     assert details["production_parity_train_suite_axis_matches"] is True
     assert details["production_parity_train_gate_required"] is True
+    assert details["operator_control_population_study_suite_present"] is True
+    assert details["operator_control_population_study_suite_scenario_count_matches"] is True
+    assert details["operator_control_population_study_suite_axis_matches"] is True
+    assert details["operator_control_population_study_gate_required"] is True
+    assert details["named_baseline_cockpit_comparison_suite_present"] is True
+    assert details["named_baseline_cockpit_comparison_suite_scenario_count_matches"] is True
+    assert details["named_baseline_cockpit_comparison_suite_axis_matches"] is True
+    assert details["named_baseline_cockpit_comparison_gate_required"] is True
+    assert details["long_work_debugging_slo_suite_present"] is True
+    assert details["long_work_debugging_slo_suite_scenario_count_matches"] is True
+    assert details["long_work_debugging_slo_suite_axis_matches"] is True
+    assert details["long_work_debugging_slo_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
@@ -777,6 +794,40 @@ def test_run_production_parity_train_benchmark_suite_passes():
     assert all(result.details["train_batch_count_matches"] for result in summary.results)
     assert all(result.details["prior_train_prs_merged"] for result in summary.results)
     assert all(result.details["cb_active_state_truthful"] for result in summary.results)
+
+
+def test_run_operator_control_population_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_control_population_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["population_receipts_have_metadata_and_metrics"] for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] for result in summary.results)
+    assert all(result.details["handoff_requires_receiver_scope_renewal"] for result in summary.results)
+
+
+def test_run_named_baseline_cockpit_comparison_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["named_baseline_cockpit_comparison"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES)
+    assert all(result.details["named_baselines_pressure_only"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+    assert all(result.details["named_baseline_cockpit_gate_required"] for result in summary.results)
+
+
+def test_run_long_work_debugging_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["long_work_debugging_slo"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES)
+    assert all(result.details["all_slos_met"] for result in summary.results)
+    assert all(
+        result.details["replay_and_runbook_actions_stay_read_only_until_context_matches"]
+        for result in summary.results
+    )
+    assert all(result.details["long_work_debugging_slo_gate_required"] for result in summary.results)
 
 
 def test_run_final_source_backed_parity_audit_benchmark_suite_passes():
@@ -2447,6 +2498,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "long_work_debugging_recovery" in captured.out
     assert "operator_control_density" in captured.out
     assert "independent_operator_usability_accessibility" in captured.out
+    assert "operator_control_population_study" in captured.out
+    assert "named_baseline_cockpit_comparison" in captured.out
+    assert "long_work_debugging_slo" in captured.out
     assert "final_source_backed_parity_audit" in captured.out
     assert "final_claim_ledger_reconciliation" in captured.out
     assert "operator_final_parity_readiness_report" in captured.out
@@ -2555,6 +2609,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "long_work_debugging_recovery",
         "operator_control_density",
         "independent_operator_usability_accessibility",
+        "operator_control_population_study",
+        "named_baseline_cockpit_comparison",
+        "long_work_debugging_slo",
         "production_operator_control_parity",
         "production_parity_train",
         "final_source_backed_parity_audit",

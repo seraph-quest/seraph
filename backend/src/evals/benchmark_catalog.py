@@ -129,6 +129,14 @@ from src.extensions.production_reach_voice_mobile import (
     PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
     PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SUITE_NAME,
 )
+from src.extensions.field_reach_operations import (
+    ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES,
+    ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME,
+    BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES,
+    BROAD_REACH_FIELD_OPERATIONS_SUITE_NAME,
+    VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -522,6 +530,59 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Production mobile execution at scale and always-available reach remain future proof work."
         ),
         scenario_names=MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROAD_REACH_FIELD_OPERATIONS_SUITE_NAME,
+        label="Broad reach field operations",
+        description=(
+            "Pins Batch CU provider/channel field-operation receipts for mobile, messaging, email, calendar, "
+            "webhook, configured degraded channels, consent, auth, revocation, provider windows, rate limits, "
+            "abuse handling, degraded recovery, coverage gaps, and cross-surface continuity."
+        ),
+        benchmark_axis="broad_reach_field_operations",
+        operator_summary=(
+            "Reach proof now exposes broader field-operation receipts while still blocking OpenClaw-class reach, "
+            "complete channel coverage, and always-available wording."
+        ),
+        remaining_gap=(
+            "OpenClaw-class reach, complete channel coverage, and always-available operation remain blocked."
+        ),
+        scenario_names=BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME,
+        label="Voice/media quality operations",
+        description=(
+            "Pins Batch CU STT/TTS/media/voice-command field-operation receipts for quality gates, latency "
+            "budgets, provider regression fallback, correction, deletion, privacy, and memory-import boundaries."
+        ),
+        benchmark_axis="voice_media_quality_operations",
+        operator_summary=(
+            "Voice/media proof now exposes field quality operations while still blocking voice parity, "
+            "multimodal parity, and production STT/TTS solved claims."
+        ),
+        remaining_gap=(
+            "Full voice/media parity and production STT/TTS solved claims remain blocked."
+        ),
+        scenario_names=VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME,
+        label="Always-available reach SLO boundary",
+        description=(
+            "Pins Batch CU bounded reach-SLO receipts for observed provider windows, error budgets, offline "
+            "recovery, provider-failure drills, operator recovery actions, and explicit always-available claim "
+            "boundaries."
+        ),
+        benchmark_axis="always_available_reach_slo",
+        operator_summary=(
+            "Reach proof now exposes bounded SLO and recovery receipts while keeping always-available operation "
+            "and production readiness wording blocked."
+        ),
+        remaining_gap=(
+            "Always-available reach, production readiness, and full parity remain blocked."
+        ),
+        scenario_names=ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,

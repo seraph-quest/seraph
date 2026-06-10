@@ -45,6 +45,7 @@ from src.extensions.benchmark import (
     build_governed_capability_pack_hardening_report,
     build_m9_governed_ecosystem_benchmark_report,
 )
+from src.extensions.live_marketplace_attestation import build_live_marketplace_attestation_report
 from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
 from src.extensions.live_reach_media import build_live_reach_media_report
 from src.extensions.production_reach_hardening import build_production_reach_browser_voice_report
@@ -3428,6 +3429,7 @@ async def get_operator_benchmark_proof():
         m9_governed_ecosystem_benchmark,
         governed_capability_pack_hardening,
         marketplace_lifecycle_maturity,
+        live_marketplace_attestation,
         production_operator_control,
     ) = await asyncio.gather(
         build_production_parity_readiness_report(),
@@ -3462,6 +3464,7 @@ async def get_operator_benchmark_proof():
         build_m9_governed_ecosystem_benchmark_report(),
         build_governed_capability_pack_hardening_report(),
         build_marketplace_lifecycle_report(),
+        build_live_marketplace_attestation_report(),
         build_production_operator_control_report(),
     )
     evolution_targets = list_evolution_targets()
@@ -3503,6 +3506,7 @@ async def get_operator_benchmark_proof():
         str(m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"]),
         str(governed_capability_pack_hardening["summary"]["benchmark_posture"]),
         str(marketplace_lifecycle_maturity["summary"]["benchmark_posture"]),
+        str(live_marketplace_attestation["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
@@ -3582,6 +3586,8 @@ async def get_operator_benchmark_proof():
             "governed_capability_pack_hardening_claim_boundary": governed_capability_pack_hardening["policy"]["claim_boundary"],
             "marketplace_lifecycle_maturity_posture": marketplace_lifecycle_maturity["summary"]["benchmark_posture"],
             "marketplace_lifecycle_maturity_claim_boundary": marketplace_lifecycle_maturity["policy"]["claim_boundary"],
+            "live_marketplace_attestation_posture": live_marketplace_attestation["summary"]["benchmark_posture"],
+            "live_marketplace_attestation_claim_boundary": live_marketplace_attestation["policy"]["claim_boundary"],
             "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
             "production_operator_control_parity_claim_boundary": production_operator_control["policy"]["claim_boundary"],
         },
@@ -3617,6 +3623,7 @@ async def get_operator_benchmark_proof():
         "m9_governed_ecosystem_benchmark": m9_governed_ecosystem_benchmark,
         "governed_capability_pack_hardening": governed_capability_pack_hardening,
         "marketplace_lifecycle_maturity": marketplace_lifecycle_maturity,
+        "live_marketplace_attestation": live_marketplace_attestation,
         "production_operator_control": production_operator_control,
         "governed_improvement": {
             "target_count": len(evolution_targets),
@@ -3799,6 +3806,11 @@ async def get_operator_governed_capability_pack_hardening():
 @router.get("/operator/marketplace-lifecycle-maturity")
 async def get_operator_marketplace_lifecycle_maturity():
     return await build_marketplace_lifecycle_report()
+
+
+@router.get("/operator/live-marketplace-attestation-proof")
+async def get_operator_live_marketplace_attestation_proof():
+    return await build_live_marketplace_attestation_report()
 
 
 @router.get("/operator/production-operator-control-parity")

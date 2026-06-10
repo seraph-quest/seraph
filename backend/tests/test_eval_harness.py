@@ -23,6 +23,11 @@ from src.extensions.marketplace_lifecycle import (
     GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
     MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
 )
+from src.extensions.live_marketplace_attestation import (
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -427,6 +432,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["capability_rollback_failure_diagnostics_suite_scenario_count_matches"] is True
     assert details["capability_rollback_failure_diagnostics_suite_axis_matches"] is True
     assert details["capability_rollback_failure_diagnostics_gate_required"] is True
+    assert details["third_party_marketplace_attestation_suite_present"] is True
+    assert details["third_party_marketplace_attestation_suite_scenario_count_matches"] is True
+    assert details["third_party_marketplace_attestation_suite_axis_matches"] is True
+    assert details["third_party_marketplace_attestation_gate_required"] is True
+    assert details["marketplace_operations_incident_drill_suite_present"] is True
+    assert details["marketplace_operations_incident_drill_suite_scenario_count_matches"] is True
+    assert details["marketplace_operations_incident_drill_suite_axis_matches"] is True
+    assert details["marketplace_operations_incident_drill_gate_required"] is True
+    assert details["publisher_review_and_package_trust_suite_present"] is True
+    assert details["publisher_review_and_package_trust_suite_scenario_count_matches"] is True
+    assert details["publisher_review_and_package_trust_suite_axis_matches"] is True
+    assert details["publisher_review_and_package_trust_gate_required"] is True
     assert details["production_operator_control_parity_suite_present"] is True
     assert details["production_operator_control_parity_suite_scenario_count_matches"] is True
     assert details["production_operator_control_parity_suite_axis_matches"] is True
@@ -835,6 +852,39 @@ def test_run_capability_rollback_failure_diagnostics_benchmark_suite_passes():
     assert result_names == set(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
     assert all(result.details["failed_update_rolls_back"] is True for result in summary.results)
     assert all(result.details["negative_cases_fail_closed"] is True for result in summary.results)
+
+
+def test_run_third_party_marketplace_attestation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["third_party_marketplace_attestation"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+    assert all(result.details["provenance_signature_publisher_fields_visible"] is True for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] is True for result in summary.results)
+
+
+def test_run_marketplace_operations_incident_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_operations_incident_drill"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+    assert all(result.details["malicious_package_quarantined"] is True for result in summary.results)
+    assert all(result.details["failed_update_rolls_back"] is True for result in summary.results)
+
+
+def test_run_publisher_review_and_package_trust_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["publisher_review_and_package_trust"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
+    assert all(result.details["publisher_key_rotation_visible"] is True for result in summary.results)
+    assert all(result.details["package_count_substitution_blocked"] is True for result in summary.results)
 
 
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
@@ -1746,6 +1796,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "marketplace_grade_capability_lifecycle" in captured.out
     assert "governed_capability_lifecycle_v2" in captured.out
     assert "capability_rollback_failure_diagnostics" in captured.out
+    assert "third_party_marketplace_attestation" in captured.out
+    assert "marketplace_operations_incident_drill" in captured.out
+    assert "publisher_review_and_package_trust" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
     assert "live_external_orchestration_attestation" in captured.out
@@ -1803,6 +1856,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "marketplace_grade_capability_lifecycle",
         "governed_capability_lifecycle_v2",
         "capability_rollback_failure_diagnostics",
+        "third_party_marketplace_attestation",
+        "marketplace_operations_incident_drill",
+        "publisher_review_and_package_trust",
         "production_operator_control_parity",
         "production_parity_train",
     )

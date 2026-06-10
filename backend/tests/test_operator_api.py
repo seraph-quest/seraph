@@ -19,6 +19,13 @@ from src.extensions.marketplace_lifecycle import (
     MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS,
     MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
 )
+from src.extensions.live_marketplace_attestation import (
+    LIVE_MARKETPLACE_ATTESTATION_BLOCKED_CLAIMS,
+    LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY,
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -2399,6 +2406,89 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_live_marketplace_attestation_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "live_marketplace_attestation_receipts_visible",
+                    "benchmark_posture": "live_marketplace_attestation_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+                        + len(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+                        + len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
+                    ),
+                    "attested_package_count": 4,
+                    "recorded_live_operation_count": 6,
+                    "publisher_review_count": 4,
+                    "blocked_attestation_count": 1,
+                    "incident_operation_count": 4,
+                    "signature_verified_count": 3,
+                    "publisher_verified_count": 3,
+                    "vulnerability_attestation_count": 4,
+                    "rollback_ready_count": 4,
+                    "fail_closed_operation_count": 4,
+                    "redaction_receipt_count": 2,
+                    "package_count_substitution_blocked": True,
+                    "claim_boundary": LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "third_party_marketplace_attestation": list(
+                        THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES
+                    ),
+                    "marketplace_operations_incident_drill": list(
+                        MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES
+                    ),
+                    "publisher_review_and_package_trust": list(
+                        PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "live_marketplace_attestation_receipts_visible",
+                        "attested_package_count": 4,
+                        "recorded_live_operation_count": 6,
+                        "publisher_review_count": 4,
+                        "package_count_substitution_blocked": True,
+                    },
+                    "third_party_attestations": [
+                        {
+                            "package_id": "marketplace.suspicious-exporter",
+                            "signature_status": "missing",
+                            "publisher_verification": "unverified",
+                            "compatibility": "blocked",
+                        }
+                    ],
+                    "operations": [
+                        {"operation_id": "cg-malicious-exporter", "state": "quarantined", "fails_closed": True},
+                        {"operation_id": "cg-failed-update-recovery", "state": "rolled_back", "fails_closed": True},
+                    ],
+                    "publisher_reviews": [
+                        {
+                            "publisher_id": "pub.unverified.unknown",
+                            "review_state": "stale_or_missing",
+                            "operator_action": "deny_and_quarantine",
+                        }
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY,
+                    "blocked_claims": list(LIVE_MARKETPLACE_ATTESTATION_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/extensions",
+                        "/api/extensions/validate",
+                        "/api/operator/marketplace-lifecycle-maturity",
+                        "/api/operator/live-marketplace-attestation-proof",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 15, "passed": 15, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_live_external_orchestration_report",
         AsyncMock(
             return_value={
@@ -2529,7 +2619,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 54
+    assert payload["summary"]["suite_count"] == 57
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2656,6 +2746,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["marketplace_lifecycle_maturity_claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
     assert (
+        payload["summary"]["live_marketplace_attestation_posture"]
+        == "live_marketplace_attestation_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["live_marketplace_attestation_claim_boundary"] == (
+        LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["production_operator_control_parity_posture"]
         == "production_operator_control_parity_ci_gated_operator_visible"
     )
@@ -2726,6 +2823,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "capability_rollback_failure_diagnostics"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "third_party_marketplace_attestation"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "marketplace_operations_incident_drill"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "publisher_review_and_package_trust"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
@@ -2989,6 +3098,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "capability_failed_update_recovery_behavior" in rollback_diagnostics_suite["scenario_names"]
     assert rollback_diagnostics_suite["scenario_count"] == len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+    attestation_suite = next(
+        item for item in payload["suites"] if item["name"] == "third_party_marketplace_attestation"
+    )
+    assert "third_party_package_provenance_signature_behavior" in attestation_suite["scenario_names"]
+    assert attestation_suite["scenario_count"] == len(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+    operations_suite = next(
+        item for item in payload["suites"] if item["name"] == "marketplace_operations_incident_drill"
+    )
+    assert "marketplace_malicious_package_quarantine_behavior" in operations_suite["scenario_names"]
+    assert operations_suite["scenario_count"] == len(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+    publisher_suite = next(
+        item for item in payload["suites"] if item["name"] == "publisher_review_and_package_trust"
+    )
+    assert "publisher_review_staleness_behavior" in publisher_suite["scenario_names"]
+    assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
     )
@@ -3040,6 +3164,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["marketplace_lifecycle_maturity"]["summary"]["staged_rollout_count"] == 2
     assert payload["marketplace_lifecycle_maturity"]["policy"]["claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
     assert "production_secure_marketplace" in payload["marketplace_lifecycle_maturity"]["policy"]["blocked_claims"]
+    assert payload["live_marketplace_attestation"]["summary"]["operator_status"] == (
+        "live_marketplace_attestation_receipts_visible"
+    )
+    assert payload["live_marketplace_attestation"]["summary"]["attested_package_count"] == 4
+    assert payload["live_marketplace_attestation"]["summary"]["recorded_live_operation_count"] == 6
+    assert payload["live_marketplace_attestation"]["summary"]["publisher_review_count"] == 4
+    assert payload["live_marketplace_attestation"]["summary"]["blocked_attestation_count"] == 1
+    assert payload["live_marketplace_attestation"]["summary"]["fail_closed_operation_count"] == 4
+    assert payload["live_marketplace_attestation"]["policy"]["claim_boundary"] == (
+        LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
+    )
+    assert "production_secure_marketplace" in payload["live_marketplace_attestation"]["policy"]["blocked_claims"]
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -3241,6 +3377,44 @@ async def test_operator_marketplace_lifecycle_maturity_surface_reports_batch_ca_
     )
     failed_update = next(
         item for item in payload["contract"]["negative_cases"] if item["case_id"] == "failed-update"
+    )
+    assert failed_update["state"] == "rolled_back"
+
+
+@pytest.mark.asyncio
+async def test_operator_live_marketplace_attestation_surface_reports_batch_cg_receipts(client):
+    resp = await client.get("/api/operator/live-marketplace-attestation-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "live_marketplace_attestation_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "live_marketplace_attestation_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+        + len(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+        + len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["attested_package_count"] == 4
+    assert payload["summary"]["recorded_live_operation_count"] == 6
+    assert payload["summary"]["publisher_review_count"] == 4
+    assert payload["summary"]["blocked_attestation_count"] == 1
+    assert payload["summary"]["fail_closed_operation_count"] == 4
+    assert payload["summary"]["package_count_substitution_blocked"] is True
+    assert payload["policy"]["claim_boundary"] == LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
+    assert set(LIVE_MARKETPLACE_ATTESTATION_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/live-marketplace-attestation-proof" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["third_party_marketplace_attestation"] == list(
+        THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES
+    )
+    suspicious = next(
+        item for item in payload["contract"]["third_party_attestations"]
+        if item["package_id"] == "marketplace.suspicious-exporter"
+    )
+    assert suspicious["signature_status"] == "missing"
+    failed_update = next(
+        item for item in payload["contract"]["operations"]
+        if item["operation_id"] == "cg-failed-update-recovery"
     )
     assert failed_update["state"] == "rolled_back"
 

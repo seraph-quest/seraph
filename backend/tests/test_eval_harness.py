@@ -50,6 +50,14 @@ from src.extensions.browser_provider_usability import (
     LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
     MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
 )
+from src.extensions.safe_browser_computer_use import (
+    AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES,
+    BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES,
+    INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES,
+    LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES,
+    SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -1214,6 +1222,72 @@ def test_run_marketplace_rollback_quarantine_diagnostics_benchmark_suite_passes(
     assert all(result.details["rollback_snapshots_visible"] is True for result in summary.results)
 
 
+def test_run_live_browser_task_depth_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_browser_task_depth"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES)
+    assert all(result.details["task_depth_visible"] is True for result in summary.results)
+    assert all(result.details["operator_status_visible"] is True for result in summary.results)
+
+
+def test_run_autonomous_browser_safety_controls_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["autonomous_browser_safety_controls"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES)
+    assert all(result.details["dangerous_actions_default_blocked"] is True for result in summary.results)
+    assert all(result.details["autonomous_tasks_scoped_and_block_mutation"] is True for result in summary.results)
+
+
+def test_run_browser_session_partitioning_security_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_session_partitioning_security"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES)
+    assert all(result.details["session_isolation_invariants_visible"] is True for result in summary.results)
+    assert all(result.details["secret_or_credential_leak_zero_tolerance_visible"] is True for result in summary.results)
+
+
+def test_run_site_specific_recovery_drills_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["site_specific_recovery_drills"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES)
+    assert all(result.details["site_specific_recovery_visible"] is True for result in summary.results)
+    assert all(result.details["site_recovery_fails_closed"] is True for result in summary.results)
+
+
+def test_run_browser_provider_reliability_matrix_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_provider_reliability_matrix"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES)
+    assert all(result.details["provider_reliability_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["provider_modes_visible"] is True for result in summary.results)
+
+
+def test_run_independent_browser_usability_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_browser_usability_review"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES)
+    assert all(result.details["independent_usability_visible"] is True for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] is True for result in summary.results)
+
+
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
 
@@ -2140,6 +2214,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "managed_browser_provider_attestation" in captured.out
     assert "live_multi_operator_usability_study" in captured.out
     assert "browser_computer_use_recovery_drill" in captured.out
+    assert "live_browser_task_depth" in captured.out
+    assert "autonomous_browser_safety_controls" in captured.out
+    assert "browser_session_partitioning_security" in captured.out
+    assert "site_specific_recovery_drills" in captured.out
+    assert "browser_provider_reliability_matrix" in captured.out
+    assert "independent_browser_usability_review" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -2193,6 +2273,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "managed_browser_provider_attestation",
         "live_multi_operator_usability_study",
         "browser_computer_use_recovery_drill",
+        "live_browser_task_depth",
+        "autonomous_browser_safety_controls",
+        "browser_session_partitioning_security",
+        "site_specific_recovery_drills",
+        "browser_provider_reliability_matrix",
+        "independent_browser_usability_review",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

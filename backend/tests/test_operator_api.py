@@ -53,6 +53,16 @@ from src.extensions.browser_provider_usability import (
     LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
     MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
 )
+from src.extensions.safe_browser_computer_use import (
+    AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES,
+    BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES,
+    INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES,
+    LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES,
+    SAFE_BROWSER_COMPUTER_USE_BLOCKED_CLAIMS,
+    SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY,
+    SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -2844,7 +2854,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 83
+    assert payload["summary"]["suite_count"] == 89
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -3014,6 +3024,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["browser_provider_usability_claim_boundary"] == (
         BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["safe_browser_computer_use_posture"]
+        == "safe_browser_computer_use_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["safe_browser_computer_use_claim_boundary"] == (
+        SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY
     )
     assert (
         payload["summary"]["production_operator_control_parity_posture"]
@@ -3506,7 +3523,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 18
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 19
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -3584,6 +3601,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY
     )
     assert "safe_browser_automation" in payload["browser_provider_usability"]["policy"]["blocked_claims"]
+    assert payload["safe_browser_computer_use"]["summary"]["operator_status"] == (
+        "safe_browser_computer_use_receipts_visible"
+    )
+    assert payload["safe_browser_computer_use"]["summary"]["dangerous_action_default_block_count"] == 7
+    assert payload["safe_browser_computer_use"]["summary"]["site_recovery_drill_count"] == 8
+    assert payload["safe_browser_computer_use"]["summary"]["provider_reliability_receipt_count"] == 3
+    assert payload["safe_browser_computer_use"]["summary"]["secret_or_credential_leak_count"] == 0
+    assert payload["safe_browser_computer_use"]["policy"]["claim_boundary"] == (
+        SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY
+    )
+    assert "full_browser_parity" in payload["safe_browser_computer_use"]["policy"]["blocked_claims"]
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -3933,6 +3961,48 @@ async def test_operator_browser_provider_usability_surface_reports_batch_ch_rece
 
 
 @pytest.mark.asyncio
+async def test_operator_safe_autonomous_browser_computer_use_surface_reports_batch_cp_receipts(client):
+    resp = await client.get("/api/operator/safe-autonomous-browser-computer-use")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "safe_browser_computer_use_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "safe_browser_computer_use_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES)
+        + len(AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES)
+        + len(BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES)
+        + len(SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES)
+        + len(BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES)
+        + len(INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["provider_mode_count"] == 3
+    assert payload["summary"]["task_sample_total"] >= 30
+    assert payload["summary"]["dangerous_action_default_block_count"] == 7
+    assert payload["summary"]["session_isolation_satisfied_count"] == 6
+    assert payload["summary"]["site_recovery_drill_count"] == 8
+    assert payload["summary"]["provider_reliability_receipt_count"] == 3
+    assert payload["summary"]["independent_usability_sample_total"] >= 20
+    assert payload["summary"]["raw_receipt_missing_count"] == 0
+    assert payload["summary"]["secret_or_credential_leak_count"] == 0
+    assert payload["summary"]["receipt_artifact_secret_scan_status"] == "passed"
+    assert payload["policy"]["claim_boundary"] == SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY
+    assert set(SAFE_BROWSER_COMPUTER_USE_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/safe-autonomous-browser-computer-use" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["live_browser_task_depth"] == list(
+        LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_provider_reliability_matrix"] == list(
+        BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES
+    )
+    assert all(
+        item["external_mutation_allowed_without_approval"] is False
+        for item in payload["contract"]["dangerous_action_taxonomy"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_operator_production_control_parity_surface_reports_batch_cb_receipts(client):
     resp = await client.get("/api/operator/production-operator-control-parity")
 
@@ -3977,7 +4047,7 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 18
+    assert payload["summary"]["completed_batch_count"] == 19
     cl_batch = next(
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CL"
@@ -4000,8 +4070,15 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CO"
     )
-    assert co_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert co_batch["status"] == "done"
     assert co_batch["issue"] == 510
+    assert co_batch["merged_pr"] == 519
+    cp_batch = next(
+        item for item in payload["contract"]["batch_reconciliation_receipts"]
+        if item["batch"] == "CP"
+    )
+    assert cp_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert cp_batch["issue"] == 511
     assert payload["summary"]["residual_gap_count"] == 7
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False

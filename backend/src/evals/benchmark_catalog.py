@@ -242,6 +242,14 @@ from src.workflows.production_sla_orchestration import (
     PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
     PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME,
 )
+from src.workflows.continuous_orchestration_slo import (
+    CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES,
+    CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME,
+    CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
+    CRASH_FAILOVER_SOAK_SUITE_NAME,
+    SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -1069,6 +1077,54 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "crash-proof or globally exactly-once."
         ),
         scenario_names=DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME,
+        label="Continuous orchestration SLO monitor",
+        description=(
+            "Pins Batch CS continuous orchestration evidence: run windows, scheduler/provider health, jitter "
+            "budgets, retries, replay windows, recovery actions, and residual uncertainty."
+        ),
+        benchmark_axis="continuous_orchestration_slo_monitor",
+        operator_summary=(
+            "Continuous orchestration SLO proof is judged by rolling monitor samples and operator-visible "
+            "recovery state rather than one-off crash or SLA receipts."
+        ),
+        remaining_gap=(
+            "Continuous monitor receipts still block unconditional exactly-once, crash-proof workflow-engine, "
+            "production-ready, and full parity wording."
+        ),
+        scenario_names=CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CRASH_FAILOVER_SOAK_SUITE_NAME,
+        label="Crash/failover soak v1",
+        description=(
+            "Pins Batch CS crash/failover soak receipts for named failure events, failover budgets, replay "
+            "authority, operator handoff, and residual uncertainty."
+        ),
+        benchmark_axis="crash_failover_soak_v1",
+        operator_summary=(
+            "Crash/failover soak proof must show which failure mode was drilled, how replay authority was "
+            "bounded, and which recovery action remains operator-controlled."
+        ),
+        remaining_gap="Named failure drills are not a proof of crash-proof orchestration or distributed consensus.",
+        scenario_names=CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME,
+        label="Side-effect reconciliation v2",
+        description=(
+            "Pins Batch CS reconciliation receipts for idempotency keys, duplicate suppression, irreversible "
+            "side-effect boundaries, manual recovery state, and operator visibility."
+        ),
+        benchmark_axis="side_effect_reconciliation_v2",
+        operator_summary=(
+            "Side-effect reconciliation proof must expose idempotency scope, duplicate handling, irreversible "
+            "boundaries, and recovery state before retry or resume is safe."
+        ),
+        remaining_gap="Reconciliation receipts are scoped to declared boundaries, not global exactly-once delivery.",
+        scenario_names=SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

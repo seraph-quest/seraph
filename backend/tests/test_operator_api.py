@@ -119,6 +119,13 @@ from src.workflows.production_sla_orchestration import (
     PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY,
     PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
 )
+from src.workflows.continuous_orchestration_slo import (
+    CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS,
+    CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY,
+    CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES,
+    CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
+)
 from src.security.production_isolation import (
     PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
     PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
@@ -2854,7 +2861,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 89
+    assert payload["summary"]["suite_count"] == 92
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2894,6 +2901,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["production_sla_orchestration_claim_boundary"] == (
         PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["continuous_orchestration_slo_posture"]
+        == "continuous_orchestration_slo_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["continuous_orchestration_slo_claim_boundary"] == (
+        CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY
     )
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
@@ -4213,6 +4227,54 @@ async def test_operator_production_sla_orchestration_surface_reports_batch_cj_re
     assert any(
         item["study_id"] == "cj-failure-after-side-effect-before-ack"
         for item in payload["contract"]["failure_injection_receipts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_continuous_orchestration_slo_surface_reports_batch_cs_receipts(client):
+    resp = await client.get("/api/operator/continuous-orchestration-slo")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "continuous_orchestration_slo_visible"
+    assert payload["summary"]["benchmark_posture"] == "continuous_orchestration_slo_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES)
+        + len(CRASH_FAILOVER_SOAK_SCENARIO_NAMES)
+        + len(SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["monitor_sample_count"] == 3
+    assert payload["summary"]["crash_failover_soak_count"] == 3
+    assert payload["summary"]["side_effect_reconciliation_count"] == 3
+    assert payload["summary"]["all_monitors_within_budget"] is True
+    assert payload["summary"]["all_failovers_within_budget"] is True
+    assert payload["summary"]["reconciliation_complete"] is True
+    assert payload["summary"]["runtime_status"] == "continuous_orchestration_runtime_ledger_visible"
+    assert payload["summary"]["runtime_observation_count"] == 9
+    assert payload["summary"]["active_budget_breach_count"] == 0
+    assert payload["summary"]["active_duplicate_risk_count"] == 0
+    assert payload["summary"]["active_recovery_queue_count"] >= 2
+    assert payload["contract"]["runtime_operations"]["runtime_receipt_digest"]
+    assert "cs-soak-provider-ack-loss" in payload["contract"]["runtime_operations"]["operator_recovery_queue"]
+    assert payload["policy"]["claim_boundary"] == CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY
+    assert set(CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/continuous-orchestration-slo" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["continuous_orchestration_slo_monitor"] == list(
+        CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["crash_failover_soak_v1"] == list(CRASH_FAILOVER_SOAK_SCENARIO_NAMES)
+    assert payload["scenario_names"]["side_effect_reconciliation_v2"] == list(
+        SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES
+    )
+    assert "unconditional_exactly_once_scheduler" in payload["policy"]["not_claimed"]
+    assert any(
+        item["evidence_mode"] == "recorded_live_fixture"
+        for item in payload["contract"]["monitor_samples"]
+    )
+    assert any(
+        item["side_effect_state"] == "completed_unacknowledged"
+        for item in payload["contract"]["crash_failover_soak_receipts"]
     )
 
 

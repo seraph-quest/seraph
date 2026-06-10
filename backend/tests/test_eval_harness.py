@@ -106,6 +106,11 @@ from src.workflows.production_sla_orchestration import (
     EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES,
     PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
 )
+from src.workflows.continuous_orchestration_slo import (
+    CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES,
+    CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
+)
 from src.security.production_isolation import (
     PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
     PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
@@ -356,6 +361,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["duplicate_side_effect_audit_suite_scenario_count_matches"] is True
     assert details["duplicate_side_effect_audit_suite_axis_matches"] is True
     assert details["duplicate_side_effect_audit_gate_required"] is True
+    assert details["continuous_orchestration_slo_suite_present"] is True
+    assert details["continuous_orchestration_slo_suite_scenario_count_matches"] is True
+    assert details["continuous_orchestration_slo_suite_axis_matches"] is True
+    assert details["continuous_orchestration_slo_gate_required"] is True
+    assert details["crash_failover_soak_suite_present"] is True
+    assert details["crash_failover_soak_suite_scenario_count_matches"] is True
+    assert details["crash_failover_soak_suite_axis_matches"] is True
+    assert details["crash_failover_soak_gate_required"] is True
+    assert details["side_effect_reconciliation_v2_suite_present"] is True
+    assert details["side_effect_reconciliation_v2_suite_scenario_count_matches"] is True
+    assert details["side_effect_reconciliation_v2_suite_axis_matches"] is True
+    assert details["side_effect_reconciliation_v2_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -659,6 +676,36 @@ def test_run_duplicate_side_effect_audit_benchmark_suite_passes():
     assert all(result.details["duplicate_audits_visible"] for result in summary.results)
     assert all(result.details["duplicate_audit_reconciliation_visible"] for result in summary.results)
     assert all(result.details["duplicate_audit_gate_required"] for result in summary.results)
+
+
+def test_run_continuous_orchestration_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["continuous_orchestration_slo_monitor"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES)
+    assert all(result.details["monitor_samples_visible"] for result in summary.results)
+    assert all(result.details["monitors_within_budget"] for result in summary.results)
+    assert all(result.details["slo_gate_required"] for result in summary.results)
+
+
+def test_run_crash_failover_soak_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["crash_failover_soak_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CRASH_FAILOVER_SOAK_SCENARIO_NAMES)
+    assert all(result.details["crash_failover_soaks_visible"] for result in summary.results)
+    assert all(result.details["replay_authority_visible"] for result in summary.results)
+    assert all(result.details["soak_gate_required"] for result in summary.results)
+
+
+def test_run_side_effect_reconciliation_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["side_effect_reconciliation_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES)
+    assert all(result.details["side_effect_reconciliations_visible"] for result in summary.results)
+    assert all(result.details["reconciliation_boundaries_visible"] for result in summary.results)
+    assert all(result.details["reconciliation_gate_required"] for result in summary.results)
 
 
 def test_run_production_operator_control_parity_benchmark_suite_passes():
@@ -2255,6 +2302,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "production_sla_orchestration" in captured.out
     assert "exactly_once_recovery_evidence" in captured.out
     assert "duplicate_side_effect_audit" in captured.out
+    assert "continuous_orchestration_slo_monitor" in captured.out
+    assert "crash_failover_soak_v1" in captured.out
+    assert "side_effect_reconciliation_v2" in captured.out
     assert available_benchmark_suites() == (
         "production_parity_readiness",
         "guardian_memory_quality",
@@ -2304,6 +2354,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "production_sla_orchestration",
         "exactly_once_recovery_evidence",
         "duplicate_side_effect_audit",
+        "continuous_orchestration_slo_monitor",
+        "crash_failover_soak_v1",
+        "side_effect_reconciliation_v2",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

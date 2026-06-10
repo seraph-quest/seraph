@@ -318,6 +318,17 @@ from src.workflows.production_sla_orchestration import (
     PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME,
     build_production_sla_orchestration_contract,
 )
+from src.workflows.continuous_orchestration_slo import (
+    CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS,
+    CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY,
+    CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES,
+    CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME,
+    CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
+    CRASH_FAILOVER_SOAK_SUITE_NAME,
+    SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME,
+    build_continuous_orchestration_slo_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -15651,6 +15662,13 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     duplicate_side_effect_audit_suite = next(
         item for item in suites if item["name"] == DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME
     )
+    continuous_orchestration_slo_suite = next(
+        item for item in suites if item["name"] == CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME
+    )
+    crash_failover_soak_suite = next(item for item in suites if item["name"] == CRASH_FAILOVER_SOAK_SUITE_NAME)
+    side_effect_reconciliation_v2_suite = next(
+        item for item in suites if item["name"] == SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
@@ -15977,6 +15995,45 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "duplicate_side_effect_audit_gate_required": (
             DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "continuous_orchestration_slo_suite_present": (
+            "continuous_orchestration_monitor_window_behavior"
+            in continuous_orchestration_slo_suite["scenario_names"]
+        ),
+        "continuous_orchestration_slo_suite_scenario_count_matches": (
+            continuous_orchestration_slo_suite["scenario_count"]
+            == len(CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES)
+        ),
+        "continuous_orchestration_slo_suite_axis_matches": (
+            continuous_orchestration_slo_suite["benchmark_axis"] == "continuous_orchestration_slo_monitor"
+        ),
+        "continuous_orchestration_slo_gate_required": (
+            CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "crash_failover_soak_suite_present": (
+            "crash_failover_soak_window_behavior" in crash_failover_soak_suite["scenario_names"]
+        ),
+        "crash_failover_soak_suite_scenario_count_matches": (
+            crash_failover_soak_suite["scenario_count"] == len(CRASH_FAILOVER_SOAK_SCENARIO_NAMES)
+        ),
+        "crash_failover_soak_suite_axis_matches": (
+            crash_failover_soak_suite["benchmark_axis"] == "crash_failover_soak_v1"
+        ),
+        "crash_failover_soak_gate_required": (
+            CRASH_FAILOVER_SOAK_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "side_effect_reconciliation_v2_suite_present": (
+            "side_effect_reconciliation_idempotency_behavior"
+            in side_effect_reconciliation_v2_suite["scenario_names"]
+        ),
+        "side_effect_reconciliation_v2_suite_scenario_count_matches": (
+            side_effect_reconciliation_v2_suite["scenario_count"] == len(SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES)
+        ),
+        "side_effect_reconciliation_v2_suite_axis_matches": (
+            side_effect_reconciliation_v2_suite["benchmark_axis"] == "side_effect_reconciliation_v2"
+        ),
+        "side_effect_reconciliation_v2_gate_required": (
+            SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
@@ -17200,6 +17257,79 @@ async def _eval_production_sla_orchestration_behavior() -> dict[str, Any]:
         "exactly_once_gate_required": EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
         "duplicate_audit_gate_required": DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
+async def _eval_continuous_orchestration_slo_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    slo_suite = next(item for item in suites if item["name"] == CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME)
+    soak_suite = next(item for item in suites if item["name"] == CRASH_FAILOVER_SOAK_SUITE_NAME)
+    reconciliation_suite = next(item for item in suites if item["name"] == SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME)
+    contract = build_continuous_orchestration_slo_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    monitors = contract["monitor_samples"]
+    soaks = contract["crash_failover_soak_receipts"]
+    reconciliations = contract["side_effect_reconciliation_receipts"]
+    controls = contract["operator_recovery_receipts"]
+    runtime = contract["runtime_operations"]
+    required_surfaces = {
+        "/api/operator/continuous-orchestration-slo",
+        "/api/operator/benchmark-proof",
+        "/api/operator/production-sla-orchestration",
+        "/api/operator/live-external-orchestration",
+        "/api/operator/durable-workflow-engine-v2",
+    }
+    required_controls = {"inspect", "audit", "resume", "repair", "suppress_duplicate", "branch", "cancel"}
+    return {
+        "slo_suite_visible": slo_suite["scenario_count"] == len(CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES),
+        "soak_suite_visible": soak_suite["scenario_count"] == len(CRASH_FAILOVER_SOAK_SCENARIO_NAMES),
+        "reconciliation_suite_visible": (
+            reconciliation_suite["scenario_count"] == len(SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES)
+        ),
+        "slo_axis_visible": slo_suite["benchmark_axis"] == "continuous_orchestration_slo_monitor",
+        "soak_axis_visible": soak_suite["benchmark_axis"] == "crash_failover_soak_v1",
+        "reconciliation_axis_visible": reconciliation_suite["benchmark_axis"] == "side_effect_reconciliation_v2",
+        "operator_status_visible": summary["operator_status"] == "continuous_orchestration_slo_visible",
+        "runtime_ledger_visible": summary["runtime_status"] == "continuous_orchestration_runtime_ledger_visible"
+        and runtime["runtime_status"] == "continuous_orchestration_runtime_ledger_visible",
+        "runtime_observations_cover_receipts": summary["runtime_observation_count"]
+        == len(monitors) + len(soaks) + len(reconciliations),
+        "runtime_state_reconciled": runtime["active_budget_breach_count"] == 0
+        and runtime["active_duplicate_risk_count"] == 0
+        and runtime["active_recovery_queue_count"] >= 2
+        and bool(runtime["runtime_receipt_digest"]),
+        "monitor_samples_visible": summary["monitor_sample_count"] >= 3,
+        "crash_failover_soaks_visible": summary["crash_failover_soak_count"] >= 3,
+        "side_effect_reconciliations_visible": summary["side_effect_reconciliation_count"] >= 3,
+        "recorded_live_receipts_visible": summary["recorded_live_receipt_count"] >= 4,
+        "deterministic_soaks_visible": summary["deterministic_soak_count"] >= 2,
+        "evidence_modes_visible": {"recorded_live_fixture", "deterministic_soak_fixture"} <= set(summary["evidence_modes"]),
+        "monitors_within_budget": summary["all_monitors_within_budget"] is True
+        and all(int(item["max_jitter_ms"]) <= int(item["jitter_budget_ms"]) for item in monitors),
+        "failovers_within_budget": summary["all_failovers_within_budget"] is True
+        and all(int(item["failover_latency_ms"]) <= int(item["failover_budget_ms"]) for item in soaks),
+        "replay_authority_visible": all(item.get("replay_authority") for item in soaks),
+        "reconciliation_boundaries_visible": summary["reconciliation_complete"] is True
+        and all(
+            item.get("idempotency_key")
+            and item.get("duplicate_suppression_state")
+            and item.get("irreversible_boundary")
+            and item.get("manual_recovery_state")
+            for item in reconciliations
+        ),
+        "operator_controls_visible": summary["required_controls_visible"] is True
+        and required_controls <= {item["action"] for item in controls},
+        "controls_leave_receipts": all(item.get("enabled") and item.get("receipt_after_action") for item in controls),
+        "claim_boundary_visible": policy["claim_boundary"] == CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "unconditional_exactly_once_not_claimed": "unconditional_exactly_once_scheduler" in policy["not_claimed"],
+        "slo_gate_required": CONTINUOUS_ORCHESTRATION_SLO_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "soak_gate_required": CRASH_FAILOVER_SOAK_SUITE_NAME in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "reconciliation_gate_required": SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
     }
 
@@ -18769,6 +18899,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_sla_orchestration_behavior,
         )
         for name in DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CS records continuous orchestration SLO monitor receipts for run windows, scheduler health, "
+                "jitter budgets, retries, replay windows, recovery state, and claim boundaries."
+            ),
+            runner=_eval_continuous_orchestration_slo_behavior,
+        )
+        for name in CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CS records crash/failover soak receipts for named failure events, replay authority, "
+                "operator handoff, failover budgets, and residual uncertainty."
+            ),
+            runner=_eval_continuous_orchestration_slo_behavior,
+        )
+        for name in CRASH_FAILOVER_SOAK_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CS records side-effect reconciliation receipts for idempotency keys, duplicate suppression, "
+                "irreversible boundaries, manual recovery state, and operator visibility."
+            ),
+            runner=_eval_continuous_orchestration_slo_behavior,
+        )
+        for name in SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

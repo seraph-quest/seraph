@@ -255,6 +255,7 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CJ", 505, "production_sla_orchestration", 514),
         ("CK", 506, "independent_secure_host_review", 515),
         ("CL", 509, "broad_channel_sla_operations", 516),
+        ("CM", 507, "independent_outcome_cohort_review", 517),
     ]
     receipts = [
         {
@@ -282,19 +283,6 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "project_pr": "owned_by_linked_pull_request_until_pr_merge",
         "code_review": "owned_by_linked_pull_request_until_pr_merge",
         "project_truth_source": "GitHub issue #497 and its Project item are authoritative for live PR/review fields",
-        "operator_visible": True,
-    })
-    receipts.append({
-        "batch": "CM",
-        "issue": 507,
-        "primary_suite": "independent_outcome_cohort_review",
-        "merged_pr": None,
-        "status": "active_branch_receipts_visible_until_pr_merge",
-        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
-        "project_status": "owned_by_github_project_until_pr_merge",
-        "project_pr": "owned_by_linked_pull_request_until_pr_merge",
-        "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #507 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
     receipts.append({
@@ -448,7 +436,7 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
                 "full_memory_provider_parity",
                 "production_ready_product",
             ],
-            "status": "active_branch_receipts_visible_until_batch_cm_pr_merge",
+            "status": "backed_for_bounded_receipts_after_batch_cm_pr_merge",
             "operator_surface": "/api/operator/independent-learning-memory-parity",
         },
         {
@@ -544,7 +532,7 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
             "gap_id": "ci-gap-human-outcomes-independent",
             "area": "guardian_intelligence",
             "gap": (
-                "Batch CM is narrowing the independent learning/memory gap with independent outcome cohort, "
+                "Batch CM narrows the independent learning/memory gap with independent outcome cohort, "
                 "task-scoped causal-learning, privacy/rollback, and memory-provider parity-matrix receipts; "
                 "guardian intelligence superiority, memory superiority, solved learning, live human-outcome "
                 "superiority, and full memory-provider parity remain blocked"

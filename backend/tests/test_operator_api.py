@@ -3466,7 +3466,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 16
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 17
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -3887,7 +3887,7 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 16
+    assert payload["summary"]["completed_batch_count"] == 17
     cl_batch = next(
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CL"
@@ -3898,9 +3898,9 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CM"
     )
-    assert cm_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
-    assert cm_batch["merged_pr"] is None
-    assert payload["summary"]["residual_gap_count"] == 6
+    assert cm_batch["status"] == "done"
+    assert cm_batch["merged_pr"] == 517
+    assert payload["summary"]["residual_gap_count"] == 7
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False
     assert payload["policy"]["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY

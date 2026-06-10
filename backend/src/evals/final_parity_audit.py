@@ -35,7 +35,7 @@ OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES = (
     "operator_final_board_reconciliation_behavior",
     "operator_final_benchmark_aggregate_behavior",
     "operator_final_residual_risk_visibility_behavior",
-    "operator_final_cq_self_reference_behavior",
+    "operator_final_cq_merged_state_behavior",
     "operator_final_no_false_completion_behavior",
 )
 FINAL_PARITY_AUDIT_CLAIM_BOUNDARY = (
@@ -282,6 +282,7 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CO", 510, "independent_package_security_review", 519),
         ("CI", 497, FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME, 504),
         ("CP", 511, "live_browser_task_depth", 520),
+        ("CQ", 512, FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME, 521),
     ]
     receipts = [
         {
@@ -298,19 +299,6 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         }
         for batch, issue, suite, pr in completed_batches
     ]
-    receipts.append({
-        "batch": "CQ",
-        "issue": 512,
-        "primary_suite": FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
-        "merged_pr": None,
-        "status": "self_referential_final_claim_lift_audit_batch",
-        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
-        "project_status": "owned_by_github_project_until_pr_merge",
-        "project_pr": "owned_by_linked_pull_request_until_pr_merge",
-        "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #512 and its Project item are authoritative for live PR/review fields",
-        "operator_visible": True,
-    })
     return receipts
 
 
@@ -515,9 +503,8 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "area": "full_parity_claim_lift_and_final_critic_audit",
             "issue_links": [475, 512],
             "allowed_wording": (
-                "after Batch CQ merges, Seraph may say the board-backed parity proof train has a final "
-                "claim-lift audit with current-source, Project, issue, PR, docs, tests, operator receipt, "
-                "and critic reconciliation"
+                "Seraph has completed a board-backed parity proof train and final claim-lift audit "
+                "with bounded receipts"
             ),
             "blocked_claims": [
                 "fully_at_parity",
@@ -533,7 +520,7 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
                 "guardian_intelligence_superiority",
                 "memory_superiority",
             ],
-            "status": "active_final_claim_lift_audit_exact_broad_claims_continue_blocked",
+            "status": "backed_for_bounded_final_claim_lift_receipts_broad_claims_continue_blocked",
             "operator_surface": "/api/operator/final-parity-readiness-report",
         },
     ]
@@ -700,10 +687,10 @@ def final_claim_lift_matrix() -> list[dict[str, Any]]:
             "claim_id": "SCL-033",
             "batch": "CQ",
             "issue": 512,
-            "merged_pr": None,
-            "project_status": "In Progress",
-            "project_pr": "owned_by_linked_pull_request_until_pr_merge",
-            "code_review": "owned_by_linked_pull_request_until_pr_merge",
+            "merged_pr": 521,
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
             "tests": ["tests/test_final_parity_audit.py", "tests/test_operator_api.py", "tests/test_strategy_claims.py"],
             "operator_surface": "/api/operator/final-parity-readiness-report",
             "evidence": [
@@ -712,18 +699,21 @@ def final_claim_lift_matrix() -> list[dict[str, Any]]:
                 "final_claim_lift_matrix",
                 "critic_disposition_receipts",
             ],
-            "permitted_exact_wording_after_merge": (
+            "permitted_exact_wording": (
                 "Seraph has completed a board-backed parity proof train and final claim-lift audit "
                 "with bounded receipts."
             ),
-            "currently_permitted_exact_wording": None,
-            "currently_allowed": False,
+            "currently_permitted_exact_wording": (
+                "Seraph has completed a board-backed parity proof train and final claim-lift audit "
+                "with bounded receipts."
+            ),
+            "currently_allowed": True,
             "narrowed_wording": (
                 "This is proof-train completion, not product-wide full parity, production readiness, "
                 "security superiority, or reference-system exceedance."
             ),
             "continued_blocked_claims": list(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS),
-            "disposition": "active_final_gate",
+            "disposition": "bounded_completion_wording_allowed_broad_claims_continue_blocked",
         },
     ]
 
@@ -1003,7 +993,7 @@ def build_final_parity_audit_contract() -> dict[str, Any]:
                 and item.get("continued_blocked_claims")
                 for item in claim_lift
             ),
-            "bounded_parity_proof_train_completion_wording_allowed": False,
+            "bounded_parity_proof_train_completion_wording_allowed": True,
             "bounded_parity_proof_train_completion_wording_allowed_after_cq_merge": True,
             "full_parity_claim_allowed": False,
             "reference_systems_exceeded_claim_allowed": False,

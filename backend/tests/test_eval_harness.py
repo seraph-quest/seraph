@@ -50,6 +50,11 @@ from src.extensions.production_marketplace_security import (
     PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES,
     PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
 )
+from src.extensions.marketplace_security_corpus import (
+    CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
@@ -603,6 +608,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["publisher_review_and_package_trust_suite_scenario_count_matches"] is True
     assert details["publisher_review_and_package_trust_suite_axis_matches"] is True
     assert details["publisher_review_and_package_trust_gate_required"] is True
+    assert details["marketplace_security_corpus_suite_present"] is True
+    assert details["marketplace_security_corpus_suite_scenario_count_matches"] is True
+    assert details["marketplace_security_corpus_suite_axis_matches"] is True
+    assert details["marketplace_security_corpus_gate_required"] is True
+    assert details["continuous_vulnerability_monitoring_suite_present"] is True
+    assert details["continuous_vulnerability_monitoring_suite_scenario_count_matches"] is True
+    assert details["continuous_vulnerability_monitoring_suite_axis_matches"] is True
+    assert details["continuous_vulnerability_monitoring_gate_required"] is True
+    assert details["publisher_trust_operations_suite_present"] is True
+    assert details["publisher_trust_operations_suite_scenario_count_matches"] is True
+    assert details["publisher_trust_operations_suite_axis_matches"] is True
+    assert details["publisher_trust_operations_gate_required"] is True
     assert details["managed_browser_provider_attestation_suite_present"] is True
     assert details["managed_browser_provider_attestation_suite_scenario_count_matches"] is True
     assert details["managed_browser_provider_attestation_suite_axis_matches"] is True
@@ -1435,6 +1452,39 @@ def test_run_marketplace_rollback_quarantine_diagnostics_benchmark_suite_passes(
     assert result_names == set(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES)
     assert all(result.details["required_lifecycle_actions_visible"] is True for result in summary.results)
     assert all(result.details["rollback_snapshots_visible"] is True for result in summary.results)
+
+
+def test_run_marketplace_security_corpus_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_security_corpus_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+    assert all(result.details["corpus_package_count_matches"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
+def test_run_continuous_vulnerability_monitoring_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["continuous_vulnerability_monitoring"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+    assert all(result.details["scanner_waiver_remediation_visible"] is True for result in summary.results)
+    assert all(result.details["critical_unwaived_package_quarantined"] is True for result in summary.results)
+
+
+def test_run_publisher_trust_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["publisher_trust_operations"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["publisher_actions_cover_allow_hold_deny"] is True for result in summary.results)
+    assert all(result.details["network_secret_workspace_denials_visible"] is True for result in summary.results)
 
 
 def test_run_live_browser_task_depth_benchmark_suite_passes():
@@ -2493,6 +2543,14 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "third_party_marketplace_attestation" in captured.out
     assert "marketplace_operations_incident_drill" in captured.out
     assert "publisher_review_and_package_trust" in captured.out
+    assert "independent_package_security_review" in captured.out
+    assert "hostile_ecosystem_package_drills" in captured.out
+    assert "package_network_incident_operations" in captured.out
+    assert "publisher_trust_vulnerability_handling" in captured.out
+    assert "marketplace_rollback_quarantine_diagnostics" in captured.out
+    assert "marketplace_security_corpus_v1" in captured.out
+    assert "continuous_vulnerability_monitoring" in captured.out
+    assert "publisher_trust_operations" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
     assert "long_work_debugging_recovery" in captured.out
@@ -2606,6 +2664,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "package_network_incident_operations",
         "publisher_trust_vulnerability_handling",
         "marketplace_rollback_quarantine_diagnostics",
+        "marketplace_security_corpus_v1",
+        "continuous_vulnerability_monitoring",
+        "publisher_trust_operations",
         "long_work_debugging_recovery",
         "operator_control_density",
         "independent_operator_usability_accessibility",

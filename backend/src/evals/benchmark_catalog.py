@@ -87,6 +87,14 @@ from src.extensions.production_marketplace_security import (
     PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
     PUBLISHER_TRUST_VULNERABILITY_HANDLING_SUITE_NAME,
 )
+from src.extensions.marketplace_security_corpus import (
+    CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES,
+    CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME,
+    MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CORPUS_SUITE_NAME,
+    PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_OPERATIONS_SUITE_NAME,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -1845,6 +1853,57 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is rollback/quarantine proof, not a production-secure marketplace claim."
         ),
         scenario_names=MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_SECURITY_CORPUS_SUITE_NAME,
+        label="Marketplace security corpus v1",
+        description=(
+            "Pins registry corpus receipts for package inventory, provenance, signatures, publisher keys, SBOM and "
+            "dependency graph digests, compatibility, review state, lifecycle diagnostics, and redacted safe handles."
+        ),
+        benchmark_axis="marketplace_security_corpus_v1",
+        operator_summary=(
+            "CX extends bounded marketplace-security proof into corpus operations without treating package count as "
+            "ecosystem superiority or full marketplace parity."
+        ),
+        remaining_gap=(
+            "This is bounded corpus evidence, not production-secure marketplace or solved third-party package security."
+        ),
+        scenario_names=MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CONTINUOUS_VULNERABILITY_MONITORING_SUITE_NAME,
+        label="Continuous vulnerability monitoring",
+        description=(
+            "Pins scanner-source freshness, database freshness, waiver expiry, remediation SLA, critical/high finding "
+            "blocks, stale database negatives, and operator-visible monitoring receipts."
+        ),
+        benchmark_axis="continuous_vulnerability_monitoring",
+        operator_summary=(
+            "Continuous monitoring keeps source freshness, waiver state, remediation decisions, and deny/quarantine "
+            "actions visible before packages can promote."
+        ),
+        remaining_gap=(
+            "This does not prove solved third-party package security or production readiness."
+        ),
+        scenario_names=CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PUBLISHER_TRUST_OPERATIONS_SUITE_NAME,
+        label="Publisher trust operations",
+        description=(
+            "Pins publisher identity, key rotation, review freshness, incident state, quarantine/re-entry decisions, "
+            "package-network denial, secret/workspace boundaries, and operator diagnostics."
+        ),
+        benchmark_axis="publisher_trust_operations",
+        operator_summary=(
+            "Publisher trust is operated as a corpus-wide safety control with visible holds, denials, and recovery "
+            "diagnostics instead of broad marketplace-security claims."
+        ),
+        remaining_gap=(
+            "Publisher trust operations remain bounded receipts, not ecosystem superiority or full marketplace parity."
+        ),
+        scenario_names=PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,

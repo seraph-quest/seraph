@@ -51,6 +51,7 @@ from src.extensions.benchmark import (
 from src.extensions.browser_provider_usability import build_browser_provider_usability_report
 from src.extensions.live_marketplace_attestation import build_live_marketplace_attestation_report
 from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
+from src.extensions.marketplace_security_corpus import build_marketplace_security_corpus_report
 from src.extensions.production_marketplace_security import build_production_marketplace_security_report
 from src.extensions.safe_browser_computer_use import build_safe_browser_computer_use_report
 from src.extensions.field_reach_operations import build_broad_reach_field_ops_report
@@ -3453,6 +3454,7 @@ async def get_operator_benchmark_proof():
         marketplace_lifecycle_maturity,
         live_marketplace_attestation,
         production_marketplace_security,
+        marketplace_security_corpus,
         browser_provider_usability,
         safe_browser_computer_use,
         production_operator_control,
@@ -3502,6 +3504,7 @@ async def get_operator_benchmark_proof():
         build_marketplace_lifecycle_report(),
         build_live_marketplace_attestation_report(),
         build_production_marketplace_security_report(),
+        build_marketplace_security_corpus_report(),
         build_browser_provider_usability_report(),
         build_safe_browser_computer_use_report(),
         build_production_operator_control_report(),
@@ -3558,6 +3561,7 @@ async def get_operator_benchmark_proof():
         str(marketplace_lifecycle_maturity["summary"]["benchmark_posture"]),
         str(live_marketplace_attestation["summary"]["benchmark_posture"]),
         str(production_marketplace_security["summary"]["benchmark_posture"]),
+        str(marketplace_security_corpus["summary"]["benchmark_posture"]),
         str(browser_provider_usability["summary"]["benchmark_posture"]),
         str(safe_browser_computer_use["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
@@ -3668,6 +3672,8 @@ async def get_operator_benchmark_proof():
             "live_marketplace_attestation_claim_boundary": live_marketplace_attestation["policy"]["claim_boundary"],
             "production_marketplace_security_posture": production_marketplace_security["summary"]["benchmark_posture"],
             "production_marketplace_security_claim_boundary": production_marketplace_security["policy"]["claim_boundary"],
+            "marketplace_security_corpus_posture": marketplace_security_corpus["summary"]["benchmark_posture"],
+            "marketplace_security_corpus_claim_boundary": marketplace_security_corpus["policy"]["claim_boundary"],
             "browser_provider_usability_posture": browser_provider_usability["summary"]["benchmark_posture"],
             "browser_provider_usability_claim_boundary": browser_provider_usability["policy"]["claim_boundary"],
             "safe_browser_computer_use_posture": safe_browser_computer_use["summary"]["benchmark_posture"],
@@ -3723,6 +3729,7 @@ async def get_operator_benchmark_proof():
         "marketplace_lifecycle_maturity": marketplace_lifecycle_maturity,
         "live_marketplace_attestation": live_marketplace_attestation,
         "production_marketplace_security": production_marketplace_security,
+        "marketplace_security_corpus": marketplace_security_corpus,
         "browser_provider_usability": browser_provider_usability,
         "safe_browser_computer_use": safe_browser_computer_use,
         "production_operator_control": production_operator_control,
@@ -3960,6 +3967,11 @@ async def get_operator_live_marketplace_attestation_proof():
 @router.get("/operator/production-marketplace-security")
 async def get_operator_production_marketplace_security():
     return await build_production_marketplace_security_report()
+
+
+@router.get("/operator/marketplace-security-corpus")
+async def get_operator_marketplace_security_corpus():
+    return await build_marketplace_security_corpus_report()
 
 
 @router.get("/operator/browser-provider-usability-proof")

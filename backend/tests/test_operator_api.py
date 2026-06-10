@@ -53,6 +53,13 @@ from src.extensions.production_marketplace_security import (
     PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY,
     PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
 )
+from src.extensions.marketplace_security_corpus import (
+    CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CORPUS_BLOCKED_CLAIMS,
+    MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY,
+    MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
@@ -2584,6 +2591,85 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_marketplace_security_corpus_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "marketplace_security_corpus_receipts_visible",
+                    "benchmark_posture": "marketplace_security_corpus_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+                        + len(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+                        + len(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+                    ),
+                    "corpus_package_count": 8,
+                    "package_family_count": 8,
+                    "continuous_monitor_count": 5,
+                    "scanner_source_count": 4,
+                    "publisher_operation_count": 5,
+                    "lifecycle_operation_count": 6,
+                    "package_network_boundary_count": 5,
+                    "safe_receipts_redacted": True,
+                    "production_secure_marketplace_claim_allowed": False,
+                    "claim_boundary": MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "marketplace_security_corpus_v1": list(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES),
+                    "continuous_vulnerability_monitoring": list(
+                        CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES
+                    ),
+                    "publisher_trust_operations": list(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "marketplace_security_corpus_receipts_visible",
+                        "corpus_package_count": 8,
+                        "continuous_monitor_count": 5,
+                        "publisher_operation_count": 5,
+                        "package_network_boundary_count": 5,
+                    },
+                    "registry_corpus": [
+                        {
+                            "package_id": "marketplace.suspicious-exporter",
+                            "signature_status": "missing",
+                            "operator_action": "deny_and_quarantine",
+                            "package_count_claim_allowed": False,
+                        }
+                    ],
+                    "continuous_monitoring": [
+                        {
+                            "monitor_id": "cx-monitor-critical-unwaived",
+                            "finding_state": "critical_unwaived",
+                            "operator_action": "deny_and_quarantine",
+                        }
+                    ],
+                    "package_network_boundaries": [
+                        {
+                            "boundary_class": "secret_ref_injection",
+                            "decision": "deny_destination_host_mismatch",
+                            "audit_visible": True,
+                        }
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY,
+                    "blocked_claims": list(MARKETPLACE_SECURITY_CORPUS_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/marketplace-security-corpus",
+                        "/api/operator/production-marketplace-security",
+                        "/api/operator/live-marketplace-attestation-proof",
+                        "/api/operator/marketplace-lifecycle-maturity",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 15, "passed": 15, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_browser_provider_usability_report",
         AsyncMock(
             return_value={
@@ -3081,6 +3167,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["production_marketplace_security_claim_boundary"]
         == PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["marketplace_security_corpus_posture"]
+        == "marketplace_security_corpus_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["marketplace_security_corpus_claim_boundary"]
+        == MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY
     )
     assert (
         payload["summary"]["browser_provider_usability_posture"]
@@ -3616,6 +3710,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "marketplace_update_failed_rollback_behavior" in rollback_quarantine_suite["scenario_names"]
     assert rollback_quarantine_suite["scenario_count"] == len(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES)
+    marketplace_security_corpus_suite = next(
+        item for item in payload["suites"] if item["name"] == "marketplace_security_corpus_v1"
+    )
+    assert "marketplace_corpus_inventory_behavior" in marketplace_security_corpus_suite["scenario_names"]
+    assert marketplace_security_corpus_suite["scenario_count"] == len(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+    continuous_monitoring_suite = next(
+        item for item in payload["suites"] if item["name"] == "continuous_vulnerability_monitoring"
+    )
+    assert "continuous_vulnerability_source_freshness_behavior" in continuous_monitoring_suite["scenario_names"]
+    assert continuous_monitoring_suite["scenario_count"] == len(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+    publisher_trust_suite = next(
+        item for item in payload["suites"] if item["name"] == "publisher_trust_operations"
+    )
+    assert "publisher_ops_identity_key_rotation_behavior" in publisher_trust_suite["scenario_names"]
+    assert publisher_trust_suite["scenario_count"] == len(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
     managed_browser_suite = next(
         item for item in payload["suites"] if item["name"] == "managed_browser_provider_attestation"
     )
@@ -3761,6 +3870,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY
     )
     assert "third_party_package_security_solved" in payload["production_marketplace_security"]["policy"]["blocked_claims"]
+    assert payload["marketplace_security_corpus"]["summary"]["operator_status"] == (
+        "marketplace_security_corpus_receipts_visible"
+    )
+    assert payload["marketplace_security_corpus"]["summary"]["corpus_package_count"] == 8
+    assert payload["marketplace_security_corpus"]["summary"]["continuous_monitor_count"] == 5
+    assert payload["marketplace_security_corpus"]["summary"]["package_network_boundary_count"] == 5
+    assert payload["marketplace_security_corpus"]["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["marketplace_security_corpus"]["policy"]["claim_boundary"] == (
+        MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY
+    )
+    assert "package_count_superiority" in payload["marketplace_security_corpus"]["policy"]["blocked_claims"]
     assert payload["browser_provider_usability"]["summary"]["operator_status"] == (
         "browser_provider_usability_receipts_visible"
     )
@@ -4101,6 +4221,51 @@ async def test_operator_production_marketplace_security_surface_reports_batch_co
         if item["receipt_id"] == "co-vulnerability-stale-db-negative"
     )
     assert stale_vulnerability["operator_action"] == "deny_until_rescan"
+
+
+@pytest.mark.asyncio
+async def test_operator_marketplace_security_corpus_surface_reports_batch_cx_receipts(client):
+    resp = await client.get("/api/operator/marketplace-security-corpus")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "marketplace_security_corpus_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "marketplace_security_corpus_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+        + len(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+        + len(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["corpus_package_count"] == 8
+    assert payload["summary"]["package_family_count"] == 8
+    assert payload["summary"]["continuous_monitor_count"] == 5
+    assert payload["summary"]["publisher_operation_count"] == 5
+    assert payload["summary"]["package_network_boundary_count"] == 5
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY
+    assert set(MARKETPLACE_SECURITY_CORPUS_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/marketplace-security-corpus" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["marketplace_security_corpus_v1"] == list(
+        MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES
+    )
+    suspicious = next(
+        item for item in payload["contract"]["registry_corpus"]
+        if item["package_id"] == "marketplace.suspicious-exporter"
+    )
+    assert suspicious["operator_action"] == "deny_and_quarantine"
+    assert suspicious["package_count_claim_allowed"] is False
+    critical_monitor = next(
+        item for item in payload["contract"]["continuous_monitoring"]
+        if item["finding_state"] == "critical_unwaived"
+    )
+    assert critical_monitor["operator_action"] == "deny_and_quarantine"
+    secret_boundary = next(
+        item for item in payload["contract"]["package_network_boundaries"]
+        if item["boundary_class"] == "secret_ref_injection"
+    )
+    assert secret_boundary["decision"] == "deny_destination_host_mismatch"
 
 
 @pytest.mark.asyncio

@@ -122,6 +122,12 @@ from src.workflows.durable_state import (
     PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
     PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME,
 )
+from src.workflows.live_orchestration import (
+    LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
+    LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -527,6 +533,41 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "outside this bounded proof gate."
         ),
         scenario_names=DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME,
+        label="Live external orchestration attestation",
+        description=(
+            "Pins recorded-live provider identity, replay windows, idempotency keys, side-effect boundaries, "
+            "delivery semantics, and operator recovery receipts for external orchestration surfaces."
+        ),
+        benchmark_axis="live_external_orchestration_attestation",
+        operator_summary=(
+            "Live external orchestration is judged by provider identity, evidence mode, idempotency boundary, "
+            "side-effect boundary, replay suppression, and recovery controls, not by exactly-once guarantees."
+        ),
+        remaining_gap=(
+            "Continuous provider SLA monitoring, production exactly-once scheduling, and crash-proof orchestration "
+            "remain outside this bounded recorded-live proof gate."
+        ),
+        scenario_names=LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME,
+        label="Orchestration crash recovery study",
+        description=(
+            "Pins crash/restart drill receipts across checkpoint recovery, side-effect boundaries, lease transfer, "
+            "resume authority, duplicate replay suppression, and operator audit controls."
+        ),
+        benchmark_axis="orchestration_crash_recovery_study",
+        operator_summary=(
+            "Crash recovery proof must show what happened before and after the injected failure, what can be "
+            "resumed, what must be audited, and which side effects remain uncertain."
+        ),
+        remaining_gap=(
+            "This is recorded-live and deterministic crash-study evidence, not a production crash-proof workflow engine."
+        ),
+        scenario_names=ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

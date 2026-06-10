@@ -39,6 +39,12 @@ from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
     PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
 )
+from src.workflows.live_orchestration import (
+    LIVE_EXTERNAL_ORCHESTRATION_BLOCKED_CLAIMS,
+    LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY,
+    LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -2226,6 +2232,88 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_live_external_orchestration_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "live_external_orchestration_receipts_visible",
+                    "benchmark_posture": "live_external_orchestration_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES)
+                        + len(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+                    ),
+                    "provider_receipt_count": 3,
+                    "crash_study_count": 3,
+                    "operator_control_count": 6,
+                    "recorded_live_receipt_count": 4,
+                    "deterministic_contract_count": 2,
+                    "side_effect_boundary_count": 3,
+                    "replay_suppression_count": 3,
+                    "required_controls_visible": True,
+                    "evidence_modes": ["deterministic_contract", "recorded_live_fixture"],
+                    "claim_boundary": LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "live_external_orchestration_attestation": list(
+                        LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES
+                    ),
+                    "orchestration_crash_recovery_study": list(
+                        ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "live_external_orchestration_receipts_visible",
+                        "provider_receipt_count": 3,
+                        "crash_study_count": 3,
+                        "required_controls_visible": True,
+                    },
+                    "provider_attestation_receipts": [
+                        {
+                            "provider": "temporal_cloud_recorded_live_fixture",
+                            "evidence_mode": "recorded_live_fixture",
+                            "provider_identity_visible": True,
+                            "idempotency_key": "workflow:release-brief:collect:20260610T0118Z",
+                            "side_effect_boundary": "external_email_send_blocked_until_operator_approval",
+                        }
+                    ],
+                    "crash_recovery_study_receipts": [
+                        {
+                            "study_id": "cc-crash-after-side-effect",
+                            "replay_suppression": "side_effect_receipt_blocks_second_write_until_operator_confirms",
+                            "resume_authority": "manual_audit_required_before_retry",
+                        }
+                    ],
+                    "operator_recovery_receipts": [
+                        {"action": "inspect", "enabled": True, "receipt_after_action": "r1"},
+                        {"action": "resume", "enabled": True, "receipt_after_action": "r2"},
+                        {"action": "retry", "enabled": True, "receipt_after_action": "r3"},
+                        {"action": "branch", "enabled": True, "receipt_after_action": "r4"},
+                        {"action": "cancel", "enabled": True, "receipt_after_action": "r5"},
+                        {"action": "audit", "enabled": True, "receipt_after_action": "r6"},
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY,
+                    "blocked_claims": list(LIVE_EXTERNAL_ORCHESTRATION_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/live-external-orchestration",
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/durable-workflow-engine-v2",
+                    ],
+                    "not_claimed": [
+                        "exactly_once_production_scheduler",
+                        "crash_proof_workflow_engine",
+                        "full_parity_achieved",
+                    ],
+                },
+                "latest_run": {"total": 11, "passed": 11, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_capability_pack_hardening_report",
         AsyncMock(
             return_value={
@@ -2274,7 +2362,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 43
+    assert payload["summary"]["suite_count"] == 45
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2300,6 +2388,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["durable_workflow_engine_v2_claim_boundary"]
         == "production_orchestration_receipts_not_langgraph_class_or_exactly_once_engine"
+    )
+    assert (
+        payload["summary"]["live_external_orchestration_posture"]
+        == "live_external_orchestration_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["live_external_orchestration_claim_boundary"] == (
+        LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY
     )
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
@@ -2451,6 +2546,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
+        "live_external_orchestration_attestation"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "orchestration_crash_recovery_study"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
         "production_reach_channel_hardening"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
@@ -2502,6 +2605,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert durable_workflow_engine_v2_suite["scenario_count"] == len(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES)
     assert payload["durable_workflow_engine_v2"]["summary"]["suite_name"] == "durable_workflow_engine_v2"
     assert "langgraph_class_durable_workflows" in payload["durable_workflow_engine_v2"]["policy"]["blocked_claims"]
+    live_external_orchestration_suite = next(
+        item for item in payload["suites"] if item["name"] == "live_external_orchestration_attestation"
+    )
+    assert (
+        "live_external_scheduler_provider_identity_behavior"
+        in live_external_orchestration_suite["scenario_names"]
+    )
+    assert live_external_orchestration_suite["scenario_count"] == len(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES)
+    crash_recovery_suite = next(
+        item for item in payload["suites"] if item["name"] == "orchestration_crash_recovery_study"
+    )
+    assert "orchestration_crash_checkpoint_recovery_behavior" in crash_recovery_suite["scenario_names"]
+    assert crash_recovery_suite["scenario_count"] == len(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
     live_replay_suite = next(item for item in payload["suites"] if item["name"] == "live_long_horizon_eval_replay_v1")
     assert "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"]
     assert live_replay_suite["scenario_count"] == 5
@@ -2662,6 +2778,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["production_operator_control"]["policy"]["claim_boundary"] == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY
     assert set(PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS) <= set(
         payload["production_operator_control"]["policy"]["blocked_claims"]
+    )
+    assert payload["live_external_orchestration"]["summary"]["operator_status"] == (
+        "live_external_orchestration_receipts_visible"
+    )
+    assert payload["live_external_orchestration"]["summary"]["provider_receipt_count"] == 3
+    assert payload["live_external_orchestration"]["summary"]["crash_study_count"] == 3
+    assert payload["live_external_orchestration"]["summary"]["required_controls_visible"] is True
+    assert payload["live_external_orchestration"]["policy"]["claim_boundary"] == (
+        LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY
+    )
+    assert set(LIVE_EXTERNAL_ORCHESTRATION_BLOCKED_CLAIMS) <= set(
+        payload["live_external_orchestration"]["policy"]["blocked_claims"]
     )
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
@@ -2857,6 +2985,42 @@ async def test_operator_production_control_parity_surface_reports_batch_cb_recei
     assert cb_train["evidence_state"] == "active_branch_receipts_visible_until_pr_merge"
     assert cb_train["merged_pr"] is None
     assert any(item["audit_id"] == "cb-audit-critic" for item in payload["contract"]["final_audit_receipts"])
+
+
+@pytest.mark.asyncio
+async def test_operator_live_external_orchestration_surface_reports_batch_cc_receipts(client):
+    resp = await client.get("/api/operator/live-external-orchestration")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "live_external_orchestration_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "live_external_orchestration_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES)
+        + len(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["provider_receipt_count"] == 3
+    assert payload["summary"]["crash_study_count"] == 3
+    assert payload["summary"]["required_controls_visible"] is True
+    assert payload["policy"]["claim_boundary"] == LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY
+    assert set(LIVE_EXTERNAL_ORCHESTRATION_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/live-external-orchestration" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["live_external_orchestration_attestation"] == list(
+        LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["orchestration_crash_recovery_study"] == list(
+        ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES
+    )
+    assert "exactly_once_production_scheduler" in payload["policy"]["not_claimed"]
+    assert any(
+        item["evidence_mode"] == "recorded_live_fixture"
+        for item in payload["contract"]["provider_attestation_receipts"]
+    )
+    assert any(
+        item["study_id"] == "cc-crash-after-side-effect"
+        for item in payload["contract"]["crash_recovery_study_receipts"]
+    )
 
 
 @pytest.mark.asyncio

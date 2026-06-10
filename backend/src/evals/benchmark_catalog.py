@@ -104,6 +104,14 @@ from src.security.production_hardening import (
     SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SCENARIO_NAMES,
     SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SUITE_NAME,
 )
+from src.security.production_isolation import (
+    PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
+    PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SUITE_NAME,
+    PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
+    PRODUCTION_ISOLATION_HARDENING_V2_SUITE_NAME,
+    SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
+    SECURITY_INCIDENT_RECOVERY_DRILL_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -663,6 +671,53 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live external attack replay and hardware-backed isolation remain future proof work before stronger security wording."
         ),
         scenario_names=SECURE_CAPABILITY_HOST_LIVE_ISOLATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_ISOLATION_HARDENING_V2_SUITE_NAME,
+        label="Production isolation hardening v2",
+        description=(
+            "Pins Batch CD isolation evidence for worker roots, browser profiles, connector credentials, "
+            "extension quarantine, workflow replay trust guards, operator receipts, and unsupported host-isolation claims."
+        ),
+        benchmark_axis="production_isolation_hardening_v2",
+        operator_summary=(
+            "Production isolation hardening v2 makes privileged boundary receipts visible while keeping "
+            "secure/private, IronClaw-class, TEE/Wasm/container, and production-ready wording blocked."
+        ),
+        remaining_gap=(
+            "This is deterministic and recorded-drill isolation evidence, not full host/container isolation or production security."
+        ),
+        scenario_names=PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SUITE_NAME,
+        label="Privileged-path red-team gauntlet v2",
+        description=(
+            "Pins Batch CD red-team negative cases for secret replay, filesystem escape, private egress, "
+            "plugin permission creep, prompt-injection delegation, and browser session bleed."
+        ),
+        benchmark_axis="privileged_path_red_team_gauntlet_v2",
+        operator_summary=(
+            "The privileged-path red-team gauntlet records what was blocked, quarantined, and recoverable "
+            "without treating negative-case receipts as solved production security."
+        ),
+        remaining_gap="Live external adversarial testing and independent security review remain future proof work.",
+        scenario_names=PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURITY_INCIDENT_RECOVERY_DRILL_SUITE_NAME,
+        label="Security incident recovery drill",
+        description=(
+            "Pins Batch CD incident drills for revocation, quarantine, kill switch, evidence redaction, "
+            "credential rotation, and operator notification."
+        ),
+        benchmark_axis="security_incident_recovery_drill",
+        operator_summary=(
+            "Security incidents now have replayable operator-visible drill receipts for containment, recovery, "
+            "redaction, rotation, and notification."
+        ),
+        remaining_gap="This is replayable drill proof, not production incident response certification.",
+        scenario_names=SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

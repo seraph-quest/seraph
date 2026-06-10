@@ -83,6 +83,7 @@ from src.workflows.durable_state import build_durable_workflow_state_report, bui
 from src.workflows.endurance_canary import build_live_workflow_endurance_canary_report
 from src.workflows.live_orchestration import build_live_external_orchestration_report
 from src.workflows.operating_layer import build_m5_operating_layer_payload
+from src.workflows.production_sla_orchestration import build_production_sla_orchestration_report
 
 router = APIRouter()
 
@@ -3407,6 +3408,7 @@ async def get_operator_benchmark_proof():
         durable_workflow_engine,
         durable_workflow_engine_v2,
         live_external_orchestration,
+        production_sla_orchestration,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         memory_provider_quality_gate_benchmark,
@@ -3444,6 +3446,7 @@ async def get_operator_benchmark_proof():
         build_durable_workflow_state_report(),
         build_durable_workflow_v2_report(),
         build_live_external_orchestration_report(),
+        build_production_sla_orchestration_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_memory_provider_quality_gate_report(),
@@ -3488,6 +3491,7 @@ async def get_operator_benchmark_proof():
         str(durable_workflow_engine["summary"]["benchmark_posture"]),
         str(durable_workflow_engine_v2["summary"]["benchmark_posture"]),
         str(live_external_orchestration["summary"]["benchmark_posture"]),
+        str(production_sla_orchestration["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"]),
@@ -3559,6 +3563,8 @@ async def get_operator_benchmark_proof():
             "durable_workflow_engine_v2_claim_boundary": durable_workflow_engine_v2["policy"]["claim_boundary"],
             "live_external_orchestration_posture": live_external_orchestration["summary"]["benchmark_posture"],
             "live_external_orchestration_claim_boundary": live_external_orchestration["policy"]["claim_boundary"],
+            "production_sla_orchestration_posture": production_sla_orchestration["summary"]["benchmark_posture"],
+            "production_sla_orchestration_claim_boundary": production_sla_orchestration["policy"]["claim_boundary"],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "memory_provider_quality_gate_benchmark_posture": memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"],
@@ -3612,6 +3618,7 @@ async def get_operator_benchmark_proof():
         "durable_workflow_engine": durable_workflow_engine,
         "durable_workflow_engine_v2": durable_workflow_engine_v2,
         "live_external_orchestration": live_external_orchestration,
+        "production_sla_orchestration": production_sla_orchestration,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "memory_provider_quality_gate_benchmark": memory_provider_quality_gate_benchmark,
@@ -3681,6 +3688,11 @@ async def get_operator_durable_workflow_engine_v2():
 @router.get("/operator/live-external-orchestration")
 async def get_operator_live_external_orchestration():
     return await build_live_external_orchestration_report()
+
+
+@router.get("/operator/production-sla-orchestration")
+async def get_operator_production_sla_orchestration():
+    return await build_production_sla_orchestration_report()
 
 
 @router.get("/operator/m5-operating-layer-benchmark")

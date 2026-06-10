@@ -242,6 +242,17 @@ from src.workflows.live_orchestration import (
     ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME,
     build_live_external_orchestration_contract,
 )
+from src.workflows.production_sla_orchestration import (
+    DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES,
+    DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME,
+    EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES,
+    EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME,
+    PRODUCTION_SLA_ORCHESTRATION_BLOCKED_CLAIMS,
+    PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY,
+    PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
+    PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME,
+    build_production_sla_orchestration_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -14723,12 +14734,13 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
         "/api/operator/final-parity-readiness-report",
         "/api/operator/benchmark-proof",
         "/api/operator/production-operator-control-parity",
+        "/api/operator/production-sla-orchestration",
         "/api/operator/browser-provider-usability-proof",
         "/api/operator/live-marketplace-attestation-proof",
     }
     completed_batches = [item for item in batches if item["status"] == "done"]
     required_systems = {"Hermes", "OpenClaw", "IronClaw"}
-    required_issue_links = {475, 496, 497}
+    required_issue_links = {475, 496, 497, 505}
     blocked_claims = set(policy["blocked_claims"])
     return {
         "operator_status_visible": summary["operator_status"] == "final_parity_readiness_report_visible",
@@ -14803,6 +14815,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     orchestration_crash_recovery_study_suite = next(
         item for item in suites if item["name"] == ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME
+    )
+    production_sla_orchestration_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME
+    )
+    exactly_once_recovery_evidence_suite = next(
+        item for item in suites if item["name"] == EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME
+    )
+    duplicate_side_effect_audit_suite = next(
+        item for item in suites if item["name"] == DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME
     )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
@@ -15019,6 +15040,48 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "orchestration_crash_recovery_study_gate_required": (
             ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_sla_orchestration_suite_present": (
+            "production_sla_provider_window_behavior"
+            in production_sla_orchestration_suite["scenario_names"]
+        ),
+        "production_sla_orchestration_suite_scenario_count_matches": (
+            production_sla_orchestration_suite["scenario_count"]
+            == len(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES)
+        ),
+        "production_sla_orchestration_suite_axis_matches": (
+            production_sla_orchestration_suite["benchmark_axis"] == "production_sla_orchestration"
+        ),
+        "production_sla_orchestration_gate_required": (
+            PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "exactly_once_recovery_evidence_suite_present": (
+            "exactly_once_idempotency_scope_behavior"
+            in exactly_once_recovery_evidence_suite["scenario_names"]
+        ),
+        "exactly_once_recovery_evidence_suite_scenario_count_matches": (
+            exactly_once_recovery_evidence_suite["scenario_count"]
+            == len(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES)
+        ),
+        "exactly_once_recovery_evidence_suite_axis_matches": (
+            exactly_once_recovery_evidence_suite["benchmark_axis"] == "exactly_once_recovery_evidence"
+        ),
+        "exactly_once_recovery_evidence_gate_required": (
+            EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "duplicate_side_effect_audit_suite_present": (
+            "duplicate_side_effect_audit_receipt_behavior"
+            in duplicate_side_effect_audit_suite["scenario_names"]
+        ),
+        "duplicate_side_effect_audit_suite_scenario_count_matches": (
+            duplicate_side_effect_audit_suite["scenario_count"]
+            == len(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+        ),
+        "duplicate_side_effect_audit_suite_axis_matches": (
+            duplicate_side_effect_audit_suite["benchmark_axis"] == "duplicate_side_effect_audit"
+        ),
+        "duplicate_side_effect_audit_gate_required": (
+            DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
@@ -15866,6 +15929,72 @@ async def _eval_live_external_orchestration_behavior() -> dict[str, Any]:
         "ci_gate_required": LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
         "crash_study_gate_required": ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
+async def _eval_production_sla_orchestration_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    sla_suite = next(item for item in suites if item["name"] == PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME)
+    exactly_once_suite = next(
+        item for item in suites if item["name"] == EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME
+    )
+    audit_suite = next(item for item in suites if item["name"] == DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME)
+    contract = build_production_sla_orchestration_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    sla_windows = contract["sla_window_receipts"]
+    failure_injections = contract["failure_injection_receipts"]
+    duplicate_audits = contract["duplicate_side_effect_audit_receipts"]
+    controls = contract["operator_recovery_receipts"]
+    required_surfaces = {
+        "/api/operator/production-sla-orchestration",
+        "/api/operator/benchmark-proof",
+        "/api/operator/live-external-orchestration",
+        "/api/operator/durable-workflow-engine-v2",
+    }
+    required_controls = {"inspect", "audit", "resume", "repair", "branch", "cancel"}
+    return {
+        "sla_suite_visible": sla_suite["scenario_count"] == len(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES),
+        "exactly_once_suite_visible": (
+            exactly_once_suite["scenario_count"] == len(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES)
+        ),
+        "duplicate_audit_suite_visible": (
+            audit_suite["scenario_count"] == len(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+        ),
+        "sla_axis_visible": sla_suite["benchmark_axis"] == "production_sla_orchestration",
+        "exactly_once_axis_visible": exactly_once_suite["benchmark_axis"] == "exactly_once_recovery_evidence",
+        "duplicate_audit_axis_visible": audit_suite["benchmark_axis"] == "duplicate_side_effect_audit",
+        "operator_status_visible": summary["operator_status"] == "production_sla_orchestration_receipts_visible",
+        "sla_windows_visible": summary["sla_window_count"] >= 3,
+        "failure_injections_visible": summary["failure_injection_count"] >= 3,
+        "duplicate_audits_visible": summary["duplicate_side_effect_audit_count"] >= 3,
+        "recorded_live_receipts_visible": summary["recorded_live_receipt_count"] >= 4,
+        "deterministic_contracts_visible": summary["deterministic_contract_count"] >= 2,
+        "evidence_modes_visible": {"recorded_live_fixture", "deterministic_contract"} <= set(summary["evidence_modes"]),
+        "provider_identity_visible": summary["all_provider_identities_visible"] is True
+        and all(item.get("provider_identity_visible") is True for item in sla_windows),
+        "sla_budget_visible": summary["all_sla_windows_within_budget"] is True
+        and all(int(item["max_jitter_ms"]) <= int(item["jitter_budget_ms"]) for item in sla_windows),
+        "failure_injection_method_visible": all(
+            item.get("failure_injection_method") and item.get("idempotency_scope")
+            for item in failure_injections
+        ),
+        "resume_authority_visible": summary["all_failure_injections_have_resume_authority"] is True,
+        "duplicate_audit_reconciliation_visible": summary["duplicate_audits_reconciled"] is True
+        and all(item.get("reconciliation_status") for item in duplicate_audits),
+        "operator_controls_visible": summary["required_controls_visible"] is True
+        and required_controls <= {item["action"] for item in controls},
+        "controls_leave_receipts": all(item.get("enabled") and item.get("receipt_after_action") for item in controls),
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_SLA_ORCHESTRATION_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "unconditional_exactly_once_not_claimed": "unconditional_exactly_once_scheduler" in policy["not_claimed"],
+        "sla_gate_required": PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "exactly_once_gate_required": EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "duplicate_audit_gate_required": DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
     }
 
@@ -17363,6 +17492,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_live_external_orchestration_behavior,
         )
         for name in ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CJ records production SLA windows, jitter budgets, failure-injection evidence, "
+                "operator recovery controls, and residual uncertainty for orchestration claims."
+            ),
+            runner=_eval_production_sla_orchestration_behavior,
+        )
+        for name in PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CJ records scoped effectively-once recovery evidence across idempotency scope, "
+                "side-effect boundaries, resume authority, and duplicate suppression."
+            ),
+            runner=_eval_production_sla_orchestration_behavior,
+        )
+        for name in EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CJ records duplicate side-effect audit receipts, reconciliation outcomes, and "
+                "operator controls without claiming unconditional exactly-once execution."
+            ),
+            runner=_eval_production_sla_orchestration_behavior,
+        )
+        for name in DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

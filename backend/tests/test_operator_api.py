@@ -79,6 +79,13 @@ from src.workflows.live_orchestration import (
     LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
     ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
 )
+from src.workflows.production_sla_orchestration import (
+    DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES,
+    EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES,
+    PRODUCTION_SLA_ORCHESTRATION_BLOCKED_CLAIMS,
+    PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY,
+    PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
+)
 from src.security.production_isolation import (
     PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
     PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
@@ -2669,6 +2676,96 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_production_sla_orchestration_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "production_sla_orchestration_receipts_visible",
+                    "benchmark_posture": "production_sla_orchestration_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES)
+                        + len(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES)
+                        + len(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+                    ),
+                    "sla_window_count": 3,
+                    "failure_injection_count": 3,
+                    "duplicate_side_effect_audit_count": 3,
+                    "operator_control_count": 6,
+                    "recorded_live_receipt_count": 4,
+                    "deterministic_contract_count": 2,
+                    "evidence_modes": ["deterministic_contract", "recorded_live_fixture"],
+                    "all_provider_identities_visible": True,
+                    "all_sla_windows_within_budget": True,
+                    "all_failure_injections_have_resume_authority": True,
+                    "duplicate_audits_reconciled": True,
+                    "required_controls_visible": True,
+                    "claim_boundary": PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "production_sla_orchestration": list(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES),
+                    "exactly_once_recovery_evidence": list(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES),
+                    "duplicate_side_effect_audit": list(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "production_sla_orchestration_receipts_visible",
+                        "sla_window_count": 3,
+                        "failure_injection_count": 3,
+                        "duplicate_side_effect_audit_count": 3,
+                        "required_controls_visible": True,
+                    },
+                    "sla_window_receipts": [
+                        {
+                            "provider": "temporal_cloud_recorded_live_fixture",
+                            "provider_identity_visible": True,
+                            "max_jitter_ms": 1000,
+                            "jitter_budget_ms": 5000,
+                        }
+                    ],
+                    "failure_injection_receipts": [
+                        {
+                            "failure_injection_method": "worker_process_kill_before_external_write",
+                            "idempotency_scope": "workflow_run_step",
+                            "resume_authority": "automatic_resume_allowed_after_checkpoint",
+                        }
+                    ],
+                    "duplicate_side_effect_audit_receipts": [
+                        {
+                            "audit_id": "cj-audit-email-send",
+                            "reconciliation_status": "no_duplicate_side_effect_detected",
+                        }
+                    ],
+                    "operator_recovery_receipts": [
+                        {"action": "inspect", "enabled": True, "receipt_after_action": "r1"},
+                        {"action": "audit", "enabled": True, "receipt_after_action": "r2"},
+                        {"action": "resume", "enabled": True, "receipt_after_action": "r3"},
+                        {"action": "repair", "enabled": True, "receipt_after_action": "r4"},
+                        {"action": "branch", "enabled": True, "receipt_after_action": "r5"},
+                        {"action": "cancel", "enabled": True, "receipt_after_action": "r6"},
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY,
+                    "blocked_claims": list(PRODUCTION_SLA_ORCHESTRATION_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/production-sla-orchestration",
+                        "/api/operator/benchmark-proof",
+                        "/api/operator/live-external-orchestration",
+                        "/api/operator/durable-workflow-engine-v2",
+                    ],
+                    "not_claimed": [
+                        "unconditional_exactly_once_scheduler",
+                        "crash_proof_workflow_engine",
+                        "full_product_parity",
+                    ],
+                },
+                "latest_run": {"total": 15, "passed": 15, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_capability_pack_hardening_report",
         AsyncMock(
             return_value={
@@ -2717,7 +2814,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 63
+    assert payload["summary"]["suite_count"] == 66
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2750,6 +2847,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["live_external_orchestration_claim_boundary"] == (
         LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["production_sla_orchestration_posture"]
+        == "production_sla_orchestration_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["production_sla_orchestration_claim_boundary"] == (
+        PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY
     )
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
@@ -3060,6 +3164,25 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "orchestration_crash_checkpoint_recovery_behavior" in crash_recovery_suite["scenario_names"]
     assert crash_recovery_suite["scenario_count"] == len(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+    production_sla_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_sla_orchestration"
+    )
+    assert "production_sla_provider_window_behavior" in production_sla_suite["scenario_names"]
+    assert production_sla_suite["scenario_count"] == len(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES)
+    exactly_once_suite = next(
+        item for item in payload["suites"] if item["name"] == "exactly_once_recovery_evidence"
+    )
+    assert "exactly_once_idempotency_scope_behavior" in exactly_once_suite["scenario_names"]
+    assert exactly_once_suite["scenario_count"] == len(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES)
+    duplicate_audit_suite = next(
+        item for item in payload["suites"] if item["name"] == "duplicate_side_effect_audit"
+    )
+    assert "duplicate_side_effect_audit_receipt_behavior" in duplicate_audit_suite["scenario_names"]
+    assert duplicate_audit_suite["scenario_count"] == len(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+    assert payload["production_sla_orchestration"]["summary"]["operator_status"] == (
+        "production_sla_orchestration_receipts_visible"
+    )
+    assert "exactly_once_production_scheduling" in payload["production_sla_orchestration"]["policy"]["blocked_claims"]
     live_replay_suite = next(item for item in payload["suites"] if item["name"] == "live_long_horizon_eval_replay_v1")
     assert "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"]
     assert live_replay_suite["scenario_count"] == 5
@@ -3715,6 +3838,48 @@ async def test_operator_live_external_orchestration_surface_reports_batch_cc_rec
     assert any(
         item["study_id"] == "cc-crash-after-side-effect"
         for item in payload["contract"]["crash_recovery_study_receipts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_production_sla_orchestration_surface_reports_batch_cj_receipts(client):
+    resp = await client.get("/api/operator/production-sla-orchestration")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "production_sla_orchestration_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "production_sla_orchestration_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES)
+        + len(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES)
+        + len(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["sla_window_count"] == 3
+    assert payload["summary"]["failure_injection_count"] == 3
+    assert payload["summary"]["duplicate_side_effect_audit_count"] == 3
+    assert payload["summary"]["all_sla_windows_within_budget"] is True
+    assert payload["summary"]["duplicate_audits_reconciled"] is True
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_SLA_ORCHESTRATION_CLAIM_BOUNDARY
+    assert set(PRODUCTION_SLA_ORCHESTRATION_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/production-sla-orchestration" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["production_sla_orchestration"] == list(
+        PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["exactly_once_recovery_evidence"] == list(
+        EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["duplicate_side_effect_audit"] == list(
+        DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES
+    )
+    assert "unconditional_exactly_once_scheduler" in payload["policy"]["not_claimed"]
+    assert any(
+        item["evidence_mode"] == "recorded_live_fixture"
+        for item in payload["contract"]["sla_window_receipts"]
+    )
+    assert any(
+        item["study_id"] == "cj-failure-after-side-effect-before-ack"
+        for item in payload["contract"]["failure_injection_receipts"]
     )
 
 

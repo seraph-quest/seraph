@@ -50,8 +50,14 @@ from src.evals.final_parity_audit import (
     FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
 )
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
@@ -2147,6 +2153,55 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Operators still need stronger external operational evidence before public full-parity or superiority claims."
         ),
         scenario_names=OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+        label="Post-CQ claim-ledger reconciliation",
+        description=(
+            "Pins post-CQ issue, PR, Project, operator, and claim-ledger reconciliation for Batches CR-CZ "
+            "without mutating the historical CQ final-audit contract."
+        ),
+        benchmark_axis="post_cq_claim_ledger_reconciliation",
+        operator_summary=(
+            "Operators can inspect the final post-CQ claim-readiness gate while broad parity, production-ready, "
+            "security, browser, marketplace, and superiority claims remain blocked."
+        ),
+        remaining_gap=(
+            "The gate permits only exact bounded receipt wording unless a future ledger row allows stronger language."
+        ),
+        scenario_names=POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
+        label="Reference-system source refresh v2",
+        description=(
+            "Pins 2026-06-11 Hermes, OpenClaw, and IronClaw source receipts, pressure-axis mapping, "
+            "access caveats, and stale-source uncertainty for the post-CQ audit."
+        ),
+        benchmark_axis="reference_system_source_refresh_v2",
+        operator_summary=(
+            "Competitor sources remain pressure evidence only and cannot imply Seraph parity or superiority."
+        ),
+        remaining_gap=(
+            "Current source refresh does not replace implementation, live operational evidence, or claim-ledger permission."
+        ),
+        scenario_names=REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
+        label="False completion scan v2",
+        description=(
+            "Pins repo, issue, PR, operator, and claim-ledger false-completion scan receipts for post-CQ wording."
+        ),
+        benchmark_axis="false_completion_scan_v2",
+        operator_summary=(
+            "False-completion scans keep exact bounded receipt wording separate from full parity, production-ready, "
+            "security, and superiority claims."
+        ),
+        remaining_gap=(
+            "Any stronger public wording still requires exact claim-ledger permission and fresh proof."
+        ),
+        scenario_names=FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     ),
 )
 

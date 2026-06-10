@@ -39,7 +39,10 @@ from src.cockpit.production_operator_control import build_production_operator_co
 from src.cockpit.dense_operator_recovery import build_dense_operator_recovery_report
 from src.cockpit.operator_mission_control import build_operator_mission_control_report
 from src.evals.benchmark_catalog import benchmark_suite_report
-from src.evals.final_parity_audit import build_final_parity_readiness_report
+from src.evals.final_parity_audit import (
+    build_final_parity_readiness_report,
+    build_post_cq_claim_readiness_report,
+)
 from src.evals.production_parity_readiness import build_production_parity_readiness_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
 from src.evolution.benchmark import build_governed_improvement_benchmark_report
@@ -3463,6 +3466,7 @@ async def get_operator_benchmark_proof():
         dense_operator_recovery,
         operator_mission_control,
         final_parity_readiness,
+        post_cq_claim_readiness,
     ) = await asyncio.gather(
         build_production_parity_readiness_report(),
         build_guardian_memory_benchmark_report(),
@@ -3514,6 +3518,7 @@ async def get_operator_benchmark_proof():
         build_dense_operator_recovery_report(),
         build_operator_mission_control_report(),
         build_final_parity_readiness_report(),
+        build_post_cq_claim_readiness_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -3572,6 +3577,7 @@ async def get_operator_benchmark_proof():
         str(dense_operator_recovery["summary"]["benchmark_posture"]),
         str(operator_mission_control["summary"]["benchmark_posture"]),
         str(final_parity_readiness["summary"]["benchmark_posture"]),
+        str(post_cq_claim_readiness["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -3696,6 +3702,8 @@ async def get_operator_benchmark_proof():
             "operator_mission_control_population_claim_boundary": operator_mission_control["policy"]["claim_boundary"],
             "final_parity_readiness_posture": final_parity_readiness["summary"]["benchmark_posture"],
             "final_parity_readiness_claim_boundary": final_parity_readiness["policy"]["claim_boundary"],
+            "post_cq_claim_readiness_posture": post_cq_claim_readiness["summary"]["benchmark_posture"],
+            "post_cq_claim_readiness_claim_boundary": post_cq_claim_readiness["policy"]["claim_boundary"],
         },
         "suites": suites,
         "production_parity_readiness": production_parity_readiness,
@@ -3747,6 +3755,7 @@ async def get_operator_benchmark_proof():
         "dense_operator_recovery_control": dense_operator_recovery,
         "operator_mission_control_population": operator_mission_control,
         "final_parity_readiness": final_parity_readiness,
+        "post_cq_claim_readiness": post_cq_claim_readiness,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -4018,6 +4027,11 @@ async def get_operator_control_population_study():
 @router.get("/operator/final-parity-readiness-report")
 async def get_operator_final_parity_readiness_report():
     return await build_final_parity_readiness_report()
+
+
+@router.get("/operator/post-cq-claim-readiness")
+async def get_operator_post_cq_claim_readiness():
+    return await build_post_cq_claim_readiness_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

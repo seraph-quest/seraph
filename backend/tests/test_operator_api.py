@@ -28,7 +28,12 @@ from src.evals.final_parity_audit import (
     FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
     FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
+    POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
 )
 from src.extensions.marketplace_lifecycle import (
     CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
@@ -3233,6 +3238,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == "final_parity_audit_ci_gated_operator_visible"
     )
     assert payload["summary"]["final_parity_readiness_claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
+    assert (
+        payload["summary"]["post_cq_claim_readiness_posture"]
+        == "post_cq_claim_readiness_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["post_cq_claim_readiness_claim_boundary"] == POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -3815,10 +3825,28 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
+    post_cq_suite = next(item for item in payload["suites"] if item["name"] == "post_cq_claim_ledger_reconciliation")
+    assert "post_cq_claim_ledger_allowed_wording_behavior" in post_cq_suite["scenario_names"]
+    assert post_cq_suite["scenario_count"] == len(POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+    source_refresh_v2_suite = next(
+        item for item in payload["suites"] if item["name"] == "reference_system_source_refresh_v2"
+    )
+    assert "reference_system_source_urls_access_date_behavior" in source_refresh_v2_suite["scenario_names"]
+    assert source_refresh_v2_suite["scenario_count"] == len(REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES)
+    false_completion_v2_suite = next(item for item in payload["suites"] if item["name"] == "false_completion_scan_v2")
+    assert "false_completion_final_gate_behavior" in false_completion_v2_suite["scenario_names"]
+    assert false_completion_v2_suite["scenario_count"] == len(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
     assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 22
     assert payload["final_parity_readiness"]["summary"]["bounded_parity_proof_train_completion_wording_allowed"] is True
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
+    assert payload["post_cq_claim_readiness"]["summary"]["operator_status"] == "post_cq_claim_readiness_visible"
+    assert payload["post_cq_claim_readiness"]["summary"]["completed_post_cq_batch_count"] == 8
+    assert payload["post_cq_claim_readiness"]["summary"]["cz_batch_status"] == (
+        "cz_gate_receipts_visible"
+    )
+    assert payload["post_cq_claim_readiness"]["summary"]["false_completion_violation_count"] == 0
+    assert "fully_at_parity" in payload["post_cq_claim_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -4551,6 +4579,57 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
         item["disposition"] == "accepted"
         for item in payload["contract"]["critic_disposition_receipts"]
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_post_cq_claim_readiness_surface_reports_batch_cz_receipts(client):
+    resp = await client.get("/api/operator/post-cq-claim-readiness")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "post_cq_claim_readiness_visible"
+    assert payload["summary"]["benchmark_posture"] == "post_cq_claim_readiness_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+        + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES)
+        + len(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["source_receipt_count"] == 7
+    assert payload["summary"]["current_source_date"] == "2026-06-11"
+    assert payload["summary"]["completed_post_cq_batch_count"] == 8
+    assert payload["summary"]["cz_batch_status"] == "cz_gate_receipts_visible"
+    assert payload["summary"]["false_completion_violation_count"] == 0
+    assert payload["summary"]["full_parity_claim_allowed"] is False
+    assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY
+    assert set(POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/post-cq-claim-readiness" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["post_cq_claim_ledger_reconciliation"] == list(
+        POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["reference_system_source_refresh_v2"] == list(
+        REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["false_completion_scan_v2"] == list(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
+    assert {"Hermes", "OpenClaw", "IronClaw"} <= {
+        item["system"] for item in payload["contract"]["reference_system_source_refresh_v2"]
+    }
+    assert all(
+        item["source_refresh_version"] == "v2_post_cq"
+        and item["claim_lift_allowed"] is False
+        for item in payload["contract"]["reference_system_source_refresh_v2"]
+    )
+    assert {item["claim_id"] for item in payload["contract"]["post_cq_claim_ledger_reconciliation"]} >= {
+        "SCL-034",
+        "SCL-035",
+        "SCL-036",
+        "SCL-037",
+        "SCL-038",
+        "SCL-039",
+        "SCL-040",
+        "SCL-041",
+    }
 
 
 @pytest.mark.asyncio

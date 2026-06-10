@@ -312,7 +312,7 @@ Post-PR #473 status: this strategy artifact is complete, and the aggregate proof
 
 ## Production-Grade Execution Roadmap
 
-The GitHub Project now tracks the production-grade parity train through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475), the original huge batch issues [#476](https://github.com/seraph-quest/seraph/issues/476)-[#482](https://github.com/seraph-quest/seraph/issues/482), and follow-on huge batch issues [#491](https://github.com/seraph-quest/seraph/issues/491)-[#497](https://github.com/seraph-quest/seraph/issues/497). That board-backed roadmap is an execution commitment, not evidence that production parity has shipped.
+The GitHub Project tracks the production-grade parity train through parent issue [#475](https://github.com/seraph-quest/seraph/issues/475), completed huge batch issues [#476](https://github.com/seraph-quest/seraph/issues/476)-[#482](https://github.com/seraph-quest/seraph/issues/482), completed follow-on issues [#491](https://github.com/seraph-quest/seraph/issues/491)-[#497](https://github.com/seraph-quest/seraph/issues/497), and full-completion residual-gap issues [#505](https://github.com/seraph-quest/seraph/issues/505)-[#512](https://github.com/seraph-quest/seraph/issues/512). That board-backed roadmap is an execution commitment, not evidence that production parity has shipped.
 
 The batch order is:
 
@@ -324,8 +324,11 @@ The batch order is:
 6. marketplace-grade capability lifecycle, review, rollback, and ecosystem maturity
 7. production operator cockpit control and end-to-end parity verification
 8. follow-on recorded-live orchestration, isolation, reach/media, human-outcome, marketplace, browser-provider/usability, and final source-backed parity audit proof
+9. full-completion residual-gap closure: orchestration SLA/exactly-once recovery, independent security/isolation review, broad reach plus production voice/media/mobile execution, independent guardian-learning outcome proof, dense operator debugging/recovery control, production marketplace security, safe autonomous browser/computer-use, and final claim-lift audit
 
 Batch CI adds the final source-backed parity readiness audit surface through `final_source_backed_parity_audit`, `final_claim_ledger_reconciliation`, `operator_final_parity_readiness_report`, and `/api/operator/final-parity-readiness-report`. It reconciles current Hermes/OpenClaw/IronClaw source receipts, production-train PR and Project evidence, claim-ledger boundaries, residual gaps, and Critic/Contrarian dispositions. It does not permit full parity, production-ready, superiority, OpenClaw-class reach, IronClaw-class secure execution, safe browser automation, full browser parity, production-secure marketplace, or solved guardian-intelligence wording.
+
+Batches CJ-CQ are the direct response to that final audit. They keep full parity and exceedance blocked while the remaining production evidence is gathered and implemented, then reserve any stronger wording for Batch CQ after current-source refresh, Project/PR/test/docs reconciliation, claim-ledger permission, and independent Critic/Contrarian review.
 
 This roadmap preserves the Seraph vision boundary: Seraph should exceed reference agents through guardian memory, restraint, trust, operator legibility, and recovery rather than by becoming an unrestricted plugin farm, raw channel gateway, or terminal-only coding shell.
 

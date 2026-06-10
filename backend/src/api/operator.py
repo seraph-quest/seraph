@@ -71,6 +71,7 @@ from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
 from src.replay.benchmark import build_live_replay_benchmark_report
 from src.security.benchmark import build_trust_boundary_benchmark_report
+from src.security.independent_review import build_independent_secure_host_review_report
 from src.security.production_hardening import build_production_secure_host_hardening_report
 from src.security.production_isolation import build_production_isolation_security_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
@@ -3424,6 +3425,7 @@ async def get_operator_benchmark_proof():
         secure_capability_host_benchmark,
         production_secure_host_hardening,
         production_isolation_security,
+        independent_secure_host_review,
         production_reach_browser_voice,
         live_reach_media,
         computer_use_benchmark,
@@ -3462,6 +3464,7 @@ async def get_operator_benchmark_proof():
         build_secure_capability_host_benchmark_report(),
         build_production_secure_host_hardening_report(),
         build_production_isolation_security_report(),
+        build_independent_secure_host_review_report(),
         build_production_reach_browser_voice_report(),
         build_live_reach_media_report(),
         build_computer_use_benchmark_report(),
@@ -3507,6 +3510,7 @@ async def get_operator_benchmark_proof():
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
         str(production_secure_host_hardening["summary"]["benchmark_posture"]),
         str(production_isolation_security["summary"]["benchmark_posture"]),
+        str(independent_secure_host_review["summary"]["benchmark_posture"]),
         str(production_reach_browser_voice["summary"]["benchmark_posture"]),
         str(live_reach_media["summary"]["benchmark_posture"]),
         str(computer_use_benchmark["summary"]["benchmark_posture"]),
@@ -3586,6 +3590,8 @@ async def get_operator_benchmark_proof():
             "production_secure_host_hardening_claim_boundary": production_secure_host_hardening["policy"]["claim_boundary"],
             "production_isolation_security_posture": production_isolation_security["summary"]["benchmark_posture"],
             "production_isolation_security_claim_boundary": production_isolation_security["policy"]["claim_boundary"],
+            "independent_secure_host_review_posture": independent_secure_host_review["summary"]["benchmark_posture"],
+            "independent_secure_host_review_claim_boundary": independent_secure_host_review["policy"]["claim_boundary"],
             "production_reach_browser_voice_posture": production_reach_browser_voice["summary"]["benchmark_posture"],
             "production_reach_browser_voice_claim_boundary": production_reach_browser_voice["policy"]["claim_boundary"],
             "live_reach_media_posture": live_reach_media["summary"]["benchmark_posture"],
@@ -3634,6 +3640,7 @@ async def get_operator_benchmark_proof():
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
         "production_secure_host_hardening": production_secure_host_hardening,
         "production_isolation_security": production_isolation_security,
+        "independent_secure_host_review": independent_secure_host_review,
         "production_reach_browser_voice": production_reach_browser_voice,
         "live_reach_media": live_reach_media,
         "computer_use_benchmark": computer_use_benchmark,
@@ -3782,6 +3789,11 @@ async def get_operator_secure_capability_host_hardening():
 @router.get("/operator/production-isolation-hardening")
 async def get_operator_production_isolation_hardening():
     return await build_production_isolation_security_report()
+
+
+@router.get("/operator/independent-secure-host-review")
+async def get_operator_independent_secure_host_review():
+    return await build_independent_secure_host_review_report()
 
 
 @router.get("/operator/production-reach-browser-voice")

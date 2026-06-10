@@ -93,6 +93,13 @@ from src.security.production_isolation import (
     PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY,
     SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
 )
+from src.security.independent_review import (
+    INDEPENDENT_SECURE_HOST_REVIEW_BLOCKED_CLAIMS,
+    INDEPENDENT_SECURE_HOST_REVIEW_CLAIM_BOUNDARY,
+    INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -2814,7 +2821,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 66
+    assert payload["summary"]["suite_count"] == 69
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -3219,6 +3226,23 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "security_incident_revocation_drill_behavior" in incident_drill_suite["scenario_names"]
     assert incident_drill_suite["scenario_count"] == len(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES)
+    independent_review_suite = next(
+        item for item in payload["suites"] if item["name"] == "independent_secure_host_review"
+    )
+    assert "independent_security_review_scope_behavior" in independent_review_suite["scenario_names"]
+    assert independent_review_suite["scenario_count"] == len(INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES)
+    hostile_drill_suite = next(item for item in payload["suites"] if item["name"] == "live_hostile_isolation_drills")
+    assert "live_hostile_credential_exfiltration_drill_behavior" in hostile_drill_suite["scenario_names"]
+    assert hostile_drill_suite["scenario_count"] == len(LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES)
+    recovery_authority_suite = next(item for item in payload["suites"] if item["name"] == "secure_host_recovery_authority")
+    assert "secure_host_post_incident_audit_behavior" in recovery_authority_suite["scenario_names"]
+    assert recovery_authority_suite["scenario_count"] == len(SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES)
+    assert payload["independent_secure_host_review"]["summary"]["operator_status"] == (
+        "independent_secure_host_review_receipts_visible"
+    )
+    assert set(INDEPENDENT_SECURE_HOST_REVIEW_BLOCKED_CLAIMS) <= set(
+        payload["independent_secure_host_review"]["policy"]["blocked_claims"]
+    )
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
@@ -4661,6 +4685,44 @@ async def test_operator_production_isolation_hardening_surface_reports_batch_cd_
         item["incident_type"] == "credential_boundary_drift"
         for item in payload["contract"]["incident_drill_receipts"]
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_independent_secure_host_review_surface_reports_batch_ck_receipts(client):
+    resp = await client.get("/api/operator/independent-secure-host-review")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "independent_secure_host_review"
+    assert payload["summary"]["benchmark_posture"] == "independent_secure_host_review_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "independent_secure_host_review_receipts_visible"
+    assert payload["summary"]["reviewed_surface_count"] >= 6
+    assert payload["summary"]["finding_count"] >= 4
+    assert payload["summary"]["unsupported_isolation_claim_visible"] is True
+    assert payload["summary"]["hostile_drill_fail_closed_count"] == payload["summary"]["hostile_drill_count"]
+    assert payload["summary"]["operator_recovery_actions_visible"] is True
+    assert payload["summary"]["claim_boundary"] == INDEPENDENT_SECURE_HOST_REVIEW_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["independent_secure_host_review"] == list(
+        INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["live_hostile_isolation_drills"] == list(
+        LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_host_recovery_authority"] == list(
+        SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES
+    )
+    assert payload["latest_run"]["failed"] == 0
+    assert "/api/operator/independent-secure-host-review" in payload["policy"]["receipt_surfaces"]
+    assert set(INDEPENDENT_SECURE_HOST_REVIEW_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert any(
+        item["surface"] == "hardware_backed_isolation" and item["implemented"] is False
+        for item in payload["contract"]["isolation_evidence_matrix"]
+    )
+    assert any(
+        item["attack_family"] == "credential_exfiltration"
+        for item in payload["contract"]["hostile_drill_receipts"]
+    )
+    assert any(item["action"] == "rotate" for item in payload["contract"]["recovery_authority_receipts"])
 
 
 @pytest.mark.asyncio

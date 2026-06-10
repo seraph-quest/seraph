@@ -308,6 +308,24 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "operator_surface": "/api/operator/production-sla-orchestration",
         },
         {
+            "claim_id": "SCL-027",
+            "area": "independent_secure_host_review_and_isolation_hardening",
+            "issue_links": [475, 506],
+            "allowed_wording": (
+                "independent secure-host review, live hostile drill, isolation evidence, and recovery "
+                "authority receipts are visible"
+            ),
+            "blocked_claims": [
+                "secure_private_by_default",
+                "production_security_solved",
+                "ironclaw_class_secure_execution",
+                "tee_cvm_wasm_or_container_isolation_implemented",
+                "production_ready_product",
+            ],
+            "status": "backed_for_bounded_receipts_after_batch_ck_pr_merge",
+            "operator_surface": "/api/operator/independent-secure-host-review",
+        },
+        {
             "claim_id": "SCL-020",
             "area": "production_isolation_and_security_incident_proof",
             "issue_links": [492],
@@ -394,9 +412,24 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
         {
             "gap_id": "ci-gap-security-independent",
             "area": "trust_boundaries",
-            "gap": "independent security review, live hostile tests, and hardware-backed/container-grade isolation remain unproven",
+            "gap": (
+                "Batch CK narrows the independent security gap with independent-review receipts, live "
+                "hostile-drill receipts, isolation-evidence matrices, and recovery-authority controls; "
+                "secure/private-by-default, IronClaw-class, and hardware-backed/container-grade isolation "
+                "claims remain blocked"
+            ),
             "blocking_claims": ["secure_private_by_default", "ironclaw_class_secure_execution"],
-            "required_stronger_evidence": "external security review plus live hostile tool/browser/credential isolation drills",
+            "current_batch_evidence": [
+                "independent_secure_host_review",
+                "live_hostile_isolation_drills",
+                "secure_host_recovery_authority",
+                "/api/operator/independent-secure-host-review",
+                "GitHub issue #506",
+            ],
+            "required_stronger_evidence": (
+                "external certification or production penetration testing plus hardware-backed/container-grade "
+                "isolation proof before secure/private, IronClaw-class, or production-ready wording"
+            ),
         },
         {
             "gap_id": "ci-gap-reach-media-production",

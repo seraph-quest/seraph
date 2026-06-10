@@ -152,6 +152,14 @@ from src.security.production_isolation import (
     SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
     SECURITY_INCIDENT_RECOVERY_DRILL_SUITE_NAME,
 )
+from src.security.independent_review import (
+    INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES,
+    INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME,
+    SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -967,6 +975,54 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="This is replayable drill proof, not production incident response certification.",
         scenario_names=SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=INDEPENDENT_SECURE_HOST_REVIEW_SUITE_NAME,
+        label="Independent secure-host review",
+        description=(
+            "Pins Batch CK independent security-review scope, finding remediation, isolation evidence, "
+            "operator receipt surfaces, and unsupported isolation-claim boundaries."
+        ),
+        benchmark_axis="independent_secure_host_review",
+        operator_summary=(
+            "Independent secure-host review now has an operator-visible proof lane above BW/CD while "
+            "secure/private, IronClaw-class, production-ready, and full-parity claims remain blocked."
+        ),
+        remaining_gap=(
+            "This is independent review and attestation proof, not full TEE/CVM/Wasm/container isolation "
+            "or production security certification."
+        ),
+        scenario_names=INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_HOSTILE_ISOLATION_DRILLS_SUITE_NAME,
+        label="Live hostile isolation drills",
+        description=(
+            "Pins CK hostile replay drills for prompt injection, SSRF/private egress, filesystem escape, "
+            "credential exfiltration, extension permission creep, replay approval drift, and browser session bleed."
+        ),
+        benchmark_axis="live_hostile_isolation_drills",
+        operator_summary=(
+            "Hostile security drills expose what was blocked, quarantined, and recoverable without "
+            "turning negative-case receipts into blanket security claims."
+        ),
+        remaining_gap="Broader external penetration testing and hardware-backed isolation remain future proof work.",
+        scenario_names=LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME,
+        label="Secure-host recovery authority",
+        description=(
+            "Pins CK operator recovery authority for allow, deny, quarantine, rotate, recover, and "
+            "post-incident audit controls after independent review or hostile drill findings."
+        ),
+        benchmark_axis="secure_host_recovery_authority",
+        operator_summary=(
+            "Operator recovery authority is visible for independent security review findings and "
+            "hostile-drill incidents."
+        ),
+        remaining_gap="This is recovery authority proof, not solved production incident response.",
+        scenario_names=SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

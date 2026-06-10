@@ -30,7 +30,7 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     summary = contract["summary"]
     batches = contract["batch_reconciliation_receipts"]
 
-    assert summary["completed_batch_count"] == 18
+    assert summary["completed_batch_count"] == 19
     assert summary["all_completed_batches_done_merged_passed"] is True
     assert summary["final_batch_status"] == "self_referential_final_audit_batch"
     assert summary["full_parity_claim_allowed"] is False
@@ -58,8 +58,15 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     co_batch = next(item for item in batches if item["batch"] == "CO")
     assert co_batch["issue"] == 510
     assert co_batch["primary_suite"] == "independent_package_security_review"
-    assert co_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
-    assert co_batch["project_status"] == "owned_by_github_project_until_pr_merge"
+    assert co_batch["status"] == "done"
+    assert co_batch["merged_pr"] == 519
+    assert co_batch["project_status"] == "Done"
+    assert co_batch["project_pr"] == "Merged"
+    cp_batch = next(item for item in batches if item["batch"] == "CP")
+    assert cp_batch["issue"] == 511
+    assert cp_batch["primary_suite"] == "live_browser_task_depth"
+    assert cp_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert cp_batch["project_status"] == "owned_by_github_project_until_pr_merge"
     assert next(item for item in batches if item["batch"] == "CI")["issue"] == 497
 
 
@@ -86,6 +93,9 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     operator_gap = next(
         item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-dense-operator-control"
     )
+    browser_gap = next(
+        item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-browser-autonomy"
+    )
 
     assert policy["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
     assert set(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
@@ -94,7 +104,8 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert "/api/operator/production-reach-voice-mobile" in policy["receipt_surfaces"]
     assert "/api/operator/dense-operator-recovery-control" in policy["receipt_surfaces"]
     assert "/api/operator/production-marketplace-security" in policy["receipt_surfaces"]
-    assert {510, 509, 508, 507, 506, 505, 497, 496, 475} <= {
+    assert "/api/operator/safe-autonomous-browser-computer-use" in policy["receipt_surfaces"]
+    assert {511, 510, 509, 508, 507, 506, 505, 497, 496, 475} <= {
         issue for item in claims for issue in item["issue_links"]
     }
     assert "production_sla_orchestration" in orchestration_gap["current_batch_evidence"]
@@ -127,6 +138,15 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert scl_031["status"] == "backed_for_bounded_receipts_after_batch_co_pr_merge"
     assert "/api/operator/production-marketplace-security" == scl_031["operator_surface"]
     assert "third_party_package_security_solved" in scl_031["blocked_claims"]
+    assert "live_browser_task_depth" in browser_gap["current_batch_evidence"]
+    assert "autonomous_browser_safety_controls" in browser_gap["current_batch_evidence"]
+    assert "browser_provider_reliability_matrix" in browser_gap["current_batch_evidence"]
+    assert "/api/operator/safe-autonomous-browser-computer-use" in browser_gap["current_batch_evidence"]
+    assert "full_browser_parity" in browser_gap["blocking_claims"]
+    scl_032 = next(item for item in claims if item["claim_id"] == "SCL-032")
+    assert scl_032["status"] == "backed_for_bounded_receipts_after_batch_cp_pr_merge"
+    assert scl_032["operator_surface"] == "/api/operator/safe-autonomous-browser-computer-use"
+    assert "safe_autonomous_computer_use" in scl_032["blocked_claims"]
     assert all(item["disposition"] == "accepted" for item in critic)
 
 

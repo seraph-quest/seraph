@@ -51,6 +51,7 @@ from src.extensions.browser_provider_usability import build_browser_provider_usa
 from src.extensions.live_marketplace_attestation import build_live_marketplace_attestation_report
 from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
 from src.extensions.production_marketplace_security import build_production_marketplace_security_report
+from src.extensions.safe_browser_computer_use import build_safe_browser_computer_use_report
 from src.extensions.live_reach_media import build_live_reach_media_report
 from src.extensions.production_reach_hardening import build_production_reach_browser_voice_report
 from src.extensions.production_reach_voice_mobile import build_production_reach_voice_mobile_report
@@ -3444,6 +3445,7 @@ async def get_operator_benchmark_proof():
         live_marketplace_attestation,
         production_marketplace_security,
         browser_provider_usability,
+        safe_browser_computer_use,
         production_operator_control,
         dense_operator_recovery,
         final_parity_readiness,
@@ -3487,6 +3489,7 @@ async def get_operator_benchmark_proof():
         build_live_marketplace_attestation_report(),
         build_production_marketplace_security_report(),
         build_browser_provider_usability_report(),
+        build_safe_browser_computer_use_report(),
         build_production_operator_control_report(),
         build_dense_operator_recovery_report(),
         build_final_parity_readiness_report(),
@@ -3537,6 +3540,7 @@ async def get_operator_benchmark_proof():
         str(live_marketplace_attestation["summary"]["benchmark_posture"]),
         str(production_marketplace_security["summary"]["benchmark_posture"]),
         str(browser_provider_usability["summary"]["benchmark_posture"]),
+        str(safe_browser_computer_use["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
         str(dense_operator_recovery["summary"]["benchmark_posture"]),
         str(final_parity_readiness["summary"]["benchmark_posture"]),
@@ -3636,6 +3640,8 @@ async def get_operator_benchmark_proof():
             "production_marketplace_security_claim_boundary": production_marketplace_security["policy"]["claim_boundary"],
             "browser_provider_usability_posture": browser_provider_usability["summary"]["benchmark_posture"],
             "browser_provider_usability_claim_boundary": browser_provider_usability["policy"]["claim_boundary"],
+            "safe_browser_computer_use_posture": safe_browser_computer_use["summary"]["benchmark_posture"],
+            "safe_browser_computer_use_claim_boundary": safe_browser_computer_use["policy"]["claim_boundary"],
             "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
             "production_operator_control_parity_claim_boundary": production_operator_control["policy"]["claim_boundary"],
             "dense_operator_recovery_control_posture": dense_operator_recovery["summary"]["benchmark_posture"],
@@ -3682,6 +3688,7 @@ async def get_operator_benchmark_proof():
         "live_marketplace_attestation": live_marketplace_attestation,
         "production_marketplace_security": production_marketplace_security,
         "browser_provider_usability": browser_provider_usability,
+        "safe_browser_computer_use": safe_browser_computer_use,
         "production_operator_control": production_operator_control,
         "dense_operator_recovery_control": dense_operator_recovery,
         "final_parity_readiness": final_parity_readiness,
@@ -3901,6 +3908,11 @@ async def get_operator_production_marketplace_security():
 @router.get("/operator/browser-provider-usability-proof")
 async def get_operator_browser_provider_usability_proof():
     return await build_browser_provider_usability_report()
+
+
+@router.get("/operator/safe-autonomous-browser-computer-use")
+async def get_operator_safe_autonomous_browser_computer_use():
+    return await build_safe_browser_computer_use_report()
 
 
 @router.get("/operator/production-operator-control-parity")

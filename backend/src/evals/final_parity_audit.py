@@ -86,6 +86,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
             "/api/operator/production-reach-voice-mobile",
             "/api/operator/independent-learning-memory-parity",
             "/api/operator/browser-provider-usability-proof",
+            "/api/operator/safe-autonomous-browser-computer-use",
             "/api/operator/live-marketplace-attestation-proof",
             "/api/operator/production-marketplace-security",
             "docs/research/19-strategy-claim-ledger.md",
@@ -178,7 +179,10 @@ def current_competitor_source_receipts() -> list[dict[str, Any]]:
                 "multi_profile_support",
             ],
             "claim_use": "source_backed_pressure_only",
-            "residual_gap": "Batch CH adds provider/usability receipts but not safe autonomous browser use or full browser parity.",
+            "residual_gap": (
+                "Batch CP adds bounded browser/computer-use safety receipts, while blanket safe "
+                "browser automation and full browser parity wording remain final-audit gated."
+            ),
         },
         {
             "system": "OpenClaw",
@@ -258,6 +262,7 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CL", 509, "broad_channel_sla_operations", 516),
         ("CM", 507, "independent_outcome_cohort_review", 517),
         ("CN", 508, "long_work_debugging_recovery", 518),
+        ("CO", 510, "independent_package_security_review", 519),
     ]
     receipts = [
         {
@@ -288,16 +293,16 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "operator_visible": True,
     })
     receipts.append({
-        "batch": "CO",
-        "issue": 510,
-        "primary_suite": "independent_package_security_review",
+        "batch": "CP",
+        "issue": 511,
+        "primary_suite": "live_browser_task_depth",
         "merged_pr": None,
         "status": "active_branch_receipts_visible_until_pr_merge",
         "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
         "project_status": "owned_by_github_project_until_pr_merge",
         "project_pr": "owned_by_linked_pull_request_until_pr_merge",
         "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #510 and its Project item are authoritative for live PR/review fields",
+        "project_truth_source": "GitHub issue #511 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
     return receipts
@@ -479,6 +484,26 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "status": "backed_for_bounded_receipts_after_batch_co_pr_merge",
             "operator_surface": "/api/operator/production-marketplace-security",
         },
+        {
+            "claim_id": "SCL-032",
+            "area": "safe_autonomous_browser_computer_use_and_full_browser_parity",
+            "issue_links": [475, 511],
+            "allowed_wording": (
+                "bounded safe/test-account browser task-depth, autonomous safety-control, session-partition, "
+                "site-recovery, provider-reliability, and independent-usability receipts are visible after "
+                "the Batch CP PR lands"
+            ),
+            "blocked_claims": [
+                "safe_browser_automation",
+                "safe_autonomous_computer_use",
+                "full_browser_parity",
+                "production_ready_product",
+                "full_production_parity",
+                "reference_systems_exceeded",
+            ],
+            "status": "backed_for_bounded_receipts_after_batch_cp_pr_merge",
+            "operator_surface": "/api/operator/safe-autonomous-browser-computer-use",
+        },
     ]
 
 
@@ -626,9 +651,32 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
         {
             "gap_id": "ci-gap-browser-autonomy",
             "area": "browser_computer_use",
-            "gap": "safe autonomous browser/computer-use and full browser parity remain unproven",
-            "blocking_claims": ["safe_browser_automation", "full_browser_parity"],
-            "required_stronger_evidence": "broad live task depth, credential partitioning, site-specific recovery, and independent usability evidence",
+            "gap": (
+                "Batch CP narrows the browser-autonomy gap with bounded safe/test-account task depth, "
+                "autonomous safety-control, session partitioning, site-specific recovery, provider reliability, "
+                "and independent usability receipts; blanket safe browser automation, safe autonomous computer-use, "
+                "full browser parity, production-ready, and full parity wording remain blocked pending final claim audit"
+            ),
+            "blocking_claims": [
+                "safe_browser_automation",
+                "safe_autonomous_computer_use",
+                "full_browser_parity",
+                "production_ready_product",
+            ],
+            "current_batch_evidence": [
+                "live_browser_task_depth",
+                "autonomous_browser_safety_controls",
+                "browser_session_partitioning_security",
+                "site_specific_recovery_drills",
+                "browser_provider_reliability_matrix",
+                "independent_browser_usability_review",
+                "/api/operator/safe-autonomous-browser-computer-use",
+                "GitHub issue #511",
+            ],
+            "required_stronger_evidence": (
+                "Batch CQ final source-backed claim reconciliation plus broader production provider/site evidence "
+                "before blanket safe automation, full browser parity, or production-ready wording"
+            ),
         },
     ]
 

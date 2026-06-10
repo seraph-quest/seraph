@@ -1,0 +1,1338 @@
+{
+  "batch": "CP",
+  "issue": 511,
+  "artifact_kind": "redacted_safe_browser_computer_use_receipts",
+  "redaction_profile": "no_raw_credentials_no_raw_cookies_no_private_page_content",
+  "created_for": [
+    "live_browser_task_depth",
+    "autonomous_browser_safety_controls",
+    "browser_session_partitioning_security",
+    "site_specific_recovery_drills",
+    "browser_provider_reliability_matrix",
+    "independent_browser_usability_review"
+  ],
+  "receipts": [
+    {
+      "receipt_id": "operator:browser-cp:provider:local",
+      "evidence_mode": "deterministic_local_fixture",
+      "redacted": true,
+      "receipt_kind": "provider_boundary",
+      "captured_at": "2026-06-10T08:07:00Z",
+      "workload": "provider_mode_partition_inventory",
+      "sample_size": 1,
+      "environment": "deterministic_local_fixture_redacted",
+      "provider_configuration": "local_playwright_ephemeral_profile_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for local; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "provider:local",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:db08efe1c86d39b6f084e7363a55d17039560bf7351e853ee6390c5eacfb2b60",
+        "raw_payload_digest": "sha256:redacted-db08efe1c86d39b6f084e736",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-3a55d17039560bf7351e853e"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:provider:managed",
+      "evidence_mode": "recorded_live_provider_fixture_redacted",
+      "redacted": true,
+      "receipt_kind": "provider_boundary",
+      "captured_at": "2026-06-10T08:14:00Z",
+      "workload": "provider_mode_partition_inventory",
+      "sample_size": 1,
+      "environment": "recorded_safe_target_test_account_fixture_redacted",
+      "provider_configuration": "managed_remote_ephemeral_profile_redacted_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for managed; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "provider:managed",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:3d66cbb43517ad5b58ce2d0769a933f414e0a131298cca5fd9a23502aac8ad0a",
+        "raw_payload_digest": "sha256:redacted-3d66cbb43517ad5b58ce2d07",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-69a933f414e0a131298cca5f"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:provider:remote-cdp-blocked",
+      "evidence_mode": "recorded_live_negative_boundary_redacted",
+      "redacted": true,
+      "receipt_kind": "provider_boundary",
+      "captured_at": "2026-06-10T08:21:00Z",
+      "workload": "provider_mode_partition_inventory",
+      "sample_size": 1,
+      "environment": "recorded_negative_boundary_fixture_redacted",
+      "provider_configuration": "remote_cdp_existing_session_blocked_until_partitioned",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "blocked_until_profile_partitioned",
+      "evidence_summary": "Redacted provider receipt for remote cdp blocked; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "provider:remote-cdp-blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:fea9bb6ad744daee38fae6e5a1ae561b7538ba5e867f32d82524336136ffd853",
+        "raw_payload_digest": "sha256:redacted-fea9bb6ad744daee38fae6e5",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-a1ae561b7538ba5e867f32d8"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:provider-reliability:local",
+      "evidence_mode": "deterministic_local_fixture",
+      "redacted": true,
+      "receipt_kind": "provider_reliability",
+      "captured_at": "2026-06-10T08:28:00Z",
+      "workload": "provider_reliability_matrix",
+      "sample_size": 8,
+      "environment": "deterministic_local_fixture_redacted",
+      "provider_configuration": "local_playwright_ephemeral_profile_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for local; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "provider-reliability:local",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:8406b08d72d8b1e3faf3204135cba33e6ac31dda18b2881eec9d81fbc6340968",
+        "raw_payload_digest": "sha256:redacted-8406b08d72d8b1e3faf32041",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-35cba33e6ac31dda18b2881e"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:provider-reliability:managed",
+      "evidence_mode": "recorded_live_provider_fixture_redacted",
+      "redacted": true,
+      "receipt_kind": "provider_reliability",
+      "captured_at": "2026-06-10T08:35:00Z",
+      "workload": "provider_reliability_matrix",
+      "sample_size": 6,
+      "environment": "recorded_safe_target_test_account_fixture_redacted",
+      "provider_configuration": "managed_remote_ephemeral_profile_redacted_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for managed; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "provider-reliability:managed",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:ae1c46afefc3ddf498dc5888f8ef8036f0f916309cd16fa5f76992998aa8aae1",
+        "raw_payload_digest": "sha256:redacted-ae1c46afefc3ddf498dc5888",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-f8ef8036f0f916309cd16fa5"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:provider-reliability:remote-cdp",
+      "evidence_mode": "recorded_live_negative_boundary_redacted",
+      "redacted": true,
+      "receipt_kind": "provider_reliability",
+      "captured_at": "2026-06-10T09:42:00Z",
+      "workload": "provider_reliability_matrix",
+      "sample_size": 6,
+      "environment": "recorded_negative_boundary_fixture_redacted",
+      "provider_configuration": "remote_cdp_existing_session_blocked_until_partitioned",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for remote cdp; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "provider-reliability:remote-cdp",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:518fe46d6783af3864f5ae16550154ebd3fba11e54625902454c63e71f8faeb3",
+        "raw_payload_digest": "sha256:redacted-518fe46d6783af3864f5ae16",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-550154ebd3fba11e54625902"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:tasks:navigation-form",
+      "evidence_mode": "deterministic_local_fixture",
+      "redacted": true,
+      "receipt_kind": "live_task_depth",
+      "captured_at": "2026-06-10T09:49:00Z",
+      "workload": "safe_target_browser_task_depth_matrix",
+      "sample_size": 8,
+      "environment": "deterministic_local_fixture_redacted",
+      "provider_configuration": "local_playwright_ephemeral_profile_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted safe-target browser task receipt for navigation form; transcript, DOM selectors, screenshots, and artifacts are summarized by digest only.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "tasks:navigation-form",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:de415b095956a6e7c4dc1d52cf8ca75936dd17822352921bb3eb6d1a080012e7",
+        "raw_payload_digest": "sha256:redacted-de415b095956a6e7c4dc1d52",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-cf8ca75936dd17822352921b"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:tasks:auth-session",
+      "evidence_mode": "recorded_live_provider_fixture_redacted",
+      "redacted": true,
+      "receipt_kind": "live_task_depth",
+      "captured_at": "2026-06-10T09:56:00Z",
+      "workload": "safe_target_browser_task_depth_matrix",
+      "sample_size": 8,
+      "environment": "recorded_safe_target_test_account_fixture_redacted",
+      "provider_configuration": "managed_remote_ephemeral_profile_redacted_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted safe-target browser task receipt for auth session; transcript, DOM selectors, screenshots, and artifacts are summarized by digest only.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "tasks:auth-session",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:762ab0ac466ec10c22184e2e751702dfd5fd293a88406218f95ad934a3b92839",
+        "raw_payload_digest": "sha256:redacted-762ab0ac466ec10c22184e2e",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-751702dfd5fd293a88406218"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:tasks:file-transfer-extraction",
+      "evidence_mode": "deterministic_local_fixture",
+      "redacted": true,
+      "receipt_kind": "live_task_depth",
+      "captured_at": "2026-06-10T09:03:00Z",
+      "workload": "safe_target_browser_task_depth_matrix",
+      "sample_size": 8,
+      "environment": "deterministic_local_fixture_redacted",
+      "provider_configuration": "local_playwright_ephemeral_profile_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted safe-target browser task receipt for file transfer extraction; transcript, DOM selectors, screenshots, and artifacts are summarized by digest only.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "tasks:file-transfer-extraction",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:75d6bde3185fc19680767df43862000c8a5601756a6bd367dc507c2e41481152",
+        "raw_payload_digest": "sha256:redacted-75d6bde3185fc19680767df4",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-3862000c8a5601756a6bd367"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:tasks:handoff",
+      "evidence_mode": "recorded_live_negative_boundary_redacted",
+      "redacted": true,
+      "receipt_kind": "live_task_depth",
+      "captured_at": "2026-06-10T09:10:00Z",
+      "workload": "safe_target_browser_task_depth_matrix",
+      "sample_size": 8,
+      "environment": "recorded_negative_boundary_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted safe-target browser task receipt for handoff; transcript, DOM selectors, screenshots, and artifacts are summarized by digest only.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "tasks:handoff",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:2f9982b2fa68ba3a835a3f6dc36b195d6a74d1dc37ea3e63dd35f544e51a8bba",
+        "raw_payload_digest": "sha256:redacted-2f9982b2fa68ba3a835a3f6d",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-c36b195d6a74d1dc37ea3e63"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:financial:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T09:17:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:financial:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:de10848d646e29e5c3e7cf3ceaa80179cff4d6bae14e9fcca06b6f628717420c",
+        "raw_payload_digest": "sha256:redacted-de10848d646e29e5c3e7cf3c",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-eaa80179cff4d6bae14e9fcc"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:legal:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T10:24:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:legal:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:253f415b5e3fd636606acd18505d340f281c9d7f7132a5daa8cd48315322a83a",
+        "raw_payload_digest": "sha256:redacted-253f415b5e3fd636606acd18",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-505d340f281c9d7f7132a5da"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:medical:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T10:31:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:medical:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:a07f83401183956a824e3772bbf08851f6b7cc66df9c9a521ba03a88b4d6ac72",
+        "raw_payload_digest": "sha256:redacted-a07f83401183956a824e3772",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-bbf08851f6b7cc66df9c9a52"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:account:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T10:38:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:account:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:26891d32561a8073a4ac522a09195850165be18a3c6bb71093d7d3c2b50f85d0",
+        "raw_payload_digest": "sha256:redacted-26891d32561a8073a4ac522a",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-09195850165be18a3c6bb710"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:security:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T10:45:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:security:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:1c8a76ac045e057ab31914f11600a8ded0f113aec5a21ed8feebae0996fd1b52",
+        "raw_payload_digest": "sha256:redacted-1c8a76ac045e057ab31914f1",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-1600a8ded0f113aec5a21ed8"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:destructive:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T10:52:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:destructive:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:2b839e9eefc6fca4aa80dd2b4ae6df22295481f4d8c64ddb9e9dad310b194d48",
+        "raw_payload_digest": "sha256:redacted-2b839e9eefc6fca4aa80dd2b",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-4ae6df22295481f4d8c64ddb"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:dangerous:personal_data:blocked",
+      "evidence_mode": "negative_policy_fixture",
+      "redacted": true,
+      "receipt_kind": "dangerous_action_negative_control",
+      "captured_at": "2026-06-10T10:59:00Z",
+      "workload": "dangerous_action_default_block_taxonomy",
+      "sample_size": 1,
+      "environment": "negative_policy_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Negative-control receipt for blocked; mutation was blocked before external submission and operator approval scope was required.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "dangerous:personal_data:blocked",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:24aa1593ada939b9d7596e0f03d30bd9d43b06c8dc781dd6cf887720bc6c6965",
+        "raw_payload_digest": "sha256:redacted-24aa1593ada939b9d7596e0f",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-03d30bd9d43b06c8dc781dd6"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:auto:safe-extract",
+      "evidence_mode": "deterministic_local_fixture",
+      "redacted": true,
+      "receipt_kind": "autonomous_action_control",
+      "captured_at": "2026-06-10T11:06:00Z",
+      "workload": "approval_scoped_autonomous_browser_task",
+      "sample_size": 4,
+      "environment": "deterministic_local_fixture_redacted",
+      "provider_configuration": "local_playwright_ephemeral_profile_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for safe extract; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "auto:safe-extract",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:cf334fddce93902575ae97603e0b2a85802dde3115db0c83f0a4fd235c17c8fd",
+        "raw_payload_digest": "sha256:redacted-cf334fddce93902575ae9760",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-3e0b2a85802dde3115db0c83"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:auto:form-draft",
+      "evidence_mode": "recorded_live_provider_fixture_redacted",
+      "redacted": true,
+      "receipt_kind": "autonomous_action_control",
+      "captured_at": "2026-06-10T11:13:00Z",
+      "workload": "approval_scoped_autonomous_browser_task",
+      "sample_size": 4,
+      "environment": "recorded_safe_target_test_account_fixture_redacted",
+      "provider_configuration": "managed_remote_ephemeral_profile_redacted_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for form draft; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "auto:form-draft",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:fee7e2145d1a8d4f64bd3479cc1bb85f40a91c2167e180e874bc7cc31f4d4f0e",
+        "raw_payload_digest": "sha256:redacted-fee7e2145d1a8d4f64bd3479",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-cc1bb85f40a91c2167e180e8"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:auto:auth-download",
+      "evidence_mode": "recorded_live_provider_fixture_redacted",
+      "redacted": true,
+      "receipt_kind": "autonomous_action_control",
+      "captured_at": "2026-06-10T11:20:00Z",
+      "workload": "approval_scoped_autonomous_browser_task",
+      "sample_size": 4,
+      "environment": "recorded_safe_target_test_account_fixture_redacted",
+      "provider_configuration": "managed_remote_ephemeral_profile_redacted_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_with_bounded_residual_gap",
+      "evidence_summary": "Redacted provider receipt for auth download; provider mode, boundary, degradation, and residual gap were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "auto:auth-download",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:9016feac386d51aadc51e06daf9ecee35fae0fa42fab72e59603e2102cc5f030",
+        "raw_payload_digest": "sha256:redacted-9016feac386d51aadc51e06d",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-af9ecee35fae0fa42fab72e5"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:partition:profile",
+      "evidence_mode": "partition_fixture",
+      "redacted": true,
+      "receipt_kind": "session_partitioning",
+      "captured_at": "2026-06-10T11:27:00Z",
+      "workload": "session_profile_cookie_credential_partitioning",
+      "sample_size": 3,
+      "environment": "partition_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_partition_or_reject_on_secret_pattern",
+      "evidence_summary": "Partition receipt for profile; profile, cookie, credential, replay, file-transfer, or provider boundary was isolated or rejected fail-closed.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "partition:profile",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:bee55ae6f0bdf24661d6636628a1d502cbee724269db54b3185bf66078b6c059",
+        "raw_payload_digest": "sha256:redacted-bee55ae6f0bdf24661d66366",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-28a1d502cbee724269db54b3"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:partition:cookie",
+      "evidence_mode": "partition_fixture",
+      "redacted": true,
+      "receipt_kind": "session_partitioning",
+      "captured_at": "2026-06-10T11:34:00Z",
+      "workload": "session_profile_cookie_credential_partitioning",
+      "sample_size": 3,
+      "environment": "partition_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_partition_or_reject_on_secret_pattern",
+      "evidence_summary": "Partition receipt for cookie; profile, cookie, credential, replay, file-transfer, or provider boundary was isolated or rejected fail-closed.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "partition:cookie",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:56d7e05321c75af256402bb9403e9b9e61d2918a930793c11fd799448a0cc00a",
+        "raw_payload_digest": "sha256:redacted-56d7e05321c75af256402bb9",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-403e9b9e61d2918a930793c1"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:partition:credential",
+      "evidence_mode": "redacted_secret_ref_fixture",
+      "redacted": true,
+      "receipt_kind": "session_partitioning",
+      "captured_at": "2026-06-10T11:41:00Z",
+      "workload": "session_profile_cookie_credential_partitioning",
+      "sample_size": 3,
+      "environment": "partition_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_partition_or_reject_on_secret_pattern",
+      "evidence_summary": "Partition receipt for credential; profile, cookie, credential, replay, file-transfer, or provider boundary was isolated or rejected fail-closed.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "partition:credential",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:d632264d36fe7e7e7d4c4fbdc8061f04e2f7ec0f3a5a7d948b078459d0c71ffc",
+        "raw_payload_digest": "sha256:redacted-d632264d36fe7e7e7d4c4fbd",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-c8061f04e2f7ec0f3a5a7d94"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:partition:replay-scrub",
+      "evidence_mode": "redacted_replay_fixture",
+      "redacted": true,
+      "receipt_kind": "session_partitioning",
+      "captured_at": "2026-06-10T12:48:00Z",
+      "workload": "session_profile_cookie_credential_partitioning",
+      "sample_size": 3,
+      "environment": "partition_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_partition_or_reject_on_secret_pattern",
+      "evidence_summary": "Partition receipt for replay scrub; profile, cookie, credential, replay, file-transfer, or provider boundary was isolated or rejected fail-closed.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "partition:replay-scrub",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:0852bbf526159432b3402a39e1ece65a744487a21a69620903b85c03981bdbbe",
+        "raw_payload_digest": "sha256:redacted-0852bbf526159432b3402a39",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-e1ece65a744487a21a696209"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:partition:file-transfer",
+      "evidence_mode": "file_transfer_boundary_fixture",
+      "redacted": true,
+      "receipt_kind": "session_partitioning",
+      "captured_at": "2026-06-10T12:55:00Z",
+      "workload": "session_profile_cookie_credential_partitioning",
+      "sample_size": 3,
+      "environment": "partition_fixture_redacted",
+      "provider_configuration": "local_playwright_ephemeral_profile_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_partition_or_reject_on_secret_pattern",
+      "evidence_summary": "Partition receipt for file transfer; profile, cookie, credential, replay, file-transfer, or provider boundary was isolated or rejected fail-closed.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "partition:file-transfer",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:3dffb0c74a19c2ebcc935cc846e3bf797c802823d9c5f6b94c530871ef3c63e3",
+        "raw_payload_digest": "sha256:redacted-3dffb0c74a19c2ebcc935cc8",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-46e3bf797c802823d9c5f6b9"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:partition:provider",
+      "evidence_mode": "provider_degradation_fixture",
+      "redacted": true,
+      "receipt_kind": "session_partitioning",
+      "captured_at": "2026-06-10T12:02:00Z",
+      "workload": "session_profile_cookie_credential_partitioning",
+      "sample_size": 3,
+      "environment": "partition_fixture_redacted",
+      "provider_configuration": "local_managed_remote_cdp_matrix",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_partition_or_reject_on_secret_pattern",
+      "evidence_summary": "Partition receipt for provider; profile, cookie, credential, replay, file-transfer, or provider boundary was isolated or rejected fail-closed.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "partition:provider",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:7ce3f3cdd7dae10051be6392ce5a639954f73a0de37ea1942685d078e4d4ae6e",
+        "raw_payload_digest": "sha256:redacted-7ce3f3cdd7dae10051be6392",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-ce5a639954f73a0de37ea194"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:login_expiry",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T12:09:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for login expiry; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:login_expiry",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:7b3be26bca5979f74870eddf2944adc525925554c9a8197e80e6e4d98f2e3fed",
+        "raw_payload_digest": "sha256:redacted-7b3be26bca5979f74870eddf",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-2944adc525925554c9a8197e"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:navigation_drift",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T12:16:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for navigation drift; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:navigation_drift",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:87eadad81b61d389d14ae6e83d8877c8cee8cf0c4b866fc439ffeb4e56343069",
+        "raw_payload_digest": "sha256:redacted-87eadad81b61d389d14ae6e8",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-3d8877c8cee8cf0c4b866fc4"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:dom_page_drift",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T12:23:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for dom page drift; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:dom_page_drift",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:c78fe8f81933ce14c2c28fd6cc04ee13e4d9101a3d4aaea575cb4df4de887cbf",
+        "raw_payload_digest": "sha256:redacted-c78fe8f81933ce14c2c28fd6",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-cc04ee13e4d9101a3d4aaea5"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:file_upload_download_failure",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T13:30:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for file upload download failure; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:file_upload_download_failure",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:6bdd56e4e0415e28c7d03af4bd63ae2c437ae80f1583fbba815b30230ed9ef79",
+        "raw_payload_digest": "sha256:redacted-6bdd56e4e0415e28c7d03af4",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-bd63ae2c437ae80f1583fbba"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:provider_crash",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T13:37:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "local_managed_remote_cdp_matrix",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for provider crash; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:provider_crash",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:9ddf83dc2de9efa3228670802e9b347e799ccd8633cdba4fa2300e333a7d1e06",
+        "raw_payload_digest": "sha256:redacted-9ddf83dc2de9efa322867080",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-2e9b347e799ccd8633cdba4f"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:remote_connection_loss",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T13:44:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for remote connection loss; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:remote_connection_loss",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:0083583bec2f5f9ad72854dd147b6d5b1b9db9c301b97258e21ba628896204b6",
+        "raw_payload_digest": "sha256:redacted-0083583bec2f5f9ad72854dd",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-147b6d5b1b9db9c301b97258"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:unsafe_replay",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T13:51:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for unsafe replay; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:unsafe_replay",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:b39eee1d780e6a981468e7ab504c6405693670f4a610aec9a23ae88aecf3ba7a",
+        "raw_payload_digest": "sha256:redacted-b39eee1d780e6a981468e7ab",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-504c6405693670f4a610aec9"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:site-recovery:stale_credential_boundary",
+      "evidence_mode": "site_recovery_drill_fixture",
+      "redacted": true,
+      "receipt_kind": "site_specific_recovery",
+      "captured_at": "2026-06-10T13:58:00Z",
+      "workload": "site_specific_browser_recovery_drill",
+      "sample_size": 3,
+      "environment": "safe_target_recovery_fixture_redacted",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "passed_fail_closed_without_external_mutation",
+      "evidence_summary": "Recovery-drill receipt for stale credential boundary; unsafe replay/external action remained blocked and operator recovery state was visible.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "site-recovery:stale_credential_boundary",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:a6e9e4c8e03eb00508aaf1e708a90efd9f96de52ca4e3c8ff00ddce9371ee474",
+        "raw_payload_digest": "sha256:redacted-a6e9e4c8e03eb00508aaf1e7",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-08a90efd9f96de52ca4e3c8f"
+      },
+      "reviewer_or_runner": "batch-cp-fixture-runner",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content"
+    },
+    {
+      "receipt_id": "operator:browser-cp:usability:task-success",
+      "evidence_mode": "independent_usability_review_summary",
+      "redacted": true,
+      "receipt_kind": "independent_usability_review",
+      "captured_at": "2026-06-10T13:05:00Z",
+      "workload": "independent_operator_usability_review",
+      "sample_size": 12,
+      "environment": "independent_redacted_review_packet",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "reviewed_with_residual_risk_recorded",
+      "evidence_summary": "Independent reviewer packet for task success; success, intervention, detectability, accessibility, recovery confidence, and residual risk were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "usability:task-success",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:60f0e58c49e6a6fb809e0397c4b1a12c3cbc33b0fef85c1f797df63f6f1a5267",
+        "raw_payload_digest": "sha256:redacted-60f0e58c49e6a6fb809e0397",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-c4b1a12c3cbc33b0fef85c1f"
+      },
+      "reviewer_or_runner": "independent-usability-reviewer-redacted",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content",
+      "review_record": {
+        "reviewer_independence": "separate_from_batch_worker",
+        "reviewer_count": 2,
+        "review_dimensions": [
+          "task_success",
+          "operator_intervention",
+          "error_detectability",
+          "accessibility",
+          "recovery_confidence",
+          "residual_risk"
+        ],
+        "private_notes": "[redacted:omitted]"
+      }
+    },
+    {
+      "receipt_id": "operator:browser-cp:usability:recovery-confidence",
+      "evidence_mode": "independent_usability_review_summary",
+      "redacted": true,
+      "receipt_kind": "independent_usability_review",
+      "captured_at": "2026-06-10T14:12:00Z",
+      "workload": "independent_operator_usability_review",
+      "sample_size": 12,
+      "environment": "independent_redacted_review_packet",
+      "provider_configuration": "provider_agnostic_policy_fixture",
+      "baseline_or_rationale": "Batch CP evidence threshold: bounded safe-target browser/computer-use receipt, not full browser parity or production-ready evidence.",
+      "failure_budget": "zero raw credential/cookie/private-content leakage; zero unapproved external mutation; fail closed on unsafe replay or stale credential.",
+      "outcome": "reviewed_with_residual_risk_recorded",
+      "evidence_summary": "Independent reviewer packet for recovery confidence; success, intervention, detectability, accessibility, recovery confidence, and residual risk were recorded.",
+      "redacted_payload_excerpt": {
+        "task_or_drill": "usability:recovery-confidence",
+        "operator_visible": true,
+        "external_mutation": "blocked_or_not_applicable",
+        "raw_secrets": "[redacted:none-present]",
+        "private_page_content": "[redacted:omitted]"
+      },
+      "artifact_digests": {
+        "redacted_receipt_sha256": "sha256:1fe4fa2bdb58e1e39112ef29528a4b78838a81856cf729a78a4572f8351dc69a",
+        "raw_payload_digest": "sha256:redacted-1fe4fa2bdb58e1e39112ef29",
+        "screenshot_or_dom_digest": "sha256:redacted-dom-528a4b78838a81856cf729a7"
+      },
+      "reviewer_or_runner": "independent-usability-reviewer-redacted",
+      "residual_gap": "bounded redacted receipt evidence only; does not prove blanket safe automation, full browser parity, or production readiness.",
+      "secret_scan_scope": [
+        "receipt_json",
+        "redacted_payload_excerpt",
+        "evidence_summary"
+      ],
+      "redaction_status": "passed_no_raw_credentials_cookies_or_private_page_content",
+      "review_record": {
+        "reviewer_independence": "separate_from_batch_worker",
+        "reviewer_count": 2,
+        "review_dimensions": [
+          "task_success",
+          "operator_intervention",
+          "error_detectability",
+          "accessibility",
+          "recovery_confidence",
+          "residual_risk"
+        ],
+        "private_notes": "[redacted:omitted]"
+      }
+    }
+  ],
+  "evidence_contract": {
+    "required_receipt_fields": [
+      "receipt_id",
+      "receipt_kind",
+      "captured_at",
+      "evidence_mode",
+      "workload",
+      "sample_size",
+      "environment",
+      "provider_configuration",
+      "baseline_or_rationale",
+      "failure_budget",
+      "outcome",
+      "evidence_summary",
+      "redacted_payload_excerpt",
+      "artifact_digests",
+      "residual_gap",
+      "secret_scan_scope",
+      "redaction_status"
+    ],
+    "claim_boundary": "redacted_batch_cp_safe_target_receipts_not_live_production_sla_full_browser_parity_or_safe_autonomous_computer_use",
+    "privacy_boundary": "no raw credentials, raw cookies, bearer tokens, passwords, or private page content are stored in this repository artifact",
+    "evidence_modes": [
+      "deterministic_local_fixture",
+      "file_transfer_boundary_fixture",
+      "independent_usability_review_summary",
+      "negative_policy_fixture",
+      "partition_fixture",
+      "provider_degradation_fixture",
+      "recorded_live_negative_boundary_redacted",
+      "recorded_live_provider_fixture_redacted",
+      "redacted_replay_fixture",
+      "redacted_secret_ref_fixture",
+      "site_recovery_drill_fixture"
+    ]
+  }
+}

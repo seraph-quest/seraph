@@ -87,6 +87,20 @@ from src.extensions.browser_provider_usability import (
     MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
     MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,
 )
+from src.extensions.safe_browser_computer_use import (
+    AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES,
+    AUTONOMOUS_BROWSER_SAFETY_SUITE_NAME,
+    BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES,
+    BROWSER_PROVIDER_RELIABILITY_MATRIX_SUITE_NAME,
+    BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITIONING_SUITE_NAME,
+    INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES,
+    INDEPENDENT_BROWSER_USABILITY_REVIEW_SUITE_NAME,
+    LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES,
+    LIVE_BROWSER_TASK_DEPTH_SUITE_NAME,
+    SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
+    SITE_SPECIFIC_BROWSER_RECOVERY_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -544,6 +558,96 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Safe autonomous browser/computer-use and full browser parity remain blocked by claim-ledger policy."
         ),
         scenario_names=BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_BROWSER_TASK_DEPTH_SUITE_NAME,
+        label="Live browser task depth",
+        description=(
+            "Pins Batch CP safe/test-account browser task depth across navigation, forms, authenticated "
+            "session continuity, upload/download, extraction, recovery, handoff, and artifact continuity."
+        ),
+        benchmark_axis="live_browser_task_depth",
+        operator_summary=(
+            "Browser/computer-use task proof now declares workload, sample size, provider mode, raw receipt "
+            "location, failure budget, residual gap, and artifact continuity."
+        ),
+        remaining_gap="Blanket safe browser automation and full browser parity remain claim-ledger gated.",
+        scenario_names=LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=AUTONOMOUS_BROWSER_SAFETY_SUITE_NAME,
+        label="Autonomous browser safety controls",
+        description=(
+            "Pins Batch CP approval scopes, dangerous-action default blocks, stale-reference/page-drift "
+            "recovery, artifact continuity, and operator recovery controls for autonomous browser tasks."
+        ),
+        benchmark_axis="autonomous_browser_safety_controls",
+        operator_summary=(
+            "Autonomous browser work is bounded by action-level approvals, draft/read-only defaults, dangerous "
+            "action blocks, and operator-visible recovery controls."
+        ),
+        remaining_gap="Safe autonomous computer-use wording remains blocked until the final claim audit permits it.",
+        scenario_names=AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_SESSION_PARTITIONING_SUITE_NAME,
+        label="Browser session partitioning security",
+        description=(
+            "Pins Batch CP profile, cookie, credential, secret-redaction, replay-scrub, download/upload, "
+            "network, and provider partition invariants."
+        ),
+        benchmark_axis="browser_session_partitioning_security",
+        operator_summary=(
+            "Browser session proof now exposes partition invariants across local, managed, and remote-CDP paths, "
+            "including fail-closed behavior for existing profiles and stale credentials."
+        ),
+        remaining_gap="This does not prove hardware/container isolation or arbitrary browser credential safety.",
+        scenario_names=BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SITE_SPECIFIC_BROWSER_RECOVERY_SUITE_NAME,
+        label="Site-specific recovery drills",
+        description=(
+            "Pins Batch CP site recovery for login expiry, navigation drift, DOM/page drift, file-transfer "
+            "failure, provider crash, remote loss, unsafe replay, and stale credentials."
+        ),
+        benchmark_axis="site_specific_recovery_drills",
+        operator_summary=(
+            "Browser recovery proof now fails closed across common site-specific failure modes before replay, "
+            "resume, upload, download, or credentialed action can continue."
+        ),
+        remaining_gap="Generalized website compatibility and full browser parity remain blocked.",
+        scenario_names=SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_PROVIDER_RELIABILITY_MATRIX_SUITE_NAME,
+        label="Browser provider reliability matrix",
+        description=(
+            "Pins Batch CP provider reliability receipts for local, managed-remote, and remote-CDP paths, "
+            "including health window, fallback path, degradation behavior, and residual gaps."
+        ),
+        benchmark_axis="browser_provider_reliability_matrix",
+        operator_summary=(
+            "Browser provider reliability is now expressed as a bounded matrix with raw receipt locations and "
+            "honest degraded-state behavior instead of a broad managed-browser SLA claim."
+        ),
+        remaining_gap="Provider-wide SLA, production remote browser reliability, and Browserbase-class parity remain blocked.",
+        scenario_names=BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=INDEPENDENT_BROWSER_USABILITY_REVIEW_SUITE_NAME,
+        label="Independent browser usability review",
+        description=(
+            "Pins Batch CP independent review metrics for task success, operator intervention, error "
+            "detectability, accessibility, recovery confidence, and residual risk."
+        ),
+        benchmark_axis="independent_browser_usability_review",
+        operator_summary=(
+            "Browser/computer-use usability now carries independent sample metadata, reviewer independence, "
+            "raw receipt locations, accessibility checks, and residual-risk receipts."
+        ),
+        remaining_gap="Broad population usability and best/world-class cockpit wording remain blocked.",
+        scenario_names=INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

@@ -43,6 +43,14 @@ from src.extensions.marketplace_lifecycle import (
     MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
     MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME,
 )
+from src.extensions.live_marketplace_attestation import (
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES,
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SUITE_NAME,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SUITE_NAME,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -1007,7 +1015,7 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "not by package count or marketplace breadth."
         ),
         remaining_gap=(
-            "Live third-party package attestation, production marketplace security, and ecosystem superiority remain future proof work."
+            "Production marketplace security, independent package-security audit, and ecosystem superiority remain future proof work."
         ),
         scenario_names=MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
     ),
@@ -1043,6 +1051,56 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live marketplace incident drills and external package attestation remain future proof work."
         ),
         scenario_names=CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME,
+        label="Third-party marketplace attestation",
+        description=(
+            "Pins recorded-live third-party package provenance, signature, publisher verification, "
+            "compatibility, dependency, vulnerability, evidence-mode, and operator attestation receipts."
+        ),
+        benchmark_axis="third_party_marketplace_attestation",
+        operator_summary=(
+            "Third-party marketplace proof is judged by evidence-backed attestation and fail-closed package trust, "
+            "not by package count or unsupported ecosystem claims."
+        ),
+        remaining_gap=(
+            "Production-secure marketplace, solved package security, and ecosystem superiority remain blocked."
+        ),
+        scenario_names=THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SUITE_NAME,
+        label="Marketplace operations and incident drill",
+        description=(
+            "Pins recorded-live install, update, downgrade, rollback, quarantine, failed-update recovery, "
+            "permission-creep, and re-entry incident diagnostics."
+        ),
+        benchmark_axis="marketplace_operations_incident_drill",
+        operator_summary=(
+            "Marketplace operations must show review state, diagnostics, rollback, quarantine, and incident "
+            "recovery before package changes are treated as trusted."
+        ),
+        remaining_gap=(
+            "External security audit, production marketplace security, and live hostile ecosystem tests remain future proof."
+        ),
+        scenario_names=MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SUITE_NAME,
+        label="Publisher review and package trust",
+        description=(
+            "Pins publisher identity, key-rotation, review freshness, trust-score explanation, incident history, "
+            "and package-count claim blocking."
+        ),
+        benchmark_axis="publisher_review_and_package_trust",
+        operator_summary=(
+            "Publisher trust must be explainable, current, and incident-aware before marketplace operations promote packages."
+        ),
+        remaining_gap=(
+            "This is recorded-live trust evidence, not a solved third-party package-security network."
+        ),
+        scenario_names=PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,

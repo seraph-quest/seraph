@@ -70,6 +70,17 @@ from src.extensions.marketplace_lifecycle import (
     MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
     build_marketplace_lifecycle_contract,
 )
+from src.extensions.live_marketplace_attestation import (
+    LIVE_MARKETPLACE_ATTESTATION_BLOCKED_CLAIMS,
+    LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY,
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES,
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SUITE_NAME,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SUITE_NAME,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME,
+    build_live_marketplace_attestation_contract,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
@@ -14413,6 +14424,106 @@ async def _eval_marketplace_lifecycle_maturity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_live_marketplace_attestation_behavior() -> dict[str, Any]:
+    contract = build_live_marketplace_attestation_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    attestations = contract["third_party_attestations"]
+    operations = contract["operations"]
+    publishers = contract["publisher_reviews"]
+    suites = benchmark_suite_report()
+    attestation_suite = next(
+        item for item in suites if item["name"] == THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME
+    )
+    operations_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SUITE_NAME
+    )
+    publisher_suite = next(
+        item for item in suites if item["name"] == PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SUITE_NAME
+    )
+    required_surfaces = {
+        "/api/extensions",
+        "/api/extensions/validate",
+        "/api/operator/marketplace-lifecycle-maturity",
+        "/api/operator/live-marketplace-attestation-proof",
+        "/api/operator/benchmark-proof",
+    }
+    package_ids = {item["package_id"] for item in attestations}
+    operations_by_state = {item["state"]: item for item in operations}
+    publisher_states = {item["publisher_id"]: item for item in publishers}
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "live_marketplace_attestation_receipts_visible"
+        ),
+        "attestation_suite_visible": (
+            attestation_suite["scenario_count"] == len(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+        ),
+        "operations_suite_visible": (
+            operations_suite["scenario_count"] == len(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+        ),
+        "publisher_suite_visible": (
+            publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
+        ),
+        "attested_package_count_matches": summary["attested_package_count"] >= 4,
+        "recorded_live_operation_count_matches": summary["recorded_live_operation_count"] >= 6,
+        "publisher_review_count_matches": summary["publisher_review_count"] >= 4,
+        "blocked_attestation_visible": summary["blocked_attestation_count"] >= 1,
+        "incident_operations_visible": summary["incident_operation_count"] >= 4,
+        "signatures_and_publishers_verified": (
+            summary["signature_verified_count"] >= 3
+            and summary["publisher_verified_count"] >= 3
+        ),
+        "vulnerability_attestation_visible": summary["vulnerability_attestation_count"] == len(attestations),
+        "rollback_ready_for_all_attestations": summary["rollback_ready_count"] == len(attestations),
+        "fail_closed_operations_visible": summary["fail_closed_operation_count"] >= 4,
+        "redaction_receipts_visible": summary["redaction_receipt_count"] >= 2,
+        "package_count_substitution_blocked": summary["package_count_substitution_blocked"] is True,
+        "claim_boundary_visible": policy["claim_boundary"] == LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(LIVE_MARKETPLACE_ATTESTATION_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "recorded_live_evidence_modes_visible": {
+            "recorded_live",
+            "recorded_live_negative",
+            "recorded_live_failure_injection",
+        }
+        <= {item["evidence_mode"] for item in operations},
+        "provenance_signature_publisher_fields_visible": all(
+            item.get("provenance")
+            and item.get("signature_status")
+            and item.get("publisher_verification")
+            for item in attestations
+        ),
+        "compatibility_dependency_vulnerability_fields_visible": all(
+            item.get("compatibility")
+            and item.get("dependency_risk")
+            and item.get("vulnerability_scan")
+            for item in attestations
+        ),
+        "malicious_package_quarantined": (
+            "marketplace.suspicious-exporter" in package_ids
+            and operations_by_state["quarantined"]["package_id"] == "marketplace.suspicious-exporter"
+        ),
+        "failed_update_rolls_back": operations_by_state["rolled_back"]["operation"] == "rollback",
+        "permission_creep_reentry_denied": operations_by_state["reentry_denied"]["operation"] == "reentry_review",
+        "downgrade_blocks_until_review": operations_by_state["blocked_until_review"]["operation"] == "downgrade",
+        "publisher_key_rotation_visible": any(
+            item["key_rotation_status"] == "rotated_with_receipt"
+            for item in publishers
+        ),
+        "stale_review_denied": publisher_states["pub.unverified.unknown"]["review_state"] == "stale_or_missing",
+        "trust_explanations_visible": all(
+            item.get("trust_score") is not None and item.get("trust_explanation")
+            for item in publishers
+        ),
+        "operator_actions_cover_allow_hold_deny": {
+            "allow_reviewed_install",
+            "hold_for_canary",
+            "deny_and_quarantine",
+        }
+        <= {item["operator_action"] for item in publishers},
+    }
+
+
 async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
     contract = build_production_operator_control_contract()
     summary = contract["summary"]
@@ -14619,6 +14730,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     capability_rollback_failure_diagnostics_suite = next(
         item for item in suites if item["name"] == CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME
+    )
+    third_party_marketplace_attestation_suite = next(
+        item for item in suites if item["name"] == THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME
+    )
+    marketplace_operations_incident_drill_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SUITE_NAME
+    )
+    publisher_review_package_trust_suite = next(
+        item for item in suites if item["name"] == PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SUITE_NAME
     )
     production_operator_control_suite = next(
         item for item in suites if item["name"] == PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME
@@ -15138,6 +15258,51 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "capability_rollback_failure_diagnostics_gate_required": (
             CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "third_party_marketplace_attestation_suite_present": (
+            "third_party_package_provenance_signature_behavior"
+            in third_party_marketplace_attestation_suite["scenario_names"]
+        ),
+        "third_party_marketplace_attestation_suite_scenario_count_matches": (
+            third_party_marketplace_attestation_suite["scenario_count"]
+            == len(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+        ),
+        "third_party_marketplace_attestation_suite_axis_matches": (
+            third_party_marketplace_attestation_suite["benchmark_axis"]
+            == "third_party_marketplace_attestation"
+        ),
+        "third_party_marketplace_attestation_gate_required": (
+            THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_operations_incident_drill_suite_present": (
+            "marketplace_malicious_package_quarantine_behavior"
+            in marketplace_operations_incident_drill_suite["scenario_names"]
+        ),
+        "marketplace_operations_incident_drill_suite_scenario_count_matches": (
+            marketplace_operations_incident_drill_suite["scenario_count"]
+            == len(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+        ),
+        "marketplace_operations_incident_drill_suite_axis_matches": (
+            marketplace_operations_incident_drill_suite["benchmark_axis"]
+            == "marketplace_operations_incident_drill"
+        ),
+        "marketplace_operations_incident_drill_gate_required": (
+            MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "publisher_review_and_package_trust_suite_present": (
+            "publisher_review_staleness_behavior"
+            in publisher_review_package_trust_suite["scenario_names"]
+        ),
+        "publisher_review_and_package_trust_suite_scenario_count_matches": (
+            publisher_review_package_trust_suite["scenario_count"]
+            == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
+        ),
+        "publisher_review_and_package_trust_suite_axis_matches": (
+            publisher_review_package_trust_suite["benchmark_axis"]
+            == "publisher_review_and_package_trust"
+        ),
+        "publisher_review_and_package_trust_gate_required": (
+            PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "production_operator_control_parity_suite_present": (
             "operator_control_train_receipt_behavior"
@@ -17884,6 +18049,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_marketplace_lifecycle_maturity_behavior,
         )
         for name in CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CG exposes recorded-live third-party package provenance, signature, publisher, compatibility, "
+                "dependency, vulnerability, evidence-mode, and operator attestation receipts."
+            ),
+            runner=_eval_live_marketplace_attestation_behavior,
+        )
+        for name in THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CG records marketplace install, update, downgrade, rollback, quarantine, failed-update, "
+                "permission-creep, and re-entry incident operations with fail-closed diagnostics."
+            ),
+            runner=_eval_live_marketplace_attestation_behavior,
+        )
+        for name in MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CG keeps publisher identity, key rotation, review freshness, trust explanation, incident "
+                "history, and package-count claim blocking operator-visible."
+            ),
+            runner=_eval_live_marketplace_attestation_behavior,
+        )
+        for name in PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

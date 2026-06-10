@@ -101,6 +101,22 @@ from src.guardian.learning_arbitration_benchmark import (
     GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
     build_guardian_learning_arbitration_receipts,
 )
+from src.guardian.live_learning_quality import (
+    CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
+    CANONICAL_MEMORY_RECONCILIATION_V2_SUITE_NAME,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SUITE_NAME,
+    LIVE_GUARDIAN_LEARNING_QUALITY_BLOCKED_CLAIMS,
+    LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SUITE_NAME,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SUITE_NAME,
+    PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
+    PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME,
+    build_live_guardian_learning_quality_contract,
+    build_live_guardian_learning_quality_report,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
@@ -13811,6 +13827,78 @@ async def _eval_operator_guardian_learning_arbitration_surface_behavior() -> dic
     }
 
 
+async def _eval_live_guardian_learning_quality_behavior() -> dict[str, Any]:
+    contract = build_live_guardian_learning_quality_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    outcomes = contract["outcome_cohorts"]
+    providers = contract["provider_maturity"]
+    reconciliation = contract["canonical_reconciliation"]
+    regressions = contract["provider_regressions"]
+    suites = benchmark_suite_report()
+    live_learning_suite = next(
+        item for item in suites if item["name"] == LIVE_GUARDIAN_LEARNING_QUALITY_SUITE_NAME
+    )
+    outcome_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SUITE_NAME
+    )
+    provider_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SUITE_NAME
+    )
+    canonical_suite = next(
+        item for item in suites if item["name"] == CANONICAL_MEMORY_RECONCILIATION_V2_SUITE_NAME
+    )
+    regression_suite = next(
+        item for item in suites if item["name"] == PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME
+    )
+    outcome_names = {item["outcome"] for item in outcomes}
+    return {
+        "operator_status_visible": summary["operator_status"] == "live_guardian_learning_quality_receipts_visible",
+        "live_learning_suite_visible": live_learning_suite["scenario_count"]
+        == len(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES),
+        "outcome_cohort_suite_visible": outcome_suite["scenario_count"]
+        == len(GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES),
+        "provider_ecosystem_suite_visible": provider_suite["scenario_count"]
+        == len(MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES),
+        "canonical_reconciliation_suite_visible": canonical_suite["scenario_count"]
+        == len(CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES),
+        "provider_regression_suite_visible": regression_suite["scenario_count"]
+        == len(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES),
+        "typed_outcomes_visible": outcome_names >= {
+            "accepted",
+            "ignored",
+            "corrected",
+            "deferred",
+            "harmful",
+            "helpful",
+            "channel_shifted",
+            "followthrough",
+        },
+        "policy_delta_visible": summary["policy_delta_count"] >= 4,
+        "false_positive_visible": summary["false_positive_receipt_count"] >= 1,
+        "false_negative_visible": summary["false_negative_receipt_count"] >= 1,
+        "stale_decay_visible": summary["stale_evidence_decay_count"] >= 1,
+        "provider_usefulness_visible": any(
+            item.get("behavior_change", {}).get("changed_action") is True for item in providers
+        ),
+        "provider_degradation_visible": any(
+            item.get("quality", {}).get("outage_state") == "degraded" for item in providers
+        ),
+        "provider_quarantine_visible": summary["provider_quarantine_count"] >= 1,
+        "canonical_precedence_visible": reconciliation["canonical_precedence"]["provider_override_blocked"] is True,
+        "provider_assisted_retrieval_visible": (
+            reconciliation["provider_assisted_retrieval"]["changed_behavior_only_after_canonical_match"] is True
+        ),
+        "advisory_writeback_visible": reconciliation["advisory_writeback"]["state"] == "review_required",
+        "delete_export_visible": summary["delete_export_receipts_visible"] is True,
+        "provider_regressions_visible": all(item.get("passed") is True for item in regressions),
+        "claim_boundary_visible": policy["claim_boundary"] == LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(LIVE_GUARDIAN_LEARNING_QUALITY_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/live-guardian-learning-quality" in policy["receipt_surfaces"],
+    }
+
+
 def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 
@@ -13990,6 +14078,21 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     learning_arbitration_suite = next(
         item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
+    )
+    live_guardian_learning_quality_suite = next(
+        item for item in suites if item["name"] == LIVE_GUARDIAN_LEARNING_QUALITY_SUITE_NAME
+    )
+    intervention_outcome_cohorts_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SUITE_NAME
+    )
+    memory_provider_ecosystem_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SUITE_NAME
+    )
+    canonical_memory_reconciliation_suite = next(
+        item for item in suites if item["name"] == CANONICAL_MEMORY_RECONCILIATION_V2_SUITE_NAME
+    )
+    provider_usefulness_regression_suite = next(
+        item for item in suites if item["name"] == PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME
     )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
@@ -14213,6 +14316,73 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "guardian_learning_arbitration_gate_required": (
             GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "live_guardian_learning_quality_suite_present": (
+            "live_learning_policy_delta_behavior" in live_guardian_learning_quality_suite["scenario_names"]
+        ),
+        "live_guardian_learning_quality_suite_scenario_count_matches": (
+            live_guardian_learning_quality_suite["scenario_count"]
+            == len(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
+        ),
+        "live_guardian_learning_quality_suite_axis_matches": (
+            live_guardian_learning_quality_suite["benchmark_axis"] == "live_guardian_learning_quality"
+        ),
+        "live_guardian_learning_quality_gate_required": (
+            LIVE_GUARDIAN_LEARNING_QUALITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "guardian_intervention_outcome_cohorts_suite_present": (
+            "intervention_outcome_harmful_behavior" in intervention_outcome_cohorts_suite["scenario_names"]
+        ),
+        "guardian_intervention_outcome_cohorts_suite_scenario_count_matches": (
+            intervention_outcome_cohorts_suite["scenario_count"]
+            == len(GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES)
+        ),
+        "guardian_intervention_outcome_cohorts_suite_axis_matches": (
+            intervention_outcome_cohorts_suite["benchmark_axis"] == "guardian_intervention_outcome_cohorts"
+        ),
+        "guardian_intervention_outcome_cohorts_gate_required": (
+            GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "memory_provider_ecosystem_maturity_v1_suite_present": (
+            "memory_provider_usefulness_metric_behavior" in memory_provider_ecosystem_suite["scenario_names"]
+        ),
+        "memory_provider_ecosystem_maturity_v1_suite_scenario_count_matches": (
+            memory_provider_ecosystem_suite["scenario_count"]
+            == len(MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES)
+        ),
+        "memory_provider_ecosystem_maturity_v1_suite_axis_matches": (
+            memory_provider_ecosystem_suite["benchmark_axis"] == "memory_provider_ecosystem_maturity_v1"
+        ),
+        "memory_provider_ecosystem_maturity_v1_gate_required": (
+            MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "canonical_memory_reconciliation_v2_suite_present": (
+            "canonical_memory_delete_export_receipt_behavior"
+            in canonical_memory_reconciliation_suite["scenario_names"]
+        ),
+        "canonical_memory_reconciliation_v2_suite_scenario_count_matches": (
+            canonical_memory_reconciliation_suite["scenario_count"]
+            == len(CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES)
+        ),
+        "canonical_memory_reconciliation_v2_suite_axis_matches": (
+            canonical_memory_reconciliation_suite["benchmark_axis"] == "canonical_memory_reconciliation_v2"
+        ),
+        "canonical_memory_reconciliation_v2_gate_required": (
+            CANONICAL_MEMORY_RECONCILIATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "provider_usefulness_regression_suite_present": (
+            "provider_usefulness_quarantine_regression_behavior"
+            in provider_usefulness_regression_suite["scenario_names"]
+        ),
+        "provider_usefulness_regression_suite_scenario_count_matches": (
+            provider_usefulness_regression_suite["scenario_count"]
+            == len(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
+        ),
+        "provider_usefulness_regression_suite_axis_matches": (
+            provider_usefulness_regression_suite["benchmark_axis"] == "provider_usefulness_regression"
+        ),
+        "provider_usefulness_regression_gate_required": (
+            PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -16626,6 +16796,66 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="guardian",
         description="Operator surfaces expose guardian learning arbitration receipts, policy, failure taxonomy, and claim boundary.",
         runner=_eval_operator_guardian_learning_arbitration_surface_behavior,
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch BZ exposes live guardian-learning outcome, intervention cohort, and memory-provider maturity "
+                "receipts without claiming guardian intelligence or memory-provider superiority."
+            ),
+            runner=_eval_live_guardian_learning_quality_behavior,
+        )
+        for name in LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch BZ records typed intervention outcome cohorts and policy deltas for restraint, timing, "
+                "clarification, channel choice, and follow-through."
+            ),
+            runner=_eval_live_guardian_learning_quality_behavior,
+        )
+        for name in GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch BZ evaluates memory-provider usefulness, degradation, privacy, latency, contradiction, and "
+                "quarantine receipts while preserving canonical memory precedence."
+            ),
+            runner=_eval_live_guardian_learning_quality_behavior,
+        )
+        for name in MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch BZ keeps provider retrieval, writeback, deletion, export, and quarantine advisory and "
+                "operator-visible under canonical memory precedence."
+            ),
+            runner=_eval_live_guardian_learning_quality_behavior,
+        )
+        for name in CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch BZ guards provider behavior-change with usefulness, latency, privacy, and quarantine "
+                "regression receipts."
+            ),
+            runner=_eval_live_guardian_learning_quality_behavior,
+        )
+        for name in PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

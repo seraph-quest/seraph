@@ -20,6 +20,13 @@ from src.extensions.production_reach_hardening import (
     PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
 )
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
+from src.guardian.live_learning_quality import (
+    CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
+    PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
+)
 from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
@@ -299,6 +306,26 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
     assert details["guardian_learning_arbitration_suite_axis_matches"] is True
     assert details["guardian_learning_arbitration_gate_required"] is True
+    assert details["live_guardian_learning_quality_suite_present"] is True
+    assert details["live_guardian_learning_quality_suite_scenario_count_matches"] is True
+    assert details["live_guardian_learning_quality_suite_axis_matches"] is True
+    assert details["live_guardian_learning_quality_gate_required"] is True
+    assert details["guardian_intervention_outcome_cohorts_suite_present"] is True
+    assert details["guardian_intervention_outcome_cohorts_suite_scenario_count_matches"] is True
+    assert details["guardian_intervention_outcome_cohorts_suite_axis_matches"] is True
+    assert details["guardian_intervention_outcome_cohorts_gate_required"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_suite_present"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_suite_scenario_count_matches"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_suite_axis_matches"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_gate_required"] is True
+    assert details["canonical_memory_reconciliation_v2_suite_present"] is True
+    assert details["canonical_memory_reconciliation_v2_suite_scenario_count_matches"] is True
+    assert details["canonical_memory_reconciliation_v2_suite_axis_matches"] is True
+    assert details["canonical_memory_reconciliation_v2_gate_required"] is True
+    assert details["provider_usefulness_regression_suite_present"] is True
+    assert details["provider_usefulness_regression_suite_scenario_count_matches"] is True
+    assert details["provider_usefulness_regression_suite_axis_matches"] is True
+    assert details["provider_usefulness_regression_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -420,6 +447,51 @@ def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
 
     assert summary.failed == 0
     assert result_names == set(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
+
+
+def test_run_live_guardian_learning_quality_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_guardian_learning_quality"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+
+
+def test_run_guardian_intervention_outcome_cohorts_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["guardian_intervention_outcome_cohorts"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES)
+    assert all(result.details["typed_outcomes_visible"] for result in summary.results)
+    assert all(result.details["policy_delta_visible"] for result in summary.results)
+
+
+def test_run_memory_provider_ecosystem_maturity_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_ecosystem_maturity_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES)
+    assert all(result.details["provider_usefulness_visible"] for result in summary.results)
+    assert all(result.details["provider_degradation_visible"] for result in summary.results)
+
+
+def test_run_canonical_memory_reconciliation_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["canonical_memory_reconciliation_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES)
+    assert all(result.details["canonical_precedence_visible"] for result in summary.results)
+    assert all(result.details["delete_export_visible"] for result in summary.results)
+
+
+def test_run_provider_usefulness_regression_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["provider_usefulness_regression"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
+    assert all(result.details["provider_regressions_visible"] for result in summary.results)
+    assert all(result.details["provider_quarantine_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():
@@ -1403,6 +1475,11 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "production_reach_channel_hardening" in captured.out
     assert "browser_computer_use_reliability_v2" in captured.out
     assert "guardian_safe_voice_media_runtime" in captured.out
+    assert "live_guardian_learning_quality" in captured.out
+    assert "guardian_intervention_outcome_cohorts" in captured.out
+    assert "memory_provider_ecosystem_maturity_v1" in captured.out
+    assert "canonical_memory_reconciliation_v2" in captured.out
+    assert "provider_usefulness_regression" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -1418,6 +1495,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "browser_computer_use_reliability_v2",
         "guardian_safe_voice_media_runtime",
         "guardian_learning_arbitration_v2",
+        "live_guardian_learning_quality",
+        "guardian_intervention_outcome_cohorts",
+        "memory_provider_ecosystem_maturity_v1",
+        "canonical_memory_reconciliation_v2",
+        "provider_usefulness_regression",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

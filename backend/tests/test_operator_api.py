@@ -107,6 +107,13 @@ from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
     INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
 )
+from src.guardian.longitudinal_guardian_outcomes import (
+    LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES,
+    LONGITUDINAL_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS,
+    LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
+    NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES,
+)
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
@@ -2874,7 +2881,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 98
+    assert payload["summary"]["suite_count"] == len(payload["suites"])
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -3020,6 +3027,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["independent_learning_memory_parity_claim_boundary"]
         == INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["longitudinal_guardian_outcomes_posture"]
+        == "longitudinal_guardian_outcomes_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["longitudinal_guardian_outcomes_claim_boundary"]
+        == LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
     )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
@@ -3238,6 +3253,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "always_available_reach_slo"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "longitudinal_guardian_outcome_study"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "named_baseline_memory_comparison"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "learning_safety_monitor_v2"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
@@ -3603,6 +3630,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     reach_slo_suite = next(item for item in payload["suites"] if item["name"] == "always_available_reach_slo")
     assert "reach_slo_window_budget_behavior" in reach_slo_suite["scenario_names"]
     assert reach_slo_suite["scenario_count"] == len(ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES)
+    longitudinal_suite = next(
+        item for item in payload["suites"] if item["name"] == "longitudinal_guardian_outcome_study"
+    )
+    assert "longitudinal_outcome_window_baseline_behavior" in longitudinal_suite["scenario_names"]
+    assert longitudinal_suite["scenario_count"] == len(LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES)
+    baseline_comparison_suite = next(
+        item for item in payload["suites"] if item["name"] == "named_baseline_memory_comparison"
+    )
+    assert "named_baseline_pressure_not_superiority_behavior" in baseline_comparison_suite["scenario_names"]
+    assert baseline_comparison_suite["scenario_count"] == len(NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES)
+    learning_safety_suite = next(item for item in payload["suites"] if item["name"] == "learning_safety_monitor_v2")
+    assert "learning_safety_harm_privacy_block_behavior" in learning_safety_suite["scenario_names"]
+    assert learning_safety_suite["scenario_count"] == len(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES)
     assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
@@ -3818,6 +3858,20 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "full_memory_provider_parity" in (
         payload["independent_learning_memory_parity"]["policy"]["blocked_claims"]
+    )
+    assert payload["longitudinal_guardian_outcomes"]["summary"]["operator_status"] == (
+        "longitudinal_guardian_outcomes_receipts_visible"
+    )
+    assert payload["longitudinal_guardian_outcomes"]["summary"]["study_count"] == 3
+    assert payload["longitudinal_guardian_outcomes"]["summary"]["baseline_count"] >= 3
+    assert payload["longitudinal_guardian_outcomes"]["summary"]["withdrawal_reweighted_count"] >= 1
+    assert payload["longitudinal_guardian_outcomes"]["summary"]["privacy_regression_count"] >= 1
+    assert payload["longitudinal_guardian_outcomes"]["summary"]["quarantine_count"] >= 2
+    assert payload["longitudinal_guardian_outcomes"]["policy"]["claim_boundary"] == (
+        LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
+    )
+    assert set(LONGITUDINAL_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= set(
+        payload["longitudinal_guardian_outcomes"]["policy"]["blocked_claims"]
     )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
@@ -4554,6 +4608,48 @@ async def test_operator_independent_learning_memory_parity_surface_reports_batch
         and "privacy_boundary" not in item["passed_dimensions"]
         and item["promotion_blocked"] is True
         for item in payload["contract"]["memory_provider_parity_matrix"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_longitudinal_guardian_outcomes_surface_reports_batch_cv_receipts(client):
+    resp = await client.get("/api/operator/longitudinal-guardian-outcomes")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "longitudinal_guardian_outcomes_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "longitudinal_guardian_outcomes_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES)
+        + len(NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES)
+        + len(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["study_count"] == 3
+    assert payload["summary"]["longitudinal_window_count"] == 3
+    assert payload["summary"]["baseline_count"] >= 3
+    assert payload["summary"]["withdrawal_reweighted_count"] >= 1
+    assert payload["summary"]["raw_transcript_stored_count"] == 0
+    assert payload["summary"]["secret_leak_count"] == 0
+    assert payload["summary"]["unredacted_identifier_count"] == 0
+    assert payload["summary"]["rollback_receipt_count"] >= payload["summary"]["study_count"]
+    assert payload["summary"]["privacy_regression_count"] >= 1
+    assert payload["summary"]["delete_export_mismatch_count"] >= 1
+    assert payload["summary"]["quarantine_count"] >= 2
+    assert payload["summary"]["reinstatement_review_count"] >= 2
+    assert payload["policy"]["claim_boundary"] == LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
+    assert set(LONGITUDINAL_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "generalized_outcome_superiority" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/longitudinal-guardian-outcomes" in payload["policy"]["receipt_surfaces"]
+    assert "named_baseline_win" in payload["policy"]["not_claimed"]
+    assert all(
+        "raw_receipt_location" not in item
+        for item in payload["contract"]["longitudinal_outcome_studies"]
+    )
+    assert all(
+        item["safe_receipt"]["contains_raw_transcript"] is False
+        and item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["raw_receipt_path_exposed"] is False
+        for item in payload["contract"]["longitudinal_outcome_studies"]
     )
 
 

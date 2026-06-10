@@ -96,6 +96,11 @@ from src.guardian.independent_learning_memory_parity import (
     MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
     TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
 )
+from src.guardian.longitudinal_guardian_outcomes import (
+    LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES,
+    NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES,
+)
 from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
@@ -540,6 +545,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["memory_provider_live_regression_monitor_suite_scenario_count_matches"] is True
     assert details["memory_provider_live_regression_monitor_suite_axis_matches"] is True
     assert details["memory_provider_live_regression_monitor_gate_required"] is True
+    assert details["longitudinal_guardian_outcome_study_suite_present"] is True
+    assert details["longitudinal_guardian_outcome_study_suite_scenario_count_matches"] is True
+    assert details["longitudinal_guardian_outcome_study_suite_axis_matches"] is True
+    assert details["longitudinal_guardian_outcome_study_gate_required"] is True
+    assert details["named_baseline_memory_comparison_suite_present"] is True
+    assert details["named_baseline_memory_comparison_suite_scenario_count_matches"] is True
+    assert details["named_baseline_memory_comparison_suite_axis_matches"] is True
+    assert details["named_baseline_memory_comparison_gate_required"] is True
+    assert details["learning_safety_monitor_v2_suite_present"] is True
+    assert details["learning_safety_monitor_v2_suite_scenario_count_matches"] is True
+    assert details["learning_safety_monitor_v2_suite_axis_matches"] is True
+    assert details["learning_safety_monitor_v2_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -1095,6 +1112,36 @@ def test_run_memory_provider_parity_matrix_benchmark_suite_passes():
     assert all(result.details["provider_matrix_visible"] for result in summary.results)
     assert all(result.details["canonical_override_blocked"] for result in summary.results)
     assert all(result.details["secret_leak_zero_tolerance_visible"] for result in summary.results)
+
+
+def test_run_longitudinal_guardian_outcome_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["longitudinal_guardian_outcome_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES)
+    assert all(result.details["longitudinal_windows_visible"] for result in summary.results)
+    assert all(result.details["sample_power_visible"] for result in summary.results)
+    assert all(result.details["independent_evaluators_visible"] for result in summary.results)
+
+
+def test_run_named_baseline_memory_comparison_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["named_baseline_memory_comparison"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES)
+    assert all(result.details["named_baselines_visible"] for result in summary.results)
+    assert all(result.details["baseline_pressure_only_visible"] for result in summary.results)
+    assert all(result.details["delete_export_mismatch_blocks_promotion"] for result in summary.results)
+
+
+def test_run_learning_safety_monitor_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["learning_safety_monitor_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES)
+    assert all(result.details["policy_versions_visible"] for result in summary.results)
+    assert all(result.details["rollback_receipts_visible"] for result in summary.results)
+    assert all(result.details["quarantine_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():
@@ -2381,6 +2428,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "independent_outcome_cohort_review" in captured.out
     assert "task_scoped_causal_learning" in captured.out
     assert "memory_provider_parity_matrix" in captured.out
+    assert "longitudinal_guardian_outcome_study" in captured.out
+    assert "named_baseline_memory_comparison" in captured.out
+    assert "learning_safety_monitor_v2" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -2447,6 +2497,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "independent_outcome_cohort_review",
         "task_scoped_causal_learning",
         "memory_provider_parity_matrix",
+        "longitudinal_guardian_outcome_study",
+        "named_baseline_memory_comparison",
+        "learning_safety_monitor_v2",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

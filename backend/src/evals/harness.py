@@ -268,6 +268,17 @@ from src.guardian.independent_learning_memory_parity import (
     TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME,
     build_independent_learning_memory_parity_contract,
 )
+from src.guardian.longitudinal_guardian_outcomes import (
+    LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_MONITOR_V2_SUITE_NAME,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SUITE_NAME,
+    LONGITUDINAL_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS,
+    LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
+    NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES,
+    NAMED_BASELINE_MEMORY_COMPARISON_SUITE_NAME,
+    build_longitudinal_guardian_outcomes_contract,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_CLAIM_BOUNDARY,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
@@ -15048,6 +15059,103 @@ async def _eval_independent_learning_memory_parity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_longitudinal_guardian_outcomes_behavior() -> dict[str, Any]:
+    contract = build_longitudinal_guardian_outcomes_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    studies = contract["longitudinal_outcome_studies"]
+    baselines = contract["named_baseline_memory_comparisons"]
+    monitors = contract["learning_safety_monitors"]
+    suites = benchmark_suite_report()
+    study_suite = next(
+        item for item in suites if item["name"] == LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SUITE_NAME
+    )
+    baseline_suite = next(
+        item for item in suites if item["name"] == NAMED_BASELINE_MEMORY_COMPARISON_SUITE_NAME
+    )
+    monitor_suite = next(
+        item for item in suites if item["name"] == LEARNING_SAFETY_MONITOR_V2_SUITE_NAME
+    )
+    provider_rows = [
+        item for item in [*baselines, *monitors]
+        if item.get("provider_id")
+    ]
+    safe_receipts = [
+        item.get("safe_receipt", {})
+        for item in [*studies, *baselines, *monitors]
+    ]
+    return {
+        "operator_status_visible": summary["operator_status"] == "longitudinal_guardian_outcomes_receipts_visible",
+        "study_suite_visible": (
+            study_suite["scenario_count"] == len(LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES)
+        ),
+        "baseline_suite_visible": (
+            baseline_suite["scenario_count"] == len(NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES)
+        ),
+        "monitor_suite_visible": monitor_suite["scenario_count"] == len(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES),
+        "longitudinal_windows_visible": summary["longitudinal_window_count"] == summary["study_count"],
+        "sample_power_visible": all(
+            item.get("sample_size")
+            and item.get("baseline_sample_size")
+            and item.get("power_rationale")
+            for item in studies
+        ),
+        "named_baselines_visible": summary["baseline_count"] >= 3,
+        "baseline_source_version_limitations_visible": all(
+            item.get("baseline_name")
+            and item.get("baseline_version")
+            and item.get("baseline_source")
+            and item.get("baseline_window")
+            and item.get("baseline_limitations")
+            for item in baselines
+        ),
+        "baseline_pressure_only_visible": summary["named_baseline_pressure_only_count"] >= 2,
+        "independent_evaluators_visible": summary["independent_evaluator_count"] == summary["study_count"],
+        "evaluator_protocol_visible": all(
+            item.get("evaluator", {}).get("protocol_id")
+            and item.get("evaluator", {}).get("protocol_version")
+            and item.get("evaluator", {}).get("conflict_disclosure")
+            for item in studies
+        ),
+        "consent_withdrawal_visible": summary["withdrawal_supported_count"] == summary["study_count"],
+        "withdrawal_reweight_visible": summary["withdrawal_reweighted_count"] >= 1,
+        "raw_transcripts_absent": summary["raw_transcript_stored_count"] == 0,
+        "redaction_safe": (
+            summary["secret_leak_count"] == 0
+            and summary["unredacted_identifier_count"] == 0
+            and all(receipt.get("contains_raw_transcript") is False for receipt in safe_receipts)
+            and all(receipt.get("contains_secret") is False for receipt in safe_receipts)
+            and all(receipt.get("raw_receipt_path_exposed") is False for receipt in safe_receipts)
+        ),
+        "adverse_events_reviewed": summary["adverse_event_reviewed_count"] == summary["adverse_event_count"],
+        "policy_versions_visible": summary["policy_version_count"] >= 3,
+        "rollback_receipts_visible": summary["rollback_receipt_count"] >= summary["study_count"],
+        "provider_monitors_visible": summary["provider_monitor_count"] >= 5,
+        "canonical_precedence_visible": (
+            summary["canonical_precedence_preserved_count"] == summary["provider_monitor_count"]
+        ),
+        "provider_override_blocks_visible": summary["provider_override_blocked_count"] >= 4,
+        "privacy_regression_visible": summary["privacy_regression_count"] >= 1,
+        "delete_export_mismatch_blocks_promotion": any(
+            int(item.get("delete_export_mismatch_count", 0) or 0) > 0
+            and item.get("behavior_change_allowed") is False
+            for item in provider_rows
+        ),
+        "quarantine_visible": summary["quarantine_count"] >= 2,
+        "reinstatement_review_visible": summary["reinstatement_review_count"] >= 2,
+        "stale_behavior_change_blocks_visible": summary["stale_behavior_change_blocked_count"] >= 1,
+        "unsafe_provider_behavior_blocked": any(
+            item.get("provider_runtime_state") == "quarantined"
+            and item.get("behavior_change_allowed") is False
+            for item in provider_rows
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(LONGITUDINAL_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/longitudinal-guardian-outcomes" in policy["receipt_surfaces"],
+    }
+
+
 def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 
@@ -16025,6 +16133,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     memory_provider_parity_matrix_suite = next(
         item for item in suites if item["name"] == MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME
     )
+    longitudinal_guardian_outcome_study_suite = next(
+        item for item in suites if item["name"] == LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SUITE_NAME
+    )
+    named_baseline_memory_comparison_suite = next(
+        item for item in suites if item["name"] == NAMED_BASELINE_MEMORY_COMPARISON_SUITE_NAME
+    )
+    learning_safety_monitor_v2_suite = next(
+        item for item in suites if item["name"] == LEARNING_SAFETY_MONITOR_V2_SUITE_NAME
+    )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -16909,6 +17026,48 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "memory_provider_parity_matrix_gate_required": (
             MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "longitudinal_guardian_outcome_study_suite_present": (
+            "longitudinal_outcome_window_baseline_behavior"
+            in longitudinal_guardian_outcome_study_suite["scenario_names"]
+        ),
+        "longitudinal_guardian_outcome_study_suite_scenario_count_matches": (
+            longitudinal_guardian_outcome_study_suite["scenario_count"]
+            == len(LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES)
+        ),
+        "longitudinal_guardian_outcome_study_suite_axis_matches": (
+            longitudinal_guardian_outcome_study_suite["benchmark_axis"]
+            == "longitudinal_guardian_outcome_study"
+        ),
+        "longitudinal_guardian_outcome_study_gate_required": (
+            LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "named_baseline_memory_comparison_suite_present": (
+            "named_baseline_pressure_not_superiority_behavior"
+            in named_baseline_memory_comparison_suite["scenario_names"]
+        ),
+        "named_baseline_memory_comparison_suite_scenario_count_matches": (
+            named_baseline_memory_comparison_suite["scenario_count"]
+            == len(NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES)
+        ),
+        "named_baseline_memory_comparison_suite_axis_matches": (
+            named_baseline_memory_comparison_suite["benchmark_axis"] == "named_baseline_memory_comparison"
+        ),
+        "named_baseline_memory_comparison_gate_required": (
+            NAMED_BASELINE_MEMORY_COMPARISON_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "learning_safety_monitor_v2_suite_present": (
+            "learning_safety_harm_privacy_block_behavior"
+            in learning_safety_monitor_v2_suite["scenario_names"]
+        ),
+        "learning_safety_monitor_v2_suite_scenario_count_matches": (
+            learning_safety_monitor_v2_suite["scenario_count"] == len(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES)
+        ),
+        "learning_safety_monitor_v2_suite_axis_matches": (
+            learning_safety_monitor_v2_suite["benchmark_axis"] == "learning_safety_monitor_v2"
+        ),
+        "learning_safety_monitor_v2_gate_required": (
+            LEARNING_SAFETY_MONITOR_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -20291,6 +20450,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_independent_learning_memory_parity_behavior,
         )
         for name in MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch CV exposes longer-horizon guardian outcome windows, named baselines, evaluator protocol, "
+                "withdrawal, adverse-event review, rollback, and bounded claim receipts."
+            ),
+            runner=_eval_longitudinal_guardian_outcomes_behavior,
+        )
+        for name in LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch CV treats named memory baselines as pressure evidence only, preserving canonical authority, "
+                "delete/export propagation, privacy regression blocks, and claim boundaries."
+            ),
+            runner=_eval_longitudinal_guardian_outcomes_behavior,
+        )
+        for name in NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch CV monitors learning-policy versions, harm, privacy, stale-evidence drift, rollback, "
+                "quarantine, reinstatement review, and operator recovery before policy promotion."
+            ),
+            runner=_eval_longitudinal_guardian_outcomes_behavior,
+        )
+        for name in LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

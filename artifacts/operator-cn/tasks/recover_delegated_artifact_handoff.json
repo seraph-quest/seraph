@@ -1,0 +1,8 @@
+{
+  "task_id": "cn-task-recover_delegated_artifact_handoff",
+  "receipt_class": "operator_task_matrix",
+  "reviewer_attestation": "operator_usability_reviewer_not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "operator_task_matrix_fixture",
+  "result": "recover_delegated_artifact_handoff_completed_with_expected_controls"
+}

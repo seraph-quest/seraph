@@ -1,0 +1,8 @@
+{
+  "study_id": "cn-usability-handoff",
+  "receipt_class": "independent_usability_accessibility",
+  "reviewer_attestation": "operator_b_not_author_of_operator_a_recovery_plan",
+  "outcome_verified": true,
+  "artifact_kind": "independent_multi_operator_handoff_review_fixture",
+  "result": "handoff_after_interruption_preserved_owner_pending_approval_and_recovery_state"
+}

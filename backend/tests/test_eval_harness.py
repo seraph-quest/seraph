@@ -19,6 +19,11 @@ from src.cockpit.production_operator_control import (
     PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
     PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
 )
+from src.cockpit.dense_operator_recovery import (
+    INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES,
+    LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES,
+    OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
@@ -811,6 +816,39 @@ def test_run_browser_computer_use_recovery_drill_benchmark_suite_passes():
     assert {result.name for result in summary.results} == set(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
     assert all(result.details["fail_closed_recovery_visible"] for result in summary.results)
     assert all(result.details["external_actions_blocked_during_recovery"] for result in summary.results)
+
+
+def test_run_long_work_debugging_recovery_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["long_work_debugging_recovery"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES)
+    assert all(result.details["debugging_receipts_visible"] for result in summary.results)
+    assert all(result.details["cross_batch_recovery_view_visible"] for result in summary.results)
+    assert all(result.details["debugging_has_lineage_branch_failure_budget"] for result in summary.results)
+
+
+def test_run_operator_control_density_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_control_density"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES)
+    assert all(result.details["control_actions_visible"] for result in summary.results)
+    assert all(result.details["required_action_names_visible"] for result in summary.results)
+    assert all(result.details["controls_have_receipts_and_correctness_checks"] for result in summary.results)
+    assert all(result.details["revoke_quarantine_rollback_boundaries_visible"] for result in summary.results)
+
+
+def test_run_independent_operator_usability_accessibility_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_operator_usability_accessibility"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES)
+    assert all(result.details["independent_usability_accessibility_suite_visible"] for result in summary.results)
+    assert all(result.details["keyboard_accessibility_visible"] for result in summary.results)
+    assert all(result.details["independent_usability_receipts_have_reviewers_and_metrics"] for result in summary.results)
+    assert all(result.details["receipt_integrity_manifest_visible"] for result in summary.results)
+    assert all(result.details["receipt_hashes_and_reviewer_attestations_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
@@ -2064,6 +2102,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "publisher_review_and_package_trust" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
+    assert "long_work_debugging_recovery" in captured.out
+    assert "operator_control_density" in captured.out
+    assert "independent_operator_usability_accessibility" in captured.out
     assert "final_source_backed_parity_audit" in captured.out
     assert "final_claim_ledger_reconciliation" in captured.out
     assert "operator_final_parity_readiness_report" in captured.out
@@ -2143,6 +2184,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "third_party_marketplace_attestation",
         "marketplace_operations_incident_drill",
         "publisher_review_and_package_trust",
+        "long_work_debugging_recovery",
+        "operator_control_density",
+        "independent_operator_usability_accessibility",
         "production_operator_control_parity",
         "production_parity_train",
         "final_source_backed_parity_audit",

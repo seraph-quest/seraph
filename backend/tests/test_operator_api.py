@@ -11,6 +11,10 @@ from src.cockpit.production_operator_control import (
     PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
     PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
 )
+from src.cockpit.dense_operator_recovery import (
+    DENSE_OPERATOR_RECOVERY_BLOCKED_CLAIMS,
+    DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY,
+)
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals.final_parity_audit import (
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
@@ -2831,7 +2835,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 75
+    assert payload["summary"]["suite_count"] == 78
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -3003,6 +3007,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["dense_operator_recovery_control_posture"]
+        == "dense_operator_recovery_control_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["dense_operator_recovery_control_claim_boundary"]
+        == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["final_parity_readiness_posture"]
         == "final_parity_audit_ci_gated_operator_visible"
     )
@@ -3011,6 +3023,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
     assert payload["durable_workflow_engine"]["summary"]["suite_name"] == "durable_workflow_engine_v1"
+    assert payload["dense_operator_recovery_control"]["summary"]["task_matrix_count"] >= 8
+    assert payload["dense_operator_recovery_control"]["policy"]["claim_boundary"] == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -3037,6 +3051,12 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "memory_provider_ecosystem_maturity_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert "long_work_debugging_recovery" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert "operator_control_density" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "independent_operator_usability_accessibility"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
@@ -3446,7 +3466,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 16
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 17
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -3867,7 +3887,7 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 16
+    assert payload["summary"]["completed_batch_count"] == 17
     cl_batch = next(
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CL"
@@ -3878,9 +3898,9 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CM"
     )
-    assert cm_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
-    assert cm_batch["merged_pr"] is None
-    assert payload["summary"]["residual_gap_count"] == 6
+    assert cm_batch["status"] == "done"
+    assert cm_batch["merged_pr"] == 517
+    assert payload["summary"]["residual_gap_count"] == 7
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False
     assert payload["policy"]["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
@@ -4172,6 +4192,56 @@ async def test_operator_independent_learning_memory_parity_surface_reports_batch
         and "privacy_boundary" not in item["passed_dimensions"]
         and item["promotion_blocked"] is True
         for item in payload["contract"]["memory_provider_parity_matrix"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_dense_operator_recovery_control_surface_reports_batch_cn_receipts(client):
+    resp = await client.get("/api/operator/dense-operator-recovery-control")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "dense_operator_recovery_control_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "dense_operator_recovery_control_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == 15
+    assert payload["summary"]["debugging_receipt_count"] >= 4
+    assert payload["summary"]["control_action_count"] >= 11
+    assert payload["summary"]["task_matrix_count"] >= 8
+    assert payload["summary"]["required_controls_visible"] is True
+    assert payload["summary"]["cross_batch_recovery_view_visible"] is True
+    assert payload["policy"]["claim_boundary"] == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY
+    assert set(DENSE_OPERATOR_RECOVERY_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/dense-operator-recovery-control" in payload["policy"]["receipt_surfaces"]
+    assert "solved_operator_control" in payload["policy"]["not_claimed"]
+    assert any(
+        item["operator_task"] == "inspect_cross_batch_residual_risk"
+        and "production_sla_orchestration" in item["cross_batch_receipts"]
+        and "browser_provider_usability" in item["cross_batch_receipts"]
+        for item in payload["contract"]["debugging_receipts"]
+    )
+    assert any(
+        item["action"] == "quarantine"
+        and item["requires_operator_review"] is True
+        and item["quarantine_release_condition"] == "independent_review_plus_hash_match_plus_no_privacy_regression"
+        and item["receipt_after_action"]
+        for item in payload["contract"]["control_density_receipts"]
+    )
+    assert any(
+        item["action"] == "rollback"
+        and item["rollback_restore_point"] == "pre_mutation_checkpoint_or_package_version_with_hash"
+        for item in payload["contract"]["control_density_receipts"]
+    )
+    assert payload["summary"]["receipt_integrity_manifest_count"] == payload["summary"]["receipt_integrity_verified_count"]
+    assert all(
+        item["verified"] is True
+        and item["outcome_verified"] is True
+        and len(item["content_sha256"]) == 64
+        for item in payload["contract"]["receipt_integrity_manifest"]
+    )
+    assert all(
+        item["keyboard_only_path_complete"] is True
+        and item["reviewer_independence"]
+        for item in payload["contract"]["independent_usability_accessibility_receipts"]
     )
 
 

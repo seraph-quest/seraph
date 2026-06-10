@@ -166,6 +166,17 @@ from src.cockpit.production_operator_control import (
     PRODUCTION_PARITY_TRAIN_SUITE_NAME,
     build_production_operator_control_contract,
 )
+from src.cockpit.dense_operator_recovery import (
+    DENSE_OPERATOR_RECOVERY_BLOCKED_CLAIMS,
+    DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY,
+    INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES,
+    INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME,
+    LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES,
+    LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,
+    OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
+    OPERATOR_CONTROL_DENSITY_SUITE_NAME,
+    build_dense_operator_recovery_contract,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -15013,6 +15024,141 @@ async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_dense_operator_recovery_control_behavior() -> dict[str, Any]:
+    contract = build_dense_operator_recovery_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    debugging = contract["debugging_receipts"]
+    controls = contract["control_density_receipts"]
+    task_matrix = contract["operator_task_matrix"]
+    usability = contract["independent_usability_accessibility_receipts"]
+    integrity = contract["receipt_integrity_manifest"]
+    suites = benchmark_suite_report()
+    long_work_suite = next(
+        item for item in suites if item["name"] == LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME
+    )
+    control_density_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_DENSITY_SUITE_NAME
+    )
+    usability_suite = next(
+        item for item in suites if item["name"] == INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    required_actions = {
+        "pause",
+        "resume",
+        "retry",
+        "repair",
+        "branch",
+        "compare",
+        "revoke",
+        "quarantine",
+        "handoff",
+        "rollback",
+        "audit",
+    }
+    required_tasks = {
+        "diagnose_failed_long_workflow",
+        "identify_unsafe_approval_drift",
+        "compare_branch_outputs",
+        "recover_delegated_artifact_handoff",
+        "revoke_or_quarantine_unsafe_action",
+        "resume_after_interruption",
+        "inspect_cross_batch_residual_risk",
+        "hand_off_to_another_operator",
+    }
+    required_surfaces = {
+        "/api/operator/dense-operator-recovery-control",
+        "/api/operator/benchmark-proof",
+        "/api/operator/production-operator-control-parity",
+        "/api/operator/browser-provider-usability-proof",
+        "/api/operator/production-sla-orchestration",
+        "/api/operator/independent-secure-host-review",
+        "/api/operator/production-reach-voice-mobile",
+        "/api/operator/independent-learning-memory-parity",
+        "/api/operator/live-marketplace-attestation-proof",
+    }
+    raw_receipt_locations = {
+        str(item["raw_receipt_location"])
+        for item in [*debugging, *task_matrix, *usability]
+    }
+    integrity_by_location = {item["raw_receipt_location"]: item for item in integrity}
+    controls_by_action = {item["action"]: item for item in controls}
+    return {
+        "operator_status_visible": summary["operator_status"] == "dense_operator_recovery_control_receipts_visible",
+        "long_work_suite_visible": long_work_suite["scenario_count"] == len(LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES),
+        "control_density_suite_visible": (
+            control_density_suite["scenario_count"] == len(OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES)
+        ),
+        "independent_usability_accessibility_suite_visible": (
+            usability_suite["scenario_count"] == len(INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES)
+        ),
+        "debugging_receipts_visible": summary["debugging_receipt_count"] >= 4,
+        "control_actions_visible": summary["control_action_count"] >= 11 and summary["required_controls_visible"] is True,
+        "operator_task_matrix_complete": summary["operator_task_matrix_complete"] is True,
+        "recovery_correctness_visible": summary["recovery_correctness_count"] >= 2,
+        "cross_batch_recovery_view_visible": summary["cross_batch_recovery_view_visible"] is True,
+        "keyboard_accessibility_visible": summary["keyboard_path_count"] == len(usability),
+        "receipt_integrity_manifest_visible": (
+            summary["receipt_integrity_manifest_count"] == len(raw_receipt_locations)
+            and summary["receipt_integrity_verified_count"] == len(raw_receipt_locations)
+            and raw_receipt_locations <= set(integrity_by_location)
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(DENSE_OPERATOR_RECOVERY_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "required_action_names_visible": required_actions <= {item["action"] for item in controls},
+        "controls_have_receipts_and_correctness_checks": all(
+            item.get("enabled") is True
+            and bool(item.get("receipt_after_action"))
+            and bool(item.get("recovery_correctness_check"))
+            and bool(item.get("approval_scope"))
+            for item in controls
+        ),
+        "revoke_quarantine_rollback_boundaries_visible": (
+            bool(controls_by_action["revoke"].get("revocation_boundary"))
+            and bool(controls_by_action["quarantine"].get("quarantine_release_condition"))
+            and bool(controls_by_action["rollback"].get("rollback_restore_point"))
+        ),
+        "required_tasks_visible": required_tasks <= {item["task"] for item in task_matrix},
+        "task_matrix_has_effort_and_raw_receipts": all(
+            item.get("operator_effort")
+            and item.get("raw_receipt_location")
+            and item.get("residual_gap")
+            for item in task_matrix
+        ),
+        "debugging_has_lineage_branch_failure_budget": all(
+            item.get("step_lineage")
+            and item.get("raw_receipt_location")
+            and item.get("failure_budget")
+            and item.get("residual_gap")
+            for item in debugging
+        ),
+        "independent_usability_receipts_have_reviewers_and_metrics": all(
+            item.get("reviewer_independence")
+            and item.get("sample_size", 0) >= 10
+            and item.get("raw_receipt_location")
+            and item.get("residual_gap")
+            for item in usability
+        ),
+        "receipt_hashes_and_reviewer_attestations_visible": all(
+            item.get("fixture_artifact_declared") is True
+            and item.get("artifact_exists") is True
+            and item.get("verified") is True
+            and item.get("outcome_verified") is True
+            and item.get("metadata_matches_receipt") is True
+            and len(str(item.get("content_sha256", ""))) == 64
+            and item.get("reviewer_attestation")
+            for item in integrity
+        ),
+        "long_work_gate_required": LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"],
+        "control_density_gate_required": OPERATOR_CONTROL_DENSITY_SUITE_NAME in gate_policy["required_benchmark_suites"],
+        "independent_usability_gate_required": (
+            INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     contract = build_final_parity_audit_contract()
     summary = contract["summary"]
@@ -15270,6 +15416,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     production_parity_train_suite = next(
         item for item in suites if item["name"] == PRODUCTION_PARITY_TRAIN_SUITE_NAME
+    )
+    long_work_debugging_recovery_suite = next(
+        item for item in suites if item["name"] == LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME
+    )
+    operator_control_density_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_DENSITY_SUITE_NAME
+    )
+    independent_operator_usability_accessibility_suite = next(
+        item for item in suites if item["name"] == INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -16059,6 +16214,48 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "production_parity_train_gate_required": (
             PRODUCTION_PARITY_TRAIN_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "long_work_debugging_recovery_suite_present": (
+            "long_work_failed_workflow_diagnosis_behavior"
+            in long_work_debugging_recovery_suite["scenario_names"]
+        ),
+        "long_work_debugging_recovery_suite_scenario_count_matches": (
+            long_work_debugging_recovery_suite["scenario_count"]
+            == len(LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES)
+        ),
+        "long_work_debugging_recovery_suite_axis_matches": (
+            long_work_debugging_recovery_suite["benchmark_axis"] == "long_work_debugging_recovery"
+        ),
+        "long_work_debugging_recovery_gate_required": (
+            LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_control_density_suite_present": (
+            "operator_control_revoke_quarantine_rollback_behavior"
+            in operator_control_density_suite["scenario_names"]
+        ),
+        "operator_control_density_suite_scenario_count_matches": (
+            operator_control_density_suite["scenario_count"] == len(OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES)
+        ),
+        "operator_control_density_suite_axis_matches": (
+            operator_control_density_suite["benchmark_axis"] == "operator_control_density"
+        ),
+        "operator_control_density_gate_required": (
+            OPERATOR_CONTROL_DENSITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "independent_operator_usability_accessibility_suite_present": (
+            "independent_usability_keyboard_only_behavior"
+            in independent_operator_usability_accessibility_suite["scenario_names"]
+        ),
+        "independent_operator_usability_accessibility_suite_scenario_count_matches": (
+            independent_operator_usability_accessibility_suite["scenario_count"]
+            == len(INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES)
+        ),
+        "independent_operator_usability_accessibility_suite_axis_matches": (
+            independent_operator_usability_accessibility_suite["benchmark_axis"]
+            == "independent_operator_usability_accessibility"
+        ),
+        "independent_operator_usability_accessibility_gate_required": (
+            INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -19084,6 +19281,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_operator_control_parity_behavior,
         )
         for name in PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CN exposes dense long-work debugging receipts for failed workflow diagnosis, branch/output "
+                "comparison, interruption resume, cross-batch residual risk, and operator recovery decisions."
+            ),
+            runner=_eval_dense_operator_recovery_control_behavior,
+        )
+        for name in LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CN pins pause, resume, retry, repair, branch, compare, revoke, quarantine, handoff, "
+                "rollback, and audit controls with authority boundaries and receipts after action."
+            ),
+            runner=_eval_dense_operator_recovery_control_behavior,
+        )
+        for name in OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CN records independent usability, keyboard-only, accessibility, error-detectability, "
+                "recovery-success, and multi-operator handoff receipts without best-cockpit claims."
+            ),
+            runner=_eval_dense_operator_recovery_control_behavior,
+        )
+        for name in INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

@@ -54,12 +54,14 @@ def test_strategy_claim_gate_covers_security_docs_and_claim_rows() -> None:
     assert "SCL-020" in ledger
     assert "SCL-028" in ledger
     assert "SCL-029" in ledger
+    assert "SCL-030" in ledger
     assert "Seraph ships a production secure-host hardening proof gate" in ledger
     assert "Seraph ships Batch BW secure-host hardening" in ledger
     assert "Batch CK bounded independent-review/hostile-drill/recovery-authority receipts" in ledger
     assert "Seraph ships bounded independent secure-host review and isolation-hardening receipts" in ledger
     assert "Seraph ships bounded broad-channel SLA, production voice/media quality-gate" in ledger
     assert "Seraph ships bounded independent guardian-learning outcome and memory-provider parity-matrix receipts" in ledger
+    assert "Seraph ships bounded dense long-work operator debugging and recovery-control receipts" in ledger
     assert "independent_secure_host_review" in parity_goals
     assert "production_secure_host_hardening" in parity_goals
     assert "broad_channel_sla_operations" in parity_goals
@@ -68,11 +70,15 @@ def test_strategy_claim_gate_covers_security_docs_and_claim_rows() -> None:
     assert "independent_outcome_cohort_review" in parity_goals
     assert "task_scoped_causal_learning" in parity_goals
     assert "memory_provider_parity_matrix" in parity_goals
+    assert "long_work_debugging_recovery" in parity_goals
+    assert "operator_control_density" in parity_goals
+    assert "independent_operator_usability_accessibility" in parity_goals
     assert "/api/operator/secure-capability-host-hardening" in roadmap
     assert "/api/operator/production-isolation-hardening" in roadmap
     assert "/api/operator/independent-secure-host-review" in roadmap
     assert "/api/operator/production-reach-voice-mobile" in roadmap
     assert "/api/operator/independent-learning-memory-parity" in roadmap
+    assert "/api/operator/dense-operator-recovery-control" in roadmap
     assert "secure/private-by-default" in status
     assert "full memory-provider parity" in status
 

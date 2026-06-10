@@ -36,6 +36,7 @@ from src.cockpit.efficiency_benchmark import (
     cockpit_efficiency_scripted_tasks,
 )
 from src.cockpit.production_operator_control import build_production_operator_control_report
+from src.cockpit.dense_operator_recovery import build_dense_operator_recovery_report
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evals.final_parity_audit import build_final_parity_readiness_report
 from src.evals.production_parity_readiness import build_production_parity_readiness_report
@@ -3442,6 +3443,7 @@ async def get_operator_benchmark_proof():
         live_marketplace_attestation,
         browser_provider_usability,
         production_operator_control,
+        dense_operator_recovery,
         final_parity_readiness,
     ) = await asyncio.gather(
         build_production_parity_readiness_report(),
@@ -3483,6 +3485,7 @@ async def get_operator_benchmark_proof():
         build_live_marketplace_attestation_report(),
         build_browser_provider_usability_report(),
         build_production_operator_control_report(),
+        build_dense_operator_recovery_report(),
         build_final_parity_readiness_report(),
     )
     evolution_targets = list_evolution_targets()
@@ -3531,6 +3534,7 @@ async def get_operator_benchmark_proof():
         str(live_marketplace_attestation["summary"]["benchmark_posture"]),
         str(browser_provider_usability["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
+        str(dense_operator_recovery["summary"]["benchmark_posture"]),
         str(final_parity_readiness["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
@@ -3628,6 +3632,8 @@ async def get_operator_benchmark_proof():
             "browser_provider_usability_claim_boundary": browser_provider_usability["policy"]["claim_boundary"],
             "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
             "production_operator_control_parity_claim_boundary": production_operator_control["policy"]["claim_boundary"],
+            "dense_operator_recovery_control_posture": dense_operator_recovery["summary"]["benchmark_posture"],
+            "dense_operator_recovery_control_claim_boundary": dense_operator_recovery["policy"]["claim_boundary"],
             "final_parity_readiness_posture": final_parity_readiness["summary"]["benchmark_posture"],
             "final_parity_readiness_claim_boundary": final_parity_readiness["policy"]["claim_boundary"],
         },
@@ -3670,6 +3676,7 @@ async def get_operator_benchmark_proof():
         "live_marketplace_attestation": live_marketplace_attestation,
         "browser_provider_usability": browser_provider_usability,
         "production_operator_control": production_operator_control,
+        "dense_operator_recovery_control": dense_operator_recovery,
         "final_parity_readiness": final_parity_readiness,
         "governed_improvement": {
             "target_count": len(evolution_targets),
@@ -3887,6 +3894,11 @@ async def get_operator_browser_provider_usability_proof():
 @router.get("/operator/production-operator-control-parity")
 async def get_operator_production_operator_control_parity():
     return await build_production_operator_control_report()
+
+
+@router.get("/operator/dense-operator-recovery-control")
+async def get_operator_dense_operator_recovery_control():
+    return await build_dense_operator_recovery_report()
 
 
 @router.get("/operator/final-parity-readiness-report")

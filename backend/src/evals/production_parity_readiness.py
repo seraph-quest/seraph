@@ -236,7 +236,7 @@ def production_parity_batch_contracts() -> list[dict[str, Any]]:
                 "production_operator_control_parity",
                 "production_parity_train",
             ],
-            "operator_receipt_target": "/api/operator/benchmark-proof",
+            "operator_receipt_target": "/api/operator/production-operator-control-parity",
             "validation_classes": [
                 "end_to_end_parity_train_replay",
                 "operator_debug_recovery_controls",

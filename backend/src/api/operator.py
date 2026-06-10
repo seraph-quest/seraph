@@ -35,6 +35,7 @@ from src.cockpit.efficiency_benchmark import (
     cockpit_efficiency_scorecard,
     cockpit_efficiency_scripted_tasks,
 )
+from src.cockpit.production_operator_control import build_production_operator_control_report
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evals.production_parity_readiness import build_production_parity_readiness_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
@@ -3419,6 +3420,7 @@ async def get_operator_benchmark_proof():
         m9_governed_ecosystem_benchmark,
         governed_capability_pack_hardening,
         marketplace_lifecycle_maturity,
+        production_operator_control,
     ) = await asyncio.gather(
         build_production_parity_readiness_report(),
         build_guardian_memory_benchmark_report(),
@@ -3448,6 +3450,7 @@ async def get_operator_benchmark_proof():
         build_m9_governed_ecosystem_benchmark_report(),
         build_governed_capability_pack_hardening_report(),
         build_marketplace_lifecycle_report(),
+        build_production_operator_control_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -3484,6 +3487,7 @@ async def get_operator_benchmark_proof():
         str(m9_governed_ecosystem_benchmark["summary"]["benchmark_posture"]),
         str(governed_capability_pack_hardening["summary"]["benchmark_posture"]),
         str(marketplace_lifecycle_maturity["summary"]["benchmark_posture"]),
+        str(production_operator_control["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -3554,6 +3558,8 @@ async def get_operator_benchmark_proof():
             "governed_capability_pack_hardening_claim_boundary": governed_capability_pack_hardening["policy"]["claim_boundary"],
             "marketplace_lifecycle_maturity_posture": marketplace_lifecycle_maturity["summary"]["benchmark_posture"],
             "marketplace_lifecycle_maturity_claim_boundary": marketplace_lifecycle_maturity["policy"]["claim_boundary"],
+            "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
+            "production_operator_control_parity_claim_boundary": production_operator_control["policy"]["claim_boundary"],
         },
         "suites": suites,
         "production_parity_readiness": production_parity_readiness,
@@ -3583,6 +3589,7 @@ async def get_operator_benchmark_proof():
         "m9_governed_ecosystem_benchmark": m9_governed_ecosystem_benchmark,
         "governed_capability_pack_hardening": governed_capability_pack_hardening,
         "marketplace_lifecycle_maturity": marketplace_lifecycle_maturity,
+        "production_operator_control": production_operator_control,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -3744,6 +3751,11 @@ async def get_operator_governed_capability_pack_hardening():
 @router.get("/operator/marketplace-lifecycle-maturity")
 async def get_operator_marketplace_lifecycle_maturity():
     return await build_marketplace_lifecycle_report()
+
+
+@router.get("/operator/production-operator-control-parity")
+async def get_operator_production_operator_control_parity():
+    return await build_production_operator_control_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

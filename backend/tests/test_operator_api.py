@@ -5,6 +5,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.cockpit.production_operator_control import (
+    PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS,
+    PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY,
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
+    PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
+)
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.extensions.marketplace_lifecycle import (
     CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
@@ -2268,7 +2274,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 41
+    assert payload["summary"]["suite_count"] == 43
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2367,6 +2373,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == "marketplace_lifecycle_maturity_ci_gated_operator_visible"
     )
     assert payload["summary"]["marketplace_lifecycle_maturity_claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
+    assert (
+        payload["summary"]["production_operator_control_parity_posture"]
+        == "production_operator_control_parity_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["production_operator_control_parity_claim_boundary"]
+        == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY
+    )
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -2418,6 +2432,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "capability_rollback_failure_diagnostics"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "production_operator_control_parity"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "production_parity_train"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -2587,6 +2609,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "capability_failed_update_recovery_behavior" in rollback_diagnostics_suite["scenario_names"]
     assert rollback_diagnostics_suite["scenario_count"] == len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+    operator_control_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
+    )
+    assert "operator_control_train_receipt_behavior" in operator_control_suite["scenario_names"]
+    assert operator_control_suite["scenario_count"] == len(PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES)
+    parity_train_suite = next(item for item in payload["suites"] if item["name"] == "production_parity_train")
+    assert "production_parity_train_batch_merge_receipt_behavior" in parity_train_suite["scenario_names"]
+    assert parity_train_suite["scenario_count"] == len(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -2622,6 +2652,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["marketplace_lifecycle_maturity"]["summary"]["staged_rollout_count"] == 2
     assert payload["marketplace_lifecycle_maturity"]["policy"]["claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
     assert "production_secure_marketplace" in payload["marketplace_lifecycle_maturity"]["policy"]["blocked_claims"]
+    assert payload["production_operator_control"]["summary"]["operator_status"] == (
+        "production_operator_control_parity_receipts_visible"
+    )
+    assert payload["production_operator_control"]["summary"]["control_surface_count"] == 6
+    assert payload["production_operator_control"]["summary"]["train_batch_count"] == 7
+    assert payload["production_operator_control"]["summary"]["merged_prior_batch_count"] == 6
+    assert payload["production_operator_control"]["summary"]["required_actions_visible"] is True
+    assert payload["production_operator_control"]["policy"]["claim_boundary"] == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY
+    assert set(PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS) <= set(
+        payload["production_operator_control"]["policy"]["blocked_claims"]
+    )
     assert payload["computer_use_benchmark"]["summary"]["suite_name"] == "computer_use_browser_desktop"
     assert payload["computer_use_benchmark"]["policy"]["browser_task_replay_policy"] == "extract_html_and_screenshot_actions_require_distinct_audit_receipts"
     assert payload["m2_execution_benchmark"]["summary"]["suite_name"] == "m2_execution_supremacy"
@@ -2786,6 +2827,36 @@ async def test_operator_marketplace_lifecycle_maturity_surface_reports_batch_ca_
         item for item in payload["contract"]["negative_cases"] if item["case_id"] == "failed-update"
     )
     assert failed_update["state"] == "rolled_back"
+
+
+@pytest.mark.asyncio
+async def test_operator_production_control_parity_surface_reports_batch_cb_receipts(client):
+    resp = await client.get("/api/operator/production-operator-control-parity")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "production_operator_control_parity_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "production_operator_control_parity_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES)
+        + len(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["control_surface_count"] == 6
+    assert payload["summary"]["train_batch_count"] == 7
+    assert payload["summary"]["merged_prior_batch_count"] == 6
+    assert payload["summary"]["required_actions_visible"] is True
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY
+    assert set(PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/production-operator-control-parity" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["production_operator_control_parity"] == list(
+        PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["production_parity_train"] == list(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+    cb_train = next(item for item in payload["contract"]["train_receipts"] if item["batch"] == "CB")
+    assert cb_train["evidence_state"] == "active_branch_receipts_visible_until_pr_merge"
+    assert cb_train["merged_pr"] is None
+    assert any(item["audit_id"] == "cb-audit-critic" for item in payload["contract"]["final_audit_receipts"])
 
 
 @pytest.mark.asyncio

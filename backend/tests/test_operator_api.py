@@ -25,6 +25,12 @@ from src.extensions.production_reach_hardening import (
     PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY,
     PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
 )
+from src.extensions.live_reach_media import (
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
+    LIVE_REACH_MEDIA_CLAIM_BOUNDARY,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
+)
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
     GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
@@ -2427,7 +2433,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 48
+    assert payload["summary"]["suite_count"] == 51
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2500,6 +2506,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["production_reach_browser_voice_claim_boundary"] == (
         "production_reach_browser_voice_receipts_not_broad_reach_voice_or_browser_parity"
     )
+    assert (
+        payload["summary"]["live_reach_media_posture"]
+        == "live_reach_media_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["live_reach_media_claim_boundary"] == LIVE_REACH_MEDIA_CLAIM_BOUNDARY
     assert (
         payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
         == "guardian_learning_arbitration_ci_gated_operator_visible"
@@ -2649,6 +2660,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         "guardian_safe_voice_media_runtime"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
+    assert (
+        "live_broad_reach_channel_attestation"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "production_voice_media_provider_runtime"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "cross_surface_continuity_recovery"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
 
     guardian_memory_suite = next(item for item in payload["suites"] if item["name"] == "guardian_memory_quality")
     assert "memory_contradiction_ranking_behavior" in guardian_memory_suite["scenario_names"]
@@ -2775,6 +2798,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "voice_media_runtime_guardian_value_behavior" in voice_runtime_suite["scenario_names"]
     assert voice_runtime_suite["scenario_count"] == len(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES)
+    live_reach_suite = next(
+        item for item in payload["suites"] if item["name"] == "live_broad_reach_channel_attestation"
+    )
+    assert "live_reach_mobile_push_identity_consent_behavior" in live_reach_suite["scenario_names"]
+    assert live_reach_suite["scenario_count"] == len(LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES)
+    voice_provider_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_voice_media_provider_runtime"
+    )
+    assert "voice_media_stt_provider_consent_capture_behavior" in voice_provider_suite["scenario_names"]
+    assert voice_provider_suite["scenario_count"] == len(PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES)
+    continuity_recovery_suite = next(
+        item for item in payload["suites"] if item["name"] == "cross_surface_continuity_recovery"
+    )
+    assert "cross_surface_browser_desktop_mobile_handoff_behavior" in continuity_recovery_suite["scenario_names"]
+    assert continuity_recovery_suite["scenario_count"] == len(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES)
     learning_arbitration_suite = next(item for item in payload["suites"] if item["name"] == "guardian_learning_arbitration_v2")
     assert "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
     assert learning_arbitration_suite["scenario_count"] == 7
@@ -2927,6 +2965,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["production_reach_browser_voice"]["summary"]["browser_session_partition_count"] >= 2
     assert payload["production_reach_browser_voice"]["summary"]["voice_media_deletion_path_count"] >= 2
     assert payload["production_reach_browser_voice"]["policy"]["claim_boundary"] == PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY
+    assert payload["live_reach_media"]["summary"]["operator_status"] == "live_reach_media_receipts_visible"
+    assert payload["live_reach_media"]["summary"]["recorded_live_channel_count"] >= 2
+    assert payload["live_reach_media"]["summary"]["voice_media_provider_count"] >= 3
+    assert payload["live_reach_media"]["summary"]["cross_surface_recovery_count"] >= 2
+    assert payload["live_reach_media"]["policy"]["claim_boundary"] == LIVE_REACH_MEDIA_CLAIM_BOUNDARY
     assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
     assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
         "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
@@ -3386,6 +3429,26 @@ async def test_operator_production_reach_browser_voice_surface_reports_batch_by_
     assert payload["summary"]["voice_media_revocation_fail_closed_count"] >= 2
     assert payload["policy"]["claim_boundary"] == PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY
     assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+
+
+@pytest.mark.asyncio
+async def test_operator_live_reach_media_surface_reports_batch_ce_receipts(client):
+    resp = await client.get("/api/operator/live-reach-media-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "live_reach_media_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "live_reach_media_receipts_visible"
+    assert payload["summary"]["recorded_live_channel_count"] >= 2
+    assert payload["summary"]["paired_channel_count"] >= 2
+    assert payload["summary"]["revocation_fail_closed_count"] >= 3
+    assert payload["summary"]["voice_media_consent_count"] >= 3
+    assert payload["summary"]["voice_media_failure_fallback_count"] >= 3
+    assert payload["summary"]["approval_survived_surface_shift_count"] >= 2
+    assert payload["policy"]["claim_boundary"] == LIVE_REACH_MEDIA_CLAIM_BOUNDARY
+    assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert "voice_parity" in payload["policy"]["blocked_claims"]
     assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
 
 

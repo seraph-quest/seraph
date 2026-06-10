@@ -28,6 +28,11 @@ from src.extensions.production_reach_hardening import (
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
     PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
 )
+from src.extensions.live_reach_media import (
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
+)
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
@@ -340,6 +345,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["guardian_safe_voice_media_runtime_suite_scenario_count_matches"] is True
     assert details["guardian_safe_voice_media_runtime_suite_axis_matches"] is True
     assert details["guardian_safe_voice_media_runtime_gate_required"] is True
+    assert details["live_broad_reach_channel_attestation_suite_present"] is True
+    assert details["live_broad_reach_channel_attestation_suite_scenario_count_matches"] is True
+    assert details["live_broad_reach_channel_attestation_suite_axis_matches"] is True
+    assert details["live_broad_reach_channel_attestation_gate_required"] is True
+    assert details["production_voice_media_provider_runtime_suite_present"] is True
+    assert details["production_voice_media_provider_runtime_suite_scenario_count_matches"] is True
+    assert details["production_voice_media_provider_runtime_suite_axis_matches"] is True
+    assert details["production_voice_media_provider_runtime_gate_required"] is True
+    assert details["cross_surface_continuity_recovery_suite_present"] is True
+    assert details["cross_surface_continuity_recovery_suite_scenario_count_matches"] is True
+    assert details["cross_surface_continuity_recovery_suite_axis_matches"] is True
+    assert details["cross_surface_continuity_recovery_gate_required"] is True
     assert details["guardian_learning_arbitration_suite_present"] is True
     assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
     assert details["guardian_learning_arbitration_suite_axis_matches"] is True
@@ -536,6 +553,33 @@ def test_run_guardian_safe_voice_media_runtime_benchmark_suite_passes():
     assert {result.name for result in summary.results} == set(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES)
     assert all(result.details["voice_media_deletion_visible"] for result in summary.results)
     assert all(result.details["voice_media_revocation_visible"] for result in summary.results)
+
+
+def test_run_live_broad_reach_channel_attestation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_broad_reach_channel_attestation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES)
+    assert all(result.details["recorded_live_channel_evidence_visible"] for result in summary.results)
+    assert all(result.details["degraded_recovery_fail_closed_visible"] for result in summary.results)
+
+
+def test_run_production_voice_media_provider_runtime_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_voice_media_provider_runtime"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES)
+    assert all(result.details["voice_media_consent_visible"] for result in summary.results)
+    assert all(result.details["voice_media_provider_failure_fallback_visible"] for result in summary.results)
+
+
+def test_run_cross_surface_continuity_recovery_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["cross_surface_continuity_recovery"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES)
+    assert all(result.details["continuity_thread_memory_visible"] for result in summary.results)
+    assert all(result.details["approval_survives_surface_shift_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
@@ -1636,6 +1680,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "production_reach_channel_hardening" in captured.out
     assert "browser_computer_use_reliability_v2" in captured.out
     assert "guardian_safe_voice_media_runtime" in captured.out
+    assert "live_broad_reach_channel_attestation" in captured.out
+    assert "production_voice_media_provider_runtime" in captured.out
+    assert "cross_surface_continuity_recovery" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -1662,6 +1709,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "production_reach_channel_hardening",
         "browser_computer_use_reliability_v2",
         "guardian_safe_voice_media_runtime",
+        "live_broad_reach_channel_attestation",
+        "production_voice_media_provider_runtime",
+        "cross_surface_continuity_recovery",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

@@ -8,6 +8,11 @@ import pytest
 
 from config.settings import settings
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
+from src.evals.final_parity_audit import (
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+)
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
 from src.cockpit.production_operator_control import (
@@ -568,6 +573,36 @@ def test_run_production_parity_train_benchmark_suite_passes():
     assert all(result.details["train_batch_count_matches"] for result in summary.results)
     assert all(result.details["prior_train_prs_merged"] for result in summary.results)
     assert all(result.details["cb_active_state_truthful"] for result in summary.results)
+
+
+def test_run_final_source_backed_parity_audit_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["final_source_backed_parity_audit"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES)
+    assert all(result.details["current_sources_have_urls_and_dates"] for result in summary.results)
+    assert all(result.details["competitor_systems_visible"] for result in summary.results)
+    assert all(result.details["source_claim_use_bounded"] for result in summary.results)
+
+
+def test_run_final_claim_ledger_reconciliation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["final_claim_ledger_reconciliation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+    assert all(result.details["claim_ledger_blocks_forbidden_wording"] for result in summary.results)
+    assert all(result.details["critic_disposition_accepted"] for result in summary.results)
+
+
+def test_run_operator_final_parity_readiness_report_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_final_parity_readiness_report"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
+    assert all(result.details["operator_surfaces_visible"] for result in summary.results)
+    assert all(result.details["residual_gaps_visible"] for result in summary.results)
+    assert all(result.details["no_false_completion_claim"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
@@ -1848,6 +1883,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "publisher_review_and_package_trust" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
+    assert "final_source_backed_parity_audit" in captured.out
+    assert "final_claim_ledger_reconciliation" in captured.out
+    assert "operator_final_parity_readiness_report" in captured.out
     assert "live_external_orchestration_attestation" in captured.out
     assert "orchestration_crash_recovery_study" in captured.out
     assert available_benchmark_suites() == (
@@ -1911,6 +1949,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "publisher_review_and_package_trust",
         "production_operator_control_parity",
         "production_parity_train",
+        "final_source_backed_parity_audit",
+        "final_claim_ledger_reconciliation",
+        "operator_final_parity_readiness_report",
     )
 
 

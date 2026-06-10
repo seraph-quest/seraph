@@ -29,6 +29,14 @@ from src.evals.production_parity_readiness import (
     PRODUCTION_PARITY_READINESS_SCENARIO_NAMES,
     PRODUCTION_PARITY_READINESS_SUITE_NAME,
 )
+from src.evals.final_parity_audit import (
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
@@ -1196,6 +1204,56 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "claims still require separate proof before stronger wording is allowed."
         ),
         scenario_names=PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
+        label="Final source-backed parity audit",
+        description=(
+            "Pins current Hermes, OpenClaw, and IronClaw source receipts, pressure-axis mapping, "
+            "batch completion evidence, residual gaps, and source-date freshness."
+        ),
+        benchmark_axis="final_source_backed_parity_audit",
+        operator_summary=(
+            "Final parity audit claims must be anchored to current official/source-backed URLs and explicit "
+            "residual-risk boundaries before any wording strengthens."
+        ),
+        remaining_gap=(
+            "The audit remains a claim gate and does not itself prove full parity, production readiness, or superiority."
+        ),
+        scenario_names=FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+        label="Final claim-ledger reconciliation",
+        description=(
+            "Pins forbidden-claim blocking, allowed wording scope, issue links, operator surfaces, "
+            "and independent Critic/Contrarian disposition requirements."
+        ),
+        benchmark_axis="final_claim_ledger_reconciliation",
+        operator_summary=(
+            "Final wording is governed by exact claim-ledger rows and blocked-claim receipts, not by roadmap completion."
+        ),
+        remaining_gap=(
+            "Full parity, superiority, production-ready, secure/private, and reference-system-exceeded wording remain blocked."
+        ),
+        scenario_names=FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+        label="Operator final parity readiness report",
+        description=(
+            "Pins the final operator-visible report for board reconciliation, aggregate benchmark visibility, "
+            "residual risks, and no-false-completion receipts."
+        ),
+        benchmark_axis="operator_final_parity_readiness_report",
+        operator_summary=(
+            "Operators can inspect source receipts, board state, claim boundaries, residual gaps, and critic disposition "
+            "from one final parity-readiness report."
+        ),
+        remaining_gap=(
+            "Operators still need stronger external operational evidence before public full-parity or superiority claims."
+        ),
+        scenario_names=OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     ),
 )
 

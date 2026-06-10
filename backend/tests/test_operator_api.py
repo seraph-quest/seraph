@@ -12,6 +12,13 @@ from src.cockpit.production_operator_control import (
     PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
 )
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
+from src.evals.final_parity_audit import (
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
+    FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+)
 from src.extensions.marketplace_lifecycle import (
     CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
     GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
@@ -2710,7 +2717,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 60
+    assert payload["summary"]["suite_count"] == 63
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2858,6 +2865,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["production_operator_control_parity_claim_boundary"]
         == PRODUCTION_OPERATOR_CONTROL_CLAIM_BOUNDARY
     )
+    assert (
+        payload["summary"]["final_parity_readiness_posture"]
+        == "final_parity_audit_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["final_parity_readiness_claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
     assert payload["summary"]["m2_completion_state"] == "ready_to_close_m2"
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
@@ -3234,6 +3246,20 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     parity_train_suite = next(item for item in payload["suites"] if item["name"] == "production_parity_train")
     assert "production_parity_train_batch_merge_receipt_behavior" in parity_train_suite["scenario_names"]
     assert parity_train_suite["scenario_count"] == len(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+    final_source_suite = next(item for item in payload["suites"] if item["name"] == "final_source_backed_parity_audit")
+    assert "final_current_source_coverage_behavior" in final_source_suite["scenario_names"]
+    assert final_source_suite["scenario_count"] == len(FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES)
+    final_claim_suite = next(item for item in payload["suites"] if item["name"] == "final_claim_ledger_reconciliation")
+    assert "final_forbidden_claim_block_behavior" in final_claim_suite["scenario_names"]
+    assert final_claim_suite["scenario_count"] == len(FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+    final_operator_suite = next(
+        item for item in payload["suites"] if item["name"] == "operator_final_parity_readiness_report"
+    )
+    assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
+    assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
+    assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 13
+    assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
     assert payload["memory_benchmark"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
@@ -3613,6 +3639,47 @@ async def test_operator_production_control_parity_surface_reports_batch_cb_recei
     assert cb_train["evidence_state"] == "active_branch_receipts_visible_until_pr_merge"
     assert cb_train["merged_pr"] is None
     assert any(item["audit_id"] == "cb-audit-critic" for item in payload["contract"]["final_audit_receipts"])
+
+
+@pytest.mark.asyncio
+async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts(client):
+    resp = await client.get("/api/operator/final-parity-readiness-report")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "final_parity_readiness_report_visible"
+    assert payload["summary"]["benchmark_posture"] == "final_parity_audit_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES)
+        + len(FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+        + len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["source_receipt_count"] == 7
+    assert payload["summary"]["competitor_count"] == 3
+    assert payload["summary"]["completed_batch_count"] == 13
+    assert payload["summary"]["residual_gap_count"] == 6
+    assert payload["summary"]["full_parity_claim_allowed"] is False
+    assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY
+    assert set(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/final-parity-readiness-report" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["final_source_backed_parity_audit"] == list(
+        FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["final_claim_ledger_reconciliation"] == list(
+        FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["operator_final_parity_readiness_report"] == list(
+        OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES
+    )
+    assert {"Hermes", "OpenClaw", "IronClaw"} <= {
+        item["system"] for item in payload["contract"]["current_source_receipts"]
+    }
+    assert all(
+        item["disposition"] == "accepted"
+        for item in payload["contract"]["critic_disposition_receipts"]
+    )
 
 
 @pytest.mark.asyncio

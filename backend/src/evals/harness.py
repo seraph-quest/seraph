@@ -53,6 +53,17 @@ from src.evals.production_parity_readiness import (
     production_parity_readiness_summary,
     production_parity_validation_plan,
 )
+from src.evals.final_parity_audit import (
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
+    FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+    build_final_parity_audit_contract,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME,
@@ -14689,6 +14700,82 @@ async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
+    contract = build_final_parity_audit_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    sources = contract["current_source_receipts"]
+    batches = contract["batch_reconciliation_receipts"]
+    claims = contract["claim_ledger_reconciliation"]
+    gaps = contract["residual_gap_receipts"]
+    critic = contract["critic_disposition_receipts"]
+    suites = benchmark_suite_report()
+    source_suite = next(
+        item for item in suites if item["name"] == FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME
+    )
+    claim_suite = next(
+        item for item in suites if item["name"] == FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME
+    )
+    operator_suite = next(
+        item for item in suites if item["name"] == OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME
+    )
+    required_surfaces = {
+        "/api/operator/final-parity-readiness-report",
+        "/api/operator/benchmark-proof",
+        "/api/operator/production-operator-control-parity",
+        "/api/operator/browser-provider-usability-proof",
+        "/api/operator/live-marketplace-attestation-proof",
+    }
+    completed_batches = [item for item in batches if item["status"] == "done"]
+    required_systems = {"Hermes", "OpenClaw", "IronClaw"}
+    required_issue_links = {475, 496, 497}
+    blocked_claims = set(policy["blocked_claims"])
+    return {
+        "operator_status_visible": summary["operator_status"] == "final_parity_readiness_report_visible",
+        "source_suite_visible": (
+            source_suite["scenario_count"] == len(FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES)
+        ),
+        "claim_suite_visible": (
+            claim_suite["scenario_count"] == len(FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+        ),
+        "operator_suite_visible": (
+            operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
+        ),
+        "current_sources_have_urls_and_dates": summary["all_sources_have_urls_and_dates"] is True,
+        "all_sources_checked_today": {item["checked_on"] for item in sources} == {"2026-06-10"},
+        "competitor_systems_visible": required_systems <= {item["system"] for item in sources},
+        "pressure_axes_visible": all(item.get("pressure_axes") for item in sources),
+        "source_claim_use_bounded": all(item["claim_use"] == "source_backed_pressure_only" for item in sources),
+        "completed_batches_done_merged_passed": summary["all_completed_batches_done_merged_passed"] is True,
+        "completed_batch_count_matches": len(completed_batches) >= 13,
+        "final_batch_self_referential_truthful": next(
+            item for item in batches if item["batch"] == "CI"
+        )["status"] == "self_referential_final_audit_batch",
+        "project_fields_required_visible": all(
+            {"Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"}
+            <= set(item["project_fields_required"])
+            for item in batches
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS) <= blocked_claims,
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "claim_ledger_issue_links_visible": required_issue_links <= {
+            issue
+            for item in claims
+            for issue in item.get("issue_links", [])
+        },
+        "claim_ledger_blocks_forbidden_wording": all(item.get("blocked_claims") for item in claims),
+        "residual_gaps_visible": summary["residual_gap_count"] >= 6,
+        "residual_gaps_block_public_claims": all(item.get("blocking_claims") for item in gaps),
+        "critic_disposition_visible": summary["critic_disposition_count"] >= 3,
+        "critic_disposition_accepted": all(item["disposition"] == "accepted" for item in critic),
+        "no_false_completion_claim": (
+            summary["full_parity_claim_allowed"] is False
+            and summary["reference_systems_exceeded_claim_allowed"] is False
+        ),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -18275,6 +18362,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_operator_control_parity_behavior,
         )
         for name in PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch CI verifies current Hermes, OpenClaw, and IronClaw source receipts, pressure mapping, "
+                "batch evidence, residual gaps, and source-date freshness."
+            ),
+            runner=_eval_final_parity_audit_behavior,
+        )
+        for name in FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch CI reconciles claim-ledger wording, forbidden-claim blocks, issue links, operator surfaces, "
+                "and independent Critic/Contrarian disposition."
+            ),
+            runner=_eval_final_parity_audit_behavior,
+        )
+        for name in FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch CI exposes the final operator parity-readiness report with board reconciliation, aggregate "
+                "benchmark visibility, residual risks, and no-false-completion receipts."
+            ),
+            runner=_eval_final_parity_audit_behavior,
+        )
+        for name in OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES
     ),
     EvalScenario(
         name="guardian_feedback_loop",

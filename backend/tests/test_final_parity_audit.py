@@ -21,8 +21,12 @@ def test_final_parity_audit_contract_exposes_current_source_receipts():
     assert summary["competitor_count"] == 3
     assert summary["current_source_date"] == "2026-06-10"
     assert summary["all_sources_have_urls_and_dates"] is True
+    assert summary["all_sources_reachable_with_caveats"] is True
     assert {"Hermes", "OpenClaw", "IronClaw"} <= {item["system"] for item in sources}
     assert all(item["claim_use"] == "source_backed_pressure_only" for item in sources)
+    assert all(item["access_status"] == "reachable" for item in sources)
+    assert all(item["access_caveat"] for item in sources)
+    assert all(item["competitor_claim_uncertainty"] for item in sources)
 
 
 def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_claims():
@@ -30,9 +34,9 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     summary = contract["summary"]
     batches = contract["batch_reconciliation_receipts"]
 
-    assert summary["completed_batch_count"] == 19
+    assert summary["completed_batch_count"] == 21
     assert summary["all_completed_batches_done_merged_passed"] is True
-    assert summary["final_batch_status"] == "self_referential_final_audit_batch"
+    assert summary["final_batch_status"] == "self_referential_final_claim_lift_audit_batch"
     assert summary["full_parity_claim_allowed"] is False
     assert summary["reference_systems_exceeded_claim_allowed"] is False
     assert next(item for item in batches if item["batch"] == "CH")["merged_pr"] == 503
@@ -65,15 +69,22 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     cp_batch = next(item for item in batches if item["batch"] == "CP")
     assert cp_batch["issue"] == 511
     assert cp_batch["primary_suite"] == "live_browser_task_depth"
-    assert cp_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
-    assert cp_batch["project_status"] == "owned_by_github_project_until_pr_merge"
-    assert next(item for item in batches if item["batch"] == "CI")["issue"] == 497
+    assert cp_batch["status"] == "done"
+    assert cp_batch["merged_pr"] == 520
+    assert cp_batch["project_status"] == "Done"
+    assert cp_batch["project_pr"] == "Merged"
+    assert next(item for item in batches if item["batch"] == "CI")["merged_pr"] == 504
+    cq_batch = next(item for item in batches if item["batch"] == "CQ")
+    assert cq_batch["issue"] == 512
+    assert cq_batch["status"] == "self_referential_final_claim_lift_audit_batch"
 
 
 def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     contract = build_final_parity_audit_contract()
     policy = contract["policy"]
     claims = contract["claim_ledger_reconciliation"]
+    claim_lift = contract["claim_lift_matrix"]
+    exact_claims = contract["exact_stronger_claim_outcomes"]
     critic = contract["critic_disposition_receipts"]
     orchestration_gap = next(
         item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-orchestration-sla"
@@ -108,6 +119,20 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert {511, 510, 509, 508, 507, 506, 505, 497, 496, 475} <= {
         issue for item in claims for issue in item["issue_links"]
     }
+    assert {475, 512} <= {issue for item in claims for issue in item["issue_links"]}
+    assert {item["claim_id"] for item in claim_lift} >= {
+        "SCL-028",
+        "SCL-029",
+        "SCL-030",
+        "SCL-031",
+        "SCL-032",
+        "SCL-033",
+    }
+    assert contract["summary"]["all_claim_lift_rows_have_project_and_pr_evidence"] is True
+    assert contract["summary"]["bounded_parity_proof_train_completion_wording_allowed"] is False
+    assert contract["summary"]["bounded_parity_proof_train_completion_wording_allowed_after_cq_merge"] is True
+    assert contract["summary"]["continued_blocked_stronger_claim_count"] == len(exact_claims)
+    assert all(item["outcome"] == "continued_blocked" for item in exact_claims)
     assert "production_sla_orchestration" in orchestration_gap["current_batch_evidence"]
     assert "exactly_once_or_crash_proof_orchestration" in orchestration_gap["blocking_claims"]
     assert "independent_secure_host_review" in security_gap["current_batch_evidence"]
@@ -147,6 +172,21 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert scl_032["status"] == "backed_for_bounded_receipts_after_batch_cp_pr_merge"
     assert scl_032["operator_surface"] == "/api/operator/safe-autonomous-browser-computer-use"
     assert "safe_autonomous_computer_use" in scl_032["blocked_claims"]
+    scl_033 = next(item for item in claims if item["claim_id"] == "SCL-033")
+    assert scl_033["status"] == "active_final_claim_lift_audit_exact_broad_claims_continue_blocked"
+    assert "/api/operator/final-parity-readiness-report" == scl_033["operator_surface"]
+    assert "fully_at_parity" in scl_033["blocked_claims"]
+    scl_032_lift = next(item for item in claim_lift if item["claim_id"] == "SCL-032")
+    assert scl_032_lift["merged_pr"] == 520
+    assert scl_032_lift["project_status"] == "Done"
+    assert "full_browser_parity" in scl_032_lift["continued_blocked_claims"]
+    scl_033_lift = next(item for item in claim_lift if item["claim_id"] == "SCL-033")
+    assert scl_033_lift["issue"] == 512
+    assert scl_033_lift["disposition"] == "active_final_gate"
+    assert scl_033_lift["currently_allowed"] is False
+    assert scl_033_lift["currently_permitted_exact_wording"] is None
+    assert "completed a board-backed parity proof train" in scl_033_lift["permitted_exact_wording_after_merge"]
+    assert "reference_systems_exceeded" in scl_033_lift["continued_blocked_claims"]
     assert all(item["disposition"] == "accepted" for item in critic)
 
 

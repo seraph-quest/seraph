@@ -1,9 +1,9 @@
-"""Batch CI final source-backed parity and exceedance audit receipts.
+"""Batch CQ final claim-lift and critic-audit receipts.
 
 This module reconciles current-source competitor evidence, production-train
 batch state, claim-ledger boundaries, and operator-visible proof surfaces. It
-is a final audit gate, not blanket full-parity, superiority, or production-ready
-evidence.
+is a final claim-lift audit gate, not blanket full-parity, superiority, or
+production-ready evidence.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES = (
     "final_batch_completion_evidence_behavior",
     "final_residual_gap_boundary_behavior",
     "final_source_date_freshness_behavior",
+    "final_source_access_caveat_behavior",
 )
 FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME = "final_claim_ledger_reconciliation"
 FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES = (
@@ -25,6 +26,7 @@ FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES = (
     "final_allowed_wording_scope_behavior",
     "final_claim_ledger_issue_link_behavior",
     "final_claim_boundary_operator_surface_behavior",
+    "final_claim_lift_matrix_behavior",
     "final_critic_disposition_required_behavior",
 )
 OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME = "operator_final_parity_readiness_report"
@@ -33,10 +35,11 @@ OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES = (
     "operator_final_board_reconciliation_behavior",
     "operator_final_benchmark_aggregate_behavior",
     "operator_final_residual_risk_visibility_behavior",
+    "operator_final_cq_self_reference_behavior",
     "operator_final_no_false_completion_behavior",
 )
 FINAL_PARITY_AUDIT_CLAIM_BOUNDARY = (
-    "final_source_backed_audit_not_full_parity_superiority_or_production_ready_claim"
+    "final_claim_lift_audit_permits_only_exact_bounded_wording_not_full_parity"
 )
 FINAL_PARITY_AUDIT_BLOCKED_CLAIMS = (
     "fully_at_parity",
@@ -106,7 +109,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
 
 
 def current_competitor_source_receipts() -> list[dict[str, Any]]:
-    return [
+    receipts = [
         {
             "system": "Hermes",
             "source_id": "hermes-features-overview",
@@ -240,6 +243,20 @@ def current_competitor_source_receipts() -> list[dict[str, Any]]:
             "residual_gap": "The matrix supports treating IronClaw as runtime pressure, not only as a security wrapper.",
         },
     ]
+    for receipt in receipts:
+        receipt["accessed_on"] = "2026-06-10"
+        receipt["access_status"] = "reachable"
+        receipt["verification_method"] = "live_web_open_2026_06_10"
+        receipt["source_freshness_status"] = "current_source_reverified_on_2026_06_10"
+        receipt["access_caveat"] = (
+            "Use as current pressure mapping only; do not infer unlisted production guarantees, "
+            "benchmarked superiority, or Seraph parity from competitor docs."
+        )
+        receipt["competitor_claim_uncertainty"] = (
+            "Docs and source pages can change after the access date; final wording remains bounded "
+            "to named Seraph receipts and this audit's claim matrix."
+        )
+    return receipts
 
 
 def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
@@ -263,6 +280,8 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CM", 507, "independent_outcome_cohort_review", 517),
         ("CN", 508, "long_work_debugging_recovery", 518),
         ("CO", 510, "independent_package_security_review", 519),
+        ("CI", 497, FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME, 504),
+        ("CP", 511, "live_browser_task_depth", 520),
     ]
     receipts = [
         {
@@ -280,29 +299,16 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         for batch, issue, suite, pr in completed_batches
     ]
     receipts.append({
-        "batch": "CI",
-        "issue": 497,
-        "primary_suite": FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
+        "batch": "CQ",
+        "issue": 512,
+        "primary_suite": FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
         "merged_pr": None,
-        "status": "self_referential_final_audit_batch",
+        "status": "self_referential_final_claim_lift_audit_batch",
         "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
         "project_status": "owned_by_github_project_until_pr_merge",
         "project_pr": "owned_by_linked_pull_request_until_pr_merge",
         "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #497 and its Project item are authoritative for live PR/review fields",
-        "operator_visible": True,
-    })
-    receipts.append({
-        "batch": "CP",
-        "issue": 511,
-        "primary_suite": "live_browser_task_depth",
-        "merged_pr": None,
-        "status": "active_branch_receipts_visible_until_pr_merge",
-        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
-        "project_status": "owned_by_github_project_until_pr_merge",
-        "project_pr": "owned_by_linked_pull_request_until_pr_merge",
-        "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #511 and its Project item are authoritative for live PR/review fields",
+        "project_truth_source": "GitHub issue #512 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
     return receipts
@@ -504,6 +510,247 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "status": "backed_for_bounded_receipts_after_batch_cp_pr_merge",
             "operator_surface": "/api/operator/safe-autonomous-browser-computer-use",
         },
+        {
+            "claim_id": "SCL-033",
+            "area": "full_parity_claim_lift_and_final_critic_audit",
+            "issue_links": [475, 512],
+            "allowed_wording": (
+                "after Batch CQ merges, Seraph may say the board-backed parity proof train has a final "
+                "claim-lift audit with current-source, Project, issue, PR, docs, tests, operator receipt, "
+                "and critic reconciliation"
+            ),
+            "blocked_claims": [
+                "fully_at_parity",
+                "reference_systems_exceeded",
+                "production_ready_product",
+                "secure_private_by_default",
+                "ironclaw_class_secure_execution",
+                "openclaw_class_reach",
+                "safe_browser_automation",
+                "full_browser_parity",
+                "production_secure_marketplace",
+                "solved_operator_control",
+                "guardian_intelligence_superiority",
+                "memory_superiority",
+            ],
+            "status": "active_final_claim_lift_audit_exact_broad_claims_continue_blocked",
+            "operator_surface": "/api/operator/final-parity-readiness-report",
+        },
+    ]
+
+
+def final_claim_lift_matrix() -> list[dict[str, Any]]:
+    return [
+        {
+            "claim_id": "SCL-028",
+            "batch": "CL",
+            "issue": 509,
+            "merged_pr": 516,
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "tests": ["tests/test_operator_api.py", "tests/test_final_parity_audit.py"],
+            "operator_surface": "/api/operator/production-reach-voice-mobile",
+            "evidence": [
+                "broad_channel_sla_operations",
+                "production_voice_media_quality_gates",
+                "mobile_execution_continuity",
+            ],
+            "permitted_exact_wording": (
+                "Seraph ships bounded broad-channel SLA, production voice/media quality-gate, "
+                "and mobile-execution continuity receipts."
+            ),
+            "narrowed_wording": "OpenClaw-class reach, full voice/media parity, and always-available operation remain unproven.",
+            "continued_blocked_claims": [
+                "openclaw_class_reach",
+                "voice_or_multimodal_parity",
+                "always_available_operation",
+                "production_ready_product",
+                "fully_at_parity",
+                "reference_systems_exceeded",
+            ],
+            "disposition": "narrowed",
+        },
+        {
+            "claim_id": "SCL-029",
+            "batch": "CM",
+            "issue": 507,
+            "merged_pr": 517,
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "tests": ["tests/test_operator_api.py", "tests/test_final_parity_audit.py"],
+            "operator_surface": "/api/operator/independent-learning-memory-parity",
+            "evidence": [
+                "independent_outcome_cohort_review",
+                "task_scoped_causal_learning",
+                "memory_provider_parity_matrix",
+            ],
+            "permitted_exact_wording": (
+                "Seraph ships bounded independent guardian-learning outcome and memory-provider "
+                "parity-matrix receipts."
+            ),
+            "narrowed_wording": "Guardian intelligence superiority and memory superiority remain unproven.",
+            "continued_blocked_claims": [
+                "guardian_intelligence_superiority",
+                "solved_live_learning",
+                "live_human_outcome_superiority",
+                "memory_superiority",
+                "full_memory_provider_parity",
+                "production_ready_product",
+                "fully_at_parity",
+                "reference_systems_exceeded",
+            ],
+            "disposition": "narrowed",
+        },
+        {
+            "claim_id": "SCL-030",
+            "batch": "CN",
+            "issue": 508,
+            "merged_pr": 518,
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "tests": ["tests/test_operator_api.py", "tests/test_final_parity_audit.py"],
+            "operator_surface": "/api/operator/dense-operator-recovery-control",
+            "evidence": [
+                "long_work_debugging_recovery",
+                "operator_control_density",
+                "independent_operator_usability_accessibility",
+            ],
+            "permitted_exact_wording": (
+                "Seraph ships bounded dense long-work operator debugging, recovery-control, "
+                "and independent usability/accessibility receipts."
+            ),
+            "narrowed_wording": "Best cockpit, world-class cockpit, and solved operator control remain unproven.",
+            "continued_blocked_claims": [
+                "best_cockpit",
+                "world_class_cockpit",
+                "solved_operator_control",
+                "production_ready_product",
+                "fully_at_parity",
+                "reference_systems_exceeded",
+            ],
+            "disposition": "narrowed",
+        },
+        {
+            "claim_id": "SCL-031",
+            "batch": "CO",
+            "issue": 510,
+            "merged_pr": 519,
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "tests": ["tests/test_operator_api.py", "tests/test_final_parity_audit.py"],
+            "operator_surface": "/api/operator/production-marketplace-security",
+            "evidence": [
+                "independent_package_security_review",
+                "hostile_ecosystem_package_drills",
+                "package_network_incident_operations",
+                "publisher_trust_vulnerability_handling",
+                "marketplace_rollback_quarantine_diagnostics",
+            ],
+            "permitted_exact_wording": (
+                "Seraph ships bounded independent package-security review, hostile ecosystem/package-network "
+                "incident, publisher trust, vulnerability handling, rollback, and quarantine diagnostics receipts."
+            ),
+            "narrowed_wording": "Production-secure marketplace and solved third-party package security remain unproven.",
+            "continued_blocked_claims": [
+                "production_secure_marketplace",
+                "third_party_package_security_solved",
+                "ecosystem_superiority",
+                "full_marketplace_parity",
+                "production_ready_product",
+                "fully_at_parity",
+                "reference_systems_exceeded",
+            ],
+            "disposition": "narrowed",
+        },
+        {
+            "claim_id": "SCL-032",
+            "batch": "CP",
+            "issue": 511,
+            "merged_pr": 520,
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "tests": ["tests/test_safe_browser_computer_use.py", "tests/test_operator_api.py", "tests/test_final_parity_audit.py"],
+            "operator_surface": "/api/operator/safe-autonomous-browser-computer-use",
+            "evidence": [
+                "live_browser_task_depth",
+                "autonomous_browser_safety_controls",
+                "browser_session_partitioning_security",
+                "site_specific_recovery_drills",
+                "browser_provider_reliability_matrix",
+                "independent_browser_usability_review",
+            ],
+            "permitted_exact_wording": "Seraph ships bounded redacted browser/computer-use safety receipt evidence.",
+            "narrowed_wording": "Blanket safe browser automation and full browser parity remain unproven.",
+            "continued_blocked_claims": [
+                "safe_browser_automation",
+                "safe_autonomous_computer_use",
+                "full_browser_parity",
+                "production_ready_product",
+                "fully_at_parity",
+                "reference_systems_exceeded",
+            ],
+            "disposition": "narrowed",
+        },
+        {
+            "claim_id": "SCL-033",
+            "batch": "CQ",
+            "issue": 512,
+            "merged_pr": None,
+            "project_status": "In Progress",
+            "project_pr": "owned_by_linked_pull_request_until_pr_merge",
+            "code_review": "owned_by_linked_pull_request_until_pr_merge",
+            "tests": ["tests/test_final_parity_audit.py", "tests/test_operator_api.py", "tests/test_strategy_claims.py"],
+            "operator_surface": "/api/operator/final-parity-readiness-report",
+            "evidence": [
+                "current_competitor_source_receipts",
+                "parity_batch_reconciliation_receipts",
+                "final_claim_lift_matrix",
+                "critic_disposition_receipts",
+            ],
+            "permitted_exact_wording_after_merge": (
+                "Seraph has completed a board-backed parity proof train and final claim-lift audit "
+                "with bounded receipts."
+            ),
+            "currently_permitted_exact_wording": None,
+            "currently_allowed": False,
+            "narrowed_wording": (
+                "This is proof-train completion, not product-wide full parity, production readiness, "
+                "security superiority, or reference-system exceedance."
+            ),
+            "continued_blocked_claims": list(FINAL_PARITY_AUDIT_BLOCKED_CLAIMS),
+            "disposition": "active_final_gate",
+        },
+    ]
+
+
+def exact_stronger_claim_outcomes() -> list[dict[str, Any]]:
+    claim_names = [
+        ("fully_at_parity", "The board-backed parity proof train is complete; product-wide full parity remains blocked."),
+        ("production_ready_product", "Named receipt surfaces exist; production-ready product wording remains blocked."),
+        ("reference_systems_exceeded", "Targeted vision and proof train are documented; reference-system exceedance remains blocked."),
+        ("secure_private_by_default", "Trust-boundary receipts exist; secure/private-by-default wording remains blocked."),
+        ("ironclaw_class_secure_execution", "Bounded isolation receipts exist; IronClaw-class execution remains blocked."),
+        ("openclaw_class_reach", "Reach receipts exist; OpenClaw-class reach remains blocked."),
+        ("safe_browser_automation", "Browser/computer-use safety receipts exist; blanket safe browser automation remains blocked."),
+        ("full_browser_parity", "Browser task and recovery receipts exist; full browser parity remains blocked."),
+        ("production_secure_marketplace", "Package-security receipts exist; production-secure marketplace remains blocked."),
+        ("solved_operator_control", "Dense control receipts exist; solved operator control remains blocked."),
+        ("guardian_intelligence_superiority", "Learning receipts exist; guardian intelligence superiority remains blocked."),
+        ("memory_superiority", "Memory-provider receipts exist; memory superiority remains blocked."),
+    ]
+    return [
+        {
+            "claim": claim,
+            "outcome": "continued_blocked",
+            "permitted_exact_wording": replacement,
+            "requires_ledger_permission": True,
+        }
+        for claim, replacement in claim_names
     ]
 
 
@@ -711,6 +958,8 @@ def build_final_parity_audit_contract() -> dict[str, Any]:
     sources = current_competitor_source_receipts()
     batches = parity_batch_reconciliation_receipts()
     claims = claim_ledger_reconciliation_receipts()
+    claim_lift = final_claim_lift_matrix()
+    exact_claims = exact_stronger_claim_outcomes()
     gaps = residual_gap_receipts()
     critic = critic_disposition_receipts()
     policy = final_parity_audit_policy_payload()
@@ -722,18 +971,40 @@ def build_final_parity_audit_contract() -> dict[str, Any]:
             "competitor_count": len({item["system"] for item in sources}),
             "current_source_date": "2026-06-10",
             "completed_batch_count": len(completed_batches),
-            "final_batch_status": next(item["status"] for item in batches if item["batch"] == "CI"),
+            "final_batch_status": next(item["status"] for item in batches if item["batch"] == "CQ"),
             "claim_ledger_receipt_count": len(claims),
+            "claim_lift_matrix_count": len(claim_lift),
+            "exact_stronger_claim_count": len(exact_claims),
+            "continued_blocked_stronger_claim_count": sum(
+                1 for item in exact_claims if item["outcome"] == "continued_blocked"
+            ),
             "residual_gap_count": len(gaps),
             "blocked_claim_count": len(policy["blocked_claims"]),
             "critic_disposition_count": len(critic),
             "all_sources_have_urls_and_dates": all(item.get("url") and item.get("checked_on") for item in sources),
+            "all_sources_reachable_with_caveats": all(
+                item.get("access_status") == "reachable"
+                and item.get("access_caveat")
+                and item.get("competitor_claim_uncertainty")
+                for item in sources
+            ),
             "all_completed_batches_done_merged_passed": all(
                 item["project_status"] == "Done"
                 and item["project_pr"] == "Merged"
                 and item["code_review"] == "Passed"
                 for item in completed_batches
             ),
+            "all_claim_lift_rows_have_project_and_pr_evidence": all(
+                item.get("project_status")
+                and item.get("project_pr")
+                and item.get("code_review")
+                and item.get("operator_surface")
+                and item.get("tests")
+                and item.get("continued_blocked_claims")
+                for item in claim_lift
+            ),
+            "bounded_parity_proof_train_completion_wording_allowed": False,
+            "bounded_parity_proof_train_completion_wording_allowed_after_cq_merge": True,
             "full_parity_claim_allowed": False,
             "reference_systems_exceeded_claim_allowed": False,
             "claim_boundary": FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
@@ -741,6 +1012,8 @@ def build_final_parity_audit_contract() -> dict[str, Any]:
         "current_source_receipts": sources,
         "batch_reconciliation_receipts": batches,
         "claim_ledger_reconciliation": claims,
+        "claim_lift_matrix": claim_lift,
+        "exact_stronger_claim_outcomes": exact_claims,
         "residual_gap_receipts": gaps,
         "critic_disposition_receipts": critic,
         "policy": policy,

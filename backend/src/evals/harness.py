@@ -15510,6 +15510,8 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     sources = contract["current_source_receipts"]
     batches = contract["batch_reconciliation_receipts"]
     claims = contract["claim_ledger_reconciliation"]
+    claim_lift = contract["claim_lift_matrix"]
+    exact_claims = contract["exact_stronger_claim_outcomes"]
     gaps = contract["residual_gap_receipts"]
     critic = contract["critic_disposition_receipts"]
     suites = benchmark_suite_report()
@@ -15533,8 +15535,9 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     }
     completed_batches = [item for item in batches if item["status"] == "done"]
     required_systems = {"Hermes", "OpenClaw", "IronClaw"}
-    required_issue_links = {475, 496, 497, 505, 509, 510}
+    required_issue_links = {475, 496, 497, 505, 507, 508, 509, 510, 511, 512}
     blocked_claims = set(policy["blocked_claims"])
+    required_claim_rows = {"SCL-028", "SCL-029", "SCL-030", "SCL-031", "SCL-032", "SCL-033"}
     return {
         "operator_status_visible": summary["operator_status"] == "final_parity_readiness_report_visible",
         "source_suite_visible": (
@@ -15547,15 +15550,21 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
             operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
         ),
         "current_sources_have_urls_and_dates": summary["all_sources_have_urls_and_dates"] is True,
+        "current_sources_have_access_caveats": summary["all_sources_reachable_with_caveats"] is True,
         "all_sources_checked_today": {item["checked_on"] for item in sources} == {"2026-06-10"},
         "competitor_systems_visible": required_systems <= {item["system"] for item in sources},
         "pressure_axes_visible": all(item.get("pressure_axes") for item in sources),
         "source_claim_use_bounded": all(item["claim_use"] == "source_backed_pressure_only" for item in sources),
         "completed_batches_done_merged_passed": summary["all_completed_batches_done_merged_passed"] is True,
-        "completed_batch_count_matches": len(completed_batches) >= 13,
+        "completed_batch_count_matches": len(completed_batches) >= 21,
+        "ci_and_cp_are_completed": (
+            next(item for item in batches if item["batch"] == "CI")["merged_pr"] == 504
+            and next(item for item in batches if item["batch"] == "CP")["merged_pr"] == 520
+            and next(item for item in batches if item["batch"] == "CP")["status"] == "done"
+        ),
         "final_batch_self_referential_truthful": next(
-            item for item in batches if item["batch"] == "CI"
-        )["status"] == "self_referential_final_audit_batch",
+            item for item in batches if item["batch"] == "CQ"
+        )["status"] == "self_referential_final_claim_lift_audit_batch",
         "project_fields_required_visible": all(
             {"Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"}
             <= set(item["project_fields_required"])
@@ -15570,6 +15579,25 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
             for issue in item.get("issue_links", [])
         },
         "claim_ledger_blocks_forbidden_wording": all(item.get("blocked_claims") for item in claims),
+        "claim_lift_matrix_rows_visible": required_claim_rows <= {item["claim_id"] for item in claim_lift},
+        "claim_lift_matrix_has_project_pr_tests_and_wording": summary[
+            "all_claim_lift_rows_have_project_and_pr_evidence"
+        ] is True
+        and all(
+            (item.get("permitted_exact_wording") or item.get("permitted_exact_wording_after_merge"))
+            and item.get("narrowed_wording")
+            and item.get("disposition") in {"narrowed", "active_final_gate"}
+            for item in claim_lift
+        ),
+        "cq_completion_wording_not_currently_allowed": summary[
+            "bounded_parity_proof_train_completion_wording_allowed"
+        ] is False
+        and next(item for item in claim_lift if item["claim_id"] == "SCL-033")["currently_allowed"] is False,
+        "exact_stronger_claims_all_explicitly_blocked_or_narrowed": (
+            summary["exact_stronger_claim_count"] >= 12
+            and summary["continued_blocked_stronger_claim_count"] == summary["exact_stronger_claim_count"]
+            and all(item["outcome"] == "continued_blocked" for item in exact_claims)
+        ),
         "residual_gaps_visible": summary["residual_gap_count"] >= 6,
         "residual_gaps_block_public_claims": all(item.get("blocking_claims") for item in gaps),
         "critic_disposition_visible": summary["critic_disposition_count"] >= 3,

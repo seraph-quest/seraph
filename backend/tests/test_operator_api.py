@@ -12,6 +12,15 @@ from src.extensions.production_reach_hardening import (
     PRODUCTION_REACH_BROWSER_VOICE_CLAIM_BOUNDARY,
     PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
 )
+from src.guardian.live_learning_quality import (
+    CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
+    LIVE_GUARDIAN_LEARNING_QUALITY_BLOCKED_CLAIMS,
+    LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
+    PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
+)
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
@@ -1811,6 +1820,99 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_live_guardian_learning_quality_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "live_guardian_learning_quality_receipts_visible",
+                    "benchmark_posture": "live_guardian_learning_quality_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
+                        + len(GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES)
+                        + len(MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES)
+                        + len(CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES)
+                        + len(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
+                    ),
+                    "outcome_cohort_count": 8,
+                    "typed_outcome_count": 8,
+                    "policy_delta_count": 4,
+                    "false_positive_receipt_count": 7,
+                    "false_negative_receipt_count": 8,
+                    "stale_evidence_decay_count": 4,
+                    "provider_count": 3,
+                    "provider_behavior_change_count": 2,
+                    "provider_quarantine_count": 1,
+                    "canonical_precedence_preserved": True,
+                    "delete_export_receipts_visible": True,
+                    "provider_regression_count": 4,
+                    "provider_regressions_passed": True,
+                    "claim_boundary": LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "live_guardian_learning_quality": list(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES),
+                    "guardian_intervention_outcome_cohorts": list(
+                        GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES
+                    ),
+                    "memory_provider_ecosystem_maturity_v1": list(
+                        MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES
+                    ),
+                    "canonical_memory_reconciliation_v2": list(
+                        CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES
+                    ),
+                    "provider_usefulness_regression": list(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "live_guardian_learning_quality_receipts_visible",
+                        "outcome_cohort_count": 8,
+                        "typed_outcome_count": 8,
+                        "provider_quarantine_count": 1,
+                        "delete_export_receipts_visible": True,
+                    },
+                    "outcome_cohorts": [
+                        {"outcome": "accepted", "typed_outcome_recorded": True},
+                        {"outcome": "ignored", "typed_outcome_recorded": True},
+                        {"outcome": "corrected", "typed_outcome_recorded": True},
+                        {"outcome": "deferred", "typed_outcome_recorded": True},
+                        {"outcome": "harmful", "typed_outcome_recorded": True},
+                        {"outcome": "helpful", "typed_outcome_recorded": True},
+                        {"outcome": "channel_shifted", "typed_outcome_recorded": True},
+                        {"outcome": "followthrough", "typed_outcome_recorded": True},
+                    ],
+                    "canonical_reconciliation": {
+                        "canonical_precedence": {"provider_override_blocked": True},
+                        "delete_export": {
+                            "delete_receipt_visible": True,
+                            "export_receipt_visible": True,
+                        },
+                    },
+                    "provider_regressions": [
+                        {"regression_id": "provider-behavior-change", "passed": True},
+                        {"regression_id": "provider-latency-outage", "passed": True},
+                        {"regression_id": "provider-privacy", "passed": True},
+                        {"regression_id": "provider-quarantine", "passed": True},
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY,
+                    "blocked_claims": list(LIVE_GUARDIAN_LEARNING_QUALITY_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/live-guardian-learning-quality",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "not_claimed": [
+                        "live_human_outcome_study",
+                        "guardian_intelligence_superiority",
+                        "external_memory_provider_parity",
+                    ],
+                },
+                "latest_run": {"total": 28, "passed": 28, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_guardian_user_model_benchmark_report",
         AsyncMock(
             return_value={
@@ -2084,7 +2186,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 33
+    assert payload["summary"]["suite_count"] == 38
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2151,6 +2253,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["guardian_learning_arbitration_claim_boundary"]
         == "deterministic_learning_arbitration_receipts_not_guardian_intelligence_superiority"
     )
+    assert (
+        payload["summary"]["live_guardian_learning_quality_posture"]
+        == "live_guardian_learning_quality_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["live_guardian_learning_quality_claim_boundary"]
+        == LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -2193,6 +2303,20 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         "guardian_learning_arbitration_v2"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
+    assert "live_guardian_learning_quality" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "guardian_intervention_outcome_cohorts"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "memory_provider_ecosystem_maturity_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "canonical_memory_reconciliation_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert "provider_usefulness_regression" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert (
         "governed_capability_pack_hardening"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -2318,6 +2442,25 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     learning_arbitration_suite = next(item for item in payload["suites"] if item["name"] == "guardian_learning_arbitration_v2")
     assert "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
     assert learning_arbitration_suite["scenario_count"] == 7
+    live_learning_suite = next(item for item in payload["suites"] if item["name"] == "live_guardian_learning_quality")
+    assert "live_learning_policy_delta_behavior" in live_learning_suite["scenario_names"]
+    assert live_learning_suite["scenario_count"] == len(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
+    outcome_cohorts_suite = next(item for item in payload["suites"] if item["name"] == "guardian_intervention_outcome_cohorts")
+    assert "intervention_outcome_harmful_behavior" in outcome_cohorts_suite["scenario_names"]
+    assert outcome_cohorts_suite["scenario_count"] == len(GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES)
+    provider_ecosystem_suite = next(
+        item for item in payload["suites"] if item["name"] == "memory_provider_ecosystem_maturity_v1"
+    )
+    assert "memory_provider_usefulness_metric_behavior" in provider_ecosystem_suite["scenario_names"]
+    assert provider_ecosystem_suite["scenario_count"] == len(MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES)
+    canonical_reconciliation_suite = next(
+        item for item in payload["suites"] if item["name"] == "canonical_memory_reconciliation_v2"
+    )
+    assert "canonical_memory_delete_export_receipt_behavior" in canonical_reconciliation_suite["scenario_names"]
+    assert canonical_reconciliation_suite["scenario_count"] == len(CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES)
+    provider_regression_suite = next(item for item in payload["suites"] if item["name"] == "provider_usefulness_regression")
+    assert "provider_usefulness_quarantine_regression_behavior" in provider_regression_suite["scenario_names"]
+    assert provider_regression_suite["scenario_count"] == len(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
     m6_memory_suite = next(item for item in payload["suites"] if item["name"] == "m6_memory_superiority")
     assert "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"]
     assert m6_memory_suite["scenario_count"] == 7
@@ -2389,6 +2532,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
         "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
     )
+    assert payload["live_guardian_learning_quality"]["summary"]["operator_status"] == (
+        "live_guardian_learning_quality_receipts_visible"
+    )
+    assert payload["live_guardian_learning_quality"]["summary"]["outcome_cohort_count"] == 8
+    assert payload["live_guardian_learning_quality"]["summary"]["provider_quarantine_count"] == 1
+    assert payload["live_guardian_learning_quality"]["summary"]["delete_export_receipts_visible"] is True
+    assert payload["live_guardian_learning_quality"]["policy"]["claim_boundary"] == (
+        LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
+    )
+    assert "guardian_intelligence_superiority" in payload["live_guardian_learning_quality"]["policy"]["blocked_claims"]
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -2571,6 +2724,39 @@ async def test_operator_memory_provider_quality_gate_surface_reports_policy_and_
         payload["summary"]["claim_boundary"]
         == "deterministic_provider_quality_gate_not_live_external_memory_provider_superiority"
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_live_guardian_learning_quality_surface_reports_batch_bz_receipts(client):
+    resp = await client.get("/api/operator/live-guardian-learning-quality")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "live_guardian_learning_quality_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "live_guardian_learning_quality_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == 28
+    assert payload["summary"]["outcome_cohort_count"] == 8
+    assert payload["summary"]["typed_outcome_count"] == 8
+    assert payload["summary"]["provider_quarantine_count"] == 1
+    assert payload["summary"]["canonical_precedence_preserved"] is True
+    assert payload["summary"]["delete_export_receipts_visible"] is True
+    assert payload["summary"]["provider_regressions_passed"] is True
+    assert payload["policy"]["claim_boundary"] == LIVE_GUARDIAN_LEARNING_QUALITY_CLAIM_BOUNDARY
+    assert set(LIVE_GUARDIAN_LEARNING_QUALITY_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/live-guardian-learning-quality" in payload["policy"]["receipt_surfaces"]
+    assert "guardian_intelligence_superiority" in payload["policy"]["not_claimed"]
+    outcomes = {item["outcome"] for item in payload["contract"]["outcome_cohorts"]}
+    assert outcomes == {
+        "accepted",
+        "ignored",
+        "corrected",
+        "deferred",
+        "harmful",
+        "helpful",
+        "channel_shifted",
+        "followthrough",
+    }
+    assert payload["contract"]["canonical_reconciliation"]["canonical_precedence"]["provider_override_blocked"] is True
 
 
 @pytest.mark.asyncio

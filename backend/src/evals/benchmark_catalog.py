@@ -53,6 +53,18 @@ from src.guardian.learning_arbitration_benchmark import (
     GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
     GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,
 )
+from src.guardian.live_learning_quality import (
+    CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
+    CANONICAL_MEMORY_RECONCILIATION_V2_SUITE_NAME,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SUITE_NAME,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SUITE_NAME,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SUITE_NAME,
+    PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
+    PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
@@ -276,6 +288,83 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "guardian-intelligence superiority claims remain future proof work."
         ),
         scenario_names=GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_GUARDIAN_LEARNING_QUALITY_SUITE_NAME,
+        label="Live guardian learning quality",
+        description=(
+            "Pins policy deltas, false-positive and false-negative receipts, stale-evidence decay, "
+            "and operator-visible learning provenance beyond deterministic arbitration floors."
+        ),
+        benchmark_axis="live_guardian_learning_quality",
+        operator_summary=(
+            "Guardian learning now has production-oriented outcome receipts for policy change without claiming "
+            "guardian intelligence superiority or live human-outcome superiority."
+        ),
+        remaining_gap=(
+            "Live human outcome studies and reference-system guardian intelligence comparisons remain future proof work."
+        ),
+        scenario_names=LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SUITE_NAME,
+        label="Guardian intervention outcome cohorts",
+        description=(
+            "Pins accepted, ignored, corrected, deferred, harmful, helpful, channel-shifted, and follow-through "
+            "outcome cohorts with typed policy-delta receipts."
+        ),
+        benchmark_axis="guardian_intervention_outcome_cohorts",
+        operator_summary=(
+            "Intervention outcomes now carry cohort-level receipts that explain how bad or good outcomes affect restraint, "
+            "clarification, timing, channel choice, and follow-through attention."
+        ),
+        remaining_gap="Live multi-user outcome studies and real-world causal attribution remain future proof work.",
+        scenario_names=GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SUITE_NAME,
+        label="Memory provider ecosystem maturity v1",
+        description=(
+            "Pins provider usefulness, noise, contradiction, freshness, privacy, latency, outage, and behavior-changing "
+            "contribution receipts while preserving canonical memory precedence."
+        ),
+        benchmark_axis="memory_provider_ecosystem_maturity_v1",
+        operator_summary=(
+            "Provider evidence can now be evaluated over time as useful, degraded, or quarantined without granting "
+            "external providers canonical memory authority."
+        ),
+        remaining_gap="Broader live-provider workloads and provider-specific benchmark parity remain future proof work.",
+        scenario_names=MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CANONICAL_MEMORY_RECONCILIATION_V2_SUITE_NAME,
+        label="Canonical memory reconciliation v2",
+        description=(
+            "Pins canonical precedence, provider-assisted retrieval, advisory writeback, delete/export receipts, "
+            "and provider quarantine behavior."
+        ),
+        benchmark_axis="canonical_memory_reconciliation_v2",
+        operator_summary=(
+            "Canonical memory remains the source of truth while provider retrieval, writeback, deletion, export, and "
+            "quarantine are visible as advisory receipts."
+        ),
+        remaining_gap="Cross-provider deletion/export execution and external-provider attestation remain future proof work.",
+        scenario_names=CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PROVIDER_USEFULNESS_REGRESSION_SUITE_NAME,
+        label="Provider usefulness regression",
+        description=(
+            "Pins provider behavior-change, latency/outage, privacy, and quarantine regressions before provider evidence "
+            "can affect guardian behavior."
+        ),
+        benchmark_axis="provider_usefulness_regression",
+        operator_summary=(
+            "Provider usefulness is now guarded by regression receipts that keep unsafe, stale, private, or noisy evidence "
+            "out of action-changing context."
+        ),
+        remaining_gap="Live provider-specific regression telemetry remains future proof work.",
+        scenario_names=PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

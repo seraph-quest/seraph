@@ -54,6 +54,7 @@ from src.guardian.brain import (
 )
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
+from src.guardian.live_learning_quality import build_live_guardian_learning_quality_report
 from src.guardian.multimodal_voice import build_guardian_safe_multimodal_voice_report
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
@@ -3404,6 +3405,7 @@ async def get_operator_benchmark_proof():
         m8_guardian_brain_benchmark,
         guardian_safe_multimodal_voice_benchmark,
         guardian_learning_arbitration_benchmark,
+        live_guardian_learning_quality,
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
@@ -3431,6 +3433,7 @@ async def get_operator_benchmark_proof():
         build_m8_guardian_brain_benchmark_report(),
         build_guardian_safe_multimodal_voice_report(),
         build_guardian_learning_arbitration_report(),
+        build_live_guardian_learning_quality_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
@@ -3465,6 +3468,7 @@ async def get_operator_benchmark_proof():
         str(m8_guardian_brain_benchmark["summary"]["benchmark_posture"]),
         str(guardian_safe_multimodal_voice_benchmark["summary"]["benchmark_posture"]),
         str(guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"]),
+        str(live_guardian_learning_quality["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
@@ -3527,6 +3531,8 @@ async def get_operator_benchmark_proof():
             "guardian_safe_multimodal_voice_claim_boundary": guardian_safe_multimodal_voice_benchmark["policy"]["claim_boundary"],
             "guardian_learning_arbitration_benchmark_posture": guardian_learning_arbitration_benchmark["summary"]["benchmark_posture"],
             "guardian_learning_arbitration_claim_boundary": guardian_learning_arbitration_benchmark["policy"]["claim_boundary"],
+            "live_guardian_learning_quality_posture": live_guardian_learning_quality["summary"]["benchmark_posture"],
+            "live_guardian_learning_quality_claim_boundary": live_guardian_learning_quality["policy"]["claim_boundary"],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
@@ -3559,6 +3565,7 @@ async def get_operator_benchmark_proof():
         "m8_guardian_brain_benchmark": m8_guardian_brain_benchmark,
         "guardian_safe_multimodal_voice_benchmark": guardian_safe_multimodal_voice_benchmark,
         "guardian_learning_arbitration_benchmark": guardian_learning_arbitration_benchmark,
+        "live_guardian_learning_quality": live_guardian_learning_quality,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
@@ -3621,6 +3628,11 @@ async def get_operator_guardian_safe_multimodal_voice():
 @router.get("/operator/guardian-learning-arbitration")
 async def get_operator_guardian_learning_arbitration():
     return await build_guardian_learning_arbitration_report()
+
+
+@router.get("/operator/live-guardian-learning-quality")
+async def get_operator_live_guardian_learning_quality():
+    return await build_live_guardian_learning_quality_report()
 
 
 @router.get("/operator/m6-memory-superiority-benchmark")

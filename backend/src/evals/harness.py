@@ -17273,6 +17273,7 @@ async def _eval_continuous_orchestration_slo_behavior() -> dict[str, Any]:
     soaks = contract["crash_failover_soak_receipts"]
     reconciliations = contract["side_effect_reconciliation_receipts"]
     controls = contract["operator_recovery_receipts"]
+    runtime = contract["runtime_operations"]
     required_surfaces = {
         "/api/operator/continuous-orchestration-slo",
         "/api/operator/benchmark-proof",
@@ -17291,6 +17292,14 @@ async def _eval_continuous_orchestration_slo_behavior() -> dict[str, Any]:
         "soak_axis_visible": soak_suite["benchmark_axis"] == "crash_failover_soak_v1",
         "reconciliation_axis_visible": reconciliation_suite["benchmark_axis"] == "side_effect_reconciliation_v2",
         "operator_status_visible": summary["operator_status"] == "continuous_orchestration_slo_visible",
+        "runtime_ledger_visible": summary["runtime_status"] == "continuous_orchestration_runtime_ledger_visible"
+        and runtime["runtime_status"] == "continuous_orchestration_runtime_ledger_visible",
+        "runtime_observations_cover_receipts": summary["runtime_observation_count"]
+        == len(monitors) + len(soaks) + len(reconciliations),
+        "runtime_state_reconciled": runtime["active_budget_breach_count"] == 0
+        and runtime["active_duplicate_risk_count"] == 0
+        and runtime["active_recovery_queue_count"] >= 2
+        and bool(runtime["runtime_receipt_digest"]),
         "monitor_samples_visible": summary["monitor_sample_count"] >= 3,
         "crash_failover_soaks_visible": summary["crash_failover_soak_count"] >= 3,
         "side_effect_reconciliations_visible": summary["side_effect_reconciliation_count"] >= 3,

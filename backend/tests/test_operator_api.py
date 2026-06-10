@@ -4249,6 +4249,13 @@ async def test_operator_continuous_orchestration_slo_surface_reports_batch_cs_re
     assert payload["summary"]["all_monitors_within_budget"] is True
     assert payload["summary"]["all_failovers_within_budget"] is True
     assert payload["summary"]["reconciliation_complete"] is True
+    assert payload["summary"]["runtime_status"] == "continuous_orchestration_runtime_ledger_visible"
+    assert payload["summary"]["runtime_observation_count"] == 9
+    assert payload["summary"]["active_budget_breach_count"] == 0
+    assert payload["summary"]["active_duplicate_risk_count"] == 0
+    assert payload["summary"]["active_recovery_queue_count"] >= 2
+    assert payload["contract"]["runtime_operations"]["runtime_receipt_digest"]
+    assert "cs-soak-provider-ack-loss" in payload["contract"]["runtime_operations"]["operator_recovery_queue"]
     assert payload["policy"]["claim_boundary"] == CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY
     assert set(CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
     assert "/api/operator/continuous-orchestration-slo" in payload["policy"]["receipt_surfaces"]

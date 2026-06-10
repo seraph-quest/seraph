@@ -28,6 +28,12 @@ def test_continuous_orchestration_slo_contract_exposes_monitor_and_recovery_rece
     assert summary["all_failovers_within_budget"] is True
     assert summary["reconciliation_complete"] is True
     assert summary["required_controls_visible"] is True
+    assert summary["runtime_status"] == "continuous_orchestration_runtime_ledger_visible"
+    assert summary["runtime_observation_count"] == 9
+    assert summary["active_budget_breach_count"] == 0
+    assert summary["active_duplicate_risk_count"] == 0
+    assert summary["active_recovery_queue_count"] >= 2
+    assert summary["runtime_receipt_digest"]
     assert summary["claim_boundary"] == CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY
     assert set(CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS) <= set(contract["policy"]["blocked_claims"])
 
@@ -75,6 +81,19 @@ def test_continuous_orchestration_slo_operator_controls_leave_receipts():
     assert all(item["receipt_after_action"] for item in controls.values())
     assert controls["resume"]["requires_approval_or_review"] is True
     assert controls["suppress_duplicate"]["mode"] == "direct"
+
+
+def test_continuous_orchestration_slo_runtime_tracks_recovery_and_reconciliation_state():
+    contract = build_continuous_orchestration_slo_contract()
+    runtime = contract["runtime_operations"]
+
+    assert runtime["runtime_status"] == "continuous_orchestration_runtime_ledger_visible"
+    assert runtime["active_budget_breach_count"] == 0
+    assert runtime["active_duplicate_risk_count"] == 0
+    assert "cs-soak-provider-ack-loss" in runtime["operator_recovery_queue"]
+    assert runtime["receipt_index"]["monitor_samples"][0]["within_budget"] is True
+    assert runtime["receipt_index"]["side_effect_reconciliation_receipts"][2]["duplicate_safe"] is True
+    assert runtime["claim_boundary"] == CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY
 
 
 def test_continuous_orchestration_slo_report_runs_batch_cs_suites():

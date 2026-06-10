@@ -8,6 +8,8 @@ parity, and reference-system exceedance claims.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 
@@ -44,6 +46,98 @@ CONTINUOUS_ORCHESTRATION_SLO_BLOCKED_CLAIMS = (
     "full_parity",
     "reference_systems_exceeded",
 )
+
+
+def _stable_digest(payload: Any) -> str:
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
+class ContinuousOrchestrationSloRuntime:
+    """Small deterministic runtime ledger for monitor, failover, and reconciliation events."""
+
+    def __init__(self) -> None:
+        self._monitor_samples: list[dict[str, Any]] = []
+        self._crash_failover_receipts: list[dict[str, Any]] = []
+        self._side_effect_receipts: list[dict[str, Any]] = []
+
+    def record_monitor_sample(self, sample: dict[str, Any]) -> dict[str, Any]:
+        receipt = {
+            **sample,
+            "runtime_receipt_id": sample.get("monitor_id") or f"monitor:{len(self._monitor_samples) + 1}",
+            "within_budget": int(sample.get("observed_fire_count") or 0) >= int(sample.get("expected_fire_count") or 0)
+            and int(sample.get("max_jitter_ms") or 0) <= int(sample.get("jitter_budget_ms") or 0),
+            "needs_operator_recovery": sample.get("operator_recovery_state") not in {
+                "no_manual_recovery_required",
+                "automatic_reconciliation_clean",
+                "provider_delay_visible_no_duplicate_side_effect",
+            },
+        }
+        self._monitor_samples.append(receipt)
+        return receipt
+
+    def record_crash_failover(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        runtime_receipt = {
+            **receipt,
+            "runtime_receipt_id": receipt.get("soak_id") or f"failover:{len(self._crash_failover_receipts) + 1}",
+            "within_budget": int(receipt.get("failover_latency_ms") or 0)
+            <= int(receipt.get("failover_budget_ms") or 0),
+            "requires_manual_recovery": "manual" in str(receipt.get("operator_recovery_state") or "")
+            or "manual" in str(receipt.get("replay_authority") or ""),
+        }
+        self._crash_failover_receipts.append(runtime_receipt)
+        return runtime_receipt
+
+    def record_side_effect_reconciliation(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        runtime_receipt = {
+            **receipt,
+            "runtime_receipt_id": receipt.get("reconciliation_id")
+            or f"reconciliation:{len(self._side_effect_receipts) + 1}",
+            "duplicate_safe": receipt.get("duplicate_suppression_state")
+            in {"suppressed", "suppressed_with_existing_artifact_reuse", "blocked"},
+            "manual_recovery_required": "required" in str(receipt.get("manual_recovery_state") or ""),
+        }
+        self._side_effect_receipts.append(runtime_receipt)
+        return runtime_receipt
+
+    def snapshot(self) -> dict[str, Any]:
+        budget_breaches = [
+            item["runtime_receipt_id"]
+            for item in [*self._monitor_samples, *self._crash_failover_receipts]
+            if not item.get("within_budget")
+        ]
+        recovery_queue = [
+            item["runtime_receipt_id"]
+            for item in [*self._monitor_samples, *self._crash_failover_receipts, *self._side_effect_receipts]
+            if item.get("needs_operator_recovery")
+            or item.get("requires_manual_recovery")
+            or item.get("manual_recovery_required")
+        ]
+        duplicate_risks = [
+            item["runtime_receipt_id"]
+            for item in self._side_effect_receipts
+            if not item.get("duplicate_safe")
+        ]
+        receipt_index = {
+            "monitor_samples": self._monitor_samples,
+            "crash_failover_receipts": self._crash_failover_receipts,
+            "side_effect_reconciliation_receipts": self._side_effect_receipts,
+        }
+        return {
+            "runtime_status": "continuous_orchestration_runtime_ledger_visible",
+            "runtime_observation_count": (
+                len(self._monitor_samples) + len(self._crash_failover_receipts) + len(self._side_effect_receipts)
+            ),
+            "active_budget_breach_count": len(budget_breaches),
+            "active_recovery_queue_count": len(recovery_queue),
+            "active_duplicate_risk_count": len(duplicate_risks),
+            "budget_breaches": budget_breaches,
+            "operator_recovery_queue": recovery_queue,
+            "duplicate_risks": duplicate_risks,
+            "receipt_index": receipt_index,
+            "runtime_receipt_digest": _stable_digest(receipt_index),
+            "claim_boundary": CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY,
+        }
 
 
 def continuous_orchestration_slo_policy_payload() -> dict[str, Any]:
@@ -230,11 +324,23 @@ def continuous_operator_controls() -> list[dict[str, Any]]:
     ]
 
 
+def build_seeded_continuous_orchestration_runtime() -> ContinuousOrchestrationSloRuntime:
+    runtime = ContinuousOrchestrationSloRuntime()
+    for sample in continuous_monitor_samples():
+        runtime.record_monitor_sample(sample)
+    for receipt in crash_failover_soak_receipts():
+        runtime.record_crash_failover(receipt)
+    for receipt in side_effect_reconciliation_receipts():
+        runtime.record_side_effect_reconciliation(receipt)
+    return runtime
+
+
 def build_continuous_orchestration_slo_contract() -> dict[str, Any]:
     monitors = continuous_monitor_samples()
     soaks = crash_failover_soak_receipts()
     reconciliations = side_effect_reconciliation_receipts()
     controls = continuous_operator_controls()
+    runtime_snapshot = build_seeded_continuous_orchestration_runtime().snapshot()
     evidence_modes = sorted({
         str(item["evidence_mode"])
         for item in [*monitors, *soaks]
@@ -270,12 +376,19 @@ def build_continuous_orchestration_slo_contract() -> dict[str, Any]:
             ),
             "required_controls_visible": {"inspect", "audit", "resume", "repair", "suppress_duplicate", "branch", "cancel"}
             <= {item["action"] for item in controls},
+            "runtime_status": runtime_snapshot["runtime_status"],
+            "runtime_observation_count": runtime_snapshot["runtime_observation_count"],
+            "active_budget_breach_count": runtime_snapshot["active_budget_breach_count"],
+            "active_recovery_queue_count": runtime_snapshot["active_recovery_queue_count"],
+            "active_duplicate_risk_count": runtime_snapshot["active_duplicate_risk_count"],
+            "runtime_receipt_digest": runtime_snapshot["runtime_receipt_digest"],
             "claim_boundary": CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY,
         },
         "monitor_samples": monitors,
         "crash_failover_soak_receipts": soaks,
         "side_effect_reconciliation_receipts": reconciliations,
         "operator_recovery_receipts": controls,
+        "runtime_operations": runtime_snapshot,
         "policy": continuous_orchestration_slo_policy_payload(),
     }
 

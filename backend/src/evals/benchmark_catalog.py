@@ -28,6 +28,14 @@ from src.cockpit.dense_operator_recovery import (
     OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
     OPERATOR_CONTROL_DENSITY_SUITE_NAME,
 )
+from src.cockpit.operator_mission_control import (
+    LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
+    LONG_WORK_DEBUGGING_SLO_SUITE_NAME,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME,
+    OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
+    OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -1888,6 +1896,57 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Broad independent usability evidence and best/world-class cockpit claims remain outside this proof gate."
         ),
         scenario_names=INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME,
+        label="Operator control population study",
+        description=(
+            "Pins broader operator population receipts for long-work diagnosis, branch comparison, handoff resume, "
+            "keyboard accessibility, recovery success, evaluator independence, and redacted raw receipt handles."
+        ),
+        benchmark_axis="operator_control_population_study",
+        operator_summary=(
+            "CW extends dense recovery proof into population-level mission-control evidence without claiming best "
+            "cockpit, solved operator control, production readiness, or reference-system exceedance."
+        ),
+        remaining_gap=(
+            "Population fixtures remain bounded and do not prove world-class cockpit quality or universal usability."
+        ),
+        scenario_names=OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=NAMED_BASELINE_COCKPIT_COMPARISON_SUITE_NAME,
+        label="Named baseline cockpit comparison",
+        description=(
+            "Pins named Hermes, OpenClaw, and IronClaw cockpit-pressure rows with source-refresh requirements, "
+            "task scope, limitations, behavior-change boundaries, and no winner or superiority wording."
+        ),
+        benchmark_axis="named_baseline_cockpit_comparison",
+        operator_summary=(
+            "Named baselines are used as pressure to keep Seraph's mission-control surface honest while stronger "
+            "competitor and superiority claims stay final-audit gated."
+        ),
+        remaining_gap=(
+            "Current-source competitor refresh and any claim lift remain owned by the final parity audit."
+        ),
+        scenario_names=NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LONG_WORK_DEBUGGING_SLO_SUITE_NAME,
+        label="Long-work debugging SLO",
+        description=(
+            "Pins p95 mission-control SLOs for searchable timelines, log/diff replay, runbook repair, handoff resume, "
+            "and residual-risk drill-down with read-only replay and authority-boundary policies."
+        ),
+        benchmark_axis="long_work_debugging_slo",
+        operator_summary=(
+            "Long-work debugging SLOs are judged by bounded task receipts, redacted handles, receiver acceptance, "
+            "and approval-context preservation."
+        ),
+        remaining_gap=(
+            "These are fixture SLOs, not fastest-cockpit, production-ready, or solved-control evidence."
+        ),
+        scenario_names=LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,

@@ -15,6 +15,13 @@ from src.cockpit.dense_operator_recovery import (
     DENSE_OPERATOR_RECOVERY_BLOCKED_CLAIMS,
     DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY,
 )
+from src.cockpit.operator_mission_control import (
+    LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
+    OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
+    OPERATOR_MISSION_CONTROL_BLOCKED_CLAIMS,
+    OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY,
+)
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals.final_parity_audit import (
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
@@ -3106,6 +3113,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["operator_mission_control_population_posture"]
+        == "operator_mission_control_population_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["operator_mission_control_population_claim_boundary"]
+        == OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["final_parity_readiness_posture"]
         == "final_parity_audit_ci_gated_operator_visible"
     )
@@ -3116,6 +3131,20 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["durable_workflow_engine"]["summary"]["suite_name"] == "durable_workflow_engine_v1"
     assert payload["dense_operator_recovery_control"]["summary"]["task_matrix_count"] >= 8
     assert payload["dense_operator_recovery_control"]["policy"]["claim_boundary"] == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY
+    assert payload["operator_mission_control_population"]["summary"]["population_operator_count"] >= 60
+    assert payload["operator_mission_control_population"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["operator_mission_control_population"]["policy"]["claim_boundary"] == (
+        OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY
+    )
+    assert (
+        "operator_control_population_study"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "named_baseline_cockpit_comparison"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert "long_work_debugging_slo" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -4700,6 +4729,48 @@ async def test_operator_dense_operator_recovery_control_surface_reports_batch_cn
         item["keyboard_only_path_complete"] is True
         and item["reviewer_independence"]
         for item in payload["contract"]["independent_usability_accessibility_receipts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_control_population_study_surface_reports_batch_cw_receipts(client):
+    resp = await client.get("/api/operator/operator-control-population-study")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "operator_mission_control_population_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "operator_mission_control_population_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES)
+        + len(NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES)
+        + len(LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["population_operator_count"] >= 60
+    assert payload["summary"]["all_slos_met"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["policy"]["claim_boundary"] == OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY
+    assert set(OPERATOR_MISSION_CONTROL_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "approval_transfer" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/operator-control-population-study" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    handoff = next(
+        item for item in payload["contract"]["workbench_receipts"] if item["surface"] == "multi_operator_handoff"
+    )
+    assert "approval_transfer" not in handoff["operator_capabilities"]
+    assert handoff["handoff_authority_policy"]["approval_reuse_allowed"] is False
+    assert handoff["handoff_authority_policy"]["receiver_scope_renewal_required"] is True
+    assert all(
+        item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["contains_private_path"] is False
+        and item["safe_receipt"]["raw_receipt_path_exposed"] is False
+        and item["safe_receipt"]["redaction_layer"] == "operator_mission_control_v1"
+        for group in (
+            payload["contract"]["workbench_receipts"],
+            payload["contract"]["population_study_receipts"],
+            payload["contract"]["named_baseline_comparisons"],
+            payload["contract"]["debugging_slo_receipts"],
+        )
+        for item in group
     )
 
 

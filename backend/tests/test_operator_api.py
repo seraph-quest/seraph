@@ -3537,8 +3537,8 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 21
-    assert payload["final_parity_readiness"]["summary"]["bounded_parity_proof_train_completion_wording_allowed"] is False
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 22
+    assert payload["final_parity_readiness"]["summary"]["bounded_parity_proof_train_completion_wording_allowed"] is True
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -4062,8 +4062,8 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 21
-    assert payload["summary"]["final_batch_status"] == "self_referential_final_claim_lift_audit_batch"
+    assert payload["summary"]["completed_batch_count"] == 22
+    assert payload["summary"]["final_batch_status"] == "done"
     assert payload["summary"]["all_sources_reachable_with_caveats"] is True
     assert payload["summary"]["claim_lift_matrix_count"] >= 6
     assert payload["summary"]["continued_blocked_stronger_claim_count"] == payload["summary"]["exact_stronger_claim_count"]
@@ -4103,8 +4103,12 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CQ"
     )
-    assert cq_batch["status"] == "self_referential_final_claim_lift_audit_batch"
+    assert cq_batch["status"] == "done"
     assert cq_batch["issue"] == 512
+    assert cq_batch["merged_pr"] == 521
+    assert cq_batch["project_status"] == "Done"
+    assert cq_batch["project_pr"] == "Merged"
+    assert cq_batch["code_review"] == "Passed"
     assert payload["summary"]["residual_gap_count"] == 7
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False

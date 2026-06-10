@@ -15567,15 +15567,19 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
         "pressure_axes_visible": all(item.get("pressure_axes") for item in sources),
         "source_claim_use_bounded": all(item["claim_use"] == "source_backed_pressure_only" for item in sources),
         "completed_batches_done_merged_passed": summary["all_completed_batches_done_merged_passed"] is True,
-        "completed_batch_count_matches": len(completed_batches) >= 21,
+        "completed_batch_count_matches": len(completed_batches) >= 22,
         "ci_and_cp_are_completed": (
             next(item for item in batches if item["batch"] == "CI")["merged_pr"] == 504
             and next(item for item in batches if item["batch"] == "CP")["merged_pr"] == 520
             and next(item for item in batches if item["batch"] == "CP")["status"] == "done"
         ),
-        "final_batch_self_referential_truthful": next(
-            item for item in batches if item["batch"] == "CQ"
-        )["status"] == "self_referential_final_claim_lift_audit_batch",
+        "final_batch_cq_done_merged_passed": (
+            next(item for item in batches if item["batch"] == "CQ")["status"] == "done"
+            and next(item for item in batches if item["batch"] == "CQ")["merged_pr"] == 521
+            and next(item for item in batches if item["batch"] == "CQ")["project_status"] == "Done"
+            and next(item for item in batches if item["batch"] == "CQ")["project_pr"] == "Merged"
+            and next(item for item in batches if item["batch"] == "CQ")["code_review"] == "Passed"
+        ),
         "project_fields_required_visible": all(
             {"Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"}
             <= set(item["project_fields_required"])
@@ -15595,15 +15599,16 @@ async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
             "all_claim_lift_rows_have_project_and_pr_evidence"
         ] is True
         and all(
-            (item.get("permitted_exact_wording") or item.get("permitted_exact_wording_after_merge"))
+            item.get("permitted_exact_wording")
             and item.get("narrowed_wording")
-            and item.get("disposition") in {"narrowed", "active_final_gate"}
+            and item.get("disposition")
+            in {"narrowed", "bounded_completion_wording_allowed_broad_claims_continue_blocked"}
             for item in claim_lift
         ),
-        "cq_completion_wording_not_currently_allowed": summary[
+        "cq_bounded_completion_wording_now_allowed": summary[
             "bounded_parity_proof_train_completion_wording_allowed"
-        ] is False
-        and next(item for item in claim_lift if item["claim_id"] == "SCL-033")["currently_allowed"] is False,
+        ] is True
+        and next(item for item in claim_lift if item["claim_id"] == "SCL-033")["currently_allowed"] is True,
         "exact_stronger_claims_all_explicitly_blocked_or_narrowed": (
             summary["exact_stronger_claim_count"] >= 12
             and summary["continued_blocked_stronger_claim_count"] == summary["exact_stronger_claim_count"]

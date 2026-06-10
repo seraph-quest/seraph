@@ -28,6 +28,11 @@ from src.extensions.live_marketplace_attestation import (
     PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
 )
+from src.extensions.browser_provider_usability import (
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -444,6 +449,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["publisher_review_and_package_trust_suite_scenario_count_matches"] is True
     assert details["publisher_review_and_package_trust_suite_axis_matches"] is True
     assert details["publisher_review_and_package_trust_gate_required"] is True
+    assert details["managed_browser_provider_attestation_suite_present"] is True
+    assert details["managed_browser_provider_attestation_suite_scenario_count_matches"] is True
+    assert details["managed_browser_provider_attestation_suite_axis_matches"] is True
+    assert details["managed_browser_provider_attestation_gate_required"] is True
+    assert details["live_multi_operator_usability_study_suite_present"] is True
+    assert details["live_multi_operator_usability_study_suite_scenario_count_matches"] is True
+    assert details["live_multi_operator_usability_study_suite_axis_matches"] is True
+    assert details["live_multi_operator_usability_study_gate_required"] is True
+    assert details["browser_computer_use_recovery_drill_suite_present"] is True
+    assert details["browser_computer_use_recovery_drill_suite_scenario_count_matches"] is True
+    assert details["browser_computer_use_recovery_drill_suite_axis_matches"] is True
+    assert details["browser_computer_use_recovery_drill_gate_required"] is True
     assert details["production_operator_control_parity_suite_present"] is True
     assert details["production_operator_control_parity_suite_scenario_count_matches"] is True
     assert details["production_operator_control_parity_suite_axis_matches"] is True
@@ -614,6 +631,33 @@ def test_run_cross_surface_continuity_recovery_benchmark_suite_passes():
     assert {result.name for result in summary.results} == set(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES)
     assert all(result.details["continuity_thread_memory_visible"] for result in summary.results)
     assert all(result.details["approval_survives_surface_shift_visible"] for result in summary.results)
+
+
+def test_run_managed_browser_provider_attestation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["managed_browser_provider_attestation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+    assert all(result.details["provider_identity_visible"] for result in summary.results)
+    assert all(result.details["remote_cdp_existing_session_blocked"] for result in summary.results)
+
+
+def test_run_live_multi_operator_usability_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_multi_operator_usability_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+    assert all(result.details["multi_operator_evidence_visible"] for result in summary.results)
+    assert all(result.details["keyboard_paths_visible"] for result in summary.results)
+
+
+def test_run_browser_computer_use_recovery_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_computer_use_recovery_drill"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+    assert all(result.details["fail_closed_recovery_visible"] for result in summary.results)
+    assert all(result.details["external_actions_blocked_during_recovery"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
@@ -1780,6 +1824,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "live_broad_reach_channel_attestation" in captured.out
     assert "production_voice_media_provider_runtime" in captured.out
     assert "cross_surface_continuity_recovery" in captured.out
+    assert "managed_browser_provider_attestation" in captured.out
+    assert "live_multi_operator_usability_study" in captured.out
+    assert "browser_computer_use_recovery_drill" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -1815,6 +1862,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "live_broad_reach_channel_attestation",
         "production_voice_media_provider_runtime",
         "cross_surface_continuity_recovery",
+        "managed_browser_provider_attestation",
+        "live_multi_operator_usability_study",
+        "browser_computer_use_recovery_drill",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

@@ -127,6 +127,14 @@ from src.guardian.live_human_outcome_learning import (
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
 )
+from src.guardian.independent_learning_memory_parity import (
+    INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
+    INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME,
+    MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
+    MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME,
+    TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
+    TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
@@ -656,6 +664,51 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broader external-provider telemetry and provider-specific production attestation remain future proof work.",
         scenario_names=MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME,
+        label="Independent outcome cohort review",
+        description=(
+            "Pins independent evaluator protocol, sample-size rationale, consent, anonymization, harm, correction, "
+            "follow-through, and claim-scope receipts for Batch CM outcome evidence."
+        ),
+        benchmark_axis="independent_outcome_cohort_review",
+        operator_summary=(
+            "Guardian-learning outcome evidence now declares cohort, evaluator, protocol, workload, sample, "
+            "raw receipt, failure budget, and residual gaps before policy claims can move."
+        ),
+        remaining_gap="Powered generalized superiority and named competitor outcome comparisons remain future proof work.",
+        scenario_names=INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME,
+        label="Task-scoped causal learning",
+        description=(
+            "Pins counterfactual, negative-control, task-class, evaluator, time-window, confounder, rollback, and "
+            "no-generalized-superiority receipts for Batch CM causal learning."
+        ),
+        benchmark_axis="task_scoped_causal_learning",
+        operator_summary=(
+            "Causal-learning receipts remain bounded to measured task classes and carry rollback authority instead of "
+            "claiming generalized guardian intelligence improvement."
+        ),
+        remaining_gap="Generalized causal superiority and production-ready autonomous learning remain blocked.",
+        scenario_names=TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_PROVIDER_PARITY_MATRIX_SUITE_NAME,
+        label="Memory provider parity matrix",
+        description=(
+            "Pins dimension-scoped provider comparison across canonical precedence, advisory retrieval/writeback, "
+            "delete/export, privacy, freshness, conflict handling, usefulness, quarantine, and reinstatement."
+        ),
+        benchmark_axis="memory_provider_parity_matrix",
+        operator_summary=(
+            "Memory-provider parity is now treated as a dimension matrix with canonical authority preserved and "
+            "unsafe providers quarantined."
+        ),
+        remaining_gap="Full memory-provider parity, memory superiority, and provider-market breadth remain blocked.",
+        scenario_names=MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

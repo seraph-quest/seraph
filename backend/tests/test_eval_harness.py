@@ -66,6 +66,11 @@ from src.guardian.live_human_outcome_learning import (
     LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
 )
+from src.guardian.independent_learning_memory_parity import (
+    INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
+    MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
+    TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
+)
 from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
 from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
@@ -890,6 +895,36 @@ def test_run_memory_provider_live_regression_monitor_benchmark_suite_passes():
     assert all(result.details["provider_monitors_visible"] for result in summary.results)
     assert all(result.details["provider_quarantine_visible"] for result in summary.results)
     assert all(result.details["unsafe_provider_behavior_blocked"] for result in summary.results)
+
+
+def test_run_independent_outcome_cohort_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_outcome_cohort_review"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES)
+    assert all(result.details["independent_evaluators_visible"] for result in summary.results)
+    assert all(result.details["implementation_independence_visible"] for result in summary.results)
+    assert all(result.details["bounded_outcome_claims_visible"] for result in summary.results)
+
+
+def test_run_task_scoped_causal_learning_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["task_scoped_causal_learning"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES)
+    assert all(result.details["bounded_causal_claims_visible"] for result in summary.results)
+    assert all(result.details["causal_task_scope_visible"] for result in summary.results)
+    assert all(result.details["rollback_authority_visible"] for result in summary.results)
+
+
+def test_run_memory_provider_parity_matrix_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_parity_matrix"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES)
+    assert all(result.details["provider_matrix_visible"] for result in summary.results)
+    assert all(result.details["canonical_override_blocked"] for result in summary.results)
+    assert all(result.details["secret_leak_zero_tolerance_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_unique_suite_scenarios():
@@ -2013,6 +2048,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "live_human_outcome_quality_study" in captured.out
     assert "guardian_learning_causal_attribution" in captured.out
     assert "memory_provider_live_regression_monitor" in captured.out
+    assert "independent_outcome_cohort_review" in captured.out
+    assert "task_scoped_causal_learning" in captured.out
+    assert "memory_provider_parity_matrix" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -2061,6 +2099,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "live_human_outcome_quality_study",
         "guardian_learning_causal_attribution",
         "memory_provider_live_regression_monitor",
+        "independent_outcome_cohort_review",
+        "task_scoped_causal_learning",
+        "memory_provider_parity_matrix",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

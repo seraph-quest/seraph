@@ -83,6 +83,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
             "/api/operator/production-operator-control-parity",
             "/api/operator/production-sla-orchestration",
             "/api/operator/production-reach-voice-mobile",
+            "/api/operator/independent-learning-memory-parity",
             "/api/operator/browser-provider-usability-proof",
             "/api/operator/live-marketplace-attestation-proof",
             "docs/research/19-strategy-claim-ledger.md",
@@ -252,6 +253,7 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CH", 496, "managed_browser_provider_attestation", 503),
         ("CJ", 505, "production_sla_orchestration", 514),
         ("CK", 506, "independent_secure_host_review", 515),
+        ("CL", 509, "broad_channel_sla_operations", 516),
     ]
     receipts = [
         {
@@ -282,16 +284,16 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "operator_visible": True,
     })
     receipts.append({
-        "batch": "CL",
-        "issue": 509,
-        "primary_suite": "broad_channel_sla_operations",
+        "batch": "CM",
+        "issue": 507,
+        "primary_suite": "independent_outcome_cohort_review",
         "merged_pr": None,
         "status": "active_branch_receipts_visible_until_pr_merge",
         "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
         "project_status": "owned_by_github_project_until_pr_merge",
         "project_pr": "owned_by_linked_pull_request_until_pr_merge",
         "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #509 and its Project item are authoritative for live PR/review fields",
+        "project_truth_source": "GitHub issue #507 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
     return receipts
@@ -416,6 +418,25 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "status": "backed_for_bounded_receipts_after_batch_cl_pr_merge",
             "operator_surface": "/api/operator/production-reach-voice-mobile",
         },
+        {
+            "claim_id": "SCL-029",
+            "area": "independent_guardian_learning_outcomes_and_memory_parity_proof",
+            "issue_links": [475, 507],
+            "allowed_wording": (
+                "bounded independent outcome cohort, task-scoped causal-learning, and memory-provider parity "
+                "matrix receipts are visible after the Batch CM PR lands"
+            ),
+            "blocked_claims": [
+                "guardian_intelligence_superiority",
+                "solved_live_learning",
+                "live_human_outcome_superiority",
+                "memory_superiority",
+                "full_memory_provider_parity",
+                "production_ready_product",
+            ],
+            "status": "active_branch_receipts_visible_until_batch_cm_pr_merge",
+            "operator_surface": "/api/operator/independent-learning-memory-parity",
+        },
     ]
 
 
@@ -490,9 +511,24 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
         {
             "gap_id": "ci-gap-human-outcomes-independent",
             "area": "guardian_intelligence",
-            "gap": "larger independent/generalized human outcome studies remain unproven",
+            "gap": (
+                "Batch CM is narrowing the independent learning/memory gap with independent outcome cohort, "
+                "task-scoped causal-learning, privacy/rollback, and memory-provider parity-matrix receipts; "
+                "guardian intelligence superiority, memory superiority, solved learning, live human-outcome "
+                "superiority, and full memory-provider parity remain blocked"
+            ),
             "blocking_claims": ["guardian_intelligence_superiority", "memory_superiority"],
-            "required_stronger_evidence": "larger independent cohort evidence with causality, bias, harm, and follow-through review",
+            "current_batch_evidence": [
+                "independent_outcome_cohort_review",
+                "task_scoped_causal_learning",
+                "memory_provider_parity_matrix",
+                "/api/operator/independent-learning-memory-parity",
+                "GitHub issue #507",
+            ],
+            "required_stronger_evidence": (
+                "powered named-baseline comparisons, larger independent populations, and final claim-ledger review "
+                "before guardian superiority, memory superiority, solved learning, or full memory-provider parity wording"
+            ),
         },
         {
             "gap_id": "ci-gap-marketplace-security",

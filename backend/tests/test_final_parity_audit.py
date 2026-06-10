@@ -34,9 +34,9 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     summary = contract["summary"]
     batches = contract["batch_reconciliation_receipts"]
 
-    assert summary["completed_batch_count"] == 21
+    assert summary["completed_batch_count"] == 22
     assert summary["all_completed_batches_done_merged_passed"] is True
-    assert summary["final_batch_status"] == "self_referential_final_claim_lift_audit_batch"
+    assert summary["final_batch_status"] == "done"
     assert summary["full_parity_claim_allowed"] is False
     assert summary["reference_systems_exceeded_claim_allowed"] is False
     assert next(item for item in batches if item["batch"] == "CH")["merged_pr"] == 503
@@ -76,7 +76,11 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     assert next(item for item in batches if item["batch"] == "CI")["merged_pr"] == 504
     cq_batch = next(item for item in batches if item["batch"] == "CQ")
     assert cq_batch["issue"] == 512
-    assert cq_batch["status"] == "self_referential_final_claim_lift_audit_batch"
+    assert cq_batch["status"] == "done"
+    assert cq_batch["merged_pr"] == 521
+    assert cq_batch["project_status"] == "Done"
+    assert cq_batch["project_pr"] == "Merged"
+    assert cq_batch["code_review"] == "Passed"
 
 
 def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
@@ -129,7 +133,7 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
         "SCL-033",
     }
     assert contract["summary"]["all_claim_lift_rows_have_project_and_pr_evidence"] is True
-    assert contract["summary"]["bounded_parity_proof_train_completion_wording_allowed"] is False
+    assert contract["summary"]["bounded_parity_proof_train_completion_wording_allowed"] is True
     assert contract["summary"]["bounded_parity_proof_train_completion_wording_allowed_after_cq_merge"] is True
     assert contract["summary"]["continued_blocked_stronger_claim_count"] == len(exact_claims)
     assert all(item["outcome"] == "continued_blocked" for item in exact_claims)
@@ -173,7 +177,7 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert scl_032["operator_surface"] == "/api/operator/safe-autonomous-browser-computer-use"
     assert "safe_autonomous_computer_use" in scl_032["blocked_claims"]
     scl_033 = next(item for item in claims if item["claim_id"] == "SCL-033")
-    assert scl_033["status"] == "active_final_claim_lift_audit_exact_broad_claims_continue_blocked"
+    assert scl_033["status"] == "backed_for_bounded_final_claim_lift_receipts_broad_claims_continue_blocked"
     assert "/api/operator/final-parity-readiness-report" == scl_033["operator_surface"]
     assert "fully_at_parity" in scl_033["blocked_claims"]
     scl_032_lift = next(item for item in claim_lift if item["claim_id"] == "SCL-032")
@@ -182,10 +186,14 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert "full_browser_parity" in scl_032_lift["continued_blocked_claims"]
     scl_033_lift = next(item for item in claim_lift if item["claim_id"] == "SCL-033")
     assert scl_033_lift["issue"] == 512
-    assert scl_033_lift["disposition"] == "active_final_gate"
-    assert scl_033_lift["currently_allowed"] is False
-    assert scl_033_lift["currently_permitted_exact_wording"] is None
-    assert "completed a board-backed parity proof train" in scl_033_lift["permitted_exact_wording_after_merge"]
+    assert scl_033_lift["merged_pr"] == 521
+    assert scl_033_lift["project_status"] == "Done"
+    assert scl_033_lift["project_pr"] == "Merged"
+    assert scl_033_lift["code_review"] == "Passed"
+    assert scl_033_lift["disposition"] == "bounded_completion_wording_allowed_broad_claims_continue_blocked"
+    assert scl_033_lift["currently_allowed"] is True
+    assert "completed a board-backed parity proof train" in scl_033_lift["currently_permitted_exact_wording"]
+    assert "completed a board-backed parity proof train" in scl_033_lift["permitted_exact_wording"]
     assert "reference_systems_exceeded" in scl_033_lift["continued_blocked_claims"]
     assert all(item["disposition"] == "accepted" for item in critic)
 

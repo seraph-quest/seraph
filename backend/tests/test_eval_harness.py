@@ -46,6 +46,11 @@ from src.workflows.live_orchestration import (
     LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
     ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
 )
+from src.security.production_isolation import (
+    PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
+    PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
+    SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -289,6 +294,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["secure_host_live_isolation_v2_suite_scenario_count_matches"] is True
     assert details["secure_host_live_isolation_v2_suite_axis_matches"] is True
     assert details["secure_host_live_isolation_v2_gate_required"] is True
+    assert details["production_isolation_hardening_v2_suite_present"] is True
+    assert details["production_isolation_hardening_v2_suite_scenario_count_matches"] is True
+    assert details["production_isolation_hardening_v2_suite_axis_matches"] is True
+    assert details["production_isolation_hardening_v2_gate_required"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_suite_present"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_suite_scenario_count_matches"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_suite_axis_matches"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_gate_required"] is True
+    assert details["security_incident_recovery_drill_suite_present"] is True
+    assert details["security_incident_recovery_drill_suite_scenario_count_matches"] is True
+    assert details["security_incident_recovery_drill_suite_axis_matches"] is True
+    assert details["security_incident_recovery_drill_gate_required"] is True
     assert details["computer_suite_present"] is True
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
@@ -912,6 +929,33 @@ def test_run_benchmark_suites_executes_secure_capability_host_live_isolation_v2_
         "secure_host_live_extension_revocation_behavior",
         "secure_host_live_workflow_replay_trust_drift_behavior",
     }
+
+
+def test_run_production_isolation_hardening_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_isolation_hardening_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES)
+
+
+def test_run_privileged_path_red_team_gauntlet_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["privileged_path_red_team_gauntlet_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES)
+
+
+def test_run_security_incident_recovery_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["security_incident_recovery_drill"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES)
 
 
 def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval_details():
@@ -1579,6 +1623,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "secure_capability_host" in captured.out
     assert "production_secure_host_hardening" in captured.out
     assert "secure_capability_host_live_isolation_v2" in captured.out
+    assert "production_isolation_hardening_v2" in captured.out
+    assert "privileged_path_red_team_gauntlet_v2" in captured.out
+    assert "security_incident_recovery_drill" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "one_excellent_reach_channel_canary" in captured.out
@@ -1637,6 +1684,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "secure_capability_host",
         "production_secure_host_hardening",
         "secure_capability_host_live_isolation_v2",
+        "production_isolation_hardening_v2",
+        "privileged_path_red_team_gauntlet_v2",
+        "security_incident_recovery_drill",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

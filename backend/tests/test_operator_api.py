@@ -45,6 +45,13 @@ from src.workflows.live_orchestration import (
     LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
     ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
 )
+from src.security.production_isolation import (
+    PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
+    PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
+    PRODUCTION_ISOLATION_SECURITY_BLOCKED_CLAIMS,
+    PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY,
+    SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1463,6 +1470,64 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_production_isolation_security_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "benchmark_posture": "production_isolation_security_ci_gated_operator_visible",
+                    "operator_status": "production_isolation_security_receipts_visible",
+                    "isolation_receipt_count": 5,
+                    "red_team_case_count": 6,
+                    "incident_drill_count": 6,
+                    "operator_control_count": 9,
+                    "fail_closed_isolation_count": 5,
+                    "blocked_red_team_count": 6,
+                    "recorded_live_drill_count": 5,
+                    "deterministic_contract_count": 6,
+                    "incident_operator_notification_visible": True,
+                    "credential_rotation_visible": True,
+                    "required_controls_visible": True,
+                    "evidence_modes": ["deterministic_contract", "recorded_live_drill"],
+                    "claim_boundary": PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY,
+                    "scenario_count": (
+                        len(PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES)
+                        + len(PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES)
+                        + len(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES)
+                    ),
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "production_isolation_hardening_v2": list(PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES),
+                    "privileged_path_red_team_gauntlet_v2": list(
+                        PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES
+                    ),
+                    "security_incident_recovery_drill": list(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES),
+                },
+                "contract": {
+                    "summary": {
+                        "claim_boundary": PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY,
+                    },
+                    "isolation_receipts": [],
+                    "red_team_cases": [],
+                    "incident_drill_receipts": [],
+                    "operator_controls": [],
+                    "policy": {
+                        "claim_boundary": PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY,
+                        "blocked_claims": list(PRODUCTION_ISOLATION_SECURITY_BLOCKED_CLAIMS),
+                    },
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY,
+                    "blocked_claims": list(PRODUCTION_ISOLATION_SECURITY_BLOCKED_CLAIMS),
+                    "receipt_surfaces": ["/api/operator/production-isolation-hardening"],
+                    "not_claimed": ["ironclaw_class_secure_execution", "full_host_container_isolation"],
+                },
+                "latest_run": {"total": 17, "passed": 17, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_computer_use_benchmark_report",
         AsyncMock(
             return_value={
@@ -2362,7 +2427,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 45
+    assert payload["summary"]["suite_count"] == 48
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2406,6 +2471,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert (
         payload["summary"]["production_secure_host_hardening_claim_boundary"]
         == "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class"
+    )
+    assert (
+        payload["summary"]["production_isolation_security_posture"]
+        == "production_isolation_security_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["production_isolation_security_claim_boundary"] == (
+        PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY
     )
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
@@ -2554,6 +2626,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert (
+        "production_isolation_hardening_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "privileged_path_red_team_gauntlet_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "security_incident_recovery_drill"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
         "production_reach_channel_hardening"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
@@ -2639,6 +2723,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "secure_host_live_private_network_egress_behavior" in secure_host_live_v2_suite["scenario_names"]
     assert "secure_host_live_extension_revocation_behavior" in secure_host_live_v2_suite["scenario_names"]
     assert secure_host_live_v2_suite["scenario_count"] == 5
+    production_isolation_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_isolation_hardening_v2"
+    )
+    assert "production_isolation_worker_boundary_behavior" in production_isolation_suite["scenario_names"]
+    assert production_isolation_suite["scenario_count"] == len(PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES)
+    red_team_suite = next(
+        item for item in payload["suites"] if item["name"] == "privileged_path_red_team_gauntlet_v2"
+    )
+    assert "red_team_secret_replay_exfiltration_behavior" in red_team_suite["scenario_names"]
+    assert red_team_suite["scenario_count"] == len(PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES)
+    incident_drill_suite = next(
+        item for item in payload["suites"] if item["name"] == "security_incident_recovery_drill"
+    )
+    assert "security_incident_revocation_drill_behavior" in incident_drill_suite["scenario_names"]
+    assert incident_drill_suite["scenario_count"] == len(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES)
 
     computer_suite = next(item for item in payload["suites"] if item["name"] == "computer_use_browser_desktop")
     assert "browser_execution_task_replay_behavior" in computer_suite["scenario_names"]
@@ -2757,6 +2856,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["production_secure_host_hardening"]["policy"]["claim_boundary"] == (
         "production_secure_host_hardening_proof_not_secure_private_by_default_or_ironclaw_class"
     )
+    assert (
+        payload["production_isolation_security"]["summary"]["benchmark_posture"]
+        == "production_isolation_security_ci_gated_operator_visible"
+    )
+    assert payload["production_isolation_security"]["policy"]["claim_boundary"] == (
+        PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY
+    )
+    assert "ironclaw_class_secure_execution" in payload["production_isolation_security"]["policy"]["blocked_claims"]
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["marketplace_lifecycle_maturity"]["summary"]["operator_status"] == (
@@ -3716,6 +3823,41 @@ async def test_operator_secure_capability_host_hardening_surface_reports_v2_poli
     )
     assert "secure_private_by_default" in payload["policy"]["blocked_claims"]
     assert "ironclaw_class_secure_execution" in payload["policy"]["blocked_claims"]
+
+
+@pytest.mark.asyncio
+async def test_operator_production_isolation_hardening_surface_reports_batch_cd_receipts(client):
+    resp = await client.get("/api/operator/production-isolation-hardening")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "production_isolation_security"
+    assert payload["summary"]["benchmark_posture"] == "production_isolation_security_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "production_isolation_security_receipts_visible"
+    assert payload["summary"]["isolation_receipt_count"] >= 5
+    assert payload["summary"]["red_team_case_count"] >= 6
+    assert payload["summary"]["incident_drill_count"] >= 6
+    assert payload["summary"]["required_controls_visible"] is True
+    assert payload["summary"]["claim_boundary"] == PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["production_isolation_hardening_v2"] == list(
+        PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["privileged_path_red_team_gauntlet_v2"] == list(
+        PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["security_incident_recovery_drill"] == list(
+        SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES
+    )
+    assert payload["latest_run"]["failed"] == 0
+    assert "/api/operator/production-isolation-hardening" in payload["policy"]["receipt_surfaces"]
+    assert "secure_private_by_default" in payload["policy"]["blocked_claims"]
+    assert "ironclaw_class_secure_execution" in payload["policy"]["blocked_claims"]
+    assert any(item["surface"] == "browser_computer_use" for item in payload["contract"]["isolation_receipts"])
+    assert any(item["case_id"] == "browser_session_bleed" for item in payload["contract"]["red_team_cases"])
+    assert any(
+        item["incident_type"] == "credential_boundary_drift"
+        for item in payload["contract"]["incident_drill_receipts"]
+    )
 
 
 @pytest.mark.asyncio

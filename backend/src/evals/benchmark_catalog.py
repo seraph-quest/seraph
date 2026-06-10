@@ -29,6 +29,14 @@ from src.extensions.benchmark import (
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
 )
+from src.extensions.marketplace_lifecycle import (
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SUITE_NAME,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -771,6 +779,56 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is deterministic governance proof, not production marketplace security or third-party ecosystem maturity."
         ),
         scenario_names=GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME,
+        label="Marketplace-grade capability lifecycle",
+        description=(
+            "Pins install, update, downgrade, disable, rollback, review, quarantine, diagnostics, and staged rollout "
+            "receipts with before/after, permission-delta, risk-delta, rollback, and recovery proof."
+        ),
+        benchmark_axis="marketplace_grade_capability_lifecycle",
+        operator_summary=(
+            "Capability lifecycle maturity is judged by operator-visible mutation receipts and recovery paths, "
+            "not by package count or marketplace breadth."
+        ),
+        remaining_gap=(
+            "Live third-party package attestation, production marketplace security, and ecosystem superiority remain future proof work."
+        ),
+        scenario_names=MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GOVERNED_CAPABILITY_LIFECYCLE_V2_SUITE_NAME,
+        label="Governed capability lifecycle v2",
+        description=(
+            "Pins permission deltas, risk deltas, dependency graphs, compatibility resolution, staged rollout, "
+            "cross-family coverage, and claim-boundary receipts."
+        ),
+        benchmark_axis="governed_capability_lifecycle_v2",
+        operator_summary=(
+            "Lifecycle v2 keeps skills, workflows, runbooks, packs, connectors, providers, and reach surfaces under "
+            "one review/rollback/diagnostics contract."
+        ),
+        remaining_gap=(
+            "Production-scale marketplace operations and live external verification remain future proof work."
+        ),
+        scenario_names=GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME,
+        label="Capability rollback and failure diagnostics",
+        description=(
+            "Pins failed-update recovery, rollback availability, permission-creep negative cases, diagnostics triage, "
+            "and quarantine re-entry review receipts."
+        ),
+        benchmark_axis="capability_rollback_failure_diagnostics",
+        operator_summary=(
+            "Failed lifecycle changes must fail closed, remain diagnosable, and keep rollback or quarantine review visible."
+        ),
+        remaining_gap=(
+            "Live marketplace incident drills and external package attestation remain future proof work."
+        ),
+        scenario_names=CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
     ),
 )
 

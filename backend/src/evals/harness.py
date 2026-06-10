@@ -59,6 +59,17 @@ from src.extensions.benchmark import (
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SUITE_NAME,
 )
+from src.extensions.marketplace_lifecycle import (
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SUITE_NAME,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME,
+    MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS,
+    MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+    build_marketplace_lifecycle_contract,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
@@ -14025,6 +14036,88 @@ async def _eval_operator_governed_capability_pack_hardening_surface_behavior() -
     }
 
 
+async def _eval_marketplace_lifecycle_maturity_behavior() -> dict[str, Any]:
+    contract = build_marketplace_lifecycle_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    lifecycle = contract["lifecycle_receipts"]
+    families = contract["family_coverage"]
+    negative_cases = contract["negative_cases"]
+    rollouts = contract["staged_rollouts"]
+    suites = benchmark_suite_report()
+    marketplace_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME
+    )
+    governed_lifecycle_suite = next(
+        item for item in suites if item["name"] == GOVERNED_CAPABILITY_LIFECYCLE_V2_SUITE_NAME
+    )
+    rollback_diagnostics_suite = next(
+        item for item in suites if item["name"] == CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME
+    )
+    required_surfaces = {
+        "/api/extensions",
+        "/api/extensions/validate",
+        "/api/operator/marketplace-lifecycle-maturity",
+        "/api/operator/benchmark-proof",
+    }
+    required_families = {
+        "skills",
+        "workflows",
+        "runbooks",
+        "starter_packs",
+        "connectors",
+        "browser_providers",
+        "messaging_connectors",
+        "node_adapters",
+        "memory_providers",
+        "voice_media_profiles",
+        "managed_connectors",
+    }
+    negative_states = {item["case_id"]: item for item in negative_cases}
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "marketplace_lifecycle_maturity_receipts_visible"
+        ),
+        "marketplace_suite_visible": marketplace_suite["scenario_count"]
+        == len(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES),
+        "governed_lifecycle_suite_visible": governed_lifecycle_suite["scenario_count"]
+        == len(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES),
+        "rollback_diagnostics_suite_visible": rollback_diagnostics_suite["scenario_count"]
+        == len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES),
+        "lifecycle_action_count_matches": summary["lifecycle_action_count"] >= 9,
+        "family_coverage_count_matches": summary["family_count"] >= len(required_families),
+        "negative_case_count_matches": summary["negative_case_count"] >= 5,
+        "staged_rollout_count_matches": summary["staged_rollout_count"] >= 2,
+        "permission_delta_receipts_visible": summary["permission_delta_receipt_count"] >= 2,
+        "risk_delta_receipts_visible": summary["risk_delta_receipt_count"] >= 9,
+        "rollback_receipts_visible": summary["rollback_receipt_count"] >= 8,
+        "quarantine_receipts_visible": summary["quarantine_receipt_count"] >= 2,
+        "failed_update_recovery_visible": summary["failed_update_recovery_visible"] is True,
+        "cross_family_coverage_visible": summary["cross_family_coverage_visible"] is True,
+        "package_count_substitution_blocked": summary["package_count_substitution_blocked"] is True,
+        "claim_boundary_visible": policy["claim_boundary"] == MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "all_lifecycle_receipts_have_deltas": all(
+            item.get("before") is not None
+            and item.get("after") is not None
+            and item.get("risk_delta")
+            and item.get("permission_delta")
+            for item in lifecycle
+        ),
+        "rollback_available_for_mutations": all(
+            item["rollback"]["available"] is True
+            for item in lifecycle
+            if item["action"] in {"install", "update", "downgrade", "disable", "rollback", "quarantine"}
+        ),
+        "failed_update_rolls_back": negative_states["failed-update"]["state"] == "rolled_back",
+        "permission_creep_quarantines": negative_states["permission-creep"]["state"] == "quarantined",
+        "negative_cases_fail_closed": all(item["fails_closed"] is True for item in negative_cases),
+        "family_names_visible": required_families <= {item["family"] for item in families},
+        "rollout_rollback_ready": all(item["rollback_ready"] is True for item in rollouts),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -14103,6 +14196,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     governed_capability_pack_hardening_suite = next(
         item for item in suites if item["name"] == GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME
+    )
+    marketplace_lifecycle_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME
+    )
+    governed_capability_lifecycle_v2_suite = next(
+        item for item in suites if item["name"] == GOVERNED_CAPABILITY_LIFECYCLE_V2_SUITE_NAME
+    )
+    capability_rollback_failure_diagnostics_suite = next(
+        item for item in suites if item["name"] == CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -14426,6 +14528,49 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "governed_capability_pack_hardening_gate_required": (
             GOVERNED_CAPABILITY_PACK_HARDENING_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_grade_capability_lifecycle_suite_present": (
+            "marketplace_lifecycle_install_receipt_behavior"
+            in marketplace_lifecycle_suite["scenario_names"]
+        ),
+        "marketplace_grade_capability_lifecycle_suite_scenario_count_matches": (
+            marketplace_lifecycle_suite["scenario_count"]
+            == len(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES)
+        ),
+        "marketplace_grade_capability_lifecycle_suite_axis_matches": (
+            marketplace_lifecycle_suite["benchmark_axis"] == "marketplace_grade_capability_lifecycle"
+        ),
+        "marketplace_grade_capability_lifecycle_gate_required": (
+            MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "governed_capability_lifecycle_v2_suite_present": (
+            "capability_lifecycle_permission_delta_behavior"
+            in governed_capability_lifecycle_v2_suite["scenario_names"]
+        ),
+        "governed_capability_lifecycle_v2_suite_scenario_count_matches": (
+            governed_capability_lifecycle_v2_suite["scenario_count"]
+            == len(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES)
+        ),
+        "governed_capability_lifecycle_v2_suite_axis_matches": (
+            governed_capability_lifecycle_v2_suite["benchmark_axis"] == "governed_capability_lifecycle_v2"
+        ),
+        "governed_capability_lifecycle_v2_gate_required": (
+            GOVERNED_CAPABILITY_LIFECYCLE_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "capability_rollback_failure_diagnostics_suite_present": (
+            "capability_failed_update_recovery_behavior"
+            in capability_rollback_failure_diagnostics_suite["scenario_names"]
+        ),
+        "capability_rollback_failure_diagnostics_suite_scenario_count_matches": (
+            capability_rollback_failure_diagnostics_suite["scenario_count"]
+            == len(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+        ),
+        "capability_rollback_failure_diagnostics_suite_axis_matches": (
+            capability_rollback_failure_diagnostics_suite["benchmark_axis"]
+            == "capability_rollback_failure_diagnostics"
+        ),
+        "capability_rollback_failure_diagnostics_gate_required": (
+            CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -16928,6 +17073,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
         category="extensions",
         description="Operator surfaces expose governed capability-pack hardening policy, receipts, taxonomy, and claim boundary.",
         runner=_eval_operator_governed_capability_pack_hardening_surface_behavior,
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CA exposes marketplace-grade install, update, downgrade, disable, rollback, review, "
+                "quarantine, diagnostics, and operator lifecycle receipts without claiming production marketplace security."
+            ),
+            runner=_eval_marketplace_lifecycle_maturity_behavior,
+        )
+        for name in MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CA records permission, risk, dependency, compatibility, staged-rollout, and cross-family "
+                "lifecycle governance receipts across capability families."
+            ),
+            runner=_eval_marketplace_lifecycle_maturity_behavior,
+        )
+        for name in GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch CA fails closed for rollback, failed update, permission creep, quarantine, and diagnostics "
+                "negative cases with operator-visible recovery receipts."
+            ),
+            runner=_eval_marketplace_lifecycle_maturity_behavior,
+        )
+        for name in CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES
     ),
     EvalScenario(
         name="guardian_feedback_loop",

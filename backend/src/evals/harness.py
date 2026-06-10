@@ -90,6 +90,17 @@ from src.extensions.production_reach_hardening import (
     build_production_reach_browser_voice_contract,
     build_production_reach_browser_voice_report,
 )
+from src.extensions.live_reach_media import (
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SUITE_NAME,
+    LIVE_REACH_MEDIA_BLOCKED_CLAIMS,
+    LIVE_REACH_MEDIA_CLAIM_BOUNDARY,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME,
+    build_live_reach_media_contract,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -12536,6 +12547,70 @@ async def _eval_production_reach_browser_voice_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_live_reach_media_behavior() -> dict[str, Any]:
+    contract = build_live_reach_media_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    channels = contract["channels"]
+    voice_media = contract["voice_media_providers"]
+    continuity = contract["cross_surface_recovery"]
+    blocked = set(policy["blocked_claims"])
+    suites = benchmark_suite_report()
+    live_reach_suite = next(
+        item for item in suites if item["name"] == LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SUITE_NAME
+    )
+    voice_media_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME
+    )
+    continuity_suite = next(
+        item for item in suites if item["name"] == CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME
+    )
+    return {
+        "operator_status_visible": summary["operator_status"] == "live_reach_media_receipts_visible",
+        "live_reach_suite_visible": live_reach_suite["scenario_count"]
+        == len(LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES),
+        "voice_media_provider_suite_visible": voice_media_suite["scenario_count"]
+        == len(PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES),
+        "cross_surface_continuity_suite_visible": continuity_suite["scenario_count"]
+        == len(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES),
+        "recorded_live_channel_evidence_visible": summary["recorded_live_channel_count"] >= 2,
+        "paired_channel_visible": summary["paired_channel_count"] >= 2,
+        "channel_provider_identity_visible": all(
+            bool(item.get("provider")) and bool(item.get("evidence_mode")) for item in channels
+        ),
+        "channel_consent_visible": all(
+            bool(item.get("operator_identity", {}).get("consent_receipt_id")) for item in channels
+        ),
+        "revocation_fail_closed_visible": summary["revocation_fail_closed_count"] >= 3,
+        "rate_limit_and_abuse_visible": summary["rate_limit_visible_count"] >= 3,
+        "degraded_recovery_fail_closed_visible": summary["degraded_recovery_visible_count"] >= 3,
+        "approval_handoff_visible": any(
+            item.get("approval_handoff", {}).get("status") == "pending_operator_approval"
+            for item in channels
+        ),
+        "voice_media_provider_identity_visible": all(
+            bool(item.get("provider")) and bool(item.get("evidence_mode")) for item in voice_media
+        ),
+        "voice_media_consent_visible": summary["voice_media_consent_count"] >= 3,
+        "voice_media_capture_boundary_visible": all(
+            item.get("capture_boundary", {}).get("provider_destination_visible") is True
+            and item.get("capture_boundary", {}).get("content_redacted") is True
+            for item in voice_media
+        ),
+        "voice_media_correction_deletion_visible": summary["voice_media_deletion_count"] >= 3,
+        "voice_media_provider_failure_fallback_visible": summary["voice_media_failure_fallback_count"] >= 3,
+        "continuity_thread_memory_visible": summary["continuity_thread_preserved_count"] >= 2,
+        "approval_survives_surface_shift_visible": summary["approval_survived_surface_shift_count"] >= 2,
+        "cross_surface_breadth_visible": any(
+            {"browser_cockpit", "desktop_notification", "mobile_push", "telegram"} <= set(item.get("surfaces", []))
+            for item in continuity
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == LIVE_REACH_MEDIA_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(LIVE_REACH_MEDIA_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/live-reach-media-proof" in policy["receipt_surfaces"],
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -14415,6 +14490,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     voice_media_runtime_suite = next(
         item for item in suites if item["name"] == GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME
     )
+    live_broad_reach_suite = next(
+        item for item in suites if item["name"] == LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SUITE_NAME
+    )
+    production_voice_media_provider_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME
+    )
+    cross_surface_continuity_recovery_suite = next(
+        item for item in suites if item["name"] == CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME
+    )
     learning_arbitration_suite = next(
         item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
     )
@@ -14722,6 +14806,46 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "guardian_safe_voice_media_runtime_gate_required": (
             GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "live_broad_reach_channel_attestation_suite_present": (
+            "live_reach_mobile_push_identity_consent_behavior" in live_broad_reach_suite["scenario_names"]
+        ),
+        "live_broad_reach_channel_attestation_suite_scenario_count_matches": (
+            live_broad_reach_suite["scenario_count"] == len(LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES)
+        ),
+        "live_broad_reach_channel_attestation_suite_axis_matches": (
+            live_broad_reach_suite["benchmark_axis"] == "live_broad_reach_channel_attestation"
+        ),
+        "live_broad_reach_channel_attestation_gate_required": (
+            LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_voice_media_provider_runtime_suite_present": (
+            "voice_media_stt_provider_consent_capture_behavior"
+            in production_voice_media_provider_suite["scenario_names"]
+        ),
+        "production_voice_media_provider_runtime_suite_scenario_count_matches": (
+            production_voice_media_provider_suite["scenario_count"]
+            == len(PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES)
+        ),
+        "production_voice_media_provider_runtime_suite_axis_matches": (
+            production_voice_media_provider_suite["benchmark_axis"] == "production_voice_media_provider_runtime"
+        ),
+        "production_voice_media_provider_runtime_gate_required": (
+            PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "cross_surface_continuity_recovery_suite_present": (
+            "cross_surface_browser_desktop_mobile_handoff_behavior"
+            in cross_surface_continuity_recovery_suite["scenario_names"]
+        ),
+        "cross_surface_continuity_recovery_suite_scenario_count_matches": (
+            cross_surface_continuity_recovery_suite["scenario_count"]
+            == len(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES)
+        ),
+        "cross_surface_continuity_recovery_suite_axis_matches": (
+            cross_surface_continuity_recovery_suite["benchmark_axis"] == "cross_surface_continuity_recovery"
+        ),
+        "cross_surface_continuity_recovery_gate_required": (
+            CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "guardian_learning_arbitration_suite_present": (
             "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
@@ -16757,6 +16881,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_reach_browser_voice_behavior,
         )
         for name in GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CE proves live or recorded-live broad reach channel attestation with provider identity, "
+                "consent, pairing, revocation, rate limits, abuse handling, approval handoff, and degraded recovery."
+            ),
+            runner=_eval_live_reach_media_behavior,
+        )
+        for name in LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CE proves production voice/media provider runtime receipts for consent, capture boundaries, "
+                "provider identity, correction, deletion, fallback, and privacy."
+            ),
+            runner=_eval_live_reach_media_behavior,
+        )
+        for name in PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch CE proves cross-surface continuity recovery across browser, desktop, mobile, messaging, "
+                "and voice surfaces while preserving thread, memory, approvals, audit, and fail-closed recovery."
+            ),
+            runner=_eval_live_reach_media_behavior,
+        )
+        for name in CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

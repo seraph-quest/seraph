@@ -55,6 +55,14 @@ from src.extensions.production_reach_hardening import (
     PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
     PRODUCTION_REACH_CHANNEL_HARDENING_SUITE_NAME,
 )
+from src.extensions.live_reach_media import (
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SUITE_NAME,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -298,6 +306,57 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Production STT/TTS, live mobile voice, and full multimodal runtime parity remain future work."
         ),
         scenario_names=GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SUITE_NAME,
+        label="Live broad reach channel attestation",
+        description=(
+            "Pins live or recorded-live mobile and messaging channel receipts for provider identity, consent, "
+            "pairing, revocation, rate limits, abuse handling, approval handoff, and degraded recovery."
+        ),
+        benchmark_axis="live_broad_reach_channel_attestation",
+        operator_summary=(
+            "Broad reach now has evidence-mode-aware channel receipts across mobile push and external messaging "
+            "without claiming OpenClaw-class reach or complete channel coverage."
+        ),
+        remaining_gap=(
+            "Production channel SLAs, complete channel inventory, and broad daily-life availability remain future work."
+        ),
+        scenario_names=LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SUITE_NAME,
+        label="Production voice/media provider runtime",
+        description=(
+            "Pins provider-named STT, TTS, and media-analysis runtime receipts for consent, capture boundaries, "
+            "correction, deletion, provider failures, privacy, and fail-closed fallback."
+        ),
+        benchmark_axis="production_voice_media_provider_runtime",
+        operator_summary=(
+            "Voice/media provider runtime proof now names provider, evidence mode, consent, capture boundary, "
+            "fallback, and deletion receipts without claiming voice or multimodal parity."
+        ),
+        remaining_gap=(
+            "Production STT/TTS quality, mobile voice execution, and full multimodal runtime parity remain future work."
+        ),
+        scenario_names=PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME,
+        label="Cross-surface continuity recovery",
+        description=(
+            "Pins recovery receipts showing thread identity, memory context, approvals, audit, routing, and "
+            "fail-closed degraded states across browser, desktop, mobile, messaging, and voice surfaces."
+        ),
+        benchmark_axis="cross_surface_continuity_recovery",
+        operator_summary=(
+            "Cross-surface reach can preserve thread, memory, approval, and recovery receipts across broader "
+            "surfaces while blocking unsafe mutations during degraded handoff."
+        ),
+        remaining_gap=(
+            "Live multi-surface operational scale and independent reliability evidence remain future work."
+        ),
+        scenario_names=CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

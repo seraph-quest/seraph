@@ -51,6 +51,14 @@ from src.extensions.live_marketplace_attestation import (
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME,
 )
+from src.extensions.browser_provider_usability import (
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SUITE_NAME,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -373,6 +381,58 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Live multi-surface operational scale and independent reliability evidence remain future work."
         ),
         scenario_names=CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,
+        label="Managed browser provider attestation",
+        description=(
+            "Pins local, managed-remote, and remote-CDP browser provider receipts for provider identity, "
+            "evidence mode, session partitioning, credential scope, download/upload boundaries, degradation, "
+            "and residual risk."
+        ),
+        benchmark_axis="managed_browser_provider_attestation",
+        operator_summary=(
+            "Browser provider proof now names provider identity and trust boundaries for local, managed, "
+            "and remote browser modes without claiming safe browser automation."
+        ),
+        remaining_gap=(
+            "Site-specific live automation reliability, provider SLAs, and full browser parity remain future proof work."
+        ),
+        scenario_names=MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_MULTI_OPERATOR_USABILITY_STUDY_SUITE_NAME,
+        label="Live multi-operator usability study",
+        description=(
+            "Pins recorded-live multi-operator cockpit tasks for inspect, recover, approval, handoff, audit, "
+            "keyboard flow, accessibility, ambiguity handling, action reversibility, and error-rate receipts."
+        ),
+        benchmark_axis="live_multi_operator_usability_study",
+        operator_summary=(
+            "Dense operator-control proof now includes multi-operator usability receipts while blocking "
+            "best-cockpit and solved-operator-control claims."
+        ),
+        remaining_gap=(
+            "Independent broad usability studies and best-in-category cockpit claims remain future proof work."
+        ),
+        scenario_names=LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
+        label="Browser computer-use recovery drill",
+        description=(
+            "Pins recovery drills for provider crash, page drift, credential partition changes, and "
+            "download/upload fail-closed behavior."
+        ),
+        benchmark_axis="browser_computer_use_recovery_drill",
+        operator_summary=(
+            "Browser/computer-use recovery now has failure-injection receipts that block external action "
+            "until operator-visible recovery gates pass."
+        ),
+        remaining_gap=(
+            "Safe autonomous browser/computer-use and full browser parity remain blocked by claim-ledger policy."
+        ),
+        scenario_names=BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

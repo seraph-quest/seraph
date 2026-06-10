@@ -81,6 +81,17 @@ from src.extensions.live_marketplace_attestation import (
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME,
     build_live_marketplace_attestation_contract,
 )
+from src.extensions.browser_provider_usability import (
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
+    BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
+    BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SUITE_NAME,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,
+    build_browser_provider_usability_contract,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
@@ -12633,6 +12644,74 @@ async def _eval_live_reach_media_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_browser_provider_usability_behavior() -> dict[str, Any]:
+    contract = build_browser_provider_usability_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    providers = contract["provider_attestation_receipts"]
+    usability = contract["multi_operator_usability_receipts"]
+    recovery = contract["recovery_drill_receipts"]
+    suites = benchmark_suite_report()
+    provider_suite = next(
+        item for item in suites if item["name"] == MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME
+    )
+    usability_suite = next(
+        item for item in suites if item["name"] == LIVE_MULTI_OPERATOR_USABILITY_STUDY_SUITE_NAME
+    )
+    recovery_suite = next(
+        item for item in suites if item["name"] == BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME
+    )
+    required_surfaces = {
+        "/api/operator/browser-provider-usability-proof",
+        "/api/operator/benchmark-proof",
+        "/api/operator/production-reach-browser-voice",
+        "/api/operator/production-operator-control-parity",
+        "/api/operator/computer-use-benchmark",
+    }
+    return {
+        "operator_status_visible": summary["operator_status"] == "browser_provider_usability_receipts_visible",
+        "managed_browser_provider_attestation_suite_visible": (
+            provider_suite["scenario_count"] == len(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+        ),
+        "live_multi_operator_usability_study_suite_visible": (
+            usability_suite["scenario_count"] == len(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+        ),
+        "browser_computer_use_recovery_drill_suite_visible": (
+            recovery_suite["scenario_count"] == len(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+        ),
+        "provider_identity_visible": all(item.get("provider_identity_visible") is True for item in providers),
+        "provider_modes_visible": {item["provider_mode"] for item in providers}
+        >= {"local", "managed_remote", "remote_cdp_existing_session"},
+        "recorded_live_provider_evidence_visible": summary["recorded_live_provider_count"] >= 2,
+        "session_partition_visible": summary["session_partition_count"] >= 2,
+        "credential_boundary_visible": summary["credential_boundary_count"] == len(providers),
+        "download_upload_boundary_visible": summary["download_upload_boundary_count"] == len(providers),
+        "degraded_or_blocked_provider_visible": summary["degraded_or_blocked_provider_count"] >= 2,
+        "remote_cdp_existing_session_blocked": any(
+            item["provider_mode"] == "remote_cdp_existing_session"
+            and item.get("provider_degradation", {}).get("state") == "blocked_until_partitioned"
+            for item in providers
+        ),
+        "multi_operator_evidence_visible": (
+            summary["multi_operator_task_count"] >= 3 and summary["max_operator_count"] >= 3
+        ),
+        "keyboard_paths_visible": summary["keyboard_path_count"] == len(usability),
+        "accessibility_receipts_visible": summary["accessibility_receipt_count"] == len(usability),
+        "reversible_actions_visible": summary["reversible_action_count"] == len(usability),
+        "ambiguity_and_error_metrics_visible": all(
+            "ambiguity_events" in item and "error_rate" in item for item in usability
+        ),
+        "recovery_drills_visible": summary["recovery_drill_count"] >= 4,
+        "fail_closed_recovery_visible": summary["fail_closed_recovery_count"] == len(recovery),
+        "external_actions_blocked_during_recovery": summary["external_action_block_count"] == len(recovery),
+        "claim_boundary_visible": policy["claim_boundary"] == BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS) <= blocked,
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "safe_browser_automation_not_claimed": "safe_browser_automation" in policy["not_claimed"],
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -14685,6 +14764,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     cross_surface_continuity_recovery_suite = next(
         item for item in suites if item["name"] == CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME
     )
+    managed_browser_provider_attestation_suite = next(
+        item for item in suites if item["name"] == MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME
+    )
+    live_multi_operator_usability_study_suite = next(
+        item for item in suites if item["name"] == LIVE_MULTI_OPERATOR_USABILITY_STUDY_SUITE_NAME
+    )
+    browser_computer_use_recovery_drill_suite = next(
+        item for item in suites if item["name"] == BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME
+    )
     learning_arbitration_suite = next(
         item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
     )
@@ -15050,6 +15138,48 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "cross_surface_continuity_recovery_gate_required": (
             CROSS_SURFACE_CONTINUITY_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "managed_browser_provider_attestation_suite_present": (
+            "managed_browser_provider_identity_evidence_behavior"
+            in managed_browser_provider_attestation_suite["scenario_names"]
+        ),
+        "managed_browser_provider_attestation_suite_scenario_count_matches": (
+            managed_browser_provider_attestation_suite["scenario_count"]
+            == len(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+        ),
+        "managed_browser_provider_attestation_suite_axis_matches": (
+            managed_browser_provider_attestation_suite["benchmark_axis"] == "managed_browser_provider_attestation"
+        ),
+        "managed_browser_provider_attestation_gate_required": (
+            MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "live_multi_operator_usability_study_suite_present": (
+            "multi_operator_inspect_recover_handoff_behavior"
+            in live_multi_operator_usability_study_suite["scenario_names"]
+        ),
+        "live_multi_operator_usability_study_suite_scenario_count_matches": (
+            live_multi_operator_usability_study_suite["scenario_count"]
+            == len(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+        ),
+        "live_multi_operator_usability_study_suite_axis_matches": (
+            live_multi_operator_usability_study_suite["benchmark_axis"] == "live_multi_operator_usability_study"
+        ),
+        "live_multi_operator_usability_study_gate_required": (
+            LIVE_MULTI_OPERATOR_USABILITY_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_computer_use_recovery_drill_suite_present": (
+            "browser_recovery_provider_crash_behavior"
+            in browser_computer_use_recovery_drill_suite["scenario_names"]
+        ),
+        "browser_computer_use_recovery_drill_suite_scenario_count_matches": (
+            browser_computer_use_recovery_drill_suite["scenario_count"]
+            == len(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+        ),
+        "browser_computer_use_recovery_drill_suite_axis_matches": (
+            browser_computer_use_recovery_drill_suite["benchmark_axis"] == "browser_computer_use_recovery_drill"
+        ),
+        "browser_computer_use_recovery_drill_gate_required": (
+            BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "guardian_learning_arbitration_suite_present": (
             "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
@@ -17209,6 +17339,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_live_reach_media_behavior,
         )
         for name in CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch CH exposes managed browser provider identity, evidence mode, session partition, "
+                "credential, download/upload, degradation, and residual-risk receipts."
+            ),
+            runner=_eval_browser_provider_usability_behavior,
+        )
+        for name in MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch CH records multi-operator usability evidence for inspect, recovery, approval, handoff, "
+                "audit, keyboard, accessibility, ambiguity, reversibility, and error-rate paths."
+            ),
+            runner=_eval_browser_provider_usability_behavior,
+        )
+        for name in LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch CH drills browser/computer-use recovery for provider crash, page drift, credential "
+                "partition changes, and download/upload fail-closed behavior."
+            ),
+            runner=_eval_browser_provider_usability_behavior,
+        )
+        for name in BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

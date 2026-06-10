@@ -26,6 +26,13 @@ from src.extensions.live_marketplace_attestation import (
     PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
 )
+from src.extensions.browser_provider_usability import (
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
+    BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
+    BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -2489,6 +2496,90 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_browser_provider_usability_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "browser_provider_usability_receipts_visible",
+                    "benchmark_posture": "browser_provider_usability_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+                        + len(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+                        + len(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+                    ),
+                    "provider_attestation_count": 3,
+                    "recorded_live_provider_count": 2,
+                    "session_partition_count": 2,
+                    "credential_boundary_count": 3,
+                    "download_upload_boundary_count": 3,
+                    "degraded_or_blocked_provider_count": 2,
+                    "multi_operator_task_count": 3,
+                    "max_operator_count": 3,
+                    "keyboard_path_count": 3,
+                    "accessibility_receipt_count": 3,
+                    "reversible_action_count": 3,
+                    "recovery_drill_count": 4,
+                    "fail_closed_recovery_count": 4,
+                    "external_action_block_count": 4,
+                    "claim_boundary": BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "managed_browser_provider_attestation": list(
+                        MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES
+                    ),
+                    "live_multi_operator_usability_study": list(
+                        LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES
+                    ),
+                    "browser_computer_use_recovery_drill": list(
+                        BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "browser_provider_usability_receipts_visible",
+                        "provider_attestation_count": 3,
+                        "multi_operator_task_count": 3,
+                        "recovery_drill_count": 4,
+                    },
+                    "provider_attestation_receipts": [
+                        {
+                            "provider_id": "openclaw-remote-cdp-existing-session",
+                            "provider_mode": "remote_cdp_existing_session",
+                            "provider_degradation": {"state": "blocked_until_partitioned"},
+                        }
+                    ],
+                    "multi_operator_usability_receipts": [
+                        {
+                            "task_id": "ch-usability-inspect-recover-handoff",
+                            "operator_count": 3,
+                            "keyboard_path_complete": True,
+                            "error_rate": 0.0,
+                        }
+                    ],
+                    "recovery_drill_receipts": [
+                        {
+                            "drill_id": "ch-recovery-provider-crash",
+                            "fails_closed": True,
+                            "external_action_allowed": False,
+                        }
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY,
+                    "blocked_claims": list(BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/browser-provider-usability-proof",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 15, "passed": 15, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_live_external_orchestration_report",
         AsyncMock(
             return_value={
@@ -2619,7 +2710,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 57
+    assert payload["summary"]["suite_count"] == 60
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2751,6 +2842,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["live_marketplace_attestation_claim_boundary"] == (
         LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["browser_provider_usability_posture"]
+        == "browser_provider_usability_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["browser_provider_usability_claim_boundary"] == (
+        BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY
     )
     assert (
         payload["summary"]["production_operator_control_parity_posture"]
@@ -3112,6 +3210,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         item for item in payload["suites"] if item["name"] == "publisher_review_and_package_trust"
     )
     assert "publisher_review_staleness_behavior" in publisher_suite["scenario_names"]
+    managed_browser_suite = next(
+        item for item in payload["suites"] if item["name"] == "managed_browser_provider_attestation"
+    )
+    assert "managed_browser_provider_identity_evidence_behavior" in managed_browser_suite["scenario_names"]
+    assert managed_browser_suite["scenario_count"] == len(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+    multi_operator_suite = next(
+        item for item in payload["suites"] if item["name"] == "live_multi_operator_usability_study"
+    )
+    assert "multi_operator_inspect_recover_handoff_behavior" in multi_operator_suite["scenario_names"]
+    assert multi_operator_suite["scenario_count"] == len(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+    recovery_drill_suite = next(
+        item for item in payload["suites"] if item["name"] == "browser_computer_use_recovery_drill"
+    )
+    assert "browser_recovery_provider_crash_behavior" in recovery_drill_suite["scenario_names"]
+    assert recovery_drill_suite["scenario_count"] == len(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
     assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
@@ -3176,6 +3289,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
     )
     assert "production_secure_marketplace" in payload["live_marketplace_attestation"]["policy"]["blocked_claims"]
+    assert payload["browser_provider_usability"]["summary"]["operator_status"] == (
+        "browser_provider_usability_receipts_visible"
+    )
+    assert payload["browser_provider_usability"]["summary"]["provider_attestation_count"] == 3
+    assert payload["browser_provider_usability"]["summary"]["multi_operator_task_count"] == 3
+    assert payload["browser_provider_usability"]["summary"]["recovery_drill_count"] == 4
+    assert payload["browser_provider_usability"]["summary"]["fail_closed_recovery_count"] == 4
+    assert payload["browser_provider_usability"]["policy"]["claim_boundary"] == (
+        BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY
+    )
+    assert "safe_browser_automation" in payload["browser_provider_usability"]["policy"]["blocked_claims"]
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -3417,6 +3541,48 @@ async def test_operator_live_marketplace_attestation_surface_reports_batch_cg_re
         if item["operation_id"] == "cg-failed-update-recovery"
     )
     assert failed_update["state"] == "rolled_back"
+
+
+@pytest.mark.asyncio
+async def test_operator_browser_provider_usability_surface_reports_batch_ch_receipts(client):
+    resp = await client.get("/api/operator/browser-provider-usability-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "browser_provider_usability_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "browser_provider_usability_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+        + len(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+        + len(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["provider_attestation_count"] == 3
+    assert payload["summary"]["recorded_live_provider_count"] == 2
+    assert payload["summary"]["credential_boundary_count"] == 3
+    assert payload["summary"]["multi_operator_task_count"] == 3
+    assert payload["summary"]["max_operator_count"] == 3
+    assert payload["summary"]["keyboard_path_count"] == 3
+    assert payload["summary"]["recovery_drill_count"] == 4
+    assert payload["summary"]["fail_closed_recovery_count"] == 4
+    assert payload["policy"]["claim_boundary"] == BROWSER_PROVIDER_USABILITY_CLAIM_BOUNDARY
+    assert set(BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/browser-provider-usability-proof" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["managed_browser_provider_attestation"] == list(
+        MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["live_multi_operator_usability_study"] == list(
+        LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_computer_use_recovery_drill"] == list(
+        BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES
+    )
+    remote = next(
+        item for item in payload["contract"]["provider_attestation_receipts"]
+        if item["provider_id"] == "openclaw-remote-cdp-existing-session"
+    )
+    assert remote["provider_degradation"]["state"] == "blocked_until_partitioned"
+    assert all(item["fails_closed"] for item in payload["contract"]["recovery_drill_receipts"])
 
 
 @pytest.mark.asyncio

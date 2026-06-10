@@ -1,0 +1,8 @@
+{
+  "receipt_id": "cn-debug-branch-compare",
+  "receipt_class": "debugging_recovery",
+  "reviewer_attestation": "operator_recovery_reviewer_not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "recorded_live_branch_family_fixture",
+  "result": "branch_outputs_producers_trust_boundaries_and_reuse_decision_visible"
+}

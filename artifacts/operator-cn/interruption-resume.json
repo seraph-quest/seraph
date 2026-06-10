@@ -1,0 +1,8 @@
+{
+  "receipt_id": "cn-debug-interruption-resume",
+  "receipt_class": "debugging_recovery",
+  "reviewer_attestation": "operator_recovery_reviewer_not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "recorded_live_resume_fixture",
+  "result": "checkpoint_approval_memory_risk_and_next_action_context_preserved"
+}

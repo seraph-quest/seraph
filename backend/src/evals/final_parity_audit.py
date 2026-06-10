@@ -81,6 +81,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
             "/api/operator/final-parity-readiness-report",
             "/api/operator/benchmark-proof",
             "/api/operator/production-operator-control-parity",
+            "/api/operator/dense-operator-recovery-control",
             "/api/operator/production-sla-orchestration",
             "/api/operator/production-reach-voice-mobile",
             "/api/operator/independent-learning-memory-parity",
@@ -296,6 +297,19 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "project_truth_source": "GitHub issue #507 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
+    receipts.append({
+        "batch": "CN",
+        "issue": 508,
+        "primary_suite": "long_work_debugging_recovery",
+        "merged_pr": None,
+        "status": "active_branch_receipts_visible_until_pr_merge",
+        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
+        "project_status": "owned_by_github_project_until_pr_merge",
+        "project_pr": "owned_by_linked_pull_request_until_pr_merge",
+        "code_review": "owned_by_linked_pull_request_until_pr_merge",
+        "project_truth_source": "GitHub issue #508 and its Project item are authoritative for live PR/review fields",
+        "operator_visible": True,
+    })
     return receipts
 
 
@@ -437,6 +451,24 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "status": "active_branch_receipts_visible_until_batch_cm_pr_merge",
             "operator_surface": "/api/operator/independent-learning-memory-parity",
         },
+        {
+            "claim_id": "SCL-030",
+            "area": "dense_long_work_operator_debugging_and_recovery_control",
+            "issue_links": [475, 508],
+            "allowed_wording": (
+                "bounded dense long-work debugging, recovery-control, and independent usability/accessibility "
+                "receipts are visible after the Batch CN PR lands"
+            ),
+            "blocked_claims": [
+                "best_cockpit",
+                "world_class_cockpit",
+                "solved_operator_control",
+                "production_ready_product",
+                "full_production_parity",
+            ],
+            "status": "active_branch_receipts_visible_until_batch_cn_pr_merge",
+            "operator_surface": "/api/operator/dense-operator-recovery-control",
+        },
     ]
 
 
@@ -536,6 +568,27 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
             "gap": "production marketplace security and independent package-security audit remain unproven",
             "blocking_claims": ["production_secure_marketplace", "reference_systems_exceeded"],
             "required_stronger_evidence": "independent package review, live hostile ecosystem tests, and package-network incident operations",
+        },
+        {
+            "gap_id": "ci-gap-dense-operator-control",
+            "area": "operator_cockpit",
+            "gap": (
+                "Batch CN narrows the dense operator-control gap with long-work debugging, control-density, "
+                "independent usability/accessibility, keyboard-only, cross-batch residual-risk, and recovery "
+                "correctness receipts; best/world-class cockpit and solved operator-control wording remain blocked"
+            ),
+            "blocking_claims": ["best_cockpit", "solved_operator_control"],
+            "current_batch_evidence": [
+                "long_work_debugging_recovery",
+                "operator_control_density",
+                "independent_operator_usability_accessibility",
+                "/api/operator/dense-operator-recovery-control",
+                "GitHub issue #508",
+            ],
+            "required_stronger_evidence": (
+                "final claim-ledger reconciliation and broader independent usability population evidence before "
+                "best-cockpit or solved-control wording"
+            ),
         },
         {
             "gap_id": "ci-gap-browser-autonomy",

@@ -1,0 +1,8 @@
+{
+  "receipt_id": "cn-debug-cross-batch-risk",
+  "receipt_class": "debugging_recovery",
+  "reviewer_attestation": "operator_recovery_reviewer_not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "deterministic_project_and_operator_surface_fixture",
+  "result": "active_residual_risks_visible_across_completion_train_batches"
+}

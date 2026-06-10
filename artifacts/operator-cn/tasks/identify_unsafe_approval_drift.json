@@ -1,0 +1,8 @@
+{
+  "task_id": "cn-task-identify_unsafe_approval_drift",
+  "receipt_class": "operator_task_matrix",
+  "reviewer_attestation": "operator_usability_reviewer_not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "operator_task_matrix_fixture",
+  "result": "identify_unsafe_approval_drift_completed_with_expected_controls"
+}

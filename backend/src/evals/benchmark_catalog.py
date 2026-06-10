@@ -20,6 +20,14 @@ from src.cockpit.production_operator_control import (
     PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
     PRODUCTION_PARITY_TRAIN_SUITE_NAME,
 )
+from src.cockpit.dense_operator_recovery import (
+    INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES,
+    INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME,
+    LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES,
+    LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,
+    OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
+    OPERATOR_CONTROL_DENSITY_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -1398,6 +1406,57 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is recorded-live trust evidence, not a solved third-party package-security network."
         ),
         scenario_names=PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,
+        label="Long-work debugging recovery",
+        description=(
+            "Pins step lineage, branch families, artifact comparison, interruption resume, delegated ownership, "
+            "cross-batch residual-risk inspection, recovery decisions, and raw operator receipts for dense long work."
+        ),
+        benchmark_axis="long_work_debugging_recovery",
+        operator_summary=(
+            "Dense long-work debugging is judged by how quickly an operator can answer what failed, which branch "
+            "or artifact is trustworthy, and which recovery path preserves approval and audit context."
+        ),
+        remaining_gap=(
+            "This is bounded debugging/recovery evidence, not a best-cockpit, solved-control, or production-ready claim."
+        ),
+        scenario_names=LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_DENSITY_SUITE_NAME,
+        label="Operator control density",
+        description=(
+            "Pins pause, resume, retry, repair, branch, compare, revoke, quarantine, handoff, rollback, and audit "
+            "controls with authority boundaries and receipts after action."
+        ),
+        benchmark_axis="operator_control_density",
+        operator_summary=(
+            "Control density means every high-risk recovery action names its target, review boundary, correctness "
+            "check, and audit receipt before an operator acts."
+        ),
+        remaining_gap=(
+            "This does not prove solved operator control or unrestricted automatic recovery."
+        ),
+        scenario_names=OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SUITE_NAME,
+        label="Independent operator usability accessibility",
+        description=(
+            "Pins independent operator-study, keyboard-only, accessibility-blocker, error-detectability, recovery "
+            "success, and multi-operator handoff receipts for long-work recovery."
+        ),
+        benchmark_axis="independent_operator_usability_accessibility",
+        operator_summary=(
+            "Usability evidence is task-relative and receipt-backed; broad population, certification, fastest-cockpit, "
+            "or world-class claims remain blocked."
+        ),
+        remaining_gap=(
+            "Broad independent usability evidence and best/world-class cockpit claims remain outside this proof gate."
+        ),
+        scenario_names=INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,

@@ -77,6 +77,13 @@ from src.extensions.safe_browser_computer_use import (
     SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY,
     SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
 )
+from src.extensions.browser_computer_use_parity_depth import (
+    BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_PARITY_DEPTH_BLOCKED_CLAIMS,
+    BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY,
+    BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
+    SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -3191,6 +3198,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["browser_computer_use_parity_depth_posture"]
+        == "browser_computer_use_parity_depth_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["browser_computer_use_parity_depth_claim_boundary"] == (
+        BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["production_operator_control_parity_posture"]
         == "production_operator_control_parity_ci_gated_operator_visible"
     )
@@ -3903,6 +3917,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         SAFE_BROWSER_COMPUTER_USE_CLAIM_BOUNDARY
     )
     assert "full_browser_parity" in payload["safe_browser_computer_use"]["policy"]["blocked_claims"]
+    assert payload["browser_computer_use_parity_depth"]["summary"]["operator_status"] == (
+        "browser_computer_use_parity_depth_receipts_visible"
+    )
+    assert payload["browser_computer_use_parity_depth"]["summary"]["task_sample_total"] >= 150
+    assert payload["browser_computer_use_parity_depth"]["summary"]["partition_boundary_count"] == 8
+    assert payload["browser_computer_use_parity_depth"]["summary"]["site_drift_recovery_count"] == 8
+    assert payload["browser_computer_use_parity_depth"]["summary"]["secret_or_cookie_exposure_count"] == 0
+    assert payload["browser_computer_use_parity_depth"]["policy"]["claim_boundary"] == (
+        BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY
+    )
+    assert "full_browser_parity" in payload["browser_computer_use_parity_depth"]["policy"]["blocked_claims"]
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -4350,6 +4375,47 @@ async def test_operator_safe_autonomous_browser_computer_use_surface_reports_bat
         item["external_mutation_allowed_without_approval"] is False
         for item in payload["contract"]["dangerous_action_taxonomy"]
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_browser_computer_use_parity_depth_surface_reports_batch_cy_receipts(client):
+    resp = await client.get("/api/operator/browser-computer-use-parity-depth")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "browser_computer_use_parity_depth_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == (
+        "browser_computer_use_parity_depth_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["scenario_count"] == (
+        len(BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES)
+        + len(BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES)
+        + len(SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["task_sample_total"] >= 150
+    assert payload["summary"]["provider_mode_count"] == 3
+    assert payload["summary"]["partition_boundary_count"] == 8
+    assert payload["summary"]["secret_or_cookie_exposure_count"] == 0
+    assert payload["summary"]["unapproved_external_mutation_count"] == 0
+    assert payload["summary"]["site_drift_recovery_count"] == 8
+    assert payload["summary"]["site_drift_fail_closed_count"] == 8
+    assert payload["summary"]["prior_safe_browser_secret_scan_status"] == "passed"
+    assert payload["policy"]["claim_boundary"] == BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY
+    assert set(BROWSER_COMPUTER_USE_PARITY_DEPTH_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/browser-computer-use-parity-depth" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["browser_task_breadth_matrix"] == list(
+        BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_auth_partition_operations"] == list(
+        BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["site_drift_recovery_slo"] == list(SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES)
+    assert all(
+        item["external_mutation_allowed_without_approval"] is False
+        for item in payload["contract"]["auth_partition_operations"]
+    )
+    assert all(item["external_action_allowed"] is False for item in payload["contract"]["site_drift_recovery_slo"])
 
 
 @pytest.mark.asyncio

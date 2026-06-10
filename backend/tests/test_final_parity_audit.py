@@ -30,7 +30,7 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     summary = contract["summary"]
     batches = contract["batch_reconciliation_receipts"]
 
-    assert summary["completed_batch_count"] == 17
+    assert summary["completed_batch_count"] == 18
     assert summary["all_completed_batches_done_merged_passed"] is True
     assert summary["final_batch_status"] == "self_referential_final_audit_batch"
     assert summary["full_parity_claim_allowed"] is False
@@ -51,8 +51,15 @@ def test_final_parity_audit_contract_reconciles_batches_and_blocks_completion_cl
     cn_batch = next(item for item in batches if item["batch"] == "CN")
     assert cn_batch["issue"] == 508
     assert cn_batch["primary_suite"] == "long_work_debugging_recovery"
-    assert cn_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
-    assert cn_batch["project_status"] == "owned_by_github_project_until_pr_merge"
+    assert cn_batch["status"] == "done"
+    assert cn_batch["merged_pr"] == 518
+    assert cn_batch["project_status"] == "Done"
+    assert cn_batch["project_pr"] == "Merged"
+    co_batch = next(item for item in batches if item["batch"] == "CO")
+    assert co_batch["issue"] == 510
+    assert co_batch["primary_suite"] == "independent_package_security_review"
+    assert co_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert co_batch["project_status"] == "owned_by_github_project_until_pr_merge"
     assert next(item for item in batches if item["batch"] == "CI")["issue"] == 497
 
 
@@ -73,6 +80,9 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     learning_gap = next(
         item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-human-outcomes-independent"
     )
+    marketplace_gap = next(
+        item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-marketplace-security"
+    )
     operator_gap = next(
         item for item in contract["residual_gap_receipts"] if item["gap_id"] == "ci-gap-dense-operator-control"
     )
@@ -83,7 +93,10 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert "/api/operator/production-sla-orchestration" in policy["receipt_surfaces"]
     assert "/api/operator/production-reach-voice-mobile" in policy["receipt_surfaces"]
     assert "/api/operator/dense-operator-recovery-control" in policy["receipt_surfaces"]
-    assert {509, 508, 507, 506, 505, 497, 496, 475} <= {issue for item in claims for issue in item["issue_links"]}
+    assert "/api/operator/production-marketplace-security" in policy["receipt_surfaces"]
+    assert {510, 509, 508, 507, 506, 505, 497, 496, 475} <= {
+        issue for item in claims for issue in item["issue_links"]
+    }
     assert "production_sla_orchestration" in orchestration_gap["current_batch_evidence"]
     assert "exactly_once_or_crash_proof_orchestration" in orchestration_gap["blocking_claims"]
     assert "independent_secure_host_review" in security_gap["current_batch_evidence"]
@@ -96,6 +109,10 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert "task_scoped_causal_learning" in learning_gap["current_batch_evidence"]
     assert "memory_provider_parity_matrix" in learning_gap["current_batch_evidence"]
     assert "/api/operator/independent-learning-memory-parity" in learning_gap["current_batch_evidence"]
+    assert "independent_package_security_review" in marketplace_gap["current_batch_evidence"]
+    assert "package_network_incident_operations" in marketplace_gap["current_batch_evidence"]
+    assert "/api/operator/production-marketplace-security" in marketplace_gap["current_batch_evidence"]
+    assert "production_secure_marketplace" in marketplace_gap["blocking_claims"]
     scl_029 = next(item for item in claims if item["claim_id"] == "SCL-029")
     assert scl_029["status"] == "backed_for_bounded_receipts_after_batch_cm_pr_merge"
     assert "full_memory_provider_parity" in scl_029["blocked_claims"]
@@ -104,8 +121,12 @@ def test_final_parity_audit_contract_reconciles_claim_ledger_and_critic():
     assert "independent_operator_usability_accessibility" in operator_gap["current_batch_evidence"]
     assert "/api/operator/dense-operator-recovery-control" in operator_gap["current_batch_evidence"]
     scl_030 = next(item for item in claims if item["claim_id"] == "SCL-030")
-    assert scl_030["status"] == "active_branch_receipts_visible_until_batch_cn_pr_merge"
+    assert scl_030["status"] == "backed_for_bounded_receipts_after_batch_cn_pr_merge"
     assert "solved_operator_control" in scl_030["blocked_claims"]
+    scl_031 = next(item for item in claims if item["claim_id"] == "SCL-031")
+    assert scl_031["status"] == "backed_for_bounded_receipts_after_batch_co_pr_merge"
+    assert "/api/operator/production-marketplace-security" == scl_031["operator_surface"]
+    assert "third_party_package_security_solved" in scl_031["blocked_claims"]
     assert all(item["disposition"] == "accepted" for item in critic)
 
 

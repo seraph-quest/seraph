@@ -37,6 +37,15 @@ from src.extensions.live_marketplace_attestation import (
     PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
 )
+from src.extensions.production_marketplace_security import (
+    HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES,
+    INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES,
+    PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES,
+    PRODUCTION_MARKETPLACE_SECURITY_BLOCKED_CLAIMS,
+    PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY,
+    PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
@@ -2835,7 +2844,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["summary"]["suite_count"] == 78
+    assert payload["summary"]["suite_count"] == 83
     assert payload["summary"]["benchmark_posture"] == "deterministic_proof_backed"
     assert (
         payload["summary"]["production_parity_readiness_posture"]
@@ -2990,6 +2999,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["live_marketplace_attestation_claim_boundary"] == (
         LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["production_marketplace_security_posture"]
+        == "production_marketplace_security_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["production_marketplace_security_claim_boundary"]
+        == PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY
     )
     assert (
         payload["summary"]["browser_provider_usability_posture"]
@@ -3415,6 +3432,29 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         item for item in payload["suites"] if item["name"] == "publisher_review_and_package_trust"
     )
     assert "publisher_review_staleness_behavior" in publisher_suite["scenario_names"]
+    package_review_suite = next(
+        item for item in payload["suites"] if item["name"] == "independent_package_security_review"
+    )
+    assert "independent_package_review_scope_behavior" in package_review_suite["scenario_names"]
+    assert package_review_suite["scenario_count"] == len(INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES)
+    hostile_suite = next(item for item in payload["suites"] if item["name"] == "hostile_ecosystem_package_drills")
+    assert "hostile_dependency_confusion_fail_closed_behavior" in hostile_suite["scenario_names"]
+    assert hostile_suite["scenario_count"] == len(HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES)
+    package_network_suite = next(
+        item for item in payload["suites"] if item["name"] == "package_network_incident_operations"
+    )
+    assert "package_network_private_ssrf_denial_behavior" in package_network_suite["scenario_names"]
+    assert package_network_suite["scenario_count"] == len(PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES)
+    publisher_vulnerability_suite = next(
+        item for item in payload["suites"] if item["name"] == "publisher_trust_vulnerability_handling"
+    )
+    assert "vulnerability_database_freshness_behavior" in publisher_vulnerability_suite["scenario_names"]
+    assert publisher_vulnerability_suite["scenario_count"] == len(PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES)
+    rollback_quarantine_suite = next(
+        item for item in payload["suites"] if item["name"] == "marketplace_rollback_quarantine_diagnostics"
+    )
+    assert "marketplace_update_failed_rollback_behavior" in rollback_quarantine_suite["scenario_names"]
+    assert rollback_quarantine_suite["scenario_count"] == len(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES)
     managed_browser_suite = next(
         item for item in payload["suites"] if item["name"] == "managed_browser_provider_attestation"
     )
@@ -3466,7 +3506,7 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "operator_final_no_false_completion_behavior" in final_operator_suite["scenario_names"]
     assert final_operator_suite["scenario_count"] == len(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
     assert payload["final_parity_readiness"]["summary"]["operator_status"] == "final_parity_readiness_report_visible"
-    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 17
+    assert payload["final_parity_readiness"]["summary"]["completed_batch_count"] == 18
     assert "fully_at_parity" in payload["final_parity_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -3523,6 +3563,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         LIVE_MARKETPLACE_ATTESTATION_CLAIM_BOUNDARY
     )
     assert "production_secure_marketplace" in payload["live_marketplace_attestation"]["policy"]["blocked_claims"]
+    assert payload["production_marketplace_security"]["summary"]["operator_status"] == (
+        "production_marketplace_security_receipts_visible"
+    )
+    assert payload["production_marketplace_security"]["summary"]["hostile_drill_count"] == 8
+    assert payload["production_marketplace_security"]["summary"]["package_network_incident_count"] == 6
+    assert payload["production_marketplace_security"]["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["production_marketplace_security"]["policy"]["claim_boundary"] == (
+        PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY
+    )
+    assert "third_party_package_security_solved" in payload["production_marketplace_security"]["policy"]["blocked_claims"]
     assert payload["browser_provider_usability"]["summary"]["operator_status"] == (
         "browser_provider_usability_receipts_visible"
     )
@@ -3801,6 +3851,46 @@ async def test_operator_live_marketplace_attestation_surface_reports_batch_cg_re
 
 
 @pytest.mark.asyncio
+async def test_operator_production_marketplace_security_surface_reports_batch_co_receipts(client):
+    resp = await client.get("/api/operator/production-marketplace-security")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "production_marketplace_security_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "production_marketplace_security_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES)
+        + len(HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES)
+        + len(PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES)
+        + len(PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES)
+        + len(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["independent_package_review_count"] == 4
+    assert payload["summary"]["hostile_drill_count"] == 8
+    assert payload["summary"]["package_network_incident_count"] == 6
+    assert payload["summary"]["publisher_vulnerability_review_count"] == 5
+    assert payload["summary"]["rollback_quarantine_diagnostic_count"] == 7
+    assert payload["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_MARKETPLACE_SECURITY_CLAIM_BOUNDARY
+    assert set(PRODUCTION_MARKETPLACE_SECURITY_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/production-marketplace-security" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["independent_package_security_review"] == list(
+        INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES
+    )
+    network_incident = next(
+        item for item in payload["contract"]["package_network_incidents"]
+        if item["package_network_incident_class"] == "secret_ref_injection"
+    )
+    assert network_incident["secret_ref_policy"] == "destination_host_mismatch_denied"
+    stale_vulnerability = next(
+        item for item in payload["contract"]["publisher_vulnerability_reviews"]
+        if item["receipt_id"] == "co-vulnerability-stale-db-negative"
+    )
+    assert stale_vulnerability["operator_action"] == "deny_until_rescan"
+
+
+@pytest.mark.asyncio
 async def test_operator_browser_provider_usability_surface_reports_batch_ch_receipts(client):
     resp = await client.get("/api/operator/browser-provider-usability-proof")
 
@@ -3887,7 +3977,7 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert payload["summary"]["source_receipt_count"] == 7
     assert payload["summary"]["competitor_count"] == 3
-    assert payload["summary"]["completed_batch_count"] == 17
+    assert payload["summary"]["completed_batch_count"] == 18
     cl_batch = next(
         item for item in payload["contract"]["batch_reconciliation_receipts"]
         if item["batch"] == "CL"
@@ -3900,6 +3990,18 @@ async def test_operator_final_parity_readiness_surface_reports_batch_ci_receipts
     )
     assert cm_batch["status"] == "done"
     assert cm_batch["merged_pr"] == 517
+    cn_batch = next(
+        item for item in payload["contract"]["batch_reconciliation_receipts"]
+        if item["batch"] == "CN"
+    )
+    assert cn_batch["status"] == "done"
+    assert cn_batch["merged_pr"] == 518
+    co_batch = next(
+        item for item in payload["contract"]["batch_reconciliation_receipts"]
+        if item["batch"] == "CO"
+    )
+    assert co_batch["status"] == "active_branch_receipts_visible_until_pr_merge"
+    assert co_batch["issue"] == 510
     assert payload["summary"]["residual_gap_count"] == 7
     assert payload["summary"]["full_parity_claim_allowed"] is False
     assert payload["summary"]["reference_systems_exceeded_claim_allowed"] is False

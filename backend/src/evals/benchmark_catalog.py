@@ -67,6 +67,18 @@ from src.extensions.live_marketplace_attestation import (
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SUITE_NAME,
 )
+from src.extensions.production_marketplace_security import (
+    HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES,
+    HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SUITE_NAME,
+    INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES,
+    INDEPENDENT_PACKAGE_SECURITY_REVIEW_SUITE_NAME,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SUITE_NAME,
+    PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES,
+    PACKAGE_NETWORK_INCIDENT_OPERATIONS_SUITE_NAME,
+    PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_HANDLING_SUITE_NAME,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -1406,6 +1418,90 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is recorded-live trust evidence, not a solved third-party package-security network."
         ),
         scenario_names=PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=INDEPENDENT_PACKAGE_SECURITY_REVIEW_SUITE_NAME,
+        label="Independent package security review",
+        description=(
+            "Pins independent reviewer metadata, package digest, signed digest, key state, publisher identity, "
+            "SBOM/dependency graph digest, vulnerability-source freshness, raw receipt locations, and residual exposure."
+        ),
+        benchmark_axis="independent_package_security_review",
+        operator_summary=(
+            "Package promotion is judged by independent review receipts and raw evidence paths, not by recorded-live "
+            "attestation labels or package count."
+        ),
+        remaining_gap=(
+            "This is bounded package-review proof, not production-secure marketplace or solved third-party package security."
+        ),
+        scenario_names=INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SUITE_NAME,
+        label="Hostile ecosystem package drills",
+        description=(
+            "Pins unsigned artifact, digest mismatch, dependency confusion, permission creep, compromised key, "
+            "unsafe lifecycle hook, suspicious transitive dependency, and compatibility migration fail-closed receipts."
+        ),
+        benchmark_axis="hostile_ecosystem_package_drills",
+        operator_summary=(
+            "Hostile package fixtures must block, quarantine, or roll back before runtime contribution, with operator "
+            "notification and raw drill receipts."
+        ),
+        remaining_gap=(
+            "This is drill evidence, not proof that all third-party package security risks are solved."
+        ),
+        scenario_names=HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PACKAGE_NETWORK_INCIDENT_OPERATIONS_SUITE_NAME,
+        label="Package-network incident operations",
+        description=(
+            "Pins package-controlled URL drift, private-network/SSRF denial, redirect and DNS private-resolution denial, "
+            "secret-ref injection denial, workspace escape denial, rollback, quarantine, and incident notification."
+        ),
+        benchmark_axis="package_network_incident_operations",
+        operator_summary=(
+            "Package-network incidents are judged by endpoint decisions, redirect/address evidence, secret and workspace "
+            "boundary decisions, rollback, quarantine, and operator receipts."
+        ),
+        remaining_gap=(
+            "This is package-network drill evidence, not broad production network security certification."
+        ),
+        scenario_names=PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PUBLISHER_TRUST_VULNERABILITY_HANDLING_SUITE_NAME,
+        label="Publisher trust and vulnerability handling",
+        description=(
+            "Pins publisher identity, key rotation/freshness, revocation and stale review handling, vulnerability source, "
+            "database freshness, severity policy, remediation, waiver, notification, and residual exposure receipts."
+        ),
+        benchmark_axis="publisher_trust_vulnerability_handling",
+        operator_summary=(
+            "Publisher trust depends on current identity/key/review state and vulnerability-source freshness before "
+            "marketplace actions can promote package runtime contribution."
+        ),
+        remaining_gap=(
+            "This does not prove ecosystem superiority, full marketplace parity, or production readiness."
+        ),
+        scenario_names=PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SUITE_NAME,
+        label="Marketplace rollback and quarantine diagnostics",
+        description=(
+            "Pins install, update, downgrade, rollback, quarantine, re-entry, incident notification, and durable restore "
+            "point diagnostics with snapshot IDs and raw receipt locations."
+        ),
+        benchmark_axis="marketplace_rollback_quarantine_diagnostics",
+        operator_summary=(
+            "Marketplace lifecycle incidents must remain diagnosable, restorable, quarantinable, and operator-visible."
+        ),
+        remaining_gap=(
+            "This is rollback/quarantine proof, not a production-secure marketplace claim."
+        ),
+        scenario_names=MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,

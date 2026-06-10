@@ -87,6 +87,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
             "/api/operator/independent-learning-memory-parity",
             "/api/operator/browser-provider-usability-proof",
             "/api/operator/live-marketplace-attestation-proof",
+            "/api/operator/production-marketplace-security",
             "docs/research/19-strategy-claim-ledger.md",
             "docs/research/20-seraph-agent-parity-and-exceedance-goals.md",
             "docs/implementation/16-agent-parity-execution-roadmap.md",
@@ -256,6 +257,7 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         ("CK", 506, "independent_secure_host_review", 515),
         ("CL", 509, "broad_channel_sla_operations", 516),
         ("CM", 507, "independent_outcome_cohort_review", 517),
+        ("CN", 508, "long_work_debugging_recovery", 518),
     ]
     receipts = [
         {
@@ -286,16 +288,16 @@ def parity_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "operator_visible": True,
     })
     receipts.append({
-        "batch": "CN",
-        "issue": 508,
-        "primary_suite": "long_work_debugging_recovery",
+        "batch": "CO",
+        "issue": 510,
+        "primary_suite": "independent_package_security_review",
         "merged_pr": None,
         "status": "active_branch_receipts_visible_until_pr_merge",
         "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
         "project_status": "owned_by_github_project_until_pr_merge",
         "project_pr": "owned_by_linked_pull_request_until_pr_merge",
         "code_review": "owned_by_linked_pull_request_until_pr_merge",
-        "project_truth_source": "GitHub issue #508 and its Project item are authoritative for live PR/review fields",
+        "project_truth_source": "GitHub issue #510 and its Project item are authoritative for live PR/review fields",
         "operator_visible": True,
     })
     return receipts
@@ -454,8 +456,28 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
                 "production_ready_product",
                 "full_production_parity",
             ],
-            "status": "active_branch_receipts_visible_until_batch_cn_pr_merge",
+            "status": "backed_for_bounded_receipts_after_batch_cn_pr_merge",
             "operator_surface": "/api/operator/dense-operator-recovery-control",
+        },
+        {
+            "claim_id": "SCL-031",
+            "area": "production_marketplace_security_and_package_network_operations",
+            "issue_links": [475, 510],
+            "allowed_wording": (
+                "bounded independent package-security review, hostile ecosystem/package-network incident, "
+                "publisher trust, vulnerability handling, rollback, and quarantine diagnostics receipts are visible "
+                "after the Batch CO PR lands"
+            ),
+            "blocked_claims": [
+                "production_secure_marketplace",
+                "third_party_package_security_solved",
+                "ecosystem_superiority",
+                "full_marketplace_parity",
+                "production_ready_product",
+                "reference_systems_exceeded",
+            ],
+            "status": "backed_for_bounded_receipts_after_batch_co_pr_merge",
+            "operator_surface": "/api/operator/production-marketplace-security",
         },
     ]
 
@@ -553,9 +575,32 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
         {
             "gap_id": "ci-gap-marketplace-security",
             "area": "ecosystem_and_leverage",
-            "gap": "production marketplace security and independent package-security audit remain unproven",
-            "blocking_claims": ["production_secure_marketplace", "reference_systems_exceeded"],
-            "required_stronger_evidence": "independent package review, live hostile ecosystem tests, and package-network incident operations",
+            "gap": (
+                "Batch CO narrows the marketplace-security gap with independent package review, hostile "
+                "ecosystem drills, package-network incident operations, publisher trust, vulnerability "
+                "handling, and rollback/quarantine diagnostics; production-secure marketplace, solved "
+                "third-party package security, full marketplace parity, and ecosystem superiority remain blocked"
+            ),
+            "blocking_claims": [
+                "production_secure_marketplace",
+                "third_party_package_security_solved",
+                "full_marketplace_parity",
+                "reference_systems_exceeded",
+            ],
+            "current_batch_evidence": [
+                "independent_package_security_review",
+                "hostile_ecosystem_package_drills",
+                "package_network_incident_operations",
+                "publisher_trust_vulnerability_handling",
+                "marketplace_rollback_quarantine_diagnostics",
+                "/api/operator/production-marketplace-security",
+                "GitHub issue #510",
+            ],
+            "required_stronger_evidence": (
+                "external marketplace security review, larger live package-network corpus, independent scanner "
+                "and vulnerability-source monitoring, and final claim-lift audit before production-secure "
+                "marketplace, solved package-security, full marketplace parity, or superiority wording"
+            ),
         },
         {
             "gap_id": "ci-gap-dense-operator-control",

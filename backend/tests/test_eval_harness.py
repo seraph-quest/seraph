@@ -38,6 +38,13 @@ from src.extensions.live_marketplace_attestation import (
     PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
     THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
 )
+from src.extensions.production_marketplace_security import (
+    HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES,
+    INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES,
+    PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
@@ -1152,6 +1159,61 @@ def test_run_publisher_review_and_package_trust_benchmark_suite_passes():
     assert all(result.details["package_count_substitution_blocked"] is True for result in summary.results)
 
 
+def test_run_independent_package_security_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_package_security_review"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES)
+    assert all(result.details["independent_package_reviews_visible"] is True for result in summary.results)
+    assert all(result.details["raw_receipt_paths_visible"] is True for result in summary.results)
+
+
+def test_run_hostile_ecosystem_package_drills_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["hostile_ecosystem_package_drills"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES)
+    assert all(result.details["hostile_drills_fail_closed"] is True for result in summary.results)
+    assert all(result.details["required_hostile_classes_visible"] is True for result in summary.results)
+
+
+def test_run_package_network_incident_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["package_network_incident_operations"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["required_network_classes_visible"] is True for result in summary.results)
+    assert all(result.details["package_network_receipts_include_redirect_and_resolved_addresses"] is True for result in summary.results)
+
+
+def test_run_publisher_trust_vulnerability_handling_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["publisher_trust_vulnerability_handling"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES)
+    assert all(result.details["scanner_source_freshness_visible"] is True for result in summary.results)
+    assert all(result.details["stale_db_or_review_denied"] is True for result in summary.results)
+
+
+def test_run_marketplace_rollback_quarantine_diagnostics_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_rollback_quarantine_diagnostics"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES)
+    assert all(result.details["required_lifecycle_actions_visible"] is True for result in summary.results)
+    assert all(result.details["rollback_snapshots_visible"] is True for result in summary.results)
+
+
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
 
@@ -2184,6 +2246,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "third_party_marketplace_attestation",
         "marketplace_operations_incident_drill",
         "publisher_review_and_package_trust",
+        "independent_package_security_review",
+        "hostile_ecosystem_package_drills",
+        "package_network_incident_operations",
+        "publisher_trust_vulnerability_handling",
+        "marketplace_rollback_quarantine_diagnostics",
         "long_work_debugging_recovery",
         "operator_control_density",
         "independent_operator_usability_accessibility",

@@ -50,6 +50,7 @@ from src.extensions.benchmark import (
 from src.extensions.browser_provider_usability import build_browser_provider_usability_report
 from src.extensions.live_marketplace_attestation import build_live_marketplace_attestation_report
 from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
+from src.extensions.production_marketplace_security import build_production_marketplace_security_report
 from src.extensions.live_reach_media import build_live_reach_media_report
 from src.extensions.production_reach_hardening import build_production_reach_browser_voice_report
 from src.extensions.production_reach_voice_mobile import build_production_reach_voice_mobile_report
@@ -3441,6 +3442,7 @@ async def get_operator_benchmark_proof():
         governed_capability_pack_hardening,
         marketplace_lifecycle_maturity,
         live_marketplace_attestation,
+        production_marketplace_security,
         browser_provider_usability,
         production_operator_control,
         dense_operator_recovery,
@@ -3483,6 +3485,7 @@ async def get_operator_benchmark_proof():
         build_governed_capability_pack_hardening_report(),
         build_marketplace_lifecycle_report(),
         build_live_marketplace_attestation_report(),
+        build_production_marketplace_security_report(),
         build_browser_provider_usability_report(),
         build_production_operator_control_report(),
         build_dense_operator_recovery_report(),
@@ -3532,6 +3535,7 @@ async def get_operator_benchmark_proof():
         str(governed_capability_pack_hardening["summary"]["benchmark_posture"]),
         str(marketplace_lifecycle_maturity["summary"]["benchmark_posture"]),
         str(live_marketplace_attestation["summary"]["benchmark_posture"]),
+        str(production_marketplace_security["summary"]["benchmark_posture"]),
         str(browser_provider_usability["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
         str(dense_operator_recovery["summary"]["benchmark_posture"]),
@@ -3628,6 +3632,8 @@ async def get_operator_benchmark_proof():
             "marketplace_lifecycle_maturity_claim_boundary": marketplace_lifecycle_maturity["policy"]["claim_boundary"],
             "live_marketplace_attestation_posture": live_marketplace_attestation["summary"]["benchmark_posture"],
             "live_marketplace_attestation_claim_boundary": live_marketplace_attestation["policy"]["claim_boundary"],
+            "production_marketplace_security_posture": production_marketplace_security["summary"]["benchmark_posture"],
+            "production_marketplace_security_claim_boundary": production_marketplace_security["policy"]["claim_boundary"],
             "browser_provider_usability_posture": browser_provider_usability["summary"]["benchmark_posture"],
             "browser_provider_usability_claim_boundary": browser_provider_usability["policy"]["claim_boundary"],
             "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
@@ -3674,6 +3680,7 @@ async def get_operator_benchmark_proof():
         "governed_capability_pack_hardening": governed_capability_pack_hardening,
         "marketplace_lifecycle_maturity": marketplace_lifecycle_maturity,
         "live_marketplace_attestation": live_marketplace_attestation,
+        "production_marketplace_security": production_marketplace_security,
         "browser_provider_usability": browser_provider_usability,
         "production_operator_control": production_operator_control,
         "dense_operator_recovery_control": dense_operator_recovery,
@@ -3884,6 +3891,11 @@ async def get_operator_marketplace_lifecycle_maturity():
 @router.get("/operator/live-marketplace-attestation-proof")
 async def get_operator_live_marketplace_attestation_proof():
     return await build_live_marketplace_attestation_report()
+
+
+@router.get("/operator/production-marketplace-security")
+async def get_operator_production_marketplace_security():
+    return await build_production_marketplace_security_report()
 
 
 @router.get("/operator/browser-provider-usability-proof")

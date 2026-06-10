@@ -410,6 +410,17 @@ from src.security.independent_review import (
     SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME,
     build_independent_secure_host_review_contract,
 )
+from src.security.container_grade_host import (
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES,
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME,
+    CONTAINER_GRADE_SECURE_HOST_BLOCKED_CLAIMS,
+    CONTAINER_GRADE_SECURE_HOST_CLAIM_BOUNDARY,
+    EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME,
+    build_container_grade_secure_host_contract,
+)
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
@@ -2848,6 +2859,131 @@ async def _eval_independent_secure_host_review_behavior() -> dict[str, Any]:
             and all(item["operator_visible"] is True for item in hostile_drills)
             and all(item["operator_visible"] is True for item in recovery_authority)
         ),
+    }
+
+
+async def _eval_container_grade_secure_host_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    gate_policy = evolution_benchmark_gate_policy()
+    isolation_suite = next(item for item in suites if item["name"] == CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME)
+    validation_suite = next(item for item in suites if item["name"] == EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME)
+    egress_suite = next(item for item in suites if item["name"] == SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME)
+    contract = build_container_grade_secure_host_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    isolation = contract["isolation_model_decisions"]
+    validation = contract["external_security_validation_receipts"]
+    egress = contract["secret_egress_certification_drills"]
+    recovery = contract["incident_recovery_validation_receipts"]
+    findings = [
+        finding
+        for receipt in validation
+        for finding in receipt.get("findings", [])
+        if isinstance(finding, dict)
+    ]
+    blocked = set(policy["blocked_claims"])
+    not_claimed = set(policy["not_claimed"])
+    required_surfaces = set(policy["receipt_surfaces"])
+    required_suites = set(gate_policy["required_benchmark_suites"])
+
+    return {
+        "container_grade_capability_isolation_suite_present": (
+            "container_grade_isolation_model_behavior" in isolation_suite["scenario_names"]
+        ),
+        "container_grade_capability_isolation_suite_scenario_count_matches": (
+            isolation_suite["scenario_count"] == len(CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES)
+        ),
+        "container_grade_capability_isolation_suite_axis_matches": (
+            isolation_suite["benchmark_axis"] == "container_grade_capability_isolation"
+        ),
+        "external_security_validation_v1_suite_present": (
+            "external_security_review_scope_behavior" in validation_suite["scenario_names"]
+        ),
+        "external_security_validation_v1_suite_scenario_count_matches": (
+            validation_suite["scenario_count"] == len(EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES)
+        ),
+        "external_security_validation_v1_suite_axis_matches": (
+            validation_suite["benchmark_axis"] == "external_security_validation_v1"
+        ),
+        "secret_egress_certification_drill_suite_present": (
+            "secret_egress_raw_value_denial_behavior" in egress_suite["scenario_names"]
+        ),
+        "secret_egress_certification_drill_suite_scenario_count_matches": (
+            egress_suite["scenario_count"] == len(SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES)
+        ),
+        "secret_egress_certification_drill_suite_axis_matches": (
+            egress_suite["benchmark_axis"] == "secret_egress_certification_drill"
+        ),
+        "all_new_suites_gate_required": {
+            CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME,
+            EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME,
+            SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME,
+        }
+        <= required_suites,
+        "operator_status_visible": summary["operator_status"] == "container_grade_secure_host_validation_visible",
+        "isolation_decisions_visible": summary["isolation_decision_count"] >= 6,
+        "implemented_boundaries_visible": summary["implemented_boundary_count"] >= 5,
+        "unsupported_boundary_visible": (
+            summary["unsupported_boundary_count"] >= 1 and summary["missing_hardware_boundary_visible"] is True
+        ),
+        "external_review_receipts_visible": summary["external_review_count"] >= 2,
+        "findings_remediated_or_waived": (
+            summary["remediated_or_waived_findings"] == summary["finding_count"]
+            and summary["finding_count"] >= 4
+        ),
+        "secret_egress_drills_visible": summary["secret_egress_drill_count"] >= 4,
+        "no_secret_leaks_in_drills": summary["secret_leak_count"] == 0 and summary["all_secret_drills_safe"] is True,
+        "recovery_authority_visible": summary["recovery_authority_count"] >= 5,
+        "receipt_digest_visible": bool(summary["receipt_digest"]),
+        "isolation_schema_complete": all(
+            {
+                "capability_class",
+                "enforcement_model",
+                "implemented",
+                "enforced_boundaries",
+                "operator_visible",
+                "residual_boundary",
+            }
+            <= set(item)
+            for item in isolation
+        ),
+        "external_review_findings_operator_visible": (
+            all(item["operator_visible"] is True for item in validation)
+            and all(item["status"] in {"remediated", "residual_risk_waiver"} for item in findings)
+        ),
+        "secret_egress_drills_operator_visible": (
+            all(item["operator_visible"] is True for item in egress)
+            and all(item["raw_secret_leaked"] is False for item in egress)
+        ),
+        "recovery_receipts_operator_visible": all(item["operator_visible"] is True for item in recovery),
+        "claim_boundary_visible": summary["claim_boundary"] == CONTAINER_GRADE_SECURE_HOST_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(CONTAINER_GRADE_SECURE_HOST_BLOCKED_CLAIMS) <= blocked,
+        "security_overclaims_remain_blocked": {
+            "secure_private_by_default",
+            "production_security_solved",
+            "ironclaw_class_secure_execution",
+            "hardware_backed_isolation",
+            "cvm_tee_wasm_or_container_isolation_implemented",
+            "production_ready_product",
+            "full_parity",
+        }
+        <= blocked,
+        "not_claimed_boundary_visible": {
+            "ironclaw_class_secure_execution",
+            "hardware_backed_isolation",
+            "tee_cvm_wasm_or_container_runtime_isolation",
+            "production_ready_product",
+            "full_parity_achieved",
+        }
+        <= not_claimed,
+        "receipt_surfaces_visible": {
+            "/api/operator/container-grade-secure-host",
+            "/api/operator/benchmark-proof",
+            "/api/operator/independent-secure-host-review",
+            "/api/operator/production-isolation-hardening",
+            "/api/operator/secure-capability-host-hardening",
+        }
+        <= required_surfaces,
     }
 
 
@@ -15697,6 +15833,15 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     secure_host_recovery_authority_suite = next(
         item for item in suites if item["name"] == SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME
     )
+    container_grade_capability_isolation_suite = next(
+        item for item in suites if item["name"] == CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME
+    )
+    external_security_validation_v1_suite = next(
+        item for item in suites if item["name"] == EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME
+    )
+    secret_egress_certification_drill_suite = next(
+        item for item in suites if item["name"] == SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME
+    )
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     one_reach_channel_suite = next(item for item in suites if item["name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME)
@@ -16148,6 +16293,47 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "secure_host_recovery_authority_gate_required": (
             SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "container_grade_capability_isolation_suite_present": (
+            "container_grade_isolation_model_behavior"
+            in container_grade_capability_isolation_suite["scenario_names"]
+        ),
+        "container_grade_capability_isolation_suite_scenario_count_matches": (
+            container_grade_capability_isolation_suite["scenario_count"]
+            == len(CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES)
+        ),
+        "container_grade_capability_isolation_suite_axis_matches": (
+            container_grade_capability_isolation_suite["benchmark_axis"]
+            == "container_grade_capability_isolation"
+        ),
+        "container_grade_capability_isolation_gate_required": (
+            CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "external_security_validation_v1_suite_present": (
+            "external_security_review_scope_behavior" in external_security_validation_v1_suite["scenario_names"]
+        ),
+        "external_security_validation_v1_suite_scenario_count_matches": (
+            external_security_validation_v1_suite["scenario_count"]
+            == len(EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES)
+        ),
+        "external_security_validation_v1_suite_axis_matches": (
+            external_security_validation_v1_suite["benchmark_axis"] == "external_security_validation_v1"
+        ),
+        "external_security_validation_v1_gate_required": (
+            EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "secret_egress_certification_drill_suite_present": (
+            "secret_egress_raw_value_denial_behavior" in secret_egress_certification_drill_suite["scenario_names"]
+        ),
+        "secret_egress_certification_drill_suite_scenario_count_matches": (
+            secret_egress_certification_drill_suite["scenario_count"]
+            == len(SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES)
+        ),
+        "secret_egress_certification_drill_suite_axis_matches": (
+            secret_egress_certification_drill_suite["benchmark_axis"] == "secret_egress_certification_drill"
+        ),
+        "secret_egress_certification_drill_gate_required": (
+            SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
         "channels_suite_present": "device_pairing_revocation_fail_closed" in channels_suite["scenario_names"],
@@ -18716,6 +18902,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_independent_secure_host_review_behavior,
         )
         for name in SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Container-grade capability isolation validation exposes enforced capability-class boundaries, "
+                "signed tool roots, and unsupported hardware-backed/runtime isolation claims."
+            ),
+            runner=_eval_container_grade_secure_host_behavior,
+        )
+        for name in CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "External security validation receipts expose review scope, findings, remediations, waivers, "
+                "and recovery authority without claiming production security certification."
+            ),
+            runner=_eval_container_grade_secure_host_behavior,
+        )
+        for name in EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Secret-egress certification drills deny private-network drift, raw-secret output, and "
+                "unexpected destinations while keeping blanket secret-safety claims blocked."
+            ),
+            runner=_eval_container_grade_secure_host_behavior,
+        )
+        for name in SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES
     ),
     EvalScenario(
         name="delegated_tool_workflow_behavior",

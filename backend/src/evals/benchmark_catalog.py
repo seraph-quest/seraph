@@ -210,6 +210,14 @@ from src.security.independent_review import (
     SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
     SECURE_HOST_RECOVERY_AUTHORITY_SUITE_NAME,
 )
+from src.security.container_grade_host import (
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES,
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME,
+    EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -1315,6 +1323,59 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="This is recovery authority proof, not solved production incident response.",
         scenario_names=SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CONTAINER_GRADE_CAPABILITY_ISOLATION_SUITE_NAME,
+        label="Container-grade capability isolation validation",
+        description=(
+            "Pins Batch CT capability-class isolation decision records for tool processes, browser automation, "
+            "authenticated connectors, extension runtime, workflow replay, signed tool roots, and unsupported "
+            "hardware-backed/runtime-isolation boundaries."
+        ),
+        benchmark_axis="container_grade_capability_isolation",
+        operator_summary=(
+            "Container-grade secure-host validation makes enforced and unsupported capability isolation "
+            "boundaries operator-visible without claiming TEE/CVM/Wasm/container isolation."
+        ),
+        remaining_gap=(
+            "This is decision-record and receipt proof, not certified hardware-backed, TEE/CVM/Wasm, "
+            "or generalized container isolation."
+        ),
+        scenario_names=CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=EXTERNAL_SECURITY_VALIDATION_V1_SUITE_NAME,
+        label="External security validation v1",
+        description=(
+            "Pins Batch CT external security-review scope, finding remediation, residual-risk waiver, "
+            "and incident-recovery evidence for secure-host trust boundaries."
+        ),
+        benchmark_axis="external_security_validation_v1",
+        operator_summary=(
+            "External security validation receipts show review scope, findings, remediations, waivers, "
+            "and recovery authority before stronger security language is allowed."
+        ),
+        remaining_gap=(
+            "This is bounded validation-record proof, not production security certification or solved security."
+        ),
+        scenario_names=EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME,
+        label="Secret-egress certification drill",
+        description=(
+            "Pins Batch CT secret-egress drills for allowlisted hosts, private-network denial, raw-secret "
+            "redaction, destination drift, rotation, and operator receipts."
+        ),
+        benchmark_axis="secret_egress_certification_drill",
+        operator_summary=(
+            "Secret-egress certification drills prove no raw secret leaks in the covered cases while keeping "
+            "secure/private-by-default and production-security claims blocked."
+        ),
+        remaining_gap=(
+            "This is replayable drill proof for covered cases, not blanket secret-safety certification."
+        ),
+        scenario_names=SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

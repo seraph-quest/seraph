@@ -121,6 +121,11 @@ from src.security.independent_review import (
     LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
     SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
 )
+from src.security.container_grade_host import (
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -412,6 +417,18 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["secure_host_recovery_authority_suite_scenario_count_matches"] is True
     assert details["secure_host_recovery_authority_suite_axis_matches"] is True
     assert details["secure_host_recovery_authority_gate_required"] is True
+    assert details["container_grade_capability_isolation_suite_present"] is True
+    assert details["container_grade_capability_isolation_suite_scenario_count_matches"] is True
+    assert details["container_grade_capability_isolation_suite_axis_matches"] is True
+    assert details["container_grade_capability_isolation_gate_required"] is True
+    assert details["external_security_validation_v1_suite_present"] is True
+    assert details["external_security_validation_v1_suite_scenario_count_matches"] is True
+    assert details["external_security_validation_v1_suite_axis_matches"] is True
+    assert details["external_security_validation_v1_gate_required"] is True
+    assert details["secret_egress_certification_drill_suite_present"] is True
+    assert details["secret_egress_certification_drill_suite_scenario_count_matches"] is True
+    assert details["secret_egress_certification_drill_suite_axis_matches"] is True
+    assert details["secret_egress_certification_drill_gate_required"] is True
     assert details["computer_suite_present"] is True
     assert details["channels_suite_present"] is True
     assert details["channels_suite_scenario_count_matches"] is True
@@ -1574,6 +1591,33 @@ def test_run_secure_host_recovery_authority_benchmark_suite_passes():
     assert result_names == set(SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES)
 
 
+def test_run_container_grade_capability_isolation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["container_grade_capability_isolation"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES)
+
+
+def test_run_external_security_validation_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["external_security_validation_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES)
+
+
+def test_run_secret_egress_certification_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["secret_egress_certification_drill"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES)
+
+
 def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_secure_capability_host_benchmark_surface_behavior"]))
 
@@ -2242,6 +2286,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "production_isolation_hardening_v2" in captured.out
     assert "privileged_path_red_team_gauntlet_v2" in captured.out
     assert "security_incident_recovery_drill" in captured.out
+    assert "container_grade_capability_isolation" in captured.out
+    assert "external_security_validation_v1" in captured.out
+    assert "secret_egress_certification_drill" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "one_excellent_reach_channel_canary" in captured.out
@@ -2369,6 +2416,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "independent_secure_host_review",
         "live_hostile_isolation_drills",
         "secure_host_recovery_authority",
+        "container_grade_capability_isolation",
+        "external_security_validation_v1",
+        "secret_egress_certification_drill",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

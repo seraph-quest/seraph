@@ -177,6 +177,14 @@ from src.guardian.independent_learning_memory_parity import (
     TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
     TASK_SCOPED_CAUSAL_LEARNING_SUITE_NAME,
 )
+from src.guardian.longitudinal_guardian_outcomes import (
+    LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_MONITOR_V2_SUITE_NAME,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SUITE_NAME,
+    NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES,
+    NAMED_BASELINE_MEMORY_COMPARISON_SUITE_NAME,
+)
 from src.guardian.multimodal_voice import (
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES,
     GUARDIAN_SAFE_MULTIMODAL_VOICE_SUITE_NAME,
@@ -910,6 +918,51 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Full memory-provider parity, memory superiority, and provider-market breadth remain blocked.",
         scenario_names=MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SUITE_NAME,
+        label="Longitudinal guardian outcome study",
+        description=(
+            "Pins longer-horizon outcome windows, named baselines, power rationale, evaluator protocol, consent, "
+            "withdrawal, anonymization, confounders, adverse events, rollback, and residual gaps for Batch CV."
+        ),
+        benchmark_axis="longitudinal_guardian_outcome_study",
+        operator_summary=(
+            "Guardian-learning outcome operations now expose longitudinal window and baseline receipts before "
+            "candidate learning changes can be promoted."
+        ),
+        remaining_gap="Generalized live-human-outcome superiority and solved learning remain blocked.",
+        scenario_names=LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=NAMED_BASELINE_MEMORY_COMPARISON_SUITE_NAME,
+        label="Named baseline memory comparison",
+        description=(
+            "Pins named baseline source, version, window, limitations, provider quality, canonical precedence, "
+            "delete/export propagation, and pressure-evidence-only claim boundaries."
+        ),
+        benchmark_axis="named_baseline_memory_comparison",
+        operator_summary=(
+            "Memory-provider baseline comparisons now identify source and limitations while preserving canonical "
+            "authority and blocking superiority wording."
+        ),
+        remaining_gap="Full memory-provider parity, memory superiority, and reference-system comparisons remain blocked.",
+        scenario_names=NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LEARNING_SAFETY_MONITOR_V2_SUITE_NAME,
+        label="Learning safety monitor v2",
+        description=(
+            "Pins learning-policy version lifecycle, harm and privacy promotion blocks, stale-evidence drift, "
+            "rollback, quarantine, reinstatement review, and operator recovery receipts."
+        ),
+        benchmark_axis="learning_safety_monitor_v2",
+        operator_summary=(
+            "Learning safety monitors now expose rollback and quarantine state before longitudinal learning changes "
+            "can affect behavior."
+        ),
+        remaining_gap="Autonomous production learning and solved long-term learning remain blocked.",
+        scenario_names=LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

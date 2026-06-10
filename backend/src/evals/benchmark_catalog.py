@@ -117,6 +117,14 @@ from src.extensions.safe_browser_computer_use import (
     SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
     SITE_SPECIFIC_BROWSER_RECOVERY_SUITE_NAME,
 )
+from src.extensions.browser_computer_use_parity_depth import (
+    BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES,
+    BROWSER_AUTH_PARTITION_OPERATIONS_SUITE_NAME,
+    BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
+    BROWSER_TASK_BREADTH_MATRIX_SUITE_NAME,
+    SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
+    SITE_DRIFT_RECOVERY_SLO_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -749,6 +757,54 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Broad population usability and best/world-class cockpit wording remain blocked.",
         scenario_names=INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_TASK_BREADTH_MATRIX_SUITE_NAME,
+        label="Browser task breadth matrix",
+        description=(
+            "Pins Batch CY production-like safe-target browser task breadth across provider identity, "
+            "evidence mode, reliability windows, recovery outcomes, and artifact continuity."
+        ),
+        benchmark_axis="browser_task_breadth_matrix",
+        operator_summary=(
+            "Browser/computer-use depth now has a task breadth matrix for local, managed, and partitioned "
+            "remote providers while keeping safe automation and full browser parity blocked."
+        ),
+        remaining_gap=(
+            "General website compatibility, safe autonomous computer-use, and full browser parity remain "
+            "claim-ledger gated."
+        ),
+        scenario_names=BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_AUTH_PARTITION_OPERATIONS_SUITE_NAME,
+        label="Browser auth partition operations",
+        description=(
+            "Pins Batch CY profile, cookie, credential, download, upload, filesystem, network, and "
+            "dangerous-action partition operations across browser providers."
+        ),
+        benchmark_axis="browser_auth_partition_operations",
+        operator_summary=(
+            "Browser auth/session proof now exposes operational partition decisions and fail-closed behavior "
+            "instead of only bounded invariant receipts."
+        ),
+        remaining_gap="Arbitrary credentialed browsing and production-safe autonomous computer-use remain blocked.",
+        scenario_names=BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SITE_DRIFT_RECOVERY_SLO_SUITE_NAME,
+        label="Site drift recovery SLO",
+        description=(
+            "Pins Batch CY site-drift recovery SLO receipts for login expiry, DOM/navigation drift, provider "
+            "degradation, stale replay, file transfer, dangerous submits, and private-network redirects."
+        ),
+        benchmark_axis="site_drift_recovery_slo",
+        operator_summary=(
+            "Browser recovery proof now carries SLO/state receipts for drift and provider degradation while "
+            "blocking replay or external action until recovery is visible."
+        ),
+        remaining_gap="Provider-wide SLA and full browser/computer-use parity remain blocked.",
+        scenario_names=SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

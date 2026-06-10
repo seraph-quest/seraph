@@ -146,6 +146,17 @@ from src.extensions.safe_browser_computer_use import (
     SITE_SPECIFIC_BROWSER_RECOVERY_SUITE_NAME,
     build_safe_browser_computer_use_contract,
 )
+from src.extensions.browser_computer_use_parity_depth import (
+    BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES,
+    BROWSER_AUTH_PARTITION_OPERATIONS_SUITE_NAME,
+    BROWSER_COMPUTER_USE_PARITY_DEPTH_BLOCKED_CLAIMS,
+    BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY,
+    BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
+    BROWSER_TASK_BREADTH_MATRIX_SUITE_NAME,
+    SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
+    SITE_DRIFT_RECOVERY_SLO_SUITE_NAME,
+    build_browser_computer_use_parity_depth_contract,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
@@ -13418,6 +13429,112 @@ async def _eval_safe_browser_computer_use_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_browser_computer_use_parity_depth_behavior() -> dict[str, Any]:
+    contract = build_browser_computer_use_parity_depth_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    tasks = contract["task_breadth_matrix"]
+    partitions = contract["auth_partition_operations"]
+    recovery = contract["site_drift_recovery_slo"]
+    usability = contract["independent_usability_reviews"]
+    suites = benchmark_suite_report()
+    task_suite = next(item for item in suites if item["name"] == BROWSER_TASK_BREADTH_MATRIX_SUITE_NAME)
+    partition_suite = next(item for item in suites if item["name"] == BROWSER_AUTH_PARTITION_OPERATIONS_SUITE_NAME)
+    recovery_suite = next(item for item in suites if item["name"] == SITE_DRIFT_RECOVERY_SLO_SUITE_NAME)
+    gate_policy = evolution_benchmark_gate_policy()
+    required_task_classes = {
+        "public_research_extraction",
+        "authenticated_dashboard_read",
+        "draft_form_fill_no_submit",
+        "file_upload_download_sandbox",
+        "multi_site_browser_native_handoff",
+        "provider_degraded_recovery",
+    }
+    required_boundaries = {
+        "profile",
+        "cookie",
+        "credential",
+        "download",
+        "upload",
+        "filesystem",
+        "network",
+        "dangerous_action",
+    }
+    required_drift_modes = {
+        "login_expiry",
+        "dom_navigation_drift",
+        "provider_degradation",
+        "remote_cdp_disconnect",
+        "file_transfer_drift",
+        "stale_replay_reference",
+        "dangerous_submit_detected",
+        "private_network_redirect",
+    }
+    required_surfaces = {
+        "/api/operator/browser-computer-use-parity-depth",
+        "/api/operator/benchmark-proof",
+        "/api/operator/safe-autonomous-browser-computer-use",
+        "/api/operator/browser-provider-usability-proof",
+    }
+    return {
+        "operator_status_visible": summary["operator_status"]
+        == "browser_computer_use_parity_depth_receipts_visible",
+        "task_breadth_suite_visible": task_suite["scenario_count"]
+        == len(BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES),
+        "auth_partition_suite_visible": partition_suite["scenario_count"]
+        == len(BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES),
+        "site_drift_slo_suite_visible": recovery_suite["scenario_count"]
+        == len(SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES),
+        "task_breadth_matrix_visible": (
+            required_task_classes <= {item["task_class"] for item in tasks}
+            and summary["task_sample_total"] >= 150
+            and summary["provider_mode_count"] >= 3
+            and all(item.get("provider_identity") and item.get("reliability_window") for item in tasks)
+        ),
+        "recorded_live_depth_visible": summary["recorded_live_task_count"] >= 4,
+        "artifact_and_recovery_outcomes_visible": all(
+            item.get("artifact_continuity") and item.get("recovery_outcome") for item in tasks
+        ),
+        "partition_operations_visible": (
+            required_boundaries <= {item["boundary"] for item in partitions}
+            and summary["partition_boundary_count"] >= 8
+            and all(item.get("operator_visible") for item in partitions)
+        ),
+        "secret_cookie_exposure_blocked": summary["secret_or_cookie_exposure_count"] == 0,
+        "unapproved_external_mutation_blocked": summary["unapproved_external_mutation_count"] == 0,
+        "partition_recovery_actions_visible": all(item.get("recovery_action") for item in partitions),
+        "site_drift_modes_visible": required_drift_modes <= {item["failure_mode"] for item in recovery},
+        "site_drift_slo_visible": (
+            summary["site_drift_recovery_count"] >= 8
+            and summary["site_drift_fail_closed_count"] == len(recovery)
+            and summary["max_site_drift_slo_seconds"] <= 180
+        ),
+        "site_drift_operator_status_visible": all(
+            item.get("operator_status") == "blocked_or_recovered_visible" for item in recovery
+        ),
+        "independent_usability_visible": (
+            summary["independent_usability_sample_total"] >= 30
+            and all(item.get("reviewer_independence") for item in usability)
+            and all(item.get("keyboard_only_path") is True for item in usability)
+        ),
+        "prior_cp_boundary_visible": summary["prior_safe_browser_boundary_visible"] is True,
+        "prior_cp_secret_scan_still_passes": summary["prior_safe_browser_secret_scan_status"] == "passed",
+        "receipt_matrix_visible": len(contract["receipt_matrix"]) == 3,
+        "claim_boundary_visible": policy["claim_boundary"] == BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(BROWSER_COMPUTER_USE_PARITY_DEPTH_BLOCKED_CLAIMS) <= blocked,
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "safe_browser_automation_not_claimed": "safe_browser_automation" in policy["not_claimed"],
+        "full_browser_parity_not_claimed": "full_browser_parity" in policy["not_claimed"],
+        "task_breadth_gate_required": BROWSER_TASK_BREADTH_MATRIX_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "auth_partition_gate_required": BROWSER_AUTH_PARTITION_OPERATIONS_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "site_drift_gate_required": SITE_DRIFT_RECOVERY_SLO_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -20105,6 +20222,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_safe_browser_computer_use_behavior,
         )
         for name in INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch CY records production-like browser task breadth across safe targets, provider identity, "
+                "reliability windows, recovery outcomes, and artifact continuity."
+            ),
+            runner=_eval_browser_computer_use_parity_depth_behavior,
+        )
+        for name in BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch CY records browser auth/session partition operations for profile, cookie, credential, "
+                "download, upload, filesystem, network, and dangerous-action boundaries."
+            ),
+            runner=_eval_browser_computer_use_parity_depth_behavior,
+        )
+        for name in BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch CY records site-drift recovery SLOs for login expiry, DOM/navigation drift, provider "
+                "degradation, stale replay, dangerous submits, and network redirects."
+            ),
+            runner=_eval_browser_computer_use_parity_depth_behavior,
+        )
+        for name in SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

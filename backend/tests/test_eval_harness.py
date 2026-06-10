@@ -68,6 +68,11 @@ from src.extensions.safe_browser_computer_use import (
     LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES,
     SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
 )
+from src.extensions.browser_computer_use_parity_depth import (
+    BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES,
+    BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
+    SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -1553,6 +1558,39 @@ def test_run_independent_browser_usability_review_benchmark_suite_passes():
     assert all(result.details["blocked_claims_visible"] is True for result in summary.results)
 
 
+def test_run_browser_task_breadth_matrix_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_task_breadth_matrix"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES)
+    assert all(result.details["task_breadth_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["recorded_live_depth_visible"] is True for result in summary.results)
+
+
+def test_run_browser_auth_partition_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_auth_partition_operations"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["partition_operations_visible"] is True for result in summary.results)
+    assert all(result.details["unapproved_external_mutation_blocked"] is True for result in summary.results)
+
+
+def test_run_site_drift_recovery_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["site_drift_recovery_slo"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES)
+    assert all(result.details["site_drift_modes_visible"] is True for result in summary.results)
+    assert all(result.details["site_drift_slo_visible"] is True for result in summary.results)
+
+
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
 
@@ -2518,6 +2556,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "site_specific_recovery_drills" in captured.out
     assert "browser_provider_reliability_matrix" in captured.out
     assert "independent_browser_usability_review" in captured.out
+    assert "browser_task_breadth_matrix" in captured.out
+    assert "browser_auth_partition_operations" in captured.out
+    assert "site_drift_recovery_slo" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -2597,6 +2638,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "site_specific_recovery_drills",
         "browser_provider_reliability_matrix",
         "independent_browser_usability_review",
+        "browser_task_breadth_matrix",
+        "browser_auth_partition_operations",
+        "site_drift_recovery_slo",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

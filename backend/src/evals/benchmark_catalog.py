@@ -176,6 +176,14 @@ from src.workflows.live_orchestration import (
     ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
     ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME,
 )
+from src.workflows.production_sla_orchestration import (
+    DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES,
+    DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME,
+    EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES,
+    EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME,
+    PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
+    PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -764,6 +772,59 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is recorded-live and deterministic crash-study evidence, not a production crash-proof workflow engine."
         ),
         scenario_names=ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_SLA_ORCHESTRATION_SUITE_NAME,
+        label="Production SLA orchestration",
+        description=(
+            "Pins stronger Batch CJ orchestration evidence: provider SLA windows, jitter budgets, missed-trigger "
+            "counts, failure-injection methods, and operator-visible residual uncertainty."
+        ),
+        benchmark_axis="production_sla_orchestration",
+        operator_summary=(
+            "Production SLA orchestration proof is judged by named providers, bounded monitoring windows, jitter "
+            "budgets, failure-injection receipts, and recovery controls rather than blanket production readiness."
+        ),
+        remaining_gap=(
+            "This still blocks unconditional exactly-once scheduling, crash-proof orchestration, and full "
+            "distributed workflow parity unless later evidence permits exact wording."
+        ),
+        scenario_names=PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=EXACTLY_ONCE_RECOVERY_EVIDENCE_SUITE_NAME,
+        label="Exactly-once recovery evidence",
+        description=(
+            "Pins scoped effectively-once recovery evidence across idempotency scopes, side-effect boundaries, "
+            "resume authority, and duplicate suppression."
+        ),
+        benchmark_axis="exactly_once_recovery_evidence",
+        operator_summary=(
+            "Exactly-once recovery evidence must name the scope where duplicate suppression is proven and the "
+            "cases that still require operator audit."
+        ),
+        remaining_gap=(
+            "Unconditional exactly-once delivery and crash-proof workflow-engine claims remain blocked."
+        ),
+        scenario_names=EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=DUPLICATE_SIDE_EFFECT_AUDIT_SUITE_NAME,
+        label="Duplicate side-effect audit",
+        description=(
+            "Pins duplicate side-effect audit receipts for external writes, repository mutations, notifications, "
+            "operator controls, and reconciliation outcomes."
+        ),
+        benchmark_axis="duplicate_side_effect_audit",
+        operator_summary=(
+            "Duplicate side-effect audit proof must show the first receipt, duplicate attempt, suppression or "
+            "reconciliation action, and the operator controls that preserve safety."
+        ),
+        remaining_gap=(
+            "Side-effect audit receipts narrow duplicate risk but do not prove every external system is "
+            "crash-proof or globally exactly-once."
+        ),
+        scenario_names=DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

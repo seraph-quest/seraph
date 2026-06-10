@@ -81,6 +81,7 @@ def final_parity_audit_policy_payload() -> dict[str, Any]:
             "/api/operator/final-parity-readiness-report",
             "/api/operator/benchmark-proof",
             "/api/operator/production-operator-control-parity",
+            "/api/operator/production-sla-orchestration",
             "/api/operator/browser-provider-usability-proof",
             "/api/operator/live-marketplace-attestation-proof",
             "docs/research/19-strategy-claim-ledger.md",
@@ -292,6 +293,21 @@ def claim_ledger_reconciliation_receipts() -> list[dict[str, Any]]:
             "operator_surface": "/api/operator/final-parity-readiness-report",
         },
         {
+            "claim_id": "SCL-026",
+            "area": "production_sla_orchestration_and_recovery_evidence",
+            "issue_links": [475, 505],
+            "allowed_wording": (
+                "production SLA orchestration, scoped effectively-once recovery, and duplicate side-effect "
+                "audit receipts are visible"
+            ),
+            "blocked_claims": [
+                "exactly_once_or_crash_proof_orchestration",
+                "production_ready_product",
+            ],
+            "status": "backed_for_bounded_receipts_after_batch_cj_pr_merge",
+            "operator_surface": "/api/operator/production-sla-orchestration",
+        },
+        {
             "claim_id": "SCL-020",
             "area": "production_isolation_and_security_incident_proof",
             "issue_links": [492],
@@ -357,9 +373,23 @@ def residual_gap_receipts() -> list[dict[str, Any]]:
         {
             "gap_id": "ci-gap-orchestration-sla",
             "area": "runtime_reliability",
-            "gap": "continuous external scheduler SLA and exactly-once/crash-proof guarantees remain unproven",
+            "gap": (
+                "Batch CJ narrows the orchestration SLA gap with provider windows, jitter budgets, "
+                "failure-injection receipts, and duplicate side-effect audit receipts; unconditional "
+                "exactly-once and crash-proof guarantees remain unproven"
+            ),
             "blocking_claims": ["exactly_once_or_crash_proof_orchestration", "production_ready_product"],
-            "required_stronger_evidence": "long-running live operational SLA, independent failure injection, and duplicate side-effect audit",
+            "current_batch_evidence": [
+                "production_sla_orchestration",
+                "exactly_once_recovery_evidence",
+                "duplicate_side_effect_audit",
+                "/api/operator/production-sla-orchestration",
+                "GitHub issue #505",
+            ],
+            "required_stronger_evidence": (
+                "continuous independent production SLA monitoring and broader crash/failover proof before "
+                "global exactly-once, crash-proof, or production-ready wording"
+            ),
         },
         {
             "gap_id": "ci-gap-security-independent",

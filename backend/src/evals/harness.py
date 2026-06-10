@@ -178,6 +178,15 @@ from src.workflows.durable_state import (
     build_durable_workflow_v2_contract,
     build_durable_workflow_v2_report,
 )
+from src.workflows.live_orchestration import (
+    LIVE_EXTERNAL_ORCHESTRATION_BLOCKED_CLAIMS,
+    LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY,
+    LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
+    LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME,
+    build_live_external_orchestration_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -14235,6 +14244,12 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     durable_workflow_engine_v2_suite = next(
         item for item in suites if item["name"] == DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME
     )
+    live_external_orchestration_suite = next(
+        item for item in suites if item["name"] == LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME
+    )
+    orchestration_crash_recovery_study_suite = next(
+        item for item in suites if item["name"] == ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
@@ -14378,6 +14393,33 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "durable_workflow_engine_v2_gate_required": (
             DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "live_external_orchestration_suite_present": (
+            "live_external_scheduler_provider_identity_behavior"
+            in live_external_orchestration_suite["scenario_names"]
+        ),
+        "live_external_orchestration_suite_scenario_count_matches": (
+            live_external_orchestration_suite["scenario_count"] == len(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES)
+        ),
+        "live_external_orchestration_suite_axis_matches": (
+            live_external_orchestration_suite["benchmark_axis"] == "live_external_orchestration_attestation"
+        ),
+        "live_external_orchestration_gate_required": (
+            LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "orchestration_crash_recovery_study_suite_present": (
+            "orchestration_crash_checkpoint_recovery_behavior"
+            in orchestration_crash_recovery_study_suite["scenario_names"]
+        ),
+        "orchestration_crash_recovery_study_suite_scenario_count_matches": (
+            orchestration_crash_recovery_study_suite["scenario_count"]
+            == len(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+        ),
+        "orchestration_crash_recovery_study_suite_axis_matches": (
+            orchestration_crash_recovery_study_suite["benchmark_axis"] == "orchestration_crash_recovery_study"
+        ),
+        "orchestration_crash_recovery_study_gate_required": (
+            ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (
@@ -14969,6 +15011,55 @@ async def _eval_durable_workflow_engine_v2_report_behavior() -> dict[str, Any]:
         "ci_gate_required": DURABLE_WORKFLOW_ENGINE_V2_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
         "production_ci_gate_required": PRODUCTION_DURABLE_ORCHESTRATION_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
+async def _eval_live_external_orchestration_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    live_suite = next(item for item in suites if item["name"] == LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME)
+    crash_suite = next(item for item in suites if item["name"] == ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME)
+    contract = build_live_external_orchestration_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    providers = contract["provider_attestation_receipts"]
+    crash_studies = contract["crash_recovery_study_receipts"]
+    controls = contract["operator_recovery_receipts"]
+    required_controls = {"inspect", "resume", "retry", "branch", "cancel", "audit"}
+    required_surfaces = {
+        "/api/operator/live-external-orchestration",
+        "/api/operator/benchmark-proof",
+        "/api/operator/durable-workflow-engine-v2",
+    }
+    return {
+        "live_suite_visible": live_suite["scenario_count"] == len(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES),
+        "crash_suite_visible": (
+            crash_suite["scenario_count"] == len(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+        ),
+        "live_axis_visible": live_suite["benchmark_axis"] == "live_external_orchestration_attestation",
+        "crash_axis_visible": crash_suite["benchmark_axis"] == "orchestration_crash_recovery_study",
+        "operator_status_visible": summary["operator_status"] == "live_external_orchestration_receipts_visible",
+        "provider_receipts_visible": summary["provider_receipt_count"] >= 3,
+        "crash_studies_visible": summary["crash_study_count"] >= 3,
+        "recorded_live_receipts_visible": summary["recorded_live_receipt_count"] >= 3,
+        "deterministic_contract_receipts_visible": summary["deterministic_contract_count"] >= 1,
+        "evidence_modes_visible": {"recorded_live_fixture", "deterministic_contract"} <= set(summary["evidence_modes"]),
+        "provider_identity_visible": all(item.get("provider_identity_visible") is True for item in providers),
+        "idempotency_keys_visible": all(bool(item.get("idempotency_key")) for item in providers),
+        "side_effect_boundaries_visible": summary["side_effect_boundary_count"] == len(providers),
+        "delivery_semantics_visible": all(bool(item.get("delivery_semantics")) for item in providers),
+        "replay_suppression_visible": summary["replay_suppression_count"] == len(crash_studies),
+        "resume_authority_visible": all(bool(item.get("resume_authority")) for item in crash_studies),
+        "operator_controls_visible": summary["required_controls_visible"] is True
+        and required_controls <= {item["action"] for item in controls},
+        "controls_leave_receipts": all(item.get("enabled") and item.get("receipt_after_action") for item in controls),
+        "claim_boundary_visible": policy["claim_boundary"] == LIVE_EXTERNAL_ORCHESTRATION_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(LIVE_EXTERNAL_ORCHESTRATION_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "exactly_once_not_claimed": "exactly_once_production_scheduler" in policy["not_claimed"],
+        "ci_gate_required": LIVE_EXTERNAL_ORCHESTRATION_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "crash_study_gate_required": ORCHESTRATION_CRASH_RECOVERY_STUDY_SUITE_NAME
         in evolution_benchmark_gate_policy()["required_benchmark_suites"],
     }
 
@@ -16406,6 +16497,30 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_durable_workflow_engine_v2_report_behavior,
         )
         for name in PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CC records external orchestration provider identity, evidence mode, idempotency, "
+                "replay, side-effect, and operator recovery receipts without claiming exactly-once scheduling."
+            ),
+            runner=_eval_live_external_orchestration_behavior,
+        )
+        for name in LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch CC records crash/restart drill receipts for checkpoint recovery, side-effect boundaries, "
+                "lease transfer, resume authority, and duplicate replay suppression."
+            ),
+            runner=_eval_live_external_orchestration_behavior,
+        )
+        for name in ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

@@ -42,6 +42,10 @@ from src.workflows.durable_state import (
     DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
     PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
 )
+from src.workflows.live_orchestration import (
+    LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -262,6 +266,14 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["durable_workflow_engine_v2_suite_scenario_count_matches"] is True
     assert details["durable_workflow_engine_v2_suite_axis_matches"] is True
     assert details["durable_workflow_engine_v2_gate_required"] is True
+    assert details["live_external_orchestration_suite_present"] is True
+    assert details["live_external_orchestration_suite_scenario_count_matches"] is True
+    assert details["live_external_orchestration_suite_axis_matches"] is True
+    assert details["live_external_orchestration_gate_required"] is True
+    assert details["orchestration_crash_recovery_study_suite_present"] is True
+    assert details["orchestration_crash_recovery_study_suite_scenario_count_matches"] is True
+    assert details["orchestration_crash_recovery_study_suite_axis_matches"] is True
+    assert details["orchestration_crash_recovery_study_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -431,6 +443,26 @@ def test_run_production_durable_orchestration_benchmark_suite_passes():
         assert result.details["production_suite_visible"] is True
         assert result.details["production_ci_gate_required"] is True
         assert result.details["unsafe_recovery_block_visible"] is True
+
+
+def test_run_live_external_orchestration_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_external_orchestration_attestation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES)
+    assert all(result.details["provider_identity_visible"] for result in summary.results)
+    assert all(result.details["idempotency_keys_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+
+
+def test_run_orchestration_crash_recovery_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["orchestration_crash_recovery_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+    assert all(result.details["crash_studies_visible"] for result in summary.results)
+    assert all(result.details["replay_suppression_visible"] for result in summary.results)
+    assert all(result.details["crash_study_gate_required"] for result in summary.results)
 
 
 def test_run_production_operator_control_parity_benchmark_suite_passes():
@@ -1572,6 +1604,8 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "capability_rollback_failure_diagnostics" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
+    assert "live_external_orchestration_attestation" in captured.out
+    assert "orchestration_crash_recovery_study" in captured.out
     assert available_benchmark_suites() == (
         "production_parity_readiness",
         "guardian_memory_quality",
@@ -1595,6 +1629,8 @@ def test_main_lists_available_benchmark_suites(capsys):
         "durable_workflow_engine_v1",
         "production_durable_orchestration",
         "durable_workflow_engine_v2",
+        "live_external_orchestration_attestation",
+        "orchestration_crash_recovery_study",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

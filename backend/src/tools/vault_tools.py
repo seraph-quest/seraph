@@ -74,16 +74,17 @@ def store_secret(key: str, value: str, description: str = "") -> str:
 
 @tool
 def get_secret(key: str) -> str:
-    """Retrieve a decrypted secret from the vault.
+    """Refuse raw secret retrieval and direct callers to scoped secret refs.
 
-    IMPORTANT: NEVER display the returned secret value in chat. Use it only
-    in tool calls (e.g. as an Authorization header in http_request).
+    Batch DB makes brokered secret references the normal runtime path. This
+    legacy tool remains registered for compatibility, but it no longer returns
+    decrypted secret material to the model/tool transcript.
 
     Args:
         key: The key of the secret to retrieve (e.g. 'moltbook_token').
 
     Returns:
-        The decrypted secret value, or a message if not found.
+        A denial or not-found message that never includes the decrypted value.
     """
     result = _run(vault_repository.get(key))
     if result is None:
@@ -95,12 +96,15 @@ def get_secret(key: str) -> str:
         )
         return f"Secret '{key}' not found in vault."
     _log_secret_event(
-        event_type="secret_access",
+        event_type="secret_raw_access_blocked",
         tool_name="get_secret",
-        summary=f"Accessed secret key '{key}'",
-        details={"key": key, "found": True},
+        summary=f"Blocked raw access to secret key '{key}'",
+        details={"key": key, "found": True, "raw_access_blocked": True},
     )
-    return result
+    return (
+        f"Raw retrieval for secret '{key}' is disabled. "
+        "Use get_secret_ref with tool, field, and destination scope."
+    )
 
 
 @tool

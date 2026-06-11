@@ -25,7 +25,7 @@ class TestMCPManager:
         MockMCPClient.return_value = mock_client
 
         mgr = MCPManager()
-        mgr.connect("things", "http://localhost:9000/mcp")
+        mgr.connect("things", "http://things.example/mcp")
         assert len(mgr.get_tools()) == 1
         assert "things" in mgr._clients
         connected_tool = mgr.get_tools()[0]
@@ -203,11 +203,23 @@ class TestMCPManager:
         MockMCPClient.return_value = mock_client
 
         mgr = MCPManager()
-        mgr.connect("http-request", "http://localhost:9200/mcp")
+        mgr.connect("http-request", "http://http-request.example/mcp")
 
         call_args = MockMCPClient.call_args
         params = call_args[0][0]
         assert "headers" not in params
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_blocks_private_network_endpoint(self, MockMCPClient):
+        mgr = MCPManager()
+
+        mgr.connect("local", "http://127.0.0.1:9200/mcp")
+
+        assert mgr.get_tools() == []
+        assert "local" not in mgr._clients
+        assert mgr._status["local"]["status"] == "blocked"
+        assert "internal_private" in mgr._status["local"]["error"]
+        MockMCPClient.assert_not_called()
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_load_config_passes_headers(self, MockMCPClient, tmp_path):
@@ -244,6 +256,25 @@ class TestMCPManager:
         call_args = MockMCPClient.call_args
         params = call_args[0][0]
         assert params["headers"]["X-Key"] == "val"
+
+    def test_add_server_blocks_private_network_endpoint(self, tmp_path):
+        mgr = MCPManager()
+        mgr._config_path = str(tmp_path / "mcp-servers.json")
+
+        with pytest.raises(ValueError, match="internal_private"):
+            mgr.add_server("local", "http://localhost:9200/mcp", enabled=True)
+
+        assert "local" not in mgr._config
+
+    def test_update_server_blocks_private_network_endpoint(self, tmp_path):
+        mgr = MCPManager()
+        mgr._config_path = str(tmp_path / "mcp-servers.json")
+        mgr._config["gh"] = {"url": "https://example.com/mcp", "enabled": True}
+
+        with pytest.raises(ValueError, match="internal_private"):
+            mgr.update_server("gh", url="http://169.254.169.254/latest/meta-data")
+
+        assert mgr._config["gh"]["url"] == "https://example.com/mcp"
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_get_config_includes_has_headers(self, MockMCPClient):

@@ -264,6 +264,16 @@ from src.security.container_grade_host import (
     SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
     SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME,
 )
+from src.security.certified_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES,
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SUITE_NAME,
+    EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_CERTIFICATION_SUITE_NAME,
+    HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
+    HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SUITE_NAME,
+    RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_IMPLEMENTATION_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -1625,6 +1635,70 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is replayable drill proof for covered cases, not blanket secret-safety certification."
         ),
         scenario_names=SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=RUNTIME_ISOLATION_IMPLEMENTATION_SUITE_NAME,
+        label="Runtime isolation implementation v1",
+        description=(
+            "Pins Batch DB covered-path capability boundary receipts across tool processes, "
+            "browser automation, authenticated connectors, external MCP, extension runtime, workflow replay, "
+            "and the explicit hardware-backed runtime substitute boundary."
+        ),
+        benchmark_axis="runtime_isolation_implementation_v1",
+        operator_summary=(
+            "Runtime isolation receipts show covered-path policy hooks and residual hardware "
+            "substitute boundaries before any stronger secure-host wording is allowed."
+        ),
+        remaining_gap=(
+            "This is covered-path policy receipt proof, not formal hardware-backed TEE/CVM/Wasm/container "
+            "certification."
+        ),
+        scenario_names=RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SUITE_NAME,
+        label="Credential-broker egress enforcement v1",
+        description=(
+            "Pins Batch DB field-scoped credential injection, endpoint allowlists, private-network and "
+            "redirect denial, rotation/revocation handling, and auditable denial receipts."
+        ),
+        benchmark_axis="credential_broker_egress_enforcement_v1",
+        operator_summary=(
+            "Credential-broker enforcement receipts prove covered secret-bearing paths fail closed on "
+            "endpoint drift, private-network resolution, raw output, and revoked refs."
+        ),
+        remaining_gap="This is covered-path enforcement proof, not blanket secret-safety certification.",
+        scenario_names=CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=EXTERNAL_SECURITY_CERTIFICATION_SUITE_NAME,
+        label="External security certification v1",
+        description=(
+            "Pins Batch DB external review/certification-scope records, findings, retest evidence, waiver "
+            "expiry, artifact digests, and remaining blocked security claims."
+        ),
+        benchmark_axis="external_security_certification_v1",
+        operator_summary=(
+            "External security certification receipts expose reviewer identity, tested surfaces, findings, "
+            "remediation, waivers, retest evidence, and formal-certification claim boundaries."
+        ),
+        remaining_gap="This is declared-scope review evidence, not formal security certification.",
+        scenario_names=EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SUITE_NAME,
+        label="Hostile runtime escape gauntlet v1",
+        description=(
+            "Pins Batch DB hostile runtime escape drills for prompt injection, SSRF/private network, DNS "
+            "redirects, workspace escape, cookie theft, package abuse, credential exfiltration, and replay drift."
+        ),
+        benchmark_axis="hostile_runtime_escape_gauntlet_v1",
+        operator_summary=(
+            "Hostile runtime escape gauntlet receipts show covered attacks are blocked or quarantined with "
+            "operator-visible recovery."
+        ),
+        remaining_gap="This is covered hostile-case proof, not solved production security.",
+        scenario_names=HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

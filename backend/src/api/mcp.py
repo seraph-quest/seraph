@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.audit.runtime import log_integration_event
-from src.tools.mcp_manager import mcp_manager
+from src.tools.mcp_manager import MCPManager, mcp_manager
 
 router = APIRouter()
 
@@ -91,6 +91,11 @@ def _validate_header_credentials(headers: dict[str, str] | None) -> list[str]:
     return issues
 
 
+def _validate_mcp_endpoint_url(url: str) -> list[str]:
+    """Validate MCP endpoints against the shared site/network guard."""
+    return MCPManager.endpoint_policy_issues(url)
+
+
 @router.get("/mcp/servers")
 async def list_servers():
     """List all configured MCP servers with status."""
@@ -111,6 +116,7 @@ async def validate_server(req: AddServerRequest):
         issues.append("Server URL must use http or https")
     if parsed and not parsed.netloc:
         issues.append("Server URL must include a host")
+    issues.extend(_validate_mcp_endpoint_url(url))
     if req.headers is not None:
         for key, value in req.headers.items():
             if not isinstance(key, str) or not key.strip():
@@ -159,8 +165,10 @@ async def add_server(req: AddServerRequest):
     if req.name in mcp_manager._config:
         raise HTTPException(status_code=409, detail=f"Server '{req.name}' already exists")
     header_issues = _validate_header_credentials(req.headers)
-    if header_issues:
-        raise HTTPException(status_code=400, detail=" ".join(header_issues))
+    endpoint_issues = _validate_mcp_endpoint_url(req.url)
+    validation_issues = [*header_issues, *endpoint_issues]
+    if validation_issues:
+        raise HTTPException(status_code=400, detail=" ".join(validation_issues))
     mcp_manager.add_server(
         name=req.name,
         url=req.url,
@@ -182,8 +190,10 @@ async def update_server(name: str, req: UpdateServerRequest):
     header_issues = _validate_header_credentials(
         updates.get("headers") if isinstance(updates.get("headers"), dict) else updates.get("headers")
     )
-    if header_issues:
-        raise HTTPException(status_code=400, detail=" ".join(header_issues))
+    endpoint_issues = _validate_mcp_endpoint_url(str(updates.get("url") or ""))
+    validation_issues = [*header_issues, *endpoint_issues]
+    if validation_issues:
+        raise HTTPException(status_code=400, detail=" ".join(validation_issues))
     if not mcp_manager.update_server(name, **updates):
         raise HTTPException(status_code=404, detail=f"Server '{name}' not found")
     return {"status": "updated", "name": name}
@@ -222,6 +232,19 @@ async def test_server(name: str):
     if config.get("source") == "extension":
         raise HTTPException(status_code=409, detail=_packaged_server_detail(name, config, action="tests"))
     url = config["url"]
+    endpoint_issues = _validate_mcp_endpoint_url(str(url))
+    if endpoint_issues:
+        await log_integration_event(
+            integration_type="mcp_test",
+            name=name,
+            outcome="blocked",
+            details={
+                "url": url,
+                "status": "site_policy_blocked",
+                "issues": endpoint_issues,
+            },
+        )
+        raise HTTPException(status_code=400, detail=" ".join(endpoint_issues))
 
     raw_headers = config.get("headers")
     try:

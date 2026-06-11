@@ -36,17 +36,19 @@ class TestStoreSecret:
 
 
 class TestGetSecret:
-    def test_found(self, mock_vault_deps):
+    def test_found_blocks_raw_value(self, mock_vault_deps):
         from src.tools.vault_tools import get_secret
 
         mock_vault_repo, mock_audit = mock_vault_deps
         mock_vault_repo.get = AsyncMock(return_value="decrypted-value")
         result = get_secret.forward("my_token")
-        assert result == "decrypted-value"
+        assert "raw retrieval" in result.lower()
+        assert "get_secret_ref" in result
+        assert "decrypted-value" not in result
         mock_audit.log_event.assert_awaited_once()
         audit_call = mock_audit.log_event.await_args.kwargs
-        assert audit_call["event_type"] == "secret_access"
-        assert audit_call["details"] == {"key": "my_token", "found": True}
+        assert audit_call["event_type"] == "secret_raw_access_blocked"
+        assert audit_call["details"] == {"key": "my_token", "found": True, "raw_access_blocked": True}
         assert "decrypted-value" not in str(audit_call)
 
     def test_not_found(self, mock_vault_deps):

@@ -1,18 +1,27 @@
 import asyncio
 
 from src.evals.final_parity_audit import (
+    BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
+    FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS,
+    FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY,
     FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
     FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
     POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+    PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
     build_final_parity_audit_contract,
     build_final_parity_readiness_report,
+    build_final_production_parity_contract,
+    build_final_production_parity_report,
     build_post_cq_claim_readiness_contract,
     build_post_cq_claim_readiness_report,
 )
@@ -308,3 +317,97 @@ def test_post_cq_claim_readiness_report_runs_all_batch_cz_suites():
     assert payload["summary"]["active_failure_count"] == 0
     assert payload["failure_report"] == []
     assert payload["policy"]["claim_boundary"] == POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY
+
+
+def test_final_production_parity_contract_reconciles_da_dg_and_keeps_claims_blocked():
+    contract = build_final_production_parity_contract()
+    summary = contract["summary"]
+    batches = contract["da_dg_batch_reconciliation_receipts"]
+    claim_lift = contract["final_full_parity_claim_lift_v1"]
+
+    assert summary["operator_status"] == "final_production_parity_gate_visible"
+    assert summary["completed_da_dg_batch_count"] == 7
+    assert summary["all_completed_da_dg_batches_done_merged_passed"] is True
+    assert summary["dg_merged_pr"] == 555
+    assert summary["dh_batch_status"] == "in_progress_on_feature_branch"
+    assert summary["bounded_final_production_parity_wording_allowed"] is True
+    assert summary["full_parity_claim_allowed"] is False
+    assert summary["production_ready_claim_allowed"] is False
+    assert summary["reference_systems_exceeded_claim_allowed"] is False
+
+    assert {item["batch"] for item in batches if item["status"] == "done"} == {
+        "DA",
+        "DB",
+        "DC",
+        "DD",
+        "DE",
+        "DF",
+        "DG",
+    }
+    assert next(item for item in batches if item["batch"] == "DG")["issue"] == 546
+    assert next(item for item in batches if item["batch"] == "DG")["project_pr"] == "Merged"
+    assert next(item for item in batches if item["batch"] == "DH")["active_branch"] == (
+        "feat/batch-dh-final-production-parity"
+    )
+    assert {item["claim_id"] for item in claim_lift} >= {
+        "SCL-043",
+        "SCL-044",
+        "SCL-045",
+        "SCL-046",
+        "SCL-047",
+        "SCL-048",
+        "SCL-049",
+        "SCL-050",
+    }
+    assert all(item["broad_claim_lift_allowed"] is False for item in claim_lift)
+    assert set(FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS) <= set(contract["policy"]["blocked_claims"])
+    assert contract["policy"]["claim_boundary"] == FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY
+
+
+def test_final_production_parity_contract_records_sources_soak_scans_and_critic():
+    contract = build_final_production_parity_contract()
+    sources = contract["reference_system_source_refresh_v3"]
+    soak = contract["production_readiness_soak_v1"]
+    scans = contract["false_completion_scan_v3"]
+    critic = contract["critic_disposition_receipts"]
+
+    assert {item["system"] for item in sources} >= {"Hermes", "OpenClaw", "IronClaw"}
+    assert all(item["checked_on"] == "2026-06-11" for item in sources)
+    assert all(item["source_refresh_version"] == "v3_final_production_parity_gate" for item in sources)
+    assert all(item["runtime_fetch_performed"] is False for item in sources)
+    assert all(item["source_refresh_kind"] == "manual_current_source_review_receipt" for item in sources)
+    assert all(item["claim_lift_allowed"] is False for item in sources)
+    assert {item["area"] for item in soak} == {
+        "runtime_reliability",
+        "trust_boundaries",
+        "presence_and_reach",
+        "guardian_intelligence",
+        "operator_control",
+        "ecosystem_and_marketplace",
+        "browser_computer_use",
+    }
+    assert all(item["raw_receipt_digest"].startswith("sha256:") for item in soak)
+    assert all(item["evidence_mode"] == "representative_cross_surface_reconciliation" for item in soak)
+    assert all(item["actual_runtime_soak_performed"] is False for item in soak)
+    assert all(item["operational_window"] == "not_a_live_soak_window" for item in soak)
+    assert all(item["claim_lift_allowed"] is False for item in soak)
+    assert any(item.get("stale_pr_number") == 548 and item["stale_pr_state"] == "CLOSED" for item in scans)
+    assert any(item.get("issue_475_body_refreshed") is True for item in scans)
+    assert sum(int(item.get("violations_found") or 0) for item in scans) == 0
+    assert all(item["disposition"].startswith("accepted") for item in critic)
+
+
+def test_final_production_parity_report_runs_all_batch_dh_suites():
+    payload = asyncio.run(build_final_production_parity_report())
+
+    assert payload["summary"]["benchmark_posture"] == "final_production_parity_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES)
+        + len(FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES)
+        + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES)
+        + len(FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES)
+        + len(BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["active_failure_count"] == 0
+    assert payload["failure_report"] == []
+    assert payload["policy"]["claim_boundary"] == FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY

@@ -56,18 +56,28 @@ from src.evals.production_parity_readiness import (
     PRODUCTION_PARITY_READINESS_SUITE_NAME,
 )
 from src.evals.final_parity_audit import (
+    BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
+    BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
+    FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V3_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
+    PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME,
 )
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
@@ -2712,6 +2722,81 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Any stronger public wording still requires exact claim-ledger permission and fresh proof."
         ),
         scenario_names=FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
+        label="Production readiness soak-readiness reconciliation v1",
+        description=(
+            "Pins the final DA-DG production-readiness soak-readiness reconciliation receipts across runtime, "
+            "security, reach, learning, operator control, marketplace, and browser/computer-use evidence."
+        ),
+        benchmark_axis="production_readiness_soak_v1",
+        operator_summary=(
+            "The final reconciliation gives operators a cross-area evidence map while product-wide "
+            "production-ready wording remains blocked."
+        ),
+        remaining_gap=(
+            "Bounded soak-readiness receipts do not prove a live soak, product-wide production readiness, "
+            "or reference-system exceedance."
+        ),
+        scenario_names=PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
+        label="Final full parity claim-lift v1",
+        description=(
+            "Reconciles SCL-043 through SCL-050, DA-DG merged evidence, and DH bounded wording without "
+            "lifting broad full-parity claims."
+        ),
+        benchmark_axis="final_full_parity_claim_lift_v1",
+        operator_summary=(
+            "Claim-lift receipts permit only exact bounded DH wording and keep broad parity, superiority, "
+            "security, reach, browser, marketplace, and memory claims blocked."
+        ),
+        remaining_gap="Any broader public wording still requires explicit claim-ledger permission.",
+        scenario_names=FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME,
+        label="Reference-system source refresh v3",
+        description=(
+            "Pins June 11, 2026 manual Hermes, OpenClaw, and IronClaw source-review receipts for the final "
+            "DH gate with pressure-only claim use and access caveats."
+        ),
+        benchmark_axis="reference_system_source_refresh_v3",
+        operator_summary=(
+            "Current competitor sources remain pressure evidence only and cannot imply Seraph parity or superiority."
+        ),
+        remaining_gap="Source refresh is not a substitute for implementation, tests, board state, or claim-ledger permission.",
+        scenario_names=REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FALSE_COMPLETION_SCAN_V3_SUITE_NAME,
+        label="False completion scan v3",
+        description=(
+            "Extends the false-completion scan through Batch DH, including docs/code/operator scans, GitHub "
+            "tracking receipts, and stale PR #548 closure."
+        ),
+        benchmark_axis="false_completion_scan_v3",
+        operator_summary=(
+            "False-completion v3 keeps DH bounded wording separate from full parity, production-ready, "
+            "security, and superiority claims."
+        ),
+        remaining_gap="External PR and issue wording must still be reviewed before merge.",
+        scenario_names=FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME,
+        label="Board PR issue reconciliation v3",
+        description=(
+            "Pins #475, #540-#547, #548, and PR #555 board/PR/issue state for the final production-parity gate."
+        ),
+        benchmark_axis="board_pr_issue_reconciliation_v3",
+        operator_summary=(
+            "Operators can inspect DA-DG Done/Merged/Passed receipts, DH active branch state, and stale PR closure."
+        ),
+        remaining_gap="Final DH PR fields must be updated when the aggregate PR opens and merges.",
+        scenario_names=BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
     ),
 )
 

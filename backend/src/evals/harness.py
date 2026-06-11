@@ -350,6 +350,22 @@ from src.cockpit.operator_control_certification import (
     REQUIRED_OPERATOR_CONTROL_ACTIONS,
     build_operator_control_certification_contract,
 )
+from src.cockpit.operator_control_production_certification import (
+    AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES,
+    AUTHORITY_TRANSFER_RECOVERY_V1_SUITE_NAME,
+    OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V2_SUITE_NAME,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_LIVE_POPULATION_V1_SUITE_NAME,
+    OPERATOR_CONTROL_PRODUCTION_CERTIFICATION_BLOCKED_CLAIMS,
+    OPERATOR_CONTROL_PRODUCTION_CERTIFICATION_CLAIM_BOUNDARY,
+    REQUIRED_DM_OPERATOR_CONTROLS,
+    TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
+    TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME,
+    build_operator_control_production_certification_contract,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -17943,6 +17959,137 @@ async def _eval_operator_control_certification_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_operator_control_production_certification_behavior() -> dict[str, Any]:
+    contract = build_operator_control_production_certification_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    controls = contract["operator_control_v2_receipts"]
+    population = contract["operator_live_population_receipts"]
+    audit = contract["tamper_evident_audit_candidate_receipts"]
+    authority = contract["authority_transfer_recovery_receipts"]
+    false_claims = contract["false_claim_scan_receipts"]
+    suites = benchmark_suite_report()
+    suite_names = {item["name"]: item for item in suites}
+    gate_policy = evolution_benchmark_gate_policy()
+    required_suites = {
+        OPERATOR_CONTROL_CERTIFICATION_V2_SUITE_NAME: OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES,
+        OPERATOR_CONTROL_LIVE_POPULATION_V1_SUITE_NAME: OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
+        TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME: TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
+        AUTHORITY_TRANSFER_RECOVERY_V1_SUITE_NAME: AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES,
+        OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SUITE_NAME: OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    }
+    safe_receipts = [
+        item["safe_receipt"]
+        for item in [*controls, *population, *audit, *authority, *false_claims]
+    ]
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "operator_control_production_certification_receipts_visible"
+        ),
+        "dm_suites_visible": all(
+            suite_name in suite_names
+            and suite_names[suite_name]["scenario_count"] == len(scenario_names)
+            for suite_name, scenario_names in required_suites.items()
+        ),
+        "dm_suites_gate_required": all(
+            suite_name in gate_policy["required_benchmark_suites"]
+            for suite_name in required_suites
+        ),
+        "required_controls_visible": (
+            summary["required_controls_visible"] is True
+            and set(REQUIRED_DM_OPERATOR_CONTROLS) <= {item["action"] for item in controls}
+        ),
+        "controls_have_authority_receipts_and_correctness": all(
+            item["enabled"] is True
+            and item["authority_visible"] is True
+            and item["receipt_after_action"]
+            and item["recovery_correctness_check"]
+            and item["safe_receipt"]
+            for item in controls
+        ),
+        "stale_approval_and_safe_denial_visible": (
+            summary["stale_approval_block_count"] >= 3
+            and summary["safe_denial_visible"] is True
+            and any(item["negative_case"] == "stale_approval_scope_blocks_mutation" for item in controls)
+        ),
+        "live_population_telemetry_visible": (
+            summary["population_operator_count"] >= 100
+            and summary["population_row_count"] >= 4
+            and summary["population_required_controls_covered"] is True
+            and summary["keyboard_accessibility_floor_met"] is True
+            and summary["latency_floor_met"] is True
+            and summary["recovery_floor_met"] is True
+            and summary["error_detectability_floor_met"] is True
+            and all(
+                item["fixture_vs_live_marker"]
+                and item["evaluator_independence"].endswith("_not_implementation_worker")
+                and item["reviewer_attestation"]
+                and len(item["telemetry_digest"]) == 64
+                for item in population
+            )
+        ),
+        "tamper_evident_audit_candidate_visible_not_tamper_proof": (
+            summary["tamper_evident_audit_candidate_count"] >= 5
+            and summary["audit_digest_chain_linked"] is True
+            and summary["audit_mutation_denial_visible"] is True
+            and all(
+                item["digest_algorithm"] == "sha256"
+                and len(item["digest"]) == 64
+                and item["redacted_handle"].startswith("audit-handle:dm:")
+                and item["residual_risk"] == "tamper_evident_candidate_not_tamper_proof_audit_or_formal_certification"
+                for item in audit
+            )
+        ),
+        "authority_transfer_recovery_visible": (
+            summary["authority_transfer_count"] >= 6
+            and summary["authority_scope_renewal_visible"] is True
+            and summary["operator_takeover_visible"] is True
+            and summary["replay_runbook_boundary_visible"] is True
+            and all(
+                item["scope_renewal_required"] is True
+                and item["checkpoint_digest_required"] is True
+                and item["actor_authority_required"] is True
+                and item["approval_reuse_allowed"] is False
+                for item in authority
+            )
+        ),
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt["contains_secret"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["contains_raw_transcript"] is False
+                and receipt["contains_unredacted_operator_identifier"] is False
+                and receipt["raw_receipt_path_exposed"] is False
+                and receipt["redaction_layer"] == "operator_control_production_certification_v1"
+                and len(receipt["tamper_evident_digest"]) == 64
+                for receipt in safe_receipts
+            )
+        ),
+        "false_claim_scan_clean": (
+            summary["false_claim_scan_clean"] is True
+            and false_claims[0]["command"] == "python3 scripts/check_strategy_claims.py"
+            and false_claims[0]["forbidden_hit_count"] == 0
+        ),
+        "claim_boundary_visible": (
+            policy["claim_boundary"] == OPERATOR_CONTROL_PRODUCTION_CERTIFICATION_CLAIM_BOUNDARY
+        ),
+        "blocked_claims_visible": (
+            set(OPERATOR_CONTROL_PRODUCTION_CERTIFICATION_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
+        ),
+        "unsupported_claims_remain_blocked": (
+            summary["formal_certification_allowed"] is False
+            and summary["solved_control_claim_allowed"] is False
+            and summary["tamper_proof_audit_claim_allowed"] is False
+            and summary["best_world_class_cockpit_claim_allowed"] is False
+        ),
+        "operator_surfaces_visible": {
+            "/api/operator/operator-control-production-certification",
+            "/api/operator/benchmark-proof",
+        } <= set(policy["receipt_surfaces"]),
+    }
+
+
 async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     contract = build_final_parity_audit_contract()
     summary = contract["summary"]
@@ -18691,6 +18838,21 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     operator_error_detectability_v1_suite = next(
         item for item in suites if item["name"] == OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME
+    )
+    operator_control_certification_v2_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_CERTIFICATION_V2_SUITE_NAME
+    )
+    operator_control_live_population_v1_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_LIVE_POPULATION_V1_SUITE_NAME
+    )
+    tamper_evident_audit_candidate_v1_suite = next(
+        item for item in suites if item["name"] == TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME
+    )
+    authority_transfer_recovery_v1_suite = next(
+        item for item in suites if item["name"] == AUTHORITY_TRANSFER_RECOVERY_V1_SUITE_NAME
+    )
+    operator_control_false_claim_scan_v1_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -20337,6 +20499,76 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "operator_error_detectability_v1_gate_required": (
             OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_control_certification_v2_suite_present": (
+            "operator_control_v2_required_control_matrix_behavior"
+            in operator_control_certification_v2_suite["scenario_names"]
+        ),
+        "operator_control_certification_v2_suite_scenario_count_matches": (
+            operator_control_certification_v2_suite["scenario_count"]
+            == len(OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES)
+        ),
+        "operator_control_certification_v2_suite_axis_matches": (
+            operator_control_certification_v2_suite["benchmark_axis"] == "operator_control_certification_v2"
+        ),
+        "operator_control_certification_v2_gate_required": (
+            OPERATOR_CONTROL_CERTIFICATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_control_live_population_v1_suite_present": (
+            "operator_live_population_task_telemetry_behavior"
+            in operator_control_live_population_v1_suite["scenario_names"]
+        ),
+        "operator_control_live_population_v1_suite_scenario_count_matches": (
+            operator_control_live_population_v1_suite["scenario_count"]
+            == len(OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES)
+        ),
+        "operator_control_live_population_v1_suite_axis_matches": (
+            operator_control_live_population_v1_suite["benchmark_axis"] == "operator_control_live_population_v1"
+        ),
+        "operator_control_live_population_v1_gate_required": (
+            OPERATOR_CONTROL_LIVE_POPULATION_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "tamper_evident_audit_candidate_v1_suite_present": (
+            "tamper_evident_audit_digest_linkage_behavior"
+            in tamper_evident_audit_candidate_v1_suite["scenario_names"]
+        ),
+        "tamper_evident_audit_candidate_v1_suite_scenario_count_matches": (
+            tamper_evident_audit_candidate_v1_suite["scenario_count"]
+            == len(TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES)
+        ),
+        "tamper_evident_audit_candidate_v1_suite_axis_matches": (
+            tamper_evident_audit_candidate_v1_suite["benchmark_axis"] == "tamper_evident_audit_candidate_v1"
+        ),
+        "tamper_evident_audit_candidate_v1_gate_required": (
+            TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "authority_transfer_recovery_v1_suite_present": (
+            "authority_transfer_scope_renewal_behavior"
+            in authority_transfer_recovery_v1_suite["scenario_names"]
+        ),
+        "authority_transfer_recovery_v1_suite_scenario_count_matches": (
+            authority_transfer_recovery_v1_suite["scenario_count"]
+            == len(AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES)
+        ),
+        "authority_transfer_recovery_v1_suite_axis_matches": (
+            authority_transfer_recovery_v1_suite["benchmark_axis"] == "authority_transfer_recovery_v1"
+        ),
+        "authority_transfer_recovery_v1_gate_required": (
+            AUTHORITY_TRANSFER_RECOVERY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_control_false_claim_scan_v1_suite_present": (
+            "operator_control_false_claim_scan_behavior"
+            in operator_control_false_claim_scan_v1_suite["scenario_names"]
+        ),
+        "operator_control_false_claim_scan_v1_suite_scenario_count_matches": (
+            operator_control_false_claim_scan_v1_suite["scenario_count"]
+            == len(OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+        ),
+        "operator_control_false_claim_scan_v1_suite_axis_matches": (
+            operator_control_false_claim_scan_v1_suite["benchmark_axis"] == "operator_control_false_claim_scan_v1"
+        ),
+        "operator_control_false_claim_scan_v1_gate_required": (
+            OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -24640,6 +24872,66 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_operator_control_certification_behavior,
         )
         for name in OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DM pins operator-control certification v2 across dense long-work controls, stale approval "
+                "blocking, safe denial, recovery correctness, and operator takeover without solved-control claims."
+            ),
+            runner=_eval_operator_control_production_certification_behavior,
+        )
+        for name in OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DM records live/population operator telemetry for clicks, keystrokes, latency, recovery, "
+                "keyboard accessibility, error detectability, and fixture-vs-live boundaries."
+            ),
+            runner=_eval_operator_control_production_certification_behavior,
+        )
+        for name in OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DM verifies tamper-evident audit candidate receipts with digest linkage, redacted handles, "
+                "mutation denial, replay denial, and explicit tamper-proof/formal-certification claim blocking."
+            ),
+            runner=_eval_operator_control_production_certification_behavior,
+        )
+        for name in TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DM verifies authority-transfer recovery for handoff, takeover, replay, rollback, quarantine, "
+                "and revoke paths with scope renewal and approval-reuse denial."
+            ),
+            runner=_eval_operator_control_production_certification_behavior,
+        )
+        for name in AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DM pins a false-claim scan for solved control, best cockpit, tamper-proof audit, formal "
+                "certification, production-ready, full-parity, and exceedance wording."
+            ),
+            runner=_eval_operator_control_production_certification_behavior,
+        )
+        for name in OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

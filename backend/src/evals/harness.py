@@ -275,6 +275,20 @@ from src.cockpit.operator_mission_control import (
     OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY,
     build_operator_mission_control_contract,
 )
+from src.cockpit.operator_control_certification import (
+    LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES,
+    LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME,
+    OPERATOR_CONTROL_CERTIFICATION_BLOCKED_CLAIMS,
+    OPERATOR_CONTROL_CERTIFICATION_CLAIM_BOUNDARY,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME,
+    OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
+    OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME,
+    REQUIRED_OPERATOR_CONTROL_ACTIONS,
+    build_operator_control_certification_contract,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -16705,6 +16719,186 @@ async def _eval_operator_mission_control_population_behavior() -> dict[str, Any]
     }
 
 
+async def _eval_operator_control_certification_behavior() -> dict[str, Any]:
+    contract = build_operator_control_certification_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    controls = contract["control_certification_receipts"]
+    population = contract["population_study_v2_receipts"]
+    slos = contract["long_work_recovery_slo_v2_receipts"]
+    errors = contract["error_detectability_receipts"]
+    baselines = contract["named_baseline_pressure_receipts"]
+    suites = benchmark_suite_report()
+    certification_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME
+    )
+    population_suite = next(
+        item for item in suites if item["name"] == MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME
+    )
+    slo_suite = next(
+        item for item in suites if item["name"] == LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME
+    )
+    error_suite = next(
+        item for item in suites if item["name"] == OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    required_surfaces = {
+        "/api/operator/operator-control-certification",
+        "/api/operator/operator-control-population-study",
+        "/api/operator/dense-operator-recovery-control",
+        "/api/operator/production-operator-control-parity",
+        "/api/operator/benchmark-proof",
+    }
+    all_safe_receipts = [
+        item["safe_receipt"]
+        for item in [*controls, *population, *slos, *errors, *baselines]
+    ]
+    approval_control = next(item for item in controls if item["action"] == "approve")
+    replay_control = next(item for item in controls if item["action"] == "replay")
+    handoff_control = next(item for item in controls if item["action"] == "handoff")
+    stale_errors = [item for item in errors if item["stale_approval_blocked"] is True]
+    return {
+        "operator_status_visible": summary["operator_status"] == "operator_control_certification_receipts_visible",
+        "operator_control_certification_suite_visible": (
+            certification_suite["scenario_count"] == len(OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES)
+        ),
+        "mission_control_population_v2_suite_visible": (
+            population_suite["scenario_count"] == len(MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES)
+        ),
+        "long_work_recovery_slo_v2_suite_visible": (
+            slo_suite["scenario_count"] == len(LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES)
+        ),
+        "operator_error_detectability_suite_visible": (
+            error_suite["scenario_count"] == len(OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES)
+        ),
+        "required_controls_visible": (
+            summary["control_count"] >= len(REQUIRED_OPERATOR_CONTROL_ACTIONS)
+            and set(REQUIRED_OPERATOR_CONTROL_ACTIONS) <= {item["action"] for item in controls}
+        ),
+        "control_receipts_have_authority_and_correctness": all(
+            item["enabled"] is True
+            and item["authority_visible"] is True
+            and item.get("receipt_after_action")
+            and item.get("recovery_correctness_check")
+            and item.get("safe_receipt")
+            for item in controls
+        ),
+        "stale_approval_negative_cases_visible": (
+            approval_control["stale_approval_blocked"] is True
+            and replay_control["stale_approval_blocked"] is True
+            and replay_control["negative_case"] == "approval_context_changed_blocks_replay"
+        ),
+        "handoff_does_not_reuse_approval": handoff_control["approval_reuse_allowed"] is False,
+        "population_telemetry_visible": (
+            summary["population_operator_count"] >= 80
+            and summary["telemetry_row_count"] >= 4
+            and summary["population_required_controls_covered"] is True
+            and set(REQUIRED_OPERATOR_CONTROL_ACTIONS) <= set(summary["population_covered_actions"])
+            and summary["independent_evaluator_count"] >= 3
+            and all(
+                item["click_count_p50"] > 0
+                and item["keystroke_count_p50"] > 0
+                and set(item["covered_actions"]) <= set(REQUIRED_OPERATOR_CONTROL_ACTIONS)
+                and len(item["covered_actions"]) >= 6
+                and item["latency_ms_p95"] <= 1000
+                and item["recovery_seconds_p95"] <= 90
+                and item["task_relative_effort_ratio"] < 0.85
+                and item["accessibility_audit_passed"] is True
+                and len(item["telemetry_digest"]) == 64
+                and item["reviewer_attestation"]
+                for item in population
+            )
+        ),
+        "keyboard_and_recovery_floors_met": (
+            summary["keyboard_only_floor_met"] is True
+            and summary["recovery_success_floor_met"] is True
+        ),
+        "long_work_slos_cover_required_dimensions": (
+            summary["all_slos_met"] is True
+            and {
+                "multi_session_workflow",
+                "delegated_artifacts",
+                "background_processes",
+                "branch_families",
+                "runbook_replay",
+            }
+            <= {item["workload"] for item in slos}
+            and all(item["approval_context_required"] is True and item["operator_receipt_required"] is True for item in slos)
+        ),
+        "source_and_residual_drilldown_visible": any(item["source_evidence_visible"] for item in slos)
+        and any(item["residual_risk_drilldown_visible"] for item in slos),
+        "error_detectability_and_calibration_met": (
+            summary["error_detectability_floor_met"] is True
+            and summary["confidence_calibration_floor_met"] is True
+            and all(item["operator_visible_fields"] for item in errors)
+        ),
+        "safe_denial_and_stale_approval_blocks_visible": (
+            summary["safe_denial_count"] >= 3
+            and summary["stale_approval_blocked_count"] >= 1
+            and all(
+                item["replay_allowed"] is False
+                and item["resume_plan"] is None
+                and item["replay_block_reason"] == "approval_context_changed"
+                for item in stale_errors
+            )
+        ),
+        "baseline_rows_are_pressure_only": (
+            summary["named_baselines_pressure_only"] is True
+            and summary["baseline_source_receipts_linked"] is True
+            and summary["baseline_claim_lift_blocked"] is True
+            and {"Hermes", "OpenClaw", "IronClaw"} <= {item["system"] for item in baselines}
+            and all(
+                item["source_checked_at"] == "2026-06-11"
+                and item["winner_claimed"] is False
+                and item["claim_lift_allowed"] is False
+                and item["source_recheck_required_before_claim_lift"] is True
+                and item["source_type"] == "post_cq_reference_system_source_refresh_v2"
+                and item["source_receipt"]["url"].startswith("https://")
+                and item["source_receipt"]["claim_use"] == "source_backed_pressure_only"
+                and item["source_receipt"]["runtime_fetch_performed"] is False
+                and item["source_receipt"]["external_reachability_receipt"]
+                and item["limitations"]
+                for item in baselines
+            )
+        ),
+        "safe_receipts_redacted_and_tamper_evident_not_tamper_proof": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt["contains_secret"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["contains_raw_transcript"] is False
+                and receipt["contains_unredacted_operator_identifier"] is False
+                and receipt["raw_receipt_path_exposed"] is False
+                and receipt["workspace_dir_exposed"] is False
+                and receipt["package_path_exposed"] is False
+                and receipt["redaction_layer"] == "operator_control_certification_v1"
+                and len(receipt["tamper_evident_digest"]) == 64
+                for receipt in all_safe_receipts
+            )
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == OPERATOR_CONTROL_CERTIFICATION_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(OPERATOR_CONTROL_CERTIFICATION_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "formal_certification_and_solved_control_blocked": (
+            summary["formal_certification_allowed"] is False
+            and summary["solved_control_claim_allowed"] is False
+            and summary["tamper_proof_audit_claim_allowed"] is False
+        ),
+        "operator_control_certification_gate_required": (
+            OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "mission_control_population_v2_gate_required": (
+            MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "long_work_recovery_slo_v2_gate_required": (
+            LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_error_detectability_gate_required": (
+            OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     contract = build_final_parity_audit_contract()
     summary = contract["summary"]
@@ -17253,6 +17447,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     long_work_debugging_slo_suite = next(
         item for item in suites if item["name"] == LONG_WORK_DEBUGGING_SLO_SUITE_NAME
+    )
+    operator_control_certification_v1_suite = next(
+        item for item in suites if item["name"] == OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME
+    )
+    mission_control_population_study_v2_suite = next(
+        item for item in suites if item["name"] == MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME
+    )
+    long_work_recovery_slo_v2_suite = next(
+        item for item in suites if item["name"] == LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME
+    )
+    operator_error_detectability_v1_suite = next(
+        item for item in suites if item["name"] == OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME
     )
     return {
         "suite_count": len(suites),
@@ -18638,6 +18844,61 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "long_work_debugging_slo_gate_required": (
             LONG_WORK_DEBUGGING_SLO_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_control_certification_v1_suite_present": (
+            "operator_certification_control_coverage_behavior"
+            in operator_control_certification_v1_suite["scenario_names"]
+        ),
+        "operator_control_certification_v1_suite_scenario_count_matches": (
+            operator_control_certification_v1_suite["scenario_count"]
+            == len(OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES)
+        ),
+        "operator_control_certification_v1_suite_axis_matches": (
+            operator_control_certification_v1_suite["benchmark_axis"] == "operator_control_certification_v1"
+        ),
+        "operator_control_certification_v1_gate_required": (
+            OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "mission_control_population_study_v2_suite_present": (
+            "mission_control_population_v2_telemetry_behavior"
+            in mission_control_population_study_v2_suite["scenario_names"]
+        ),
+        "mission_control_population_study_v2_suite_scenario_count_matches": (
+            mission_control_population_study_v2_suite["scenario_count"]
+            == len(MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES)
+        ),
+        "mission_control_population_study_v2_suite_axis_matches": (
+            mission_control_population_study_v2_suite["benchmark_axis"] == "mission_control_population_study_v2"
+        ),
+        "mission_control_population_study_v2_gate_required": (
+            MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "long_work_recovery_slo_v2_suite_present": (
+            "long_work_recovery_slo_v2_multisession_behavior"
+            in long_work_recovery_slo_v2_suite["scenario_names"]
+        ),
+        "long_work_recovery_slo_v2_suite_scenario_count_matches": (
+            long_work_recovery_slo_v2_suite["scenario_count"] == len(LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES)
+        ),
+        "long_work_recovery_slo_v2_suite_axis_matches": (
+            long_work_recovery_slo_v2_suite["benchmark_axis"] == "long_work_recovery_slo_v2"
+        ),
+        "long_work_recovery_slo_v2_gate_required": (
+            LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "operator_error_detectability_v1_suite_present": (
+            "operator_error_detectability_stale_approval_behavior"
+            in operator_error_detectability_v1_suite["scenario_names"]
+        ),
+        "operator_error_detectability_v1_suite_scenario_count_matches": (
+            operator_error_detectability_v1_suite["scenario_count"]
+            == len(OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES)
+        ),
+        "operator_error_detectability_v1_suite_axis_matches": (
+            operator_error_detectability_v1_suite["benchmark_axis"] == "operator_error_detectability_v1"
+        ),
+        "operator_error_detectability_v1_gate_required": (
+            OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_gate_required": LIVE_REPLAY_BENCHMARK_SUITE_NAME in gate_policy["required_benchmark_suites"],
         "required_suite_count_matches": len(gate_policy["required_benchmark_suites"]) == len(suites),
@@ -22443,6 +22704,55 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_operator_mission_control_population_behavior,
         )
         for name in LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DE pins bounded operator-control certification coverage across inspect, approve, deny, pause, "
+                "resume, retry, repair, branch, compare, revoke, quarantine, handoff, rollback, audit, search, replay, "
+                "and runbook controls without formal-certification or solved-control claims."
+            ),
+            runner=_eval_operator_control_certification_behavior,
+        )
+        for name in OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DE records mission-control population v2 telemetry for clicks, keystrokes, latency, recovery, "
+                "effort, accessibility, keyboard-only paths, reviewer independence, and pressure-only baselines."
+            ),
+            runner=_eval_operator_control_certification_behavior,
+        )
+        for name in MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DE checks long-work recovery SLO v2 receipts for multi-session workflows, delegated artifacts, "
+                "background processes, branch families, source evidence, runbook replay, and residual-risk drill-down."
+            ),
+            runner=_eval_operator_control_certification_behavior,
+        )
+        for name in LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DE verifies operator error detectability, confidence calibration, safe denial, stale approval "
+                "blocking, replay denial, and recovery correctness before mutation."
+            ),
+            runner=_eval_operator_control_certification_behavior,
+        )
+        for name in OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

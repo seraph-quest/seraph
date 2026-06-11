@@ -36,6 +36,16 @@ from src.cockpit.operator_mission_control import (
     OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
     OPERATOR_CONTROL_POPULATION_STUDY_SUITE_NAME,
 )
+from src.cockpit.operator_control_certification import (
+    LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES,
+    LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME,
+    OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
+    OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -2348,6 +2358,75 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "These are fixture SLOs, not fastest-cockpit, production-ready, or solved-control evidence."
         ),
         scenario_names=LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_CERTIFICATION_V1_SUITE_NAME,
+        label="Operator control certification v1",
+        description=(
+            "Pins bounded certification-style coverage for inspect, approve, deny, pause, resume, retry, repair, "
+            "branch, compare, revoke, quarantine, handoff, rollback, audit, search, replay, and runbook controls "
+            "with authority, stale-approval, integrity, and claim-boundary receipts."
+        ),
+        benchmark_axis="operator_control_certification_v1",
+        operator_summary=(
+            "Batch DE treats certification as bounded operator-control evidence: coverage, authority, receipt, "
+            "negative-case, and redaction proof without formal-certification or solved-control wording."
+        ),
+        remaining_gap=(
+            "This is not formal certification, best/world-class cockpit proof, solved operator control, "
+            "tamper-proof audit, production readiness, full parity, or reference-system exceedance."
+        ),
+        scenario_names=OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MISSION_CONTROL_POPULATION_STUDY_V2_SUITE_NAME,
+        label="Mission control population study v2",
+        description=(
+            "Pins broader task-relative telemetry for operator clicks, keystrokes, latency, recovery, effort, "
+            "accessibility, keyboard-only success, reviewer independence, digest visibility, and pressure-only baselines."
+        ),
+        benchmark_axis="mission_control_population_study_v2",
+        operator_summary=(
+            "Population v2 receipts make operator-control evidence measurable while keeping named baselines pressure-only."
+        ),
+        remaining_gap=(
+            "Population fixtures remain bounded and do not prove fastest cockpit, named baseline wins, or universal usability."
+        ),
+        scenario_names=MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LONG_WORK_RECOVERY_SLO_V2_SUITE_NAME,
+        label="Long-work recovery SLO v2",
+        description=(
+            "Pins multi-session, delegated-artifact, background-process, branch-family, source-evidence, runbook replay, "
+            "and residual-risk drill-down SLO receipts with approval-context preservation."
+        ),
+        benchmark_axis="long_work_recovery_slo_v2",
+        operator_summary=(
+            "Long-work recovery v2 checks that recovery stays operator-controlled, source-backed, and read-only until "
+            "approval, trust, checkpoint, and side-effect boundaries match."
+        ),
+        remaining_gap=(
+            "These are bounded recovery SLO receipts, not guaranteed rollback, crash-proof operation, or solved control."
+        ),
+        scenario_names=LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME,
+        label="Operator error detectability v1",
+        description=(
+            "Pins error detectability, confidence calibration, safe denial, stale approval blocking, replay denial, "
+            "and recovery-correctness receipts for representative long-work operator failures."
+        ),
+        benchmark_axis="operator_error_detectability_v1",
+        operator_summary=(
+            "Operator error detectability means unsafe recovery is visible and deniable before mutation, with calibrated "
+            "confidence and explicit stale-approval negative cases."
+        ),
+        remaining_gap=(
+            "This does not prove solved operator control, tamper-proof audit, production readiness, or full parity."
+        ),
+        scenario_names=OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,

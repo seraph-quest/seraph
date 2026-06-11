@@ -111,6 +111,20 @@ def test_run_command_rejects_inline_python():
     assert result == "Error: Inline Python execution belongs in execute_code, not the process runtime."
 
 
+def test_run_command_rejects_python_network_client_imports():
+    script_name = _write_script(
+        "wave_db_process_network_escape.py",
+        """
+        import socket
+        print(socket.gethostname())
+        """,
+    )
+
+    result = run_command(command="python3", args_json=f'["{script_name}"]')
+
+    assert result == "Error: script network clients are blocked in the process runtime."
+
+
 def test_run_command_rejects_workspace_escape():
     result = run_command(command="python3", args_json='["missing.py"]', cwd="../")
     assert result == "Error: cwd must stay within the workspace."

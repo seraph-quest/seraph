@@ -139,6 +139,28 @@ _DANGEROUS_FIND_ACTIONS = {
     "-ok",
     "-okdir",
 }
+_NETWORK_SCRIPT_MARKERS = (
+    "import socket",
+    "from socket import",
+    "import http.client",
+    "from http.client import",
+    "import urllib.request",
+    "from urllib.request import",
+    "import requests",
+    "from requests import",
+    "import httpx",
+    "from httpx import",
+    "fetch(",
+    "net.connect",
+    "http.request",
+    "https.request",
+    "require('net')",
+    'require("net")',
+    "require('http')",
+    'require("http")',
+    "require('https')",
+    'require("https")',
+)
 _ENV_ALLOWLIST = {
     "PATH",
     "LANG",
@@ -323,6 +345,15 @@ def _validate_interpreter_args(executable: str, args: list[str]) -> None:
         raise ValueError("uv run -m is not allowed in the process runtime.")
 
 
+def _reject_network_script_markers(script_path: Path) -> None:
+    try:
+        body = script_path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError as exc:
+        raise ValueError("script path must point to a readable workspace file.") from exc
+    if any(marker in body for marker in _NETWORK_SCRIPT_MARKERS):
+        raise ValueError("script network clients are blocked in the process runtime.")
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
 
@@ -350,6 +381,7 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if arg.startswith("-"):
                 continue
             _ensure_process_accessible_path(arg, cwd, label="script path")
+            _reject_network_script_markers((Path(arg) if Path(arg).is_absolute() else (cwd / arg)).resolve())
             break
         return
 
@@ -534,6 +566,7 @@ def _process_approval_context(
         "secret_like_path_arguments_blocked": True,
         "recursive_secret_like_search_paths_blocked": True,
         "dangerous_find_actions_blocked": True,
+        "script_network_client_markers_blocked": True,
         "runtime_log_storage": "temp_runtime_outside_workspace",
         "runtime_worker_storage": "temp_runtime_outside_workspace",
         "disposable_worker_runtime": True,

@@ -278,12 +278,12 @@ TOOL_METADATA: dict[str, dict] = {
         "execution_boundaries": ["secret_management"],
     },
     "get_secret": {
-        "description": "Retrieve a secret from the vault",
+        "description": "Legacy raw-secret retrieval stub; returns a scoped-ref migration denial",
         "policy_modes": ["full"],
-        "execution_boundaries": ["secret_read"],
+        "execution_boundaries": ["secret_ref_migration"],
     },
     "get_secret_ref": {
-        "description": "Create an opaque session-scoped reference for a secret",
+        "description": "Create an opaque scoped reference for a secret",
         "policy_modes": ["full"],
         "execution_boundaries": ["secret_injection"],
     },

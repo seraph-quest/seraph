@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from smolagents import Tool, tool
 
 from src.approval.runtime import get_current_session_id
+from src.security.site_policy import evaluate_site_access
 from src.tools.policy import (
     get_tool_credential_egress_policy,
     get_tool_secret_ref_fields,
@@ -91,7 +92,17 @@ class SecretRefResolvingTool(Tool):
         resolved_secret_values: list[str] = []
         for key, value in invocation.items():
             if key in secret_ref_fields:
-                resolved_value, secret_values = resolve_secret_refs_with_values(value, session_id)
+                destination = _primary_credential_destination(invocation)
+                resolved_value, secret_values = resolve_secret_refs_with_values(
+                    value,
+                    session_id,
+                    tool_name=self.name,
+                    field_name=key,
+                    destination_host=destination.get("host"),
+                    destination_scheme=destination.get("scheme"),
+                    destination_port=destination.get("port"),
+                    purpose="tool_credential_injection",
+                )
                 resolved_invocation[key] = resolved_value
                 resolved_secret_values.extend(secret_values)
             else:
@@ -175,7 +186,8 @@ def _disallowed_credential_destination_hosts(invocation: dict, allowed_hosts: li
         if not _looks_like_destination_field(str(key)):
             continue
         for host in _extract_url_hosts(value):
-            if host.lower() not in normalized_allowed:
+            decision = evaluate_site_access(host, resolve_dns=True)
+            if not decision.allowed or host.lower() not in normalized_allowed:
                 discovered_hosts.add(host)
     return sorted(discovered_hosts)
 
@@ -203,8 +215,15 @@ def _extract_url_hosts(value) -> list[str]:
 
 
 @tool
-def get_secret_ref(key: str) -> str:
-    """Create a session-scoped opaque reference for a stored secret.
+def get_secret_ref(
+    key: str,
+    tool_name: str = "",
+    field_name: str = "",
+    destination_url: str = "",
+    purpose: str = "tool_credential_injection",
+    one_time: bool = False,
+) -> str:
+    """Create an opaque scoped reference for a stored secret.
 
     Use the returned `secret://...` reference directly inside later tool
     arguments such as HTTP headers. Seraph will resolve it at execution time
@@ -212,6 +231,11 @@ def get_secret_ref(key: str) -> str:
 
     Args:
         key: The key of the stored secret to reference.
+        tool_name: Tool name this ref may be resolved by.
+        field_name: Top-level tool field this ref may be injected into.
+        destination_url: Destination URL this ref may be used against.
+        purpose: Optional purpose label for audit and scope matching.
+        one_time: Whether the ref should be consumed after its first resolution.
 
     Returns:
         An opaque secret reference string, or a not-found message.
@@ -230,11 +254,82 @@ def get_secret_ref(key: str) -> str:
         )
         return f"Secret '{key}' not found in vault."
 
-    secret_ref = issue_secret_ref(session_id, result)
+    destination = _destination_from_url(destination_url)
+    if not tool_name.strip() or not field_name.strip() or not destination.get("host"):
+        _log_secret_event(
+            event_type="secret_ref_issue",
+            tool_name="get_secret_ref",
+            summary=f"Blocked unscoped secret reference for key '{key}'",
+            details={
+                "key": key,
+                "found": True,
+                "scoped_tool": bool(tool_name.strip()),
+                "scoped_field": bool(field_name.strip()),
+                "scoped_destination": bool(destination.get("host")),
+            },
+        )
+        return "Secret references require tool_name, field_name, and destination_url scope."
+
+    secret_ref = issue_secret_ref(
+        session_id,
+        result,
+        tool_name=tool_name,
+        field_name=field_name,
+        destination_host=destination.get("host"),
+        destination_scheme=destination.get("scheme"),
+        destination_port=destination.get("port"),
+        purpose=purpose or None,
+        one_time=one_time,
+    )
     _log_secret_event(
         event_type="secret_ref_issue",
         tool_name="get_secret_ref",
         summary=f"Issued secret reference for key '{key}'",
-        details={"key": key, "found": True},
+        details={
+            "key": key,
+            "found": True,
+            "scoped_tool": bool(tool_name),
+            "scoped_field": bool(field_name),
+            "scoped_destination": bool(destination.get("host")),
+            "one_time": bool(one_time),
+        },
     )
     return secret_ref
+
+
+def _primary_credential_destination(invocation: dict) -> dict[str, object | None]:
+    for key, value in invocation.items():
+        if _looks_like_destination_field(str(key)):
+            destination = _destination_from_nested_value(value)
+            if destination.get("host"):
+                return destination
+    return {"scheme": None, "host": None, "port": None}
+
+
+def _destination_from_nested_value(value) -> dict[str, object | None]:
+    if isinstance(value, str):
+        return _destination_from_url(value)
+    if isinstance(value, dict):
+        for item in value.values():
+            destination = _destination_from_nested_value(item)
+            if destination.get("host"):
+                return destination
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            destination = _destination_from_nested_value(item)
+            if destination.get("host"):
+                return destination
+    return {"scheme": None, "host": None, "port": None}
+
+
+def _destination_from_url(value: str) -> dict[str, object | None]:
+    if not isinstance(value, str) or not value.strip():
+        return {"scheme": None, "host": None, "port": None}
+    parsed = urlparse(value)
+    if not parsed.hostname:
+        return {"scheme": None, "host": None, "port": None}
+    return {
+        "scheme": parsed.scheme.lower() if parsed.scheme else None,
+        "host": parsed.hostname.lower(),
+        "port": parsed.port or (443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else None),
+    }

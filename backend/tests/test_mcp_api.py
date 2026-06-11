@@ -77,6 +77,28 @@ async def test_validate_server_rejects_raw_sensitive_header(client):
 
 
 @pytest.mark.asyncio
+async def test_validate_server_rejects_private_network_endpoint(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr.inspect_headers.return_value = ([], [], [])
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers/validate",
+            json={
+                "name": "local",
+                "url": "http://127.0.0.1:8765/mcp",
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert data["status"] == "invalid"
+    assert "blocked by site policy: internal_private" in data["issues"][0]
+
+
+@pytest.mark.asyncio
 async def test_validate_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
         mock_mgr.inspect_headers.return_value = ([], [], ["env"])
@@ -226,6 +248,24 @@ async def test_add_server_rejects_raw_sensitive_header(client):
 
 
 @pytest.mark.asyncio
+async def test_add_server_rejects_private_network_endpoint(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {}
+
+        resp = await client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "local",
+                "url": "http://169.254.169.254/latest/meta-data",
+                "enabled": True,
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "blocked by site policy: internal_private" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_add_server_rejects_mixed_raw_and_placeholder_sensitive_header(client):
     with patch("src.api.mcp.mcp_manager") as mock_mgr:
         mock_mgr._config = {}
@@ -258,6 +298,20 @@ async def test_update_server_rejects_mixed_raw_and_placeholder_sensitive_header(
 
     assert resp.status_code == 400
     assert "Sensitive header 'Authorization'" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_server_rejects_private_network_endpoint(client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {"gh": {"url": "https://example.com/mcp", "headers": {}}}
+
+        resp = await client.put(
+            "/api/mcp/servers/gh",
+            json={"url": "http://localhost:9000/mcp"},
+        )
+
+    assert resp.status_code == 400
+    assert "blocked by site policy: internal_private" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -318,6 +372,30 @@ async def test_test_server_auth_required_for_missing_vars(client):
         data = resp.json()
         assert data["status"] == "auth_required"
         assert "GITHUB_TOKEN" in data["missing_env_vars"]
+
+
+@pytest.mark.asyncio
+async def test_test_server_rejects_private_network_endpoint(async_db, client):
+    with patch("src.api.mcp.mcp_manager") as mock_mgr:
+        mock_mgr._config = {
+            "local": {
+                "url": "http://127.0.0.1:8765/mcp",
+                "headers": None,
+            }
+        }
+
+        resp = await client.post("/api/mcp/servers/local/test")
+
+    assert resp.status_code == 400
+    assert "blocked by site policy: internal_private" in resp.json()["detail"]
+
+    events = await audit_repository.list_events(limit=10)
+    assert any(
+        event["event_type"] == "integration_blocked"
+        and event["tool_name"] == "mcp_test:local"
+        and event["details"]["status"] == "site_policy_blocked"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

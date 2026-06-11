@@ -21,6 +21,7 @@ from smolagents import MCPClient
 
 from src.audit.formatting import redact_for_audit
 from src.audit.runtime import log_integration_event_sync
+from src.security.site_policy import evaluate_site_access
 from src.vault.repository import vault_repository
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,27 @@ class MCPManager:
             f.write("\n")
 
     # --- Connection management ---
+
+    @staticmethod
+    def endpoint_policy_issues(url: str) -> list[str]:
+        """Validate MCP endpoints against the shared site/network guard."""
+        normalized = (url or "").strip()
+        if not normalized:
+            return []
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return []
+        decision = evaluate_site_access(normalized, resolve_dns=True)
+        if decision.allowed:
+            return []
+        reason = decision.reason or "blocked"
+        return [f"Server URL host '{decision.hostname}' is blocked by site policy: {reason}."]
+
+    @staticmethod
+    def _raise_for_endpoint_policy(url: str) -> None:
+        issues = MCPManager.endpoint_policy_issues(url)
+        if issues:
+            raise ValueError(" ".join(issues))
 
     @staticmethod
     def _build_source_context(
@@ -377,6 +399,22 @@ class MCPManager:
     def connect(self, name: str, url: str, headers: dict[str, str] | None = None) -> None:
         """Connect to a named MCP server via HTTP/SSE. Fails gracefully."""
         try:
+            endpoint_issues = self.endpoint_policy_issues(url)
+            if endpoint_issues:
+                msg = " ".join(endpoint_issues)
+                self._status[name] = {"status": "blocked", "error": msg}
+                logger.warning("MCP server '%s' blocked by endpoint policy: %s", name, msg)
+                log_integration_event_sync(
+                    integration_type="mcp_server",
+                    name=name,
+                    outcome="blocked",
+                    details={
+                        "url": url,
+                        "status": "site_policy_blocked",
+                        "issues": endpoint_issues,
+                    },
+                )
+                return
             resolved_headers, missing_vars, missing_vault_keys, credential_sources = self.resolve_headers(headers)
             missing_details: list[str] = []
             if missing_vars:
@@ -587,6 +625,7 @@ class MCPManager:
                    extension_display_name: str | None = None,
                    source: str | None = None) -> None:
         """Add a new server to config and optionally connect it."""
+        self._raise_for_endpoint_policy(url)
         self._config[name] = {
             "url": url,
             "enabled": enabled,
@@ -612,6 +651,8 @@ class MCPManager:
         """Update server config. Returns False if server not found."""
         if name not in self._config:
             return False
+        if "url" in kwargs:
+            self._raise_for_endpoint_policy(str(kwargs["url"]))
         server = self._config[name]
         was_enabled = bool(server.get("enabled", True))
         previous_url = server.get("url")

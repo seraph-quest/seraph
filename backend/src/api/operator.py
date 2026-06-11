@@ -84,6 +84,7 @@ from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
 from src.replay.benchmark import build_live_replay_benchmark_report
 from src.security.benchmark import build_trust_boundary_benchmark_report
+from src.security.certified_secure_host import build_certified_secure_host_report
 from src.security.container_grade_host import build_container_grade_secure_host_report
 from src.security.independent_review import build_independent_secure_host_review_report
 from src.security.production_hardening import build_production_secure_host_hardening_report
@@ -3447,6 +3448,7 @@ async def get_operator_benchmark_proof():
         production_isolation_security,
         independent_secure_host_review,
         container_grade_secure_host,
+        certified_secure_host,
         production_reach_browser_voice,
         live_reach_media,
         production_reach_voice_mobile,
@@ -3500,6 +3502,7 @@ async def get_operator_benchmark_proof():
         build_production_isolation_security_report(),
         build_independent_secure_host_review_report(),
         build_container_grade_secure_host_report(),
+        build_certified_secure_host_report(),
         build_production_reach_browser_voice_report(),
         build_live_reach_media_report(),
         build_production_reach_voice_mobile_report(),
@@ -3560,6 +3563,7 @@ async def get_operator_benchmark_proof():
         str(production_isolation_security["summary"]["benchmark_posture"]),
         str(independent_secure_host_review["summary"]["benchmark_posture"]),
         str(container_grade_secure_host["summary"]["benchmark_posture"]),
+        str(certified_secure_host["summary"]["benchmark_posture"]),
         str(production_reach_browser_voice["summary"]["benchmark_posture"]),
         str(live_reach_media["summary"]["benchmark_posture"]),
         str(production_reach_voice_mobile["summary"]["benchmark_posture"]),
@@ -3670,6 +3674,8 @@ async def get_operator_benchmark_proof():
             "independent_secure_host_review_claim_boundary": independent_secure_host_review["policy"]["claim_boundary"],
             "container_grade_secure_host_posture": container_grade_secure_host["summary"]["benchmark_posture"],
             "container_grade_secure_host_claim_boundary": container_grade_secure_host["policy"]["claim_boundary"],
+            "certified_secure_host_posture": certified_secure_host["summary"]["benchmark_posture"],
+            "certified_secure_host_claim_boundary": certified_secure_host["policy"]["claim_boundary"],
             "production_reach_browser_voice_posture": production_reach_browser_voice["summary"]["benchmark_posture"],
             "production_reach_browser_voice_claim_boundary": production_reach_browser_voice["policy"]["claim_boundary"],
             "live_reach_media_posture": live_reach_media["summary"]["benchmark_posture"],
@@ -3746,6 +3752,7 @@ async def get_operator_benchmark_proof():
         "production_isolation_security": production_isolation_security,
         "independent_secure_host_review": independent_secure_host_review,
         "container_grade_secure_host": container_grade_secure_host,
+        "certified_secure_host": certified_secure_host,
         "production_reach_browser_voice": production_reach_browser_voice,
         "live_reach_media": live_reach_media,
         "production_reach_voice_mobile": production_reach_voice_mobile,
@@ -3933,6 +3940,11 @@ async def get_operator_independent_secure_host_review():
 @router.get("/operator/container-grade-secure-host")
 async def get_operator_container_grade_secure_host():
     return await build_container_grade_secure_host_report()
+
+
+@router.get("/operator/certified-secure-host")
+async def get_operator_certified_secure_host():
+    return await build_certified_secure_host_report()
 
 
 @router.get("/operator/production-reach-browser-voice")

@@ -193,6 +193,14 @@ from src.security.container_grade_host import (
     EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
     SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
 )
+from src.security.certified_secure_host import (
+    CERTIFIED_SECURE_HOST_BLOCKED_CLAIMS,
+    CERTIFIED_SECURE_HOST_CLAIM_BOUNDARY,
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES,
+    HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -3120,6 +3128,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["container_grade_secure_host_claim_boundary"] == (
         CONTAINER_GRADE_SECURE_HOST_CLAIM_BOUNDARY
     )
+    assert (
+        payload["summary"]["certified_secure_host_posture"]
+        == "certified_secure_host_covered_path_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["certified_secure_host_claim_boundary"] == CERTIFIED_SECURE_HOST_CLAIM_BOUNDARY
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
@@ -3962,6 +3975,12 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         PRODUCTION_ISOLATION_SECURITY_CLAIM_BOUNDARY
     )
     assert "ironclaw_class_secure_execution" in payload["production_isolation_security"]["policy"]["blocked_claims"]
+    assert (
+        payload["certified_secure_host"]["summary"]["benchmark_posture"]
+        == "certified_secure_host_covered_path_ci_gated_operator_visible"
+    )
+    assert payload["certified_secure_host"]["policy"]["claim_boundary"] == CERTIFIED_SECURE_HOST_CLAIM_BOUNDARY
+    assert "formal_security_certification" in payload["certified_secure_host"]["policy"]["blocked_claims"]
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["marketplace_lifecycle_maturity"]["summary"]["operator_status"] == (
@@ -6000,6 +6019,65 @@ async def test_operator_container_grade_secure_host_surface_reports_batch_ct_rec
         for item in payload["contract"]["secret_egress_certification_drills"]
     )
     assert any(item["action"] == "rotate" for item in payload["contract"]["incident_recovery_validation_receipts"])
+
+
+@pytest.mark.asyncio
+async def test_operator_certified_secure_host_surface_reports_batch_db_receipts(client):
+    resp = await client.get("/api/operator/certified-secure-host")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "certified_secure_host"
+    assert payload["summary"]["benchmark_posture"] == "certified_secure_host_covered_path_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "certified_secure_host_covered_path_receipts_visible"
+    assert payload["summary"]["runtime_profile_count"] >= 7
+    assert payload["summary"]["implemented_runtime_profile_count"] >= 6
+    assert payload["summary"]["hardware_substitute_visible"] is True
+    assert payload["summary"]["credential_broker_decision_count"] >= 6
+    assert payload["summary"]["credential_broker_block_count"] >= 5
+    assert payload["summary"]["credential_leak_count"] == 0
+    assert payload["summary"]["external_record_count"] >= 3
+    assert payload["summary"]["formal_certification_count"] == 0
+    assert payload["summary"]["escape_case_count"] >= 8
+    assert payload["summary"]["escape_fail_closed_count"] == payload["summary"]["escape_case_count"]
+    assert payload["summary"]["claim_boundary"] == CERTIFIED_SECURE_HOST_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["runtime_isolation_implementation_v1"] == list(
+        RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["credential_broker_egress_enforcement_v1"] == list(
+        CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["external_security_certification_v1"] == list(
+        EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["hostile_runtime_escape_gauntlet_v1"] == list(
+        HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES
+    )
+    assert payload["latest_run"]["failed"] == 0
+    assert "/api/operator/certified-secure-host" in payload["policy"]["receipt_surfaces"]
+    assert set(CERTIFIED_SECURE_HOST_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "hardware_backed_isolation" in payload["policy"]["blocked_claims"]
+    assert "formal_security_certification" in payload["policy"]["blocked_claims"]
+    assert all(
+        item["operator_visible"] is True and item["fail_closed"] is True
+        for item in payload["contract"]["runtime_isolation_profiles"]
+    )
+    assert all(
+        item["raw_secret_leaked"] is False and item["endpoint_allowlist_checked"] is True
+        for item in payload["contract"]["credential_broker_egress_decisions"]
+    )
+    assert all(
+        item["formal_certification"] is False
+        for item in payload["contract"]["external_security_certification_records"]
+    )
+    assert any(
+        item["capability_class"] == "hardware_backed_runtime" and item["implemented"] is False
+        for item in payload["contract"]["runtime_isolation_profiles"]
+    )
+    assert any(
+        item["case_id"] == "credential_exfiltration" and item["fail_closed"] is True
+        for item in payload["contract"]["hostile_runtime_escape_cases"]
+    )
 
 
 @pytest.mark.asyncio

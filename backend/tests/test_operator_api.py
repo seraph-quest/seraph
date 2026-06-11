@@ -101,6 +101,16 @@ from src.extensions.production_secure_marketplace import (
     REQUIRED_MARKETPLACE_LIFECYCLE_FLOWS,
     THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
 )
+from src.extensions.marketplace_production_security import (
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS,
+    MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
@@ -2855,6 +2865,94 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_marketplace_production_security_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "marketplace_production_security_receipts_visible",
+                    "benchmark_posture": "marketplace_production_security_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES)
+                        + len(PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES)
+                        + len(ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES)
+                        + len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES)
+                        + len(PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES)
+                        + len(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+                    ),
+                    "certification_track_review_count": 4,
+                    "live_ops_receipt_count": 9,
+                    "supply_chain_operation_count": 6,
+                    "hostile_gauntlet_v2_count": 9,
+                    "publisher_vulnerability_ops_count": 5,
+                    "safe_receipts_redacted": True,
+                    "false_claim_scan_clean": True,
+                    "production_secure_marketplace_claim_allowed": False,
+                    "third_party_package_security_solved_claim_allowed": False,
+                    "formal_certification_claim_allowed": False,
+                    "claim_boundary": MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "marketplace_security_certification_track_v1": list(
+                        MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES
+                    ),
+                    "production_secure_marketplace_live_ops_v2": list(
+                        PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES
+                    ),
+                    "ecosystem_supply_chain_operations_v1": list(
+                        ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES
+                    ),
+                    "hostile_package_lifecycle_gauntlet_v2": list(
+                        HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES
+                    ),
+                    "publisher_trust_vulnerability_ops_v1": list(
+                        PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES
+                    ),
+                    "marketplace_false_claim_scan_v1": list(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "marketplace_production_security_receipts_visible",
+                        "required_live_ops_covered": True,
+                        "required_hostile_v2_drills_covered": True,
+                    },
+                    "supply_chain_operations": [
+                        {
+                            "package_id": "marketplace.suspicious-exporter",
+                            "promotion_decision": "deny_and_quarantine",
+                            "signature_status": "missing",
+                        }
+                    ],
+                    "hostile_package_lifecycle_gauntlet_v2": [
+                        {
+                            "drill_class": "private_network_ssrf",
+                            "private_network_decision": "denied",
+                            "runtime_contribution_allowed": False,
+                        }
+                    ],
+                    "marketplace_false_claim_scan": {
+                        "forbidden_hit_count": 0,
+                        "blocked_claims_checked": list(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS),
+                    },
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY,
+                    "blocked_claims": list(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/marketplace-production-security",
+                        "/api/operator/production-secure-marketplace",
+                        "/api/operator/marketplace-security-corpus",
+                        "/api/operator/production-marketplace-security",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 22, "passed": 22, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_browser_provider_usability_report",
         AsyncMock(
             return_value={
@@ -3477,6 +3575,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["marketplace_production_security_posture"]
+        == "marketplace_production_security_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["marketplace_production_security_claim_boundary"]
+        == MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["marketplace_production_security_operator_status"] == (
+        "marketplace_production_security_receipts_visible"
+    )
+    assert (
         payload["summary"]["browser_provider_usability_posture"]
         == "browser_provider_usability_ci_gated_operator_visible"
     )
@@ -3601,6 +3710,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert set(PRODUCTION_SECURE_MARKETPLACE_BLOCKED_CLAIMS) <= set(
         payload["production_secure_marketplace"]["policy"]["blocked_claims"]
     )
+    assert payload["marketplace_production_security"]["summary"]["certification_track_review_count"] >= 4
+    assert payload["marketplace_production_security"]["summary"]["hostile_gauntlet_v2_count"] >= 9
+    assert payload["marketplace_production_security"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["marketplace_production_security"]["summary"]["false_claim_scan_clean"] is True
+    assert payload["marketplace_production_security"]["policy"]["claim_boundary"] == (
+        MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY
+    )
+    assert set(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS) <= set(
+        payload["marketplace_production_security"]["policy"]["blocked_claims"]
+    )
     assert (
         "operator_control_population_study"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -3657,6 +3776,30 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "hostile_package_lifecycle_gauntlet_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "marketplace_security_certification_track_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "production_secure_marketplace_live_ops_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "ecosystem_supply_chain_operations_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "hostile_package_lifecycle_gauntlet_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "publisher_trust_vulnerability_ops_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "marketplace_false_claim_scan_v1"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert payload["governed_improvement"]["target_count"] == 2
@@ -5056,6 +5199,58 @@ async def test_operator_production_secure_marketplace_surface_reports_batch_df_r
         )
         for item in group
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_marketplace_production_security_surface_reports_batch_dn_receipts(client):
+    resp = await client.get("/api/operator/marketplace-production-security")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "marketplace_production_security_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "marketplace_production_security_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES)
+        + len(PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES)
+        + len(ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES)
+        + len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES)
+        + len(PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES)
+        + len(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["certification_track_review_count"] >= 4
+    assert payload["summary"]["required_live_ops_covered"] is True
+    assert payload["summary"]["required_supply_chain_fields_visible"] is True
+    assert payload["summary"]["required_hostile_v2_drills_covered"] is True
+    assert payload["summary"]["hostile_gauntlet_v2_fail_closed"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["false_claim_scan_clean"] is True
+    assert payload["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["summary"]["formal_certification_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY
+    assert set(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/marketplace-production-security" in payload["policy"]["receipt_surfaces"]
+    assert payload["scenario_names"]["marketplace_security_certification_track_v1"] == list(
+        MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES
+    )
+    suspicious = next(
+        item for item in payload["contract"]["supply_chain_operations"]
+        if item["package_id"] == "marketplace.suspicious-exporter"
+    )
+    assert suspicious["promotion_decision"] == "deny_and_quarantine"
+    assert suspicious["signature_status"] == "missing"
+    revoked = next(
+        item for item in payload["contract"]["supply_chain_operations"]
+        if item["package_id"] == "marketplace.analytics-export"
+    )
+    assert revoked["publisher_key_state"] == "revoked"
+    private_network = next(
+        item for item in payload["contract"]["hostile_package_lifecycle_gauntlet_v2"]
+        if item["drill_class"] == "private_network_ssrf"
+    )
+    assert private_network["private_network_decision"] == "denied"
+    claim_scan = payload["contract"]["marketplace_false_claim_scan"]
+    assert claim_scan["forbidden_hit_count"] == 0
+    assert "formal_package_security_certification" in claim_scan["blocked_claims_checked"]
 
 
 @pytest.mark.asyncio

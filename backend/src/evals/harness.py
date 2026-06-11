@@ -155,6 +155,26 @@ from src.extensions.production_secure_marketplace import (
     THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SUITE_NAME,
     build_production_secure_marketplace_contract,
 )
+from src.extensions.marketplace_production_security import (
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES,
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS,
+    MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME,
+    REQUIRED_HOSTILE_V2_DRILLS,
+    REQUIRED_MARKETPLACE_LIVE_OPS,
+    REQUIRED_SUPPLY_CHAIN_FIELDS,
+    build_marketplace_production_security_contract,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -17420,6 +17440,217 @@ async def _eval_production_secure_marketplace_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_marketplace_production_security_behavior() -> dict[str, Any]:
+    contract = build_marketplace_production_security_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    certifications = contract["certification_track_reviews"]
+    live_ops = contract["live_ops_receipts_v2"]
+    supply_chain = contract["supply_chain_operations"]
+    hostile = contract["hostile_package_lifecycle_gauntlet_v2"]
+    publishers = contract["publisher_trust_vulnerability_ops"]
+    false_claim_scan = contract["marketplace_false_claim_scan"]
+    promoted = [
+        item for item in supply_chain
+        if item["promotion_decision"] in {"allow_promote", "staged_rollout"}
+    ]
+    denied_or_held = [
+        item for item in supply_chain
+        if item["promotion_decision"] in {"deny_and_quarantine", "deny_until_rescan", "hold_for_external_retest"}
+    ]
+    safe_receipts = [
+        item["safe_receipt"]
+        for item in [*certifications, *live_ops, *supply_chain, *hostile, *publishers, false_claim_scan]
+    ]
+    suites = benchmark_suite_report()
+    certification_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME
+    )
+    live_ops_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME
+    )
+    supply_chain_suite = next(
+        item for item in suites if item["name"] == ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME
+    )
+    hostile_suite = next(
+        item for item in suites if item["name"] == HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME
+    )
+    publisher_suite = next(
+        item for item in suites if item["name"] == PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME
+    )
+    claim_scan_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    required_surfaces = {
+        "/api/operator/marketplace-production-security",
+        "/api/operator/production-secure-marketplace",
+        "/api/operator/marketplace-security-corpus",
+        "/api/operator/production-marketplace-security",
+        "/api/operator/benchmark-proof",
+    }
+    return {
+        "operator_status_visible": summary["operator_status"] == "marketplace_production_security_receipts_visible",
+        "marketplace_security_certification_track_suite_visible": (
+            certification_suite["scenario_count"] == len(MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES)
+        ),
+        "production_secure_marketplace_live_ops_v2_suite_visible": (
+            live_ops_suite["scenario_count"] == len(PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES)
+        ),
+        "ecosystem_supply_chain_operations_suite_visible": (
+            supply_chain_suite["scenario_count"] == len(ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES)
+        ),
+        "hostile_package_lifecycle_gauntlet_v2_suite_visible": (
+            hostile_suite["scenario_count"] == len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES)
+        ),
+        "publisher_trust_vulnerability_ops_suite_visible": (
+            publisher_suite["scenario_count"] == len(PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES)
+        ),
+        "marketplace_false_claim_scan_suite_visible": (
+            claim_scan_suite["scenario_count"] == len(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+        ),
+        "certification_track_scope_visible": (
+            summary["certification_track_review_count"] >= 4
+            and summary["required_certification_fields_visible"] is True
+            and summary["external_review_or_certification_scope_visible"] is True
+            and summary["waiver_expiry_and_retest_visible"] is True
+            and all(
+                item["claim_lift_allowed"] is False
+                and item["review_evidence_mode"]
+                == "fixture_external_certification_track_receipt_not_formal_certification"
+                and item["fixture_vs_live"] == "fixture_certification_scope_not_formal_external_certification"
+                for item in certifications
+            )
+        ),
+        "live_ops_v2_lifecycle_coverage_visible": (
+            summary["live_ops_receipt_count"] >= len(REQUIRED_MARKETPLACE_LIVE_OPS)
+            and summary["required_live_ops_covered"] is True
+            and set(REQUIRED_MARKETPLACE_LIVE_OPS) <= {item["operation"] for item in live_ops}
+        ),
+        "supply_chain_fields_and_promotion_policy_visible": (
+            summary["supply_chain_operation_count"] >= 6
+            and summary["required_supply_chain_fields_visible"] is True
+            and summary["promoted_package_proof_complete"] is True
+            and all(set(REQUIRED_SUPPLY_CHAIN_FIELDS) <= set(item["operator_visible_fields"]) for item in supply_chain)
+            and all(
+                item["signature_status"] == "verified"
+                and item["signed_digest"] != "missing"
+                and item["publisher_identity_verified"] is True
+                and item["publisher_key_state"] == "active"
+                and item["revocation_status"] == "not_revoked"
+                and item["compatibility_state"] == "compatible"
+                and item["freshness_status"] == "current"
+                and item["quarantine"]["state"] == "not_quarantined"
+                and item["quarantine"]["reentry_required"] is False
+                for item in promoted
+            )
+        ),
+        "risky_packages_denied_or_held": (
+            summary["blocked_or_held_risky_package_count"] >= 4
+            and summary["critical_high_denied_count"] >= 3
+            and all(item["enforcement"]["status"] == "denied" for item in denied_or_held)
+        ),
+        "capability_host_boundaries_visible": all(
+            item["permissions"]["declared"]
+            and item["permissions"]["required"]
+            and item["permissions"]["missing"] == []
+            and item["audit"]["required"] is True
+            and item["mutation_rights"]
+            and item["runtime"]["lifecycle_approval_boundaries"]
+            for item in supply_chain
+        ),
+        "hostile_v2_boundary_denials_visible": (
+            summary["hostile_gauntlet_v2_count"] >= len(REQUIRED_HOSTILE_V2_DRILLS)
+            and summary["required_hostile_v2_drills_covered"] is True
+            and summary["hostile_gauntlet_v2_fail_closed"] is True
+            and set(REQUIRED_HOSTILE_V2_DRILLS) <= {item["drill_class"] for item in hostile}
+            and all(
+                item["runtime_contribution_allowed"] is False
+                and item["requested_url_digest"]
+                and item["redirect_chain_digest"]
+                and item["secret_ref_policy"] == "deny_secret_destination_mismatch"
+                and item["allowed_hosts"]
+                and item["credential_destination_host"]
+                and item["quarantine"]["state"] == "quarantined"
+                for item in hostile
+            )
+        ),
+        "network_private_data_denials_visible": any(
+            item["private_network_decision"] == "denied"
+            and item["dns_rebind_decision"] in {"denied", "not_applicable"}
+            for item in hostile
+        ) and any(
+            item["workspace_egress_decision"] == "denied" for item in hostile
+        ),
+        "publisher_vulnerability_ops_visible": (
+            summary["publisher_vulnerability_ops_count"] >= 5
+            and summary["scanner_freshness_computed"] is True
+            and all(item["operator_diagnostic_id"] for item in publishers)
+            and any(item["key_state"] == "revoked" and item["operator_action"] == "deny_and_quarantine" for item in publishers)
+            and any(item["freshness_status"] == "stale" and item["operator_action"] == "deny_until_rescan" for item in publishers)
+            and all(item["critical_high_blocked"] is True for item in publishers)
+        ),
+        "operator_diagnostics_visible": summary["operator_diagnostics_visible"] is True,
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt["contains_secret"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["contains_raw_package_path"] is False
+                and receipt["contains_raw_transcript"] is False
+                and receipt["raw_receipt_path_exposed"] is False
+                and receipt["workspace_dir_exposed"] is False
+                and receipt["package_path_exposed"] is False
+                and receipt["redaction"] == "metadata_only_receipt_handle"
+                and receipt["redaction_layer"] == "marketplace_production_security_v1"
+                and receipt["redaction_degraded"] is False
+                and len(receipt["evidence_body_digest"]) == 64
+                and len(receipt["sanitized_payload_digest"]) == 64
+                and len(receipt["tamper_evident_digest"]) == 64
+                and receipt["tamper_evident_digest"] != receipt["evidence_body_digest"]
+                for receipt in safe_receipts
+            )
+        ),
+        "false_claim_scan_visible": (
+            summary["false_claim_scan_clean"] is True
+            and false_claim_scan["suite_name"] == MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME
+            and false_claim_scan["validation_command"] == "python3 scripts/check_strategy_claims.py"
+            and set(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS)
+            <= set(false_claim_scan["blocked_claims_checked"])
+            and false_claim_scan["forbidden_hit_count"] == 0
+            and false_claim_scan["claim_lift_allowed"] is False
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "marketplace_claims_blocked": (
+            summary["production_secure_marketplace_claim_allowed"] is False
+            and summary["third_party_package_security_solved_claim_allowed"] is False
+            and summary["formal_certification_claim_allowed"] is False
+            and summary["full_marketplace_parity_claim_allowed"] is False
+            and summary["reference_systems_exceeded_claim_allowed"] is False
+        ),
+        "marketplace_security_certification_track_gate_required": (
+            MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_secure_marketplace_live_ops_v2_gate_required": (
+            PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "ecosystem_supply_chain_operations_gate_required": (
+            ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "hostile_package_lifecycle_gauntlet_v2_gate_required": (
+            HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "publisher_trust_vulnerability_ops_gate_required": (
+            PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_false_claim_scan_gate_required": (
+            MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
     contract = build_production_operator_control_contract()
     summary = contract["summary"]
@@ -18802,6 +19033,24 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     )
     hostile_package_lifecycle_gauntlet_v1_suite = next(
         item for item in suites if item["name"] == HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SUITE_NAME
+    )
+    marketplace_security_certification_track_v1_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME
+    )
+    production_secure_marketplace_live_ops_v2_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME
+    )
+    ecosystem_supply_chain_operations_v1_suite = next(
+        item for item in suites if item["name"] == ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME
+    )
+    hostile_package_lifecycle_gauntlet_v2_suite = next(
+        item for item in suites if item["name"] == HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME
+    )
+    publisher_trust_vulnerability_ops_v1_suite = next(
+        item for item in suites if item["name"] == PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME
+    )
+    marketplace_false_claim_scan_v1_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME
     )
     production_operator_control_suite = next(
         item for item in suites if item["name"] == PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME
@@ -20334,6 +20583,95 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "hostile_package_lifecycle_gauntlet_v1_gate_required": (
             HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_security_certification_track_v1_suite_present": (
+            "marketplace_security_certification_track_scope_behavior"
+            in marketplace_security_certification_track_v1_suite["scenario_names"]
+        ),
+        "marketplace_security_certification_track_v1_suite_scenario_count_matches": (
+            marketplace_security_certification_track_v1_suite["scenario_count"]
+            == len(MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES)
+        ),
+        "marketplace_security_certification_track_v1_suite_axis_matches": (
+            marketplace_security_certification_track_v1_suite["benchmark_axis"]
+            == "marketplace_security_certification_track_v1"
+        ),
+        "marketplace_security_certification_track_v1_gate_required": (
+            MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "production_secure_marketplace_live_ops_v2_suite_present": (
+            "production_secure_marketplace_live_ops_promotion_gate_behavior"
+            in production_secure_marketplace_live_ops_v2_suite["scenario_names"]
+        ),
+        "production_secure_marketplace_live_ops_v2_suite_scenario_count_matches": (
+            production_secure_marketplace_live_ops_v2_suite["scenario_count"]
+            == len(PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES)
+        ),
+        "production_secure_marketplace_live_ops_v2_suite_axis_matches": (
+            production_secure_marketplace_live_ops_v2_suite["benchmark_axis"]
+            == "production_secure_marketplace_live_ops_v2"
+        ),
+        "production_secure_marketplace_live_ops_v2_gate_required": (
+            PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "ecosystem_supply_chain_operations_v1_suite_present": (
+            "ecosystem_supply_chain_provenance_signature_behavior"
+            in ecosystem_supply_chain_operations_v1_suite["scenario_names"]
+        ),
+        "ecosystem_supply_chain_operations_v1_suite_scenario_count_matches": (
+            ecosystem_supply_chain_operations_v1_suite["scenario_count"]
+            == len(ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES)
+        ),
+        "ecosystem_supply_chain_operations_v1_suite_axis_matches": (
+            ecosystem_supply_chain_operations_v1_suite["benchmark_axis"]
+            == "ecosystem_supply_chain_operations_v1"
+        ),
+        "ecosystem_supply_chain_operations_v1_gate_required": (
+            ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "hostile_package_lifecycle_gauntlet_v2_suite_present": (
+            "hostile_package_lifecycle_v2_private_network_behavior"
+            in hostile_package_lifecycle_gauntlet_v2_suite["scenario_names"]
+        ),
+        "hostile_package_lifecycle_gauntlet_v2_suite_scenario_count_matches": (
+            hostile_package_lifecycle_gauntlet_v2_suite["scenario_count"]
+            == len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES)
+        ),
+        "hostile_package_lifecycle_gauntlet_v2_suite_axis_matches": (
+            hostile_package_lifecycle_gauntlet_v2_suite["benchmark_axis"]
+            == "hostile_package_lifecycle_gauntlet_v2"
+        ),
+        "hostile_package_lifecycle_gauntlet_v2_gate_required": (
+            HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "publisher_trust_vulnerability_ops_v1_suite_present": (
+            "publisher_trust_vulnerability_ops_review_freshness_behavior"
+            in publisher_trust_vulnerability_ops_v1_suite["scenario_names"]
+        ),
+        "publisher_trust_vulnerability_ops_v1_suite_scenario_count_matches": (
+            publisher_trust_vulnerability_ops_v1_suite["scenario_count"]
+            == len(PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES)
+        ),
+        "publisher_trust_vulnerability_ops_v1_suite_axis_matches": (
+            publisher_trust_vulnerability_ops_v1_suite["benchmark_axis"]
+            == "publisher_trust_vulnerability_ops_v1"
+        ),
+        "publisher_trust_vulnerability_ops_v1_gate_required": (
+            PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_false_claim_scan_v1_suite_present": (
+            "marketplace_false_claim_scan_blocked_claims_behavior"
+            in marketplace_false_claim_scan_v1_suite["scenario_names"]
+        ),
+        "marketplace_false_claim_scan_v1_suite_scenario_count_matches": (
+            marketplace_false_claim_scan_v1_suite["scenario_count"]
+            == len(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+        ),
+        "marketplace_false_claim_scan_v1_suite_axis_matches": (
+            marketplace_false_claim_scan_v1_suite["benchmark_axis"] == "marketplace_false_claim_scan_v1"
+        ),
+        "marketplace_false_claim_scan_v1_gate_required": (
+            MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "production_operator_control_parity_suite_present": (
             "operator_control_train_receipt_behavior"
@@ -24727,6 +25065,78 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_secure_marketplace_behavior,
         )
         for name in HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DN exposes certification-track marketplace review receipts with scope, findings, retests, "
+                "waivers, expiry, fixture-vs-live labels, redacted handles, and blocked formal-certification claims."
+            ),
+            runner=_eval_marketplace_production_security_behavior,
+        )
+        for name in MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DN records marketplace live-ops v2 lifecycle receipts for install, update, downgrade, "
+                "disable, rollback, quarantine, re-entry, failed updates, publisher trust changes, and scanner freshness."
+            ),
+            runner=_eval_marketplace_production_security_behavior,
+        )
+        for name in PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DN checks ecosystem supply-chain operations for provenance, signed digests, publisher keys, "
+                "revocation, SBOM/dependency graphs, compatibility, review state, permission boundaries, and promotion decisions."
+            ),
+            runner=_eval_marketplace_production_security_behavior,
+        )
+        for name in ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DN runs hostile package lifecycle gauntlet v2 for private-network/SSRF, DNS rebinding, "
+                "secret/workspace exfiltration, malicious updates, dependency confusion, rollback bypass, quarantine bypass, and package-network incidents."
+            ),
+            runner=_eval_marketplace_production_security_behavior,
+        )
+        for name in HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DN keeps publisher trust and vulnerability operations visible for review freshness, key "
+                "revocation, waiver expiry, remediation SLA, critical/high denials, and operator diagnostics."
+            ),
+            runner=_eval_marketplace_production_security_behavior,
+        )
+        for name in PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DN records marketplace-specific false-claim scan receipts for blocked production-secure, "
+                "solved-security, formal-certification, full-parity, superiority, and exceedance wording."
+            ),
+            runner=_eval_marketplace_production_security_behavior,
+        )
+        for name in MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

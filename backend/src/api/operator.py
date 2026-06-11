@@ -60,6 +60,7 @@ from src.extensions.browser_provider_usability import build_browser_provider_usa
 from src.extensions.live_marketplace_attestation import build_live_marketplace_attestation_report
 from src.extensions.marketplace_lifecycle import build_marketplace_lifecycle_report
 from src.extensions.marketplace_security_corpus import build_marketplace_security_corpus_report
+from src.extensions.marketplace_production_security import build_marketplace_production_security_report
 from src.extensions.production_secure_marketplace import build_production_secure_marketplace_report
 from src.extensions.production_marketplace_security import build_production_marketplace_security_report
 from src.extensions.safe_browser_computer_use import build_safe_browser_computer_use_report
@@ -3485,6 +3486,7 @@ async def get_operator_benchmark_proof():
         production_marketplace_security,
         marketplace_security_corpus,
         production_secure_marketplace,
+        marketplace_production_security,
         browser_provider_usability,
         safe_browser_computer_use,
         browser_computer_use_parity_depth,
@@ -3550,6 +3552,7 @@ async def get_operator_benchmark_proof():
         build_production_marketplace_security_report(),
         build_marketplace_security_corpus_report(),
         build_production_secure_marketplace_report(),
+        build_marketplace_production_security_report(),
         build_browser_provider_usability_report(),
         build_safe_browser_computer_use_report(),
         build_browser_computer_use_parity_depth_report(),
@@ -3622,6 +3625,7 @@ async def get_operator_benchmark_proof():
         str(production_marketplace_security["summary"]["benchmark_posture"]),
         str(marketplace_security_corpus["summary"]["benchmark_posture"]),
         str(production_secure_marketplace["summary"]["benchmark_posture"]),
+        str(marketplace_production_security["summary"]["benchmark_posture"]),
         str(browser_provider_usability["summary"]["benchmark_posture"]),
         str(safe_browser_computer_use["summary"]["benchmark_posture"]),
         str(browser_computer_use_parity_depth["summary"]["benchmark_posture"]),
@@ -3778,6 +3782,15 @@ async def get_operator_benchmark_proof():
             "marketplace_security_corpus_claim_boundary": marketplace_security_corpus["policy"]["claim_boundary"],
             "production_secure_marketplace_posture": production_secure_marketplace["summary"]["benchmark_posture"],
             "production_secure_marketplace_claim_boundary": production_secure_marketplace["policy"]["claim_boundary"],
+            "marketplace_production_security_posture": marketplace_production_security["summary"][
+                "benchmark_posture"
+            ],
+            "marketplace_production_security_claim_boundary": marketplace_production_security["policy"][
+                "claim_boundary"
+            ],
+            "marketplace_production_security_operator_status": marketplace_production_security["summary"][
+                "operator_status"
+            ],
             "browser_provider_usability_posture": browser_provider_usability["summary"]["benchmark_posture"],
             "browser_provider_usability_claim_boundary": browser_provider_usability["policy"]["claim_boundary"],
             "safe_browser_computer_use_posture": safe_browser_computer_use["summary"]["benchmark_posture"],
@@ -3866,6 +3879,7 @@ async def get_operator_benchmark_proof():
         "production_marketplace_security": production_marketplace_security,
         "marketplace_security_corpus": marketplace_security_corpus,
         "production_secure_marketplace": production_secure_marketplace,
+        "marketplace_production_security": marketplace_production_security,
         "browser_provider_usability": browser_provider_usability,
         "safe_browser_computer_use": safe_browser_computer_use,
         "browser_computer_use_parity_depth": browser_computer_use_parity_depth,
@@ -4159,6 +4173,11 @@ async def get_operator_marketplace_security_corpus():
 @router.get("/operator/production-secure-marketplace")
 async def get_operator_production_secure_marketplace():
     return await build_production_secure_marketplace_report()
+
+
+@router.get("/operator/marketplace-production-security")
+async def get_operator_marketplace_production_security():
+    return await build_marketplace_production_security_report()
 
 
 @router.get("/operator/browser-provider-usability-proof")

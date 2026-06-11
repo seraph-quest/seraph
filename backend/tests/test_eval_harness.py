@@ -139,6 +139,11 @@ from src.workflows.continuous_orchestration_slo import (
     CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
     SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
 )
+from src.workflows.production_workflow_guarantees import (
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
+)
 from src.security.production_isolation import (
     PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
     PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
@@ -799,6 +804,38 @@ def test_run_side_effect_reconciliation_v2_benchmark_suite_passes():
     assert all(result.details["side_effect_reconciliations_visible"] for result in summary.results)
     assert all(result.details["reconciliation_boundaries_visible"] for result in summary.results)
     assert all(result.details["reconciliation_gate_required"] for result in summary.results)
+
+
+def test_run_production_workflow_state_machine_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_workflow_state_machine_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES)
+    assert all(result.details["da_only_state_machine_visible"] for result in summary.results)
+    assert all(result.details["lease_and_owner_authority_visible"] for result in summary.results)
+    assert all(result.details["state_gate_required"] for result in summary.results)
+
+
+def test_run_crash_proof_orchestration_fault_campaign_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["crash_proof_orchestration_fault_campaign"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES
+    )
+    assert all(result.details["fault_campaign_visible"] for result in summary.results)
+    assert all(result.details["fault_receipt_handles_visible"] for result in summary.results)
+    assert all(result.details["fault_gate_required"] for result in summary.results)
+
+
+def test_run_external_side_effect_reconciliation_v3_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["external_side_effect_reconciliation_v3"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES)
+    assert all(result.details["side_effect_v3_visible"] for result in summary.results)
+    assert all(result.details["manual_repair_and_replay_decisions_visible"] for result in summary.results)
+    assert all(result.details["reconciliation_v3_gate_required"] for result in summary.results)
 
 
 def test_run_production_operator_control_parity_benchmark_suite_passes():

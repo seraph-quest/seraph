@@ -100,6 +100,7 @@ from src.workflows.live_orchestration import build_live_external_orchestration_r
 from src.workflows.operating_layer import build_m5_operating_layer_payload
 from src.workflows.production_sla_orchestration import build_production_sla_orchestration_report
 from src.workflows.continuous_orchestration_slo import build_continuous_orchestration_slo_report
+from src.workflows.production_workflow_guarantees import build_production_workflow_guarantees_report
 
 router = APIRouter()
 
@@ -3426,6 +3427,7 @@ async def get_operator_benchmark_proof():
         live_external_orchestration,
         production_sla_orchestration,
         continuous_orchestration_slo,
+        production_workflow_guarantees,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         memory_provider_quality_gate_benchmark,
@@ -3478,6 +3480,7 @@ async def get_operator_benchmark_proof():
         build_live_external_orchestration_report(),
         build_production_sla_orchestration_report(),
         build_continuous_orchestration_slo_report(),
+        build_production_workflow_guarantees_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_memory_provider_quality_gate_report(),
@@ -3537,6 +3540,7 @@ async def get_operator_benchmark_proof():
         str(live_external_orchestration["summary"]["benchmark_posture"]),
         str(production_sla_orchestration["summary"]["benchmark_posture"]),
         str(continuous_orchestration_slo["summary"]["benchmark_posture"]),
+        str(production_workflow_guarantees["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"]),
@@ -3625,6 +3629,12 @@ async def get_operator_benchmark_proof():
             "production_sla_orchestration_claim_boundary": production_sla_orchestration["policy"]["claim_boundary"],
             "continuous_orchestration_slo_posture": continuous_orchestration_slo["summary"]["benchmark_posture"],
             "continuous_orchestration_slo_claim_boundary": continuous_orchestration_slo["policy"]["claim_boundary"],
+            "production_workflow_guarantees_posture": production_workflow_guarantees["summary"]["benchmark_posture"],
+            "production_workflow_guarantees_claim_boundary": production_workflow_guarantees["policy"]["claim_boundary"],
+            "production_workflow_guarantees_runtime_status": production_workflow_guarantees["summary"]["runtime_status"],
+            "production_workflow_guarantees_missing_live_evidence": production_workflow_guarantees["summary"][
+                "missing_live_evidence"
+            ],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "memory_provider_quality_gate_benchmark_posture": memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"],
@@ -3716,6 +3726,7 @@ async def get_operator_benchmark_proof():
         "live_external_orchestration": live_external_orchestration,
         "production_sla_orchestration": production_sla_orchestration,
         "continuous_orchestration_slo": continuous_orchestration_slo,
+        "production_workflow_guarantees": production_workflow_guarantees,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "memory_provider_quality_gate_benchmark": memory_provider_quality_gate_benchmark,
@@ -3808,6 +3819,11 @@ async def get_operator_production_sla_orchestration():
 @router.get("/operator/continuous-orchestration-slo")
 async def get_operator_continuous_orchestration_slo():
     return await build_continuous_orchestration_slo_report()
+
+
+@router.get("/operator/production-workflow-guarantees")
+async def get_operator_production_workflow_guarantees():
+    return await build_production_workflow_guarantees_report()
 
 
 @router.get("/operator/m5-operating-layer-benchmark")

@@ -88,6 +88,12 @@ from src.extensions.browser_computer_use_parity_depth import (
     BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
     SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
 )
+from src.extensions.full_browser_parity import (
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
+    FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -735,6 +741,22 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["browser_computer_use_recovery_drill_suite_scenario_count_matches"] is True
     assert details["browser_computer_use_recovery_drill_suite_axis_matches"] is True
     assert details["browser_computer_use_recovery_drill_gate_required"] is True
+    assert details["safe_autonomous_browser_runtime_v1_suite_present"] is True
+    assert details["safe_autonomous_browser_runtime_v1_suite_scenario_count_matches"] is True
+    assert details["safe_autonomous_browser_runtime_v1_suite_axis_matches"] is True
+    assert details["safe_autonomous_browser_runtime_v1_gate_required"] is True
+    assert details["full_browser_parity_matrix_v1_suite_present"] is True
+    assert details["full_browser_parity_matrix_v1_suite_scenario_count_matches"] is True
+    assert details["full_browser_parity_matrix_v1_suite_axis_matches"] is True
+    assert details["full_browser_parity_matrix_v1_gate_required"] is True
+    assert details["real_site_drift_recovery_v2_suite_present"] is True
+    assert details["real_site_drift_recovery_v2_suite_scenario_count_matches"] is True
+    assert details["real_site_drift_recovery_v2_suite_axis_matches"] is True
+    assert details["real_site_drift_recovery_v2_gate_required"] is True
+    assert details["browser_session_partition_certification_v1_suite_present"] is True
+    assert details["browser_session_partition_certification_v1_suite_scenario_count_matches"] is True
+    assert details["browser_session_partition_certification_v1_suite_axis_matches"] is True
+    assert details["browser_session_partition_certification_v1_gate_required"] is True
     assert details["production_operator_control_parity_suite_present"] is True
     assert details["production_operator_control_parity_suite_scenario_count_matches"] is True
     assert details["production_operator_control_parity_suite_axis_matches"] is True
@@ -1976,6 +1998,52 @@ def test_run_site_drift_recovery_slo_benchmark_suite_passes():
     assert all(result.details["site_drift_slo_visible"] is True for result in summary.results)
 
 
+def test_run_safe_autonomous_browser_runtime_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["safe_autonomous_browser_runtime_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES)
+    assert all(result.details["runtime_task_corpus_visible"] is True for result in summary.results)
+    assert all(result.details["provider_execution_caveat_enforced"] is True for result in summary.results)
+
+
+def test_run_full_browser_parity_matrix_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["full_browser_parity_matrix_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+    assert all(result.details["provider_modes_covered"] is True for result in summary.results)
+    assert all(result.details["all_boundaries_enforced"] is True for result in summary.results)
+    assert all(result.details["full_browser_parity_not_claimed"] is True for result in summary.results)
+
+
+def test_run_real_site_drift_recovery_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["real_site_drift_recovery_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES)
+    assert all(result.details["real_site_drift_classes_visible"] is True for result in summary.results)
+    assert all(result.details["real_site_drift_fails_closed"] is True for result in summary.results)
+
+
+def test_run_browser_session_partition_certification_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_session_partition_certification_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES)
+    assert all(result.details["partition_certification_scope_visible"] is True for result in summary.results)
+    assert all(result.details["partition_claim_lift_blocked"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
 
@@ -2991,6 +3059,10 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "browser_task_breadth_matrix" in captured.out
     assert "browser_auth_partition_operations" in captured.out
     assert "site_drift_recovery_slo" in captured.out
+    assert "safe_autonomous_browser_runtime_v1" in captured.out
+    assert "full_browser_parity_matrix_v1" in captured.out
+    assert "real_site_drift_recovery_v2" in captured.out
+    assert "browser_session_partition_certification_v1" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -3092,6 +3164,10 @@ def test_main_lists_available_benchmark_suites(capsys):
         "browser_task_breadth_matrix",
         "browser_auth_partition_operations",
         "site_drift_recovery_slo",
+        "safe_autonomous_browser_runtime_v1",
+        "full_browser_parity_matrix_v1",
+        "real_site_drift_recovery_v2",
+        "browser_session_partition_certification_v1",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

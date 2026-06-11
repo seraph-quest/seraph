@@ -181,6 +181,23 @@ from src.extensions.browser_computer_use_parity_depth import (
     SITE_DRIFT_RECOVERY_SLO_SUITE_NAME,
     build_browser_computer_use_parity_depth_contract,
 )
+from src.extensions.full_browser_parity import (
+    BROWSER_PARITY_EVIDENCE_BLOCKED_CLAIMS,
+    BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY,
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME,
+    FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME,
+    REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
+    REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME,
+    REQUIRED_BROWSER_BOUNDARIES,
+    REQUIRED_BROWSER_PROVIDER_MODES,
+    REQUIRED_HOSTILE_BROWSER_CASES,
+    REQUIRED_REAL_SITE_DRIFT_CLASSES,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME,
+    build_full_browser_parity_contract,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
@@ -13878,6 +13895,212 @@ async def _eval_browser_computer_use_parity_depth_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_full_browser_parity_behavior() -> dict[str, Any]:
+    contract = build_full_browser_parity_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    runtime = contract["safe_autonomous_browser_runtime"]
+    parity_matrix = contract["full_browser_parity_matrix"]
+    drift = contract["real_site_drift_recovery_v2"]
+    hostile = contract["hostile_browser_negative_cases"]
+    partition = contract["browser_session_partition_certification"]
+    redaction = contract["redaction_scan_receipts"]
+    suites = benchmark_suite_report()
+    safe_runtime_suite = next(
+        item for item in suites if item["name"] == SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME
+    )
+    parity_matrix_suite = next(item for item in suites if item["name"] == FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME)
+    drift_suite = next(item for item in suites if item["name"] == REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME)
+    partition_suite = next(
+        item for item in suites if item["name"] == BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    all_boundaries = [
+        boundary
+        for item in parity_matrix
+        for boundary in item["boundaries"]
+    ]
+    all_receipt_items = [*runtime, *parity_matrix, *drift, *hostile, *partition, *redaction]
+    safe_receipts = [item["safe_receipt"] for item in all_receipt_items]
+    required_surfaces = {
+        "/api/operator/full-browser-parity",
+        "/api/operator/browser-computer-use-parity-depth",
+        "/api/operator/safe-autonomous-browser-computer-use",
+        "/api/operator/browser-provider-usability-proof",
+        "/api/operator/benchmark-proof",
+    }
+    return {
+        "operator_status_visible": summary["operator_status"] == "browser_parity_evidence_receipts_visible",
+        "safe_runtime_suite_visible": (
+            safe_runtime_suite["scenario_count"] == len(SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES)
+        ),
+        "parity_matrix_suite_visible": (
+            parity_matrix_suite["scenario_count"] == len(FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+        ),
+        "real_site_drift_suite_visible": (
+            drift_suite["scenario_count"] == len(REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES)
+        ),
+        "partition_certification_suite_visible": (
+            partition_suite["scenario_count"] == len(BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES)
+        ),
+        "runtime_task_corpus_visible": (
+            summary["runtime_task_count"] >= 12
+            and summary["runtime_sample_total"] >= 350
+            and summary["runtime_provider_mode_count"] >= len(REQUIRED_BROWSER_PROVIDER_MODES)
+            and all(item.get("replay_safe_audit_id") for item in runtime)
+        ),
+        "provider_execution_caveat_enforced": (
+            summary["managed_remote_live_provider_claimed"] is False
+            and all(
+                item["execution_mode"] != "live_provider_execution"
+                for item in runtime
+                if item["provider_mode"] in {"managed_remote", "remote_cdp_partitioned"}
+            )
+        ),
+        "existing_session_unpartitioned_blocked": summary["existing_session_unpartitioned_blocked"] is True,
+        "dangerous_actions_default_blocked": summary["dangerous_actions_default_blocked"] is True,
+        "provider_modes_covered": summary["required_provider_modes_covered"] is True,
+        "boundary_matrix_visible": (
+            summary["required_boundaries_covered"] is True
+            and set(REQUIRED_BROWSER_BOUNDARIES) <= {item["boundary"] for item in all_boundaries}
+            and summary["boundary_count"] >= len(REQUIRED_BROWSER_PROVIDER_MODES) * len(REQUIRED_BROWSER_BOUNDARIES)
+        ),
+        "all_boundaries_enforced": (
+            summary["all_boundaries_enforced"] is True
+            and summary["boundary_leak_count"] == 0
+            and summary["boundary_negative_case_count"] >= (
+                len(REQUIRED_BROWSER_PROVIDER_MODES) * len(REQUIRED_BROWSER_BOUNDARIES)
+            )
+            and all(
+                item["enforced"] is True
+                and item["leak_count"] == 0
+                and item["negative_case_verified"] is True
+                and item["negative_case_receipt"]["decision"] == "blocked"
+                and item["negative_case_receipt"]["seeded_sensitive_value_present_in_raw_fixture"] is True
+                and item["negative_case_receipt"]["seeded_sensitive_value_present_in_safe_receipt"] is False
+                and len(item["negative_case_receipt"]["seeded_sensitive_value_digest"]) == 64
+                and len(item["negative_case_receipt"]["safe_receipt_digest"]) == 64
+                for item in all_boundaries
+            )
+        ),
+        "real_site_drift_classes_visible": (
+            summary["required_real_site_drift_classes_covered"] is True
+            and set(REQUIRED_REAL_SITE_DRIFT_CLASSES) <= {item["drift_class"] for item in drift}
+        ),
+        "real_site_drift_fails_closed": (
+            summary["real_site_external_action_allowed_count"] == 0
+            and summary["anti_bot_boundary_visible"] is True
+            and all(
+                item["external_action_allowed"] is False
+                and item["real_site_fixture_mode"]
+                == "deterministic_safe_target_fixture_with_redacted_artifact_digests"
+                and item["fixture_artifact_id"].startswith("artifact:browser-dg:site-drift:")
+                and len(item["selector_diff_digest"]) == 64
+                and len(item["dom_snapshot_digest"]) == 64
+                and len(item["screenshot_digest"]) == 64
+                and len(item["auth_or_network_trace_digest"]) == 64
+                for item in drift
+            )
+        ),
+        "hostile_browser_cases_visible": (
+            summary["required_hostile_browser_cases_covered"] is True
+            and set(REQUIRED_HOSTILE_BROWSER_CASES) <= {item["hostile_case"] for item in hostile}
+        ),
+        "hostile_browser_cases_fail_closed": (
+            summary["hostile_cases_fail_closed"] is True
+            and summary["credential_leak_count"] == 0
+            and summary["cookie_leak_count"] == 0
+            and summary["private_data_leak_count"] == 0
+            and summary["clipboard_leak_count"] == 0
+            and summary["unapproved_mutation_count"] == 0
+        ),
+        "partition_certification_scope_visible": (
+            summary["partition_certification_count"] >= len(REQUIRED_BROWSER_PROVIDER_MODES)
+            and all(item["review_evidence_mode"].endswith("not_formal_certification") for item in partition)
+            and any(item["existing_session_requires_partition"] is True for item in partition)
+            and summary["partition_verified_provider_mode_count"] == len(REQUIRED_BROWSER_PROVIDER_MODES) - 1
+            and summary["existing_session_partition_certificate_blocked"] is True
+            and all(
+                item["profile_partition_verified"] is True
+                and item["cookie_jar_isolated"] is True
+                and item["credential_scope_verified"] is True
+                and item["network_private_egress_blocked"] is True
+                for item in partition
+                if item["provider_mode"] != "existing_session_unpartitioned_blocked"
+            )
+            and any(
+                item["provider_mode"] == "existing_session_unpartitioned_blocked"
+                and item["negative_certification_receipt"] is True
+                and item["profile_partition_verified"] is False
+                and item["cookie_jar_isolated"] is False
+                and item["credential_scope_verified"] is False
+                and item["network_private_egress_blocked"] is False
+                and item["existing_session_attach_allowed"] is False
+                for item in partition
+            )
+        ),
+        "partition_claim_lift_blocked": (
+            summary["partition_session_leak_count"] == 0
+            and summary["partition_claim_lift_blocked"] is True
+            and all(item["claim_lift_allowed"] is False for item in partition)
+        ),
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and summary["redaction_scan_count"] == len(redaction)
+            and summary["redaction_scan_passed"] is True
+            and all(
+                item["seed_marker_present_in_raw_fixture"] is True
+                and item["seed_marker_present_in_safe_receipt"] is False
+                and item["scan_passed"] is True
+                and len(item["raw_seed_payload_digest"]) == 64
+                and len(item["seed_marker_digest"]) == 64
+                for item in redaction
+            )
+            and all(
+                receipt["redaction_layer"] == "browser_parity_evidence_v1"
+                and len(receipt["evidence_body_digest"]) == 64
+                and len(receipt["tamper_evident_digest"]) == 64
+                and receipt["tamper_evident_digest"] != receipt["evidence_body_digest"]
+                and receipt["contains_secret"] is False
+                and receipt["contains_cookie"] is False
+                and receipt["contains_auth_header"] is False
+                and receipt["contains_credential_ref"] is False
+                and receipt["contains_raw_dom"] is False
+                and receipt["contains_screenshot"] is False
+                and receipt["contains_clipboard_content"] is False
+                and receipt["contains_downloaded_filename"] is False
+                and receipt["contains_account_identifier"] is False
+                and receipt["contains_private_page_content"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["raw_receipt_path_exposed"] is False
+                and receipt["workspace_dir_exposed"] is False
+                and receipt["profile_dir_exposed"] is False
+                and receipt["download_path_exposed"] is False
+                for receipt in safe_receipts
+            )
+        ),
+        "prior_cy_boundary_visible": summary["prior_cy_boundary_visible"] is True,
+        "claim_boundary_visible": policy["claim_boundary"] == BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(BROWSER_PARITY_EVIDENCE_BLOCKED_CLAIMS) <= blocked,
+        "safe_browser_automation_not_claimed": "safe_browser_automation" in policy["not_claimed"],
+        "full_browser_parity_not_claimed": "full_browser_parity" in policy["not_claimed"],
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "safe_runtime_gate_required": (
+            SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "parity_matrix_gate_required": (
+            FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "real_site_drift_gate_required": (
+            REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "partition_certification_gate_required": (
+            BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -17551,6 +17774,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     independent_browser_usability_review_suite = next(
         item for item in suites if item["name"] == INDEPENDENT_BROWSER_USABILITY_REVIEW_SUITE_NAME
     )
+    safe_autonomous_browser_runtime_v1_suite = next(
+        item for item in suites if item["name"] == SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME
+    )
+    full_browser_parity_matrix_v1_suite = next(
+        item for item in suites if item["name"] == FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME
+    )
+    real_site_drift_recovery_v2_suite = next(
+        item for item in suites if item["name"] == REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME
+    )
+    browser_session_partition_certification_v1_suite = next(
+        item for item in suites if item["name"] == BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME
+    )
     learning_arbitration_suite = next(
         item for item in suites if item["name"] == GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME
     )
@@ -18475,6 +18710,62 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "independent_browser_usability_review_gate_required": (
             INDEPENDENT_BROWSER_USABILITY_REVIEW_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "safe_autonomous_browser_runtime_v1_suite_present": (
+            "safe_browser_runtime_task_corpus_behavior"
+            in safe_autonomous_browser_runtime_v1_suite["scenario_names"]
+        ),
+        "safe_autonomous_browser_runtime_v1_suite_scenario_count_matches": (
+            safe_autonomous_browser_runtime_v1_suite["scenario_count"]
+            == len(SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES)
+        ),
+        "safe_autonomous_browser_runtime_v1_suite_axis_matches": (
+            safe_autonomous_browser_runtime_v1_suite["benchmark_axis"]
+            == "safe_autonomous_browser_runtime_v1"
+        ),
+        "safe_autonomous_browser_runtime_v1_gate_required": (
+            SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "full_browser_parity_matrix_v1_suite_present": (
+            "full_browser_parity_provider_mode_matrix_behavior"
+            in full_browser_parity_matrix_v1_suite["scenario_names"]
+        ),
+        "full_browser_parity_matrix_v1_suite_scenario_count_matches": (
+            full_browser_parity_matrix_v1_suite["scenario_count"]
+            == len(FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+        ),
+        "full_browser_parity_matrix_v1_suite_axis_matches": (
+            full_browser_parity_matrix_v1_suite["benchmark_axis"] == "full_browser_parity_matrix_v1"
+        ),
+        "full_browser_parity_matrix_v1_gate_required": (
+            FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "real_site_drift_recovery_v2_suite_present": (
+            "real_site_selector_drift_recovery_behavior" in real_site_drift_recovery_v2_suite["scenario_names"]
+        ),
+        "real_site_drift_recovery_v2_suite_scenario_count_matches": (
+            real_site_drift_recovery_v2_suite["scenario_count"] == len(REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES)
+        ),
+        "real_site_drift_recovery_v2_suite_axis_matches": (
+            real_site_drift_recovery_v2_suite["benchmark_axis"] == "real_site_drift_recovery_v2"
+        ),
+        "real_site_drift_recovery_v2_gate_required": (
+            REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_session_partition_certification_v1_suite_present": (
+            "browser_session_partition_provider_scope_behavior"
+            in browser_session_partition_certification_v1_suite["scenario_names"]
+        ),
+        "browser_session_partition_certification_v1_suite_scenario_count_matches": (
+            browser_session_partition_certification_v1_suite["scenario_count"]
+            == len(BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES)
+        ),
+        "browser_session_partition_certification_v1_suite_axis_matches": (
+            browser_session_partition_certification_v1_suite["benchmark_axis"]
+            == "browser_session_partition_certification_v1"
+        ),
+        "browser_session_partition_certification_v1_gate_required": (
+            BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "guardian_learning_arbitration_suite_present": (
             "guardian_learning_arbitration_act_behavior" in learning_arbitration_suite["scenario_names"]
@@ -21823,6 +22114,54 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_browser_computer_use_parity_depth_behavior,
         )
         for name in SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DG records bounded safe-target browser runtime receipts across local, staged managed, "
+                "partitioned remote-CDP, and blocked existing-session paths."
+            ),
+            runner=_eval_full_browser_parity_behavior,
+        )
+        for name in SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DG records provider-mode and boundary-matrix evidence while keeping full browser parity "
+                "and safe-automation claims blocked."
+            ),
+            runner=_eval_full_browser_parity_behavior,
+        )
+        for name in FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DG records real-site drift recovery v2 receipts for selector, navigation, auth, provider, "
+                "rate-limit, anti-bot, and partial-completion boundaries."
+            ),
+            runner=_eval_full_browser_parity_behavior,
+        )
+        for name in REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DG records fixture certification-scope session partition receipts for profile, cookie, "
+                "credential, download, upload, clipboard, private-data, and network boundaries."
+            ),
+            runner=_eval_full_browser_parity_behavior,
+        )
+        for name in BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

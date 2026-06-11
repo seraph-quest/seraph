@@ -151,6 +151,16 @@ from src.extensions.browser_computer_use_parity_depth import (
     SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
     SITE_DRIFT_RECOVERY_SLO_SUITE_NAME,
 )
+from src.extensions.full_browser_parity import (
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME,
+    FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME,
+    REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
+    REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -940,6 +950,68 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Provider-wide SLA and full browser/computer-use parity remain blocked.",
         scenario_names=SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME,
+        label="Safe autonomous browser runtime v1",
+        description=(
+            "Pins Batch DG safe-target runtime evidence across local, staged managed, partitioned remote-CDP, "
+            "and blocked existing-session paths with task success, safe-block, intervention, and leak counters."
+        ),
+        benchmark_axis="safe_autonomous_browser_runtime_v1",
+        operator_summary=(
+            "Browser runtime evidence now reports provider execution caveats, dangerous-action blocks, "
+            "operator interventions, replay-safe audit ids, and residual risk."
+        ),
+        remaining_gap=(
+            "Safe autonomous browser/computer-use and full browser parity wording remain blocked."
+        ),
+        scenario_names=SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FULL_BROWSER_PARITY_MATRIX_V1_SUITE_NAME,
+        label="Full browser parity matrix v1",
+        description=(
+            "Pins Batch DG provider and boundary matrices for auth, cookies, profiles, credentials, downloads, "
+            "uploads, filesystem, clipboard, network, and private-data handling."
+        ),
+        benchmark_axis="full_browser_parity_matrix_v1",
+        operator_summary=(
+            "Full-browser-parity pressure is represented as a boundary matrix while parity and safe-automation "
+            "claims stay blocked by policy."
+        ),
+        remaining_gap="This matrix is evidence, not a full browser parity or safe automation claim.",
+        scenario_names=FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REAL_SITE_DRIFT_RECOVERY_V2_SUITE_NAME,
+        label="Safe-target drift recovery v2",
+        description=(
+            "Pins Batch DG selector, navigation, auth-expiry, provider-failure, rate-limit, anti-bot, and "
+            "partial-completion recovery boundaries for deterministic safe-target drift fixtures."
+        ),
+        benchmark_axis="real_site_drift_recovery_v2",
+        operator_summary=(
+            "Safe-target drift fixture evidence now fails closed or recovers with operator-visible receipts without "
+            "auto-solving anti-bot gates or broadening network scope."
+        ),
+        remaining_gap="General website compatibility and anti-bot bypass remain blocked.",
+        scenario_names=REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SUITE_NAME,
+        label="Browser session partition certification v1",
+        description=(
+            "Pins Batch DG fixture certification-scope receipts for profile, cookie, credential, download, "
+            "upload, clipboard, private-data, network, and existing-session partition boundaries."
+        ),
+        benchmark_axis="browser_session_partition_certification_v1",
+        operator_summary=(
+            "Browser partition certification-scope evidence is visible as fixture review receipts, not formal "
+            "certification or proof of arbitrary credentialed browsing safety."
+        ),
+        remaining_gap="Formal certification and full browser parity remain blocked.",
+        scenario_names=BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

@@ -70,26 +70,38 @@ from src.evals.production_parity_readiness import (
 from src.evals.final_parity_audit import (
     BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
     BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME,
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SUITE_NAME,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V3_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V4_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SUITE_NAME,
     PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
     PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SUITE_NAME,
 )
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
@@ -3506,6 +3518,95 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Final DH PR fields must be updated when the aggregate PR opens and merges.",
         scenario_names=BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SUITE_NAME,
+        label="Full parity claim-lift audit v1",
+        description=(
+            "Reconciles SCL-051 through SCL-058, DI-DO merged evidence, and DP bounded release-gate wording "
+            "without lifting broad full-parity, production-ready, or exceedance claims."
+        ),
+        benchmark_axis="full_parity_claim_lift_audit_v1",
+        operator_summary=(
+            "Claim-lift receipts permit only exact bounded DP wording and keep broad parity, superiority, "
+            "security, reach, browser, marketplace, operator-control, learning, and memory claims blocked."
+        ),
+        remaining_gap="Any broader public wording still requires explicit claim-ledger permission and stronger evidence.",
+        scenario_names=FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_READINESS_RECONCILIATION_V2_SUITE_NAME,
+        label="Production readiness reconciliation v2",
+        description=(
+            "Pins post-DI-DO reconciliation receipts across runtime, security, reach, learning, operator control, "
+            "marketplace, and browser/computer-use evidence."
+        ),
+        benchmark_axis="production_readiness_reconciliation_v2",
+        operator_summary=(
+            "The release gate exposes a cross-area evidence map while product-wide production-ready wording remains blocked."
+        ),
+        remaining_gap=(
+            "Bounded reconciliation receipts do not prove a live soak, product-wide production readiness, "
+            "or reference-system exceedance."
+        ),
+        scenario_names=PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SUITE_NAME,
+        label="Reference-system source refresh v4",
+        description=(
+            "Pins June 11, 2026 manual Hermes, OpenClaw, and IronClaw source-review receipts for the post-DI-DO "
+            "release gate with pressure-only claim use and access caveats."
+        ),
+        benchmark_axis="reference_system_source_refresh_v4",
+        operator_summary=(
+            "Current competitor sources remain pressure evidence only and cannot imply Seraph parity or superiority."
+        ),
+        remaining_gap="Source refresh is not a substitute for implementation, tests, board state, or claim-ledger permission.",
+        scenario_names=REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
+        label="Post-DI-DO board PR issue reconciliation v1",
+        description=(
+            "Pins #475, #557-#564, #561, #563, and merged PRs #565-#571 board/PR/issue state for the "
+            "post-DI-DO release gate."
+        ),
+        benchmark_axis="post_di_do_board_pr_issue_reconciliation_v1",
+        operator_summary=(
+            "Operators can inspect DI-DO Done/Merged/Passed receipts, DP active branch state, and stale issue-body caveats."
+        ),
+        remaining_gap="Final DP PR fields must be updated when the aggregate PR opens and merges.",
+        scenario_names=POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FALSE_COMPLETION_SCAN_V4_SUITE_NAME,
+        label="False completion scan v4",
+        description=(
+            "Extends the false-completion scan through Batch DP, including docs/code/operator scans, GitHub "
+            "tracking receipts, claim-ledger boundaries, and stale issue-body caveats."
+        ),
+        benchmark_axis="false_completion_scan_v4",
+        operator_summary=(
+            "False-completion v4 keeps DP bounded wording separate from full parity, production-ready, "
+            "security, and superiority claims."
+        ),
+        remaining_gap="External PR and issue wording must still be reviewed before merge.",
+        scenario_names=FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
+        label="Final Critic/Contrarian no-block v1",
+        description=(
+            "Records independent Critic/Contrarian receipts for current-source evidence, stale tracking, duplicate "
+            "tracking, claim boundaries, and security/privacy caveats."
+        ),
+        benchmark_axis="final_critic_contrarian_no_block_v1",
+        operator_summary=(
+            "The release gate is only healthy when independent critique is visible and no blocking finding remains."
+        ),
+        remaining_gap="A later PR can only strengthen wording after another independent critic pass and exact ledger permission.",
+        scenario_names=FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     ),
 )
 

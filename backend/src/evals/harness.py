@@ -56,6 +56,8 @@ from src.evals.production_parity_readiness import (
 from src.evals.final_parity_audit import (
     BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
     BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME,
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
@@ -64,26 +66,39 @@ from src.evals.final_parity_audit import (
     FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY,
     FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
     FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SUITE_NAME,
+    FULL_PARITY_RELEASE_GATE_BLOCKED_CLAIMS,
+    FULL_PARITY_RELEASE_GATE_CLAIM_BOUNDARY,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V3_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V4_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SUITE_NAME,
     POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
     POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SUITE_NAME,
     PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
     PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SUITE_NAME,
     build_final_parity_audit_contract,
     build_final_production_parity_contract,
+    build_full_parity_release_gate_contract,
     build_post_cq_claim_readiness_contract,
 )
 from src.extensions.benchmark import (
@@ -18955,6 +18970,160 @@ async def _eval_final_production_parity_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_full_parity_release_gate_behavior() -> dict[str, Any]:
+    contract = build_full_parity_release_gate_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    sources = contract["reference_system_source_refresh_v4"]
+    batches = contract["post_di_do_board_pr_issue_reconciliation_v1"]
+    readiness = contract["production_readiness_reconciliation_v2"]
+    claim_lift = contract["full_parity_claim_lift_audit_v1"]
+    scans = contract["false_completion_scan_v4"]
+    critic = contract["final_critic_contrarian_no_block_v1"]
+    suites = benchmark_suite_report()
+    claim_suite = next(item for item in suites if item["name"] == FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SUITE_NAME)
+    readiness_suite = next(item for item in suites if item["name"] == PRODUCTION_READINESS_RECONCILIATION_V2_SUITE_NAME)
+    source_suite = next(item for item in suites if item["name"] == REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SUITE_NAME)
+    board_suite = next(item for item in suites if item["name"] == POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME)
+    scan_suite = next(item for item in suites if item["name"] == FALSE_COMPLETION_SCAN_V4_SUITE_NAME)
+    critic_suite = next(item for item in suites if item["name"] == FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME)
+    completed_batches = [item for item in batches if item["status"] == "done"]
+    required_batches = {"DI", "DJ", "DK", "DL", "DM", "DN", "DO"}
+    required_claim_rows = {
+        "SCL-051",
+        "SCL-052",
+        "SCL-053",
+        "SCL-054",
+        "SCL-055",
+        "SCL-056",
+        "SCL-057",
+        "SCL-058",
+    }
+    required_surfaces = {
+        "/api/operator/full-parity-release-gate",
+        "/api/operator/benchmark-proof",
+        "/api/operator/production-orchestration-hard-guarantees",
+        "/api/operator/production-grade-secure-capability-host",
+        "/api/operator/reach-voice-production-ops",
+        "/api/operator/live-guardian-memory-field-program",
+        "/api/operator/operator-control-production-certification",
+        "/api/operator/marketplace-production-security",
+        "/api/operator/browser-computer-use-production",
+    }
+    return {
+        "operator_status_visible": summary["operator_status"] == "full_parity_release_gate_visible",
+        "full_parity_claim_lift_audit_suite_visible": (
+            claim_suite["scenario_count"] == len(FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES)
+        ),
+        "production_readiness_reconciliation_v2_suite_visible": (
+            readiness_suite["scenario_count"] == len(PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES)
+        ),
+        "reference_system_source_refresh_v4_suite_visible": (
+            source_suite["scenario_count"] == len(REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES)
+        ),
+        "post_di_do_board_reconciliation_suite_visible": (
+            board_suite["scenario_count"] == len(POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        ),
+        "false_completion_scan_v4_suite_visible": (
+            scan_suite["scenario_count"] == len(FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES)
+        ),
+        "final_critic_no_block_suite_visible": (
+            critic_suite["scenario_count"] == len(FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+        ),
+        "all_sources_checked_today": {item["checked_on"] for item in sources} == {"2026-06-11"},
+        "source_refresh_v4_visible": all(
+            item.get("source_refresh_version") == "v4_post_di_do_release_gate" for item in sources
+        ),
+        "source_refresh_v4_bounded_to_manual_review": (
+            summary["all_sources_are_manual_review_receipts"] is True
+            and all(item.get("runtime_fetch_performed") is False for item in sources)
+            and all(item.get("verification_method") == "manual_team_lead_web_review_2026_06_11_post_di_do" for item in sources)
+        ),
+        "source_claim_use_bounded": all(item["claim_use"] == "current_source_pressure_only" for item in sources),
+        "source_claim_lift_blocked": all(item.get("claim_lift_allowed") is False for item in sources),
+        "competitor_systems_visible": {"Hermes", "OpenClaw", "IronClaw"} <= {item["system"] for item in sources},
+        "current_sources_have_access_caveats": summary["all_sources_reachable_with_caveats"] is True,
+        "completed_di_do_batches_done_merged_passed": (
+            len(completed_batches) == 7
+            and {item["batch"] for item in completed_batches} == required_batches
+            and summary["all_completed_di_do_batches_done_merged_passed"] is True
+        ),
+        "di_do_pr_train_visible": {
+            next(item for item in batches if item["batch"] == "DI")["merged_pr"],
+            next(item for item in batches if item["batch"] == "DJ")["merged_pr"],
+            next(item for item in batches if item["batch"] == "DK")["merged_pr"],
+            next(item for item in batches if item["batch"] == "DL")["merged_pr"],
+            next(item for item in batches if item["batch"] == "DM")["merged_pr"],
+            next(item for item in batches if item["batch"] == "DN")["merged_pr"],
+            next(item for item in batches if item["batch"] == "DO")["merged_pr"],
+        } == {565, 566, 567, 568, 569, 570, 571},
+        "dp_active_branch_visible": (
+            next(item for item in batches if item["batch"] == "DP")["issue"] == 563
+            and next(item for item in batches if item["batch"] == "DP")["status"] == "in_progress_on_feature_branch"
+            and next(item for item in batches if item["batch"] == "DP")["active_branch"]
+            == "feat/batch-dp-full-parity-release-gate"
+        ),
+        "stale_issue_body_caveats_visible": (
+            summary["stale_issue_body_caveats_are_recorded"] is True
+            and {item["issue"] for item in batches if item.get("stale_issue_body_caveat")} >= {563, 564, 561}
+            and any(475 in item.get("stale_issue_body_caveats", []) for item in scans)
+        ),
+        "project_fields_required_visible": all(
+            {"Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"}
+            <= set(item["project_fields_required"])
+            for item in batches
+        ),
+        "readiness_covers_required_areas": {
+            "runtime_reliability",
+            "trust_boundaries",
+            "presence_and_reach",
+            "guardian_intelligence",
+            "operator_control",
+            "ecosystem_and_marketplace",
+            "browser_computer_use",
+        }
+        <= {item["area"] for item in readiness},
+        "readiness_receipts_have_raw_handles": all(
+            item.get("raw_receipt_handle")
+            and item.get("raw_receipt_digest")
+            and item.get("residual_risk")
+            and item.get("claim_lift_allowed") is False
+            for item in readiness
+        ),
+        "readiness_is_reconciliation_only": (
+            summary["production_readiness_receipts_are_reconciliation_only"] is True
+            and all(item.get("actual_runtime_soak_performed") is False for item in readiness)
+            and all(item.get("operational_window") == "not_a_live_soak_window" for item in readiness)
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == FULL_PARITY_RELEASE_GATE_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(FULL_PARITY_RELEASE_GATE_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "claim_lift_rows_visible": required_claim_rows <= {item["claim_id"] for item in claim_lift},
+        "claim_lift_rows_keep_broad_claims_blocked": all(
+            item.get("blocked_claims") and item.get("broad_claim_lift_allowed") is False for item in claim_lift
+        ),
+        "bounded_dp_wording_allowed_only": (
+            summary["bounded_post_di_do_release_gate_wording_allowed"] is True
+            and summary["full_parity_claim_allowed"] is False
+            and summary["reference_systems_exceeded_claim_allowed"] is False
+            and summary["production_ready_claim_allowed"] is False
+            and summary["secure_private_by_default_claim_allowed"] is False
+        ),
+        "false_completion_scans_visible": (
+            summary["false_completion_scan_count"] >= 4
+            and summary["false_completion_violation_count"] == 0
+            and summary["all_local_false_completion_scans_clean"] is True
+            and any(item.get("scan_mode") == "external_github_pr_issue_review_performed" for item in scans)
+            and any(item.get("scan_mode") == "claim_ledger_boundary_receipt" for item in scans)
+        ),
+        "critic_no_block_visible": (
+            summary["critic_disposition_count"] >= 5
+            and summary["critic_no_block"] is True
+            and all(item["disposition"].startswith("accepted") for item in critic)
+        ),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -25905,6 +26074,78 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_final_production_parity_behavior,
         )
         for name in BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch DP reconciles SCL-051 through SCL-058 and permits only exact bounded post-DI-DO "
+                "release-gate wording while broad full-parity and exceedance claims remain blocked."
+            ),
+            runner=_eval_full_parity_release_gate_behavior,
+        )
+        for name in FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch DP reconciles DI-DO production-readiness evidence as receipt-only proof, not a live "
+                "soak or product-wide production-ready claim."
+            ),
+            runner=_eval_full_parity_release_gate_behavior,
+        )
+        for name in PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch DP records manual Hermes, OpenClaw, and IronClaw source-review receipts on "
+                "June 11, 2026 as pressure evidence only."
+            ),
+            runner=_eval_full_parity_release_gate_behavior,
+        )
+        for name in REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch DP reconciles #475, #557-#564, #561, #563, and merged PRs #565-#571 with "
+                "live Project fields and stale issue-body caveats."
+            ),
+            runner=_eval_full_parity_release_gate_behavior,
+        )
+        for name in POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch DP scans docs, code, operator surfaces, GitHub tracking, and claim-ledger wording "
+                "for false completion or unsupported broad parity claims."
+            ),
+            runner=_eval_full_parity_release_gate_behavior,
+        )
+        for name in FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch DP records independent Critic/Contrarian no-block receipts for evidence quality, "
+                "tracking freshness, claim boundaries, and security/privacy caveats."
+            ),
+            runner=_eval_full_parity_release_gate_behavior,
+        )
+        for name in FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES
     ),
     EvalScenario(
         name="guardian_feedback_loop",

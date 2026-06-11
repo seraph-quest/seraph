@@ -9,12 +9,18 @@ import pytest
 from config.settings import settings
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals.final_parity_audit import (
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
 )
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
@@ -1327,6 +1333,68 @@ def test_run_false_completion_scan_v2_benchmark_suite_passes():
     assert all(result.details["false_completion_scans_visible"] for result in summary.results)
     assert all(result.details["full_parity_claim_still_blocked"] for result in summary.results)
     assert all(result.details["no_duplicate_tracking"] for result in summary.results)
+
+
+def test_run_full_parity_claim_lift_audit_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["full_parity_claim_lift_audit_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES)
+    assert all(result.details["claim_lift_rows_visible"] for result in summary.results)
+    assert all(result.details["bounded_dp_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_production_readiness_reconciliation_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_readiness_reconciliation_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES)
+    assert all(result.details["readiness_covers_required_areas"] for result in summary.results)
+    assert all(result.details["readiness_receipts_have_raw_handles"] for result in summary.results)
+    assert all(result.details["readiness_is_reconciliation_only"] for result in summary.results)
+
+
+def test_run_reference_system_source_refresh_v4_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["reference_system_source_refresh_v4"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES)
+    assert all(result.details["source_refresh_v4_visible"] for result in summary.results)
+    assert all(result.details["source_claim_use_bounded"] for result in summary.results)
+    assert all(result.details["source_claim_lift_blocked"] for result in summary.results)
+
+
+def test_run_post_di_do_board_pr_issue_reconciliation_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["post_di_do_board_pr_issue_reconciliation_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES
+    )
+    assert all(result.details["completed_di_do_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["di_do_pr_train_visible"] for result in summary.results)
+    assert all(result.details["stale_issue_body_caveats_visible"] for result in summary.results)
+
+
+def test_run_false_completion_scan_v4_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["false_completion_scan_v4"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
+    assert all(result.details["bounded_dp_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["claim_lift_rows_keep_broad_claims_blocked"] for result in summary.results)
+
+
+def test_run_final_critic_contrarian_no_block_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["final_critic_contrarian_no_block_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    assert all(result.details["critic_no_block_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+    assert all(result.details["operator_surfaces_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
@@ -3528,6 +3596,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "reference_system_source_refresh_v3" in captured.out
     assert "false_completion_scan_v3" in captured.out
     assert "board_pr_issue_reconciliation_v3" in captured.out
+    assert "full_parity_claim_lift_audit_v1" in captured.out
+    assert "production_readiness_reconciliation_v2" in captured.out
+    assert "reference_system_source_refresh_v4" in captured.out
+    assert "post_di_do_board_pr_issue_reconciliation_v1" in captured.out
+    assert "false_completion_scan_v4" in captured.out
+    assert "final_critic_contrarian_no_block_v1" in captured.out
     assert "live_external_orchestration_attestation" in captured.out
     assert "orchestration_crash_recovery_study" in captured.out
     assert "production_sla_orchestration" in captured.out
@@ -3721,6 +3795,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "reference_system_source_refresh_v3",
         "false_completion_scan_v3",
         "board_pr_issue_reconciliation_v3",
+        "full_parity_claim_lift_audit_v1",
+        "production_readiness_reconciliation_v2",
+        "reference_system_source_refresh_v4",
+        "post_di_do_board_pr_issue_reconciliation_v1",
+        "false_completion_scan_v4",
+        "final_critic_contrarian_no_block_v1",
     )
 
 

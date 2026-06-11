@@ -44,22 +44,30 @@ from src.cockpit.operator_control_production_certification import (
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals.final_parity_audit import (
     BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
     FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS,
     FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY,
     FINAL_PARITY_AUDIT_BLOCKED_CLAIMS,
     FINAL_PARITY_AUDIT_CLAIM_BOUNDARY,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
+    FULL_PARITY_RELEASE_GATE_BLOCKED_CLAIMS,
+    FULL_PARITY_RELEASE_GATE_CLAIM_BOUNDARY,
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
     POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
     PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
 )
 from src.extensions.marketplace_lifecycle import (
     CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
@@ -4599,6 +4607,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["final_production_parity"]["summary"]["operator_status"] == "final_production_parity_gate_visible"
     assert payload["final_production_parity"]["summary"]["dg_merged_pr"] == 555
     assert "fully_at_parity" in payload["final_production_parity"]["policy"]["blocked_claims"]
+    dp_claim_suite = next(item for item in payload["suites"] if item["name"] == "full_parity_claim_lift_audit_v1")
+    assert "full_parity_claim_ledger_scl_051_058_behavior" in dp_claim_suite["scenario_names"]
+    assert dp_claim_suite["scenario_count"] == len(FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES)
+    assert payload["summary"]["full_parity_release_gate_posture"] == (
+        "full_parity_release_gate_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["full_parity_release_gate_claim_boundary"] == FULL_PARITY_RELEASE_GATE_CLAIM_BOUNDARY
+    assert payload["full_parity_release_gate"]["summary"]["operator_status"] == "full_parity_release_gate_visible"
+    assert payload["full_parity_release_gate"]["summary"]["completed_di_do_batch_count"] == 7
+    assert payload["full_parity_release_gate"]["summary"]["full_parity_claim_allowed"] is False
+    assert "fully_at_parity" in payload["full_parity_release_gate"]["policy"]["blocked_claims"]
     assert "fully_at_parity" in payload["post_cq_claim_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -5851,6 +5870,85 @@ async def test_operator_final_production_parity_surface_reports_batch_dh_receipt
     assert any(
         item.get("issue_475_body_refreshed") is True
         for item in payload["contract"]["false_completion_scan_v3"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_full_parity_release_gate_surface_reports_batch_dp_receipts(client):
+    resp = await client.get("/api/operator/full-parity-release-gate")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "full_parity_release_gate_visible"
+    assert payload["summary"]["benchmark_posture"] == "full_parity_release_gate_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES)
+        + len(PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES)
+        + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES)
+        + len(POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        + len(FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES)
+        + len(FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["completed_di_do_batch_count"] == 7
+    assert payload["summary"]["dp_batch_status"] == "in_progress_on_feature_branch"
+    assert payload["summary"]["stale_issue_body_caveats_are_recorded"] is True
+    assert payload["summary"]["false_completion_violation_count"] == 0
+    assert payload["summary"]["critic_no_block"] is True
+    assert payload["summary"]["full_parity_claim_allowed"] is False
+    assert payload["summary"]["production_ready_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == FULL_PARITY_RELEASE_GATE_CLAIM_BOUNDARY
+    assert set(FULL_PARITY_RELEASE_GATE_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/full-parity-release-gate" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["full_parity_claim_lift_audit_v1"] == list(
+        FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["production_readiness_reconciliation_v2"] == list(
+        PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["reference_system_source_refresh_v4"] == list(
+        REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["post_di_do_board_pr_issue_reconciliation_v1"] == list(
+        POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["false_completion_scan_v4"] == list(FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES)
+    assert payload["scenario_names"]["final_critic_contrarian_no_block_v1"] == list(
+        FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES
+    )
+    assert {item["batch"] for item in payload["contract"]["post_di_do_board_pr_issue_reconciliation_v1"]} >= {
+        "DI",
+        "DJ",
+        "DK",
+        "DL",
+        "DM",
+        "DN",
+        "DO",
+        "DP",
+    }
+    assert {item["merged_pr"] for item in payload["contract"]["post_di_do_board_pr_issue_reconciliation_v1"] if item["batch"] != "DP"} == {
+        565,
+        566,
+        567,
+        568,
+        569,
+        570,
+        571,
+    }
+    assert {item["claim_id"] for item in payload["contract"]["full_parity_claim_lift_audit_v1"]} >= {
+        "SCL-051",
+        "SCL-052",
+        "SCL-053",
+        "SCL-054",
+        "SCL-055",
+        "SCL-056",
+        "SCL-057",
+        "SCL-058",
+    }
+    assert all(
+        item["runtime_fetch_performed"] is False
+        and item["source_refresh_version"] == "v4_post_di_do_release_gate"
+        for item in payload["contract"]["reference_system_source_refresh_v4"]
     )
 
 

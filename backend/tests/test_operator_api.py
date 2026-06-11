@@ -8935,3 +8935,28 @@ async def test_operator_timeline_hides_stale_resume_surface_when_workflow_bounda
     assert workflow_item["metadata"]["resume_plan"] is None
     assert workflow_item["metadata"]["trust_boundary"]["status"] == "changed"
     assert workflow_item["metadata"]["trust_boundary"]["reason"] == "approval_context_changed"
+
+
+@pytest.mark.asyncio
+async def test_operator_production_orchestration_hard_guarantees_surface_reports_di_receipts(client):
+    resp = await client.get("/api/operator/production-orchestration-hard-guarantees")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "production_orchestration_hard_guarantees_visible"
+    assert payload["summary"]["suite_count"] == 5
+    assert payload["summary"]["failed"] == 0
+    assert payload["summary"]["all_failovers_within_budget"] is True
+    assert payload["summary"]["all_side_effects_have_redacted_receipts"] is True
+    assert payload["summary"]["continuous_live_soak_not_claimed"] is True
+    assert payload["policy"]["claim_boundary"] == (
+        "production_orchestration_hard_guarantee_receipts_not_unconditional_exactly_once_or_crash_proof"
+    )
+    assert "continuous_live_soak_completed" in payload["policy"]["not_claimed"]
+    assert "unconditional_exactly_once" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/production-orchestration-hard-guarantees" in payload["policy"]["receipt_surfaces"]
+    assert payload["contract"]["receipt_index"]["predecessor_sources"]["batch_da"]
+    assert any(
+        item["external_confirmation_state"] == "quarantined"
+        for item in payload["contract"]["external_side_effect_correctness_v4_receipts"]
+    )

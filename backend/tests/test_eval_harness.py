@@ -966,6 +966,27 @@ def test_run_external_side_effect_reconciliation_v3_benchmark_suite_passes():
     assert all(result.details["reconciliation_v3_gate_required"] for result in summary.results)
 
 
+def test_run_production_orchestration_hard_guarantees_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites(
+            [
+                "production_orchestration_hard_guarantees_v1",
+                "distributed_workflow_recovery_operations_v1",
+                "external_side_effect_correctness_v4",
+                "scheduler_failover_soak_v1",
+                "orchestration_false_claim_scan_v1",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+    assert all(result.details["hard_guarantee_receipts_visible"] for result in summary.results)
+    assert all(result.details["distributed_recovery_receipts_visible"] for result in summary.results)
+    assert all(result.details["side_effect_correctness_visible"] for result in summary.results)
+    assert all(result.details["scheduler_soak_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
 def test_run_production_operator_control_parity_benchmark_suite_passes():
     summary = asyncio.run(run_benchmark_suites(["production_operator_control_parity"]))
 
@@ -3009,6 +3030,11 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "production_workflow_state_machine_v1" in captured.out
     assert "crash_proof_orchestration_fault_campaign" in captured.out
     assert "external_side_effect_reconciliation_v3" in captured.out
+    assert "production_orchestration_hard_guarantees_v1" in captured.out
+    assert "distributed_workflow_recovery_operations_v1" in captured.out
+    assert "external_side_effect_correctness_v4" in captured.out
+    assert "scheduler_failover_soak_v1" in captured.out
+    assert "orchestration_false_claim_scan_v1" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
@@ -3211,6 +3237,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "production_workflow_state_machine_v1",
         "crash_proof_orchestration_fault_campaign",
         "external_side_effect_reconciliation_v3",
+        "production_orchestration_hard_guarantees_v1",
+        "distributed_workflow_recovery_operations_v1",
+        "external_side_effect_correctness_v4",
+        "scheduler_failover_soak_v1",
+        "orchestration_false_claim_scan_v1",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

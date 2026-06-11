@@ -489,6 +489,21 @@ from src.workflows.production_workflow_guarantees import (
     PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME,
     build_production_workflow_guarantees_contract,
 )
+from src.workflows.production_orchestration_hard_guarantees import (
+    DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SCENARIO_NAMES,
+    DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SUITE_NAME,
+    EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SUITE_NAME,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_BLOCKED_CLAIMS,
+    PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_CLAIM_BOUNDARY,
+    PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SCENARIO_NAMES,
+    PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SUITE_NAME,
+    SCHEDULER_FAILOVER_SOAK_V1_SCENARIO_NAMES,
+    SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME,
+    build_production_orchestration_hard_guarantees_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -20221,6 +20236,93 @@ async def _eval_production_workflow_guarantees_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_production_orchestration_hard_guarantees_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    hard_suite = next(item for item in suites if item["name"] == PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SUITE_NAME)
+    recovery_suite = next(
+        item for item in suites if item["name"] == DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SUITE_NAME
+    )
+    side_effect_suite = next(item for item in suites if item["name"] == EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SUITE_NAME)
+    soak_suite = next(item for item in suites if item["name"] == SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME)
+    scan_suite = next(item for item in suites if item["name"] == ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SUITE_NAME)
+    contract = build_production_orchestration_hard_guarantees_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    guarantees = contract["hard_guarantee_receipts"]
+    recoveries = contract["distributed_recovery_receipts"]
+    side_effects = contract["external_side_effect_correctness_v4_receipts"]
+    soaks = contract["scheduler_failover_soak_receipts"]
+    scans = contract["false_claim_scan_receipts"]
+    controls = contract["operator_recovery_receipts"]
+    required_surfaces = {
+        "/api/operator/production-orchestration-hard-guarantees",
+        "/api/operator/production-workflow-guarantees",
+        "/api/operator/continuous-orchestration-slo",
+        "/api/operator/benchmark-proof",
+    }
+    required_controls = {
+        "inspect",
+        "resume",
+        "repair",
+        "suppress_duplicate",
+        "quarantine",
+        "handoff",
+        "branch",
+        "cancel",
+        "audit",
+    }
+    return {
+        "hard_suite_visible": hard_suite["scenario_count"]
+        == len(PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SCENARIO_NAMES),
+        "recovery_suite_visible": recovery_suite["scenario_count"]
+        == len(DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SCENARIO_NAMES),
+        "side_effect_suite_visible": side_effect_suite["scenario_count"]
+        == len(EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SCENARIO_NAMES),
+        "soak_suite_visible": soak_suite["scenario_count"] == len(SCHEDULER_FAILOVER_SOAK_V1_SCENARIO_NAMES),
+        "scan_suite_visible": scan_suite["scenario_count"] == len(ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES),
+        "hard_axis_visible": hard_suite["benchmark_axis"] == "production_orchestration_hard_guarantees_v1",
+        "operator_status_visible": summary["operator_status"] == "production_orchestration_hard_guarantees_visible",
+        "hard_guarantee_receipts_visible": summary["hard_guarantee_receipt_count"] >= 3
+        and all(item.get("raw_receipt_handle") for item in guarantees),
+        "distributed_recovery_receipts_visible": summary["distributed_recovery_receipt_count"] >= 3
+        and all(item.get("operator_receipt") and item.get("queue_replay") for item in recoveries),
+        "side_effect_correctness_visible": summary["external_side_effect_correctness_v4_count"] >= 3
+        and summary["all_side_effects_have_idempotency_keys"] is True
+        and summary["all_side_effects_have_redacted_receipts"] is True
+        and {"confirmed", "compensated", "quarantined"}
+        <= {item["external_confirmation_state"] for item in side_effects},
+        "scheduler_soak_visible": summary["scheduler_failover_soak_count"] >= 3
+        and summary["all_failovers_within_budget"] is True
+        and all(item.get("raw_receipt_handle") for item in soaks),
+        "continuous_live_soak_boundary_visible": summary["continuous_live_soak_not_claimed"] is True
+        and all(item.get("live_window_marker") == "missing_independent_continuous_live_window" for item in soaks)
+        and "continuous_live_soak_completed" in policy["not_claimed"],
+        "unsafe_replay_blocks_visible": summary["unsafe_replay_blocks_visible"] is True,
+        "false_claim_scan_visible": summary["false_claim_scan_count"] >= 3
+        and all(item["result"] in {"blocked_claims_remain_blocked", "bounded_wording_only", "claim_lift_not_requested"} for item in scans),
+        "operator_controls_visible": summary["operator_control_count"] >= len(required_controls)
+        and required_controls <= {item["action"] for item in controls},
+        "controls_leave_receipts": all(item.get("enabled") and item.get("receipt_after_action") for item in controls),
+        "predecessor_sources_are_context_only": summary["predecessor_source_count"] == 2
+        and bool(contract["receipt_index"]["predecessor_sources"]),
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_BLOCKED_CLAIMS)
+        <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "unconditional_exactly_once_not_claimed": "unconditional_exactly_once_scheduler" in policy["not_claimed"],
+        "hard_gate_required": PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "recovery_gate_required": DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "side_effect_v4_gate_required": EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "soak_gate_required": SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "scan_gate_required": ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -21942,6 +22044,66 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_workflow_guarantees_behavior,
         )
         for name in EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DI records production orchestration hard-guarantee evidence for durable queues, "
+                "scheduler leases, replay authority, operator recovery, and blocked claim boundaries."
+            ),
+            runner=_eval_production_orchestration_hard_guarantees_behavior,
+        )
+        for name in PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DI records distributed workflow recovery operations for worker handoff, queue replay, "
+                "delegated artifacts, and manual repair state."
+            ),
+            runner=_eval_production_orchestration_hard_guarantees_behavior,
+        )
+        for name in DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DI records external side-effect correctness v4 receipts for idempotency, duplicate "
+                "suppression, irreversible boundaries, reconciliation, and manual recovery."
+            ),
+            runner=_eval_production_orchestration_hard_guarantees_behavior,
+        )
+        for name in EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DI records scheduler failover soak receipts for crash windows, failover budgets, "
+                "provider outage behavior, replay authority, and operator handoff."
+            ),
+            runner=_eval_production_orchestration_hard_guarantees_behavior,
+        )
+        for name in SCHEDULER_FAILOVER_SOAK_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DI records orchestration false-claim scans so exactly-once, crash-proof, solved, "
+                "production-ready, full-parity, and exceedance wording remains blocked."
+            ),
+            runner=_eval_production_orchestration_hard_guarantees_behavior,
+        )
+        for name in ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

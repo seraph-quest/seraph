@@ -382,6 +382,18 @@ from src.workflows.production_workflow_guarantees import (
     PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
     PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME,
 )
+from src.workflows.production_orchestration_hard_guarantees import (
+    DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SCENARIO_NAMES,
+    DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SUITE_NAME,
+    EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SUITE_NAME,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SCENARIO_NAMES,
+    PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SUITE_NAME,
+    SCHEDULER_FAILOVER_SOAK_V1_SCENARIO_NAMES,
+    SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -1643,6 +1655,84 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="V3 reconciliation remains scoped to declared side-effect boundaries, not global exactly-once.",
         scenario_names=EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SUITE_NAME,
+        label="Production orchestration hard-guarantee evidence v1",
+        description=(
+            "Pins Batch DI hard-guarantee evidence for durable queues, scheduler leases, worker failover, "
+            "replay authority, operator recovery, and bounded claim posture."
+        ),
+        benchmark_axis="production_orchestration_hard_guarantees_v1",
+        operator_summary=(
+            "DI hard-guarantee proof must expose which guarantee scopes are backed by receipts and where "
+            "operator recovery remains required."
+        ),
+        remaining_gap=(
+            "Hard-guarantee evidence remains bounded and does not prove unconditional exactly-once or "
+            "crash-proof orchestration."
+        ),
+        scenario_names=PRODUCTION_ORCHESTRATION_HARD_GUARANTEES_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SUITE_NAME,
+        label="Distributed workflow recovery operations v1",
+        description=(
+            "Pins Batch DI recovery receipts for worker handoff, queue replay, delegated artifact review, "
+            "manual repair, and operator-visible recovery decisions."
+        ),
+        benchmark_axis="distributed_workflow_recovery_operations_v1",
+        operator_summary=(
+            "Recovery proof must show handoff authority, queue replay safety, delegated artifact lineage, "
+            "and manual repair state."
+        ),
+        remaining_gap="Recovery operations do not grant solved durable workflow or production-ready claims.",
+        scenario_names=DISTRIBUTED_WORKFLOW_RECOVERY_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SUITE_NAME,
+        label="External side-effect correctness v4",
+        description=(
+            "Pins Batch DI side-effect correctness receipts for idempotency keys, duplicate suppression, "
+            "irreversible boundaries, reconciliation records, and manual recovery state."
+        ),
+        benchmark_axis="external_side_effect_correctness_v4",
+        operator_summary=(
+            "Side-effect v4 proof must bind each external mutation to a declared idempotency scope, "
+            "confirmation state, and redacted receipt."
+        ),
+        remaining_gap="Side-effect correctness remains scoped to declared boundaries, not global exactly-once delivery.",
+        scenario_names=EXTERNAL_SIDE_EFFECT_CORRECTNESS_V4_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME,
+        label="Scheduler failover soak v1",
+        description=(
+            "Pins Batch DI scheduler failover soak receipts for crash windows, failover budgets, replay "
+            "authority, provider outage handling, and operator handoff."
+        ),
+        benchmark_axis="scheduler_failover_soak_v1",
+        operator_summary=(
+            "Scheduler soak proof must show observed failover within budget and name the operator recovery "
+            "path when automation remains unsafe."
+        ),
+        remaining_gap="Accelerated soak windows are not a proof of universal crash-proof orchestration.",
+        scenario_names=SCHEDULER_FAILOVER_SOAK_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+        label="Orchestration false-claim scan v1",
+        description=(
+            "Pins Batch DI false-claim scan receipts for docs, operator API, release wording, and claim-ledger "
+            "surfaces."
+        ),
+        benchmark_axis="orchestration_false_claim_scan_v1",
+        operator_summary=(
+            "False-claim proof must show that exactly-once, crash-proof, solved workflow, production-ready, "
+            "full parity, and exceedance wording remains blocked."
+        ),
+        remaining_gap="Clean false-claim scans do not themselves prove stronger orchestration behavior.",
+        scenario_names=ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

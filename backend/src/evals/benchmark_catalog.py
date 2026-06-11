@@ -217,6 +217,18 @@ from src.extensions.always_available_reach_media import (
     VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
     VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME,
 )
+from src.extensions.reach_voice_production_ops import (
+    ALWAYS_AVAILABLE_REACH_LIVE_OPS_V1_SCENARIO_NAMES,
+    ALWAYS_AVAILABLE_REACH_LIVE_OPS_V1_SUITE_NAME,
+    CHANNEL_INCIDENT_RESPONSE_V1_SCENARIO_NAMES,
+    CHANNEL_INCIDENT_RESPONSE_V1_SUITE_NAME,
+    CROSS_SURFACE_REACH_CONTINUITY_V2_SCENARIO_NAMES,
+    CROSS_SURFACE_REACH_CONTINUITY_V2_SUITE_NAME,
+    REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -796,6 +808,93 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Always-available operation, production readiness, full parity, and reach superiority remain blocked."
         ),
         scenario_names=REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ALWAYS_AVAILABLE_REACH_LIVE_OPS_V1_SUITE_NAME,
+        label="Always-available reach live ops v1",
+        description=(
+            "Pins Batch DK selected mobile, messaging, native, browser, web, degraded, and explicit gap "
+            "operational-window receipts for provider identity, consent, pairing, revocation, rate limits, "
+            "abuse handling, false/missed delivery metrics, and safe redaction."
+        ),
+        benchmark_axis="always_available_reach_live_ops_v1",
+        operator_summary=(
+            "Reach proof now exposes broader live/degraded operational windows while still blocking "
+            "OpenClaw-class reach, complete channel coverage, and always-available operation wording."
+        ),
+        remaining_gap=(
+            "OpenClaw-class reach, complete channel coverage, always-available operation, and production "
+            "readiness remain blocked."
+        ),
+        scenario_names=ALWAYS_AVAILABLE_REACH_LIVE_OPS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SUITE_NAME,
+        label="Voice/media production parity candidate v1",
+        description=(
+            "Pins Batch DK STT, TTS, voice-command, media-analysis, and media-delivery candidate receipts "
+            "for quality, latency, correction, deletion, privacy, consent, provider-regression, and fallback."
+        ),
+        benchmark_axis="voice_media_production_parity_candidate_v1",
+        operator_summary=(
+            "Voice/media proof now exposes production parity-candidate receipts while keeping voice parity, "
+            "multimodal parity, and production STT/TTS solved claims blocked."
+        ),
+        remaining_gap=(
+            "Full voice/media parity, multimodal parity, and production STT/TTS solved claims remain blocked."
+        ),
+        scenario_names=VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CHANNEL_INCIDENT_RESPONSE_V1_SUITE_NAME,
+        label="Channel incident response v1",
+        description=(
+            "Pins Batch DK provider outage, rate-limit, abuse-storm, signature-rotation, revocation, fallback, "
+            "offline recovery, quarantine, and operator repair receipts for reach-channel incidents."
+        ),
+        benchmark_axis="channel_incident_response_v1",
+        operator_summary=(
+            "Reach proof now exposes provider incident response and repair actions while keeping production "
+            "readiness and always-available claims blocked."
+        ),
+        remaining_gap=(
+            "Provider-wide incident SLAs, complete channel coverage, and production readiness remain blocked."
+        ),
+        scenario_names=CHANNEL_INCIDENT_RESPONSE_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CROSS_SURFACE_REACH_CONTINUITY_V2_SUITE_NAME,
+        label="Cross-surface reach continuity v2",
+        description=(
+            "Pins Batch DK thread, memory, approval, notification, operator-handoff, offline recovery, "
+            "replay-authority, and unsafe-mutation blocking receipts across reach surfaces."
+        ),
+        benchmark_axis="cross_surface_reach_continuity_v2",
+        operator_summary=(
+            "Cross-surface proof now exposes v2 reach continuity receipts while keeping always-available "
+            "daily-life reach and production readiness wording blocked."
+        ),
+        remaining_gap=(
+            "Always-available daily-life reach and production-grade continuity at scale remain blocked."
+        ),
+        scenario_names=CROSS_SURFACE_REACH_CONTINUITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+        label="Reach/media false-claim scan v1",
+        description=(
+            "Pins Batch DK static claim-scan receipts that keep OpenClaw-class reach, complete coverage, "
+            "always-available operation, voice/media parity, production readiness, full parity, and "
+            "exceedance wording blocked."
+        ),
+        benchmark_axis="reach_media_false_claim_scan_v1",
+        operator_summary=(
+            "Reach/media proof now exposes a false-claim scan receipt for DK claim boundaries."
+        ),
+        remaining_gap=(
+            "Claim lifting still requires future evidence, current-source review, and final claim-ledger approval."
+        ),
+        scenario_names=REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,

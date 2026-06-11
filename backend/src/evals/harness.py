@@ -609,6 +609,23 @@ from src.security.certified_secure_host import (
     RUNTIME_ISOLATION_IMPLEMENTATION_SUITE_NAME,
     build_certified_secure_host_contract,
 )
+from src.security.production_grade_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES,
+    CREDENTIAL_BROKER_EGRESS_SOAK_SUITE_NAME,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SUITE_NAME,
+    PRODUCTION_GRADE_SECURE_HOST_BLOCKED_CLAIMS,
+    PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SUITE_NAME,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SUITE_NAME,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SUITE_NAME,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME,
+    build_production_grade_secure_host_contract,
+)
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
@@ -3349,6 +3366,191 @@ async def _eval_certified_secure_host_behavior() -> dict[str, Any]:
             "/api/operator/container-grade-secure-host",
             "/api/operator/benchmark-proof",
             "/api/operator/independent-secure-host-review",
+        }
+        <= required_surfaces,
+    }
+
+
+async def _eval_production_grade_secure_host_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    gate_policy = evolution_benchmark_gate_policy()
+    evidence_suite = next(
+        item for item in suites if item["name"] == PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SUITE_NAME
+    )
+    chain_suite = next(item for item in suites if item["name"] == SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SUITE_NAME)
+    egress_suite = next(item for item in suites if item["name"] == CREDENTIAL_BROKER_EGRESS_SOAK_SUITE_NAME)
+    attestation_suite = next(item for item in suites if item["name"] == RUNTIME_ISOLATION_ATTESTATION_MATRIX_SUITE_NAME)
+    recovery_suite = next(item for item in suites if item["name"] == SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME)
+    claim_scan_suite = next(item for item in suites if item["name"] == SECURE_HOST_FALSE_CLAIM_SCAN_SUITE_NAME)
+    contract = build_production_grade_secure_host_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    surface_matrix = contract["surface_matrix"]
+    attack_chains = contract["cross_surface_attack_chains"]
+    egress_soak = contract["credential_broker_egress_soak"]
+    attestation = contract["runtime_isolation_attestation_matrix"]
+    recovery = contract["operator_recovery_authority"]
+    false_claims = contract["false_claim_scan_receipts"]
+    blocked = set(policy["blocked_claims"])
+    not_claimed = set(policy["not_claimed"])
+    required_surfaces = set(policy["receipt_surfaces"])
+    required_suites = set(gate_policy["required_benchmark_suites"])
+
+    attack_chain_required_fields = {
+        "source_surface",
+        "destination_surface",
+        "redacted_receipt_handle",
+        "credential_scope",
+        "session_or_profile_owner",
+        "filesystem_root",
+        "network_destination",
+        "dns_redirect_result",
+        "private_network_decision",
+        "revocation_epoch_checked",
+        "rotation_outcome",
+        "replay_authority",
+        "delegated_owner",
+        "provider_fallback_mode",
+        "package_signature_root",
+        "operator_action",
+        "redaction_digest",
+        "residual_risk",
+        "claim_boundary",
+        "fixture_vs_live",
+    }
+
+    return {
+        "production_grade_secure_host_suite_present": (
+            "production_grade_secure_host_surface_matrix_behavior" in evidence_suite["scenario_names"]
+        ),
+        "production_grade_secure_host_suite_scenario_count_matches": (
+            evidence_suite["scenario_count"] == len(PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES)
+        ),
+        "production_grade_secure_host_suite_axis_matches": (
+            evidence_suite["benchmark_axis"] == "production_grade_secure_capability_host_evidence_v1"
+        ),
+        "secure_host_cross_surface_chain_suite_present": (
+            "secure_host_prompt_to_delegated_tool_chain_behavior" in chain_suite["scenario_names"]
+        ),
+        "secure_host_cross_surface_chain_suite_scenario_count_matches": (
+            chain_suite["scenario_count"] == len(SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES)
+        ),
+        "credential_broker_egress_soak_suite_present": (
+            "credential_broker_field_destination_scope_behavior" in egress_suite["scenario_names"]
+        ),
+        "runtime_attestation_matrix_suite_present": (
+            "runtime_attestation_unsupported_boundary_behavior" in attestation_suite["scenario_names"]
+        ),
+        "operator_recovery_authority_suite_present": (
+            "secure_host_operator_deny_quarantine_rotate_behavior" in recovery_suite["scenario_names"]
+        ),
+        "false_claim_scan_suite_present": (
+            "secure_host_false_claim_scan_blocks_security_overclaims" in claim_scan_suite["scenario_names"]
+        ),
+        "all_new_suites_gate_required": {
+            PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SUITE_NAME,
+            SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SUITE_NAME,
+            CREDENTIAL_BROKER_EGRESS_SOAK_SUITE_NAME,
+            RUNTIME_ISOLATION_ATTESTATION_MATRIX_SUITE_NAME,
+            SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME,
+            SECURE_HOST_FALSE_CLAIM_SCAN_SUITE_NAME,
+        }
+        <= required_suites,
+        "operator_status_visible": summary["operator_status"] == "production_grade_secure_host_receipts_visible",
+        "surface_matrix_covers_required_surfaces": summary["surface_count"] >= 12,
+        "surface_receipt_fields_visible": all(
+            {
+                "source_surface",
+                "destination_surface",
+                "redacted_receipt_handle",
+                "session_or_profile_owner",
+                "credential_scope",
+                "filesystem_root",
+                "network_destination_policy",
+                "evidence_mode",
+                "fixture_vs_live",
+                "operator_visible",
+                "residual_risk",
+                "receipt_digest",
+            }
+            <= set(item)
+            for item in surface_matrix
+        ),
+        "connector_mcp_and_lifecycle_secret_refs_destination_scoped": all(
+            next(item for item in surface_matrix if item["surface_id"] == surface_id)["credential_scope"]
+            == "field_and_destination_scoped_secret_ref"
+            for surface_id in (
+                "authenticated_connector",
+                "external_mcp",
+                "extension_runtime",
+                "workflow_replay",
+                "provider_fallback",
+                "credential",
+            )
+        ),
+        "attack_chains_fail_closed": (
+            summary["attack_chain_count"] >= 7
+            and summary["attack_chain_fail_closed_count"] == summary["attack_chain_count"]
+            and all(attack_chain_required_fields <= set(item) for item in attack_chains)
+            and all(item["claim_boundary"] == PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY for item in attack_chains)
+            and all(item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/") for item in attack_chains)
+            and all(item["fixture_vs_live"] == "attack_chain_fixture_not_live_external_target" for item in attack_chains)
+        ),
+        "credential_egress_soak_blocks_private_and_raw_secret": (
+            summary["credential_egress_decision_count"] >= 5
+            and summary["credential_egress_block_count"] >= 4
+            and summary["credential_leak_count"] == 0
+            and all(item["field_scoped_injection"] is True for item in egress_soak)
+            and all(item["endpoint_allowlist_checked"] is True for item in egress_soak)
+            and all(item["dns_redirect_rechecked"] is True for item in egress_soak)
+            and all(item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/") for item in egress_soak)
+        ),
+        "attestation_marks_unsupported_boundaries": (
+            summary["attestation_surface_count"] >= 8
+            and summary["unsupported_boundary_count"] >= 2
+            and any(item["surface"] == "hardware_backed_runtime" and not item["implemented"] for item in attestation)
+            and any(item["surface"] == "formal_security_certification" and not item["implemented"] for item in attestation)
+            and all(item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/") for item in attestation)
+        ),
+        "operator_recovery_authority_visible": (
+            summary["operator_recovery_action_count"] >= 8
+            and all(item["operator_visible"] is True for item in recovery)
+            and all(item.get("safe_redaction_digest") for item in recovery)
+            and all(item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/") for item in recovery)
+        ),
+        "false_claim_scan_visible": (
+            summary["false_claim_scan_count"] >= 1
+            and all(not item["blocked_claims_found"] for item in false_claims)
+            and all(item.get("fixture_vs_live") for item in false_claims)
+            and all(item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/") for item in false_claims)
+            and all(item["validation_command"] == "python3 scripts/check_strategy_claims.py" for item in false_claims)
+            and all(item["forbidden_hit_count"] == 0 for item in false_claims)
+        ),
+        "claim_boundary_visible": summary["claim_boundary"] == PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_GRADE_SECURE_HOST_BLOCKED_CLAIMS) <= blocked,
+        "security_overclaims_remain_blocked": {
+            "secure_private_by_default",
+            "production_security_solved",
+            "ironclaw_class_secure_execution",
+            "hardware_backed_isolation",
+            "formal_security_certification",
+            "safe_autonomous_computer_use",
+            "production_ready_product",
+            "full_parity",
+        }
+        <= blocked,
+        "not_claimed_boundary_visible": {
+            "ironclaw_class_secure_execution",
+            "hardware_backed_isolation",
+            "tee_cvm_wasm_or_container_runtime_isolation",
+            "formal_security_certification",
+            "full_parity_achieved",
+        }
+        <= not_claimed,
+        "receipt_surfaces_visible": {
+            "/api/operator/production-grade-secure-capability-host",
+            "/api/operator/certified-secure-host",
+            "/api/operator/benchmark-proof",
         }
         <= required_surfaces,
     }
@@ -21789,6 +21991,78 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_certified_secure_host_behavior,
         )
         for name in HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Production-grade secure-host receipts expose cross-surface boundary fields, evidence modes, "
+                "fixture-vs-live markers, residual risks, and blocked claims."
+            ),
+            runner=_eval_production_grade_secure_host_behavior,
+        )
+        for name in PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Secure-host cross-surface attack-chain receipts fail closed across prompt, connector, browser, "
+                "package, MCP, background-process, and provider-fallback chains."
+            ),
+            runner=_eval_production_grade_secure_host_behavior,
+        )
+        for name in SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Credential-broker egress soak receipts prove field/destination scope, DNS/redirect rechecks, "
+                "revocation epochs, rotation outcomes, private-network denial, and raw-secret leak blocking."
+            ),
+            runner=_eval_production_grade_secure_host_behavior,
+        )
+        for name in CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Runtime isolation attestation matrix receipts separate implemented policy boundaries from "
+                "unsupported hardware, TEE, CVM, Wasm, container, and formal-certification claims."
+            ),
+            runner=_eval_production_grade_secure_host_behavior,
+        )
+        for name in RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Secure-host operator recovery authority receipts expose deny, quarantine, rotate, rollback, "
+                "revoke, replay-block, repair, and audit actions with safe redaction digests."
+            ),
+            runner=_eval_production_grade_secure_host_behavior,
+        )
+        for name in SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Secure-host false-claim scans keep secure/private, IronClaw-class, certification, "
+                "production-ready, full-parity, and superiority claims blocked."
+            ),
+            runner=_eval_production_grade_secure_host_behavior,
+        )
+        for name in SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES
     ),
     EvalScenario(
         name="delegated_tool_workflow_behavior",

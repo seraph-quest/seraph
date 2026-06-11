@@ -93,6 +93,7 @@ from src.security.benchmark import build_trust_boundary_benchmark_report
 from src.security.certified_secure_host import build_certified_secure_host_report
 from src.security.container_grade_host import build_container_grade_secure_host_report
 from src.security.independent_review import build_independent_secure_host_review_report
+from src.security.production_grade_secure_host import build_production_grade_secure_host_report
 from src.security.production_hardening import build_production_secure_host_hardening_report
 from src.security.production_isolation import build_production_isolation_security_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
@@ -3460,6 +3461,7 @@ async def get_operator_benchmark_proof():
         independent_secure_host_review,
         container_grade_secure_host,
         certified_secure_host,
+        production_grade_secure_host,
         production_reach_browser_voice,
         live_reach_media,
         production_reach_voice_mobile,
@@ -3521,6 +3523,7 @@ async def get_operator_benchmark_proof():
         build_independent_secure_host_review_report(),
         build_container_grade_secure_host_report(),
         build_certified_secure_host_report(),
+        build_production_grade_secure_host_report(),
         build_production_reach_browser_voice_report(),
         build_live_reach_media_report(),
         build_production_reach_voice_mobile_report(),
@@ -3589,6 +3592,7 @@ async def get_operator_benchmark_proof():
         str(independent_secure_host_review["summary"]["benchmark_posture"]),
         str(container_grade_secure_host["summary"]["benchmark_posture"]),
         str(certified_secure_host["summary"]["benchmark_posture"]),
+        str(production_grade_secure_host["summary"]["benchmark_posture"]),
         str(production_reach_browser_voice["summary"]["benchmark_posture"]),
         str(live_reach_media["summary"]["benchmark_posture"]),
         str(production_reach_voice_mobile["summary"]["benchmark_posture"]),
@@ -3717,6 +3721,9 @@ async def get_operator_benchmark_proof():
             "container_grade_secure_host_claim_boundary": container_grade_secure_host["policy"]["claim_boundary"],
             "certified_secure_host_posture": certified_secure_host["summary"]["benchmark_posture"],
             "certified_secure_host_claim_boundary": certified_secure_host["policy"]["claim_boundary"],
+            "production_grade_secure_host_posture": production_grade_secure_host["summary"]["benchmark_posture"],
+            "production_grade_secure_host_claim_boundary": production_grade_secure_host["policy"]["claim_boundary"],
+            "production_grade_secure_host_operator_status": production_grade_secure_host["summary"]["operator_status"],
             "production_reach_browser_voice_posture": production_reach_browser_voice["summary"]["benchmark_posture"],
             "production_reach_browser_voice_claim_boundary": production_reach_browser_voice["policy"]["claim_boundary"],
             "live_reach_media_posture": live_reach_media["summary"]["benchmark_posture"],
@@ -3806,6 +3813,7 @@ async def get_operator_benchmark_proof():
         "independent_secure_host_review": independent_secure_host_review,
         "container_grade_secure_host": container_grade_secure_host,
         "certified_secure_host": certified_secure_host,
+        "production_grade_secure_host": production_grade_secure_host,
         "production_reach_browser_voice": production_reach_browser_voice,
         "live_reach_media": live_reach_media,
         "production_reach_voice_mobile": production_reach_voice_mobile,
@@ -4013,6 +4021,11 @@ async def get_operator_container_grade_secure_host():
 @router.get("/operator/certified-secure-host")
 async def get_operator_certified_secure_host():
     return await build_certified_secure_host_report()
+
+
+@router.get("/operator/production-grade-secure-capability-host")
+async def get_operator_production_grade_secure_capability_host():
+    return await build_production_grade_secure_host_report()
 
 
 @router.get("/operator/production-reach-browser-voice")

@@ -195,6 +195,14 @@ from src.security.certified_secure_host import (
     HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
     RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
 )
+from src.security.production_grade_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -984,6 +992,29 @@ def test_run_production_orchestration_hard_guarantees_benchmark_suites_pass():
     assert all(result.details["distributed_recovery_receipts_visible"] for result in summary.results)
     assert all(result.details["side_effect_correctness_visible"] for result in summary.results)
     assert all(result.details["scheduler_soak_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_production_grade_secure_host_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites(
+            [
+                "production_grade_secure_capability_host_evidence_v1",
+                "secure_host_cross_surface_attack_chain_v1",
+                "credential_broker_egress_soak_v1",
+                "runtime_isolation_attestation_matrix_v1",
+                "secure_host_operator_recovery_authority_v1",
+                "secure_host_false_claim_scan_v1",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+    assert all(result.details["surface_matrix_covers_required_surfaces"] for result in summary.results)
+    assert all(result.details["attack_chains_fail_closed"] for result in summary.results)
+    assert all(result.details["credential_egress_soak_blocks_private_and_raw_secret"] for result in summary.results)
+    assert all(result.details["attestation_marks_unsupported_boundaries"] for result in summary.results)
+    assert all(result.details["operator_recovery_authority_visible"] for result in summary.results)
     assert all(result.details["false_claim_scan_visible"] for result in summary.results)
 
 
@@ -3050,6 +3081,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "credential_broker_egress_enforcement_v1" in captured.out
     assert "external_security_certification_v1" in captured.out
     assert "hostile_runtime_escape_gauntlet_v1" in captured.out
+    assert "production_grade_secure_capability_host_evidence_v1" in captured.out
+    assert "secure_host_cross_surface_attack_chain_v1" in captured.out
+    assert "credential_broker_egress_soak_v1" in captured.out
+    assert "runtime_isolation_attestation_matrix_v1" in captured.out
+    assert "secure_host_operator_recovery_authority_v1" in captured.out
+    assert "secure_host_false_claim_scan_v1" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "one_excellent_reach_channel_canary" in captured.out
@@ -3261,6 +3298,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "credential_broker_egress_enforcement_v1",
         "external_security_certification_v1",
         "hostile_runtime_escape_gauntlet_v1",
+        "production_grade_secure_capability_host_evidence_v1",
+        "secure_host_cross_surface_attack_chain_v1",
+        "credential_broker_egress_soak_v1",
+        "runtime_isolation_attestation_matrix_v1",
+        "secure_host_operator_recovery_authority_v1",
+        "secure_host_false_claim_scan_v1",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

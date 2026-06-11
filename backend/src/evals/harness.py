@@ -16802,6 +16802,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     secret_egress_certification_drill_suite = next(
         item for item in suites if item["name"] == SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME
     )
+    runtime_isolation_implementation_suite = next(
+        item for item in suites if item["name"] == RUNTIME_ISOLATION_IMPLEMENTATION_SUITE_NAME
+    )
+    credential_broker_egress_enforcement_suite = next(
+        item for item in suites if item["name"] == CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SUITE_NAME
+    )
+    external_security_certification_suite = next(
+        item for item in suites if item["name"] == EXTERNAL_SECURITY_CERTIFICATION_SUITE_NAME
+    )
+    hostile_runtime_escape_gauntlet_suite = next(
+        item for item in suites if item["name"] == HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SUITE_NAME
+    )
     computer_suite = next(item for item in suites if item["name"] == "computer_use_browser_desktop")
     channels_suite = next(item for item in suites if item["name"] == CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME)
     one_reach_channel_suite = next(item for item in suites if item["name"] == ONE_REACH_CHANNEL_CANARY_SUITE_NAME)
@@ -17330,6 +17342,51 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "secret_egress_certification_drill_gate_required": (
             SECRET_EGRESS_CERTIFICATION_DRILL_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "runtime_isolation_implementation_suite_present": (
+            "runtime_isolation_capability_class_enforcement_behavior"
+            in runtime_isolation_implementation_suite["scenario_names"]
+        ),
+        "runtime_isolation_implementation_suite_scenario_count_matches": (
+            runtime_isolation_implementation_suite["scenario_count"]
+            == len(RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES)
+        ),
+        "runtime_isolation_implementation_suite_axis_matches": (
+            runtime_isolation_implementation_suite["benchmark_axis"] == "runtime_isolation_implementation_v1"
+        ),
+        "credential_broker_egress_enforcement_suite_present": (
+            "credential_broker_field_scoped_injection_behavior"
+            in credential_broker_egress_enforcement_suite["scenario_names"]
+        ),
+        "credential_broker_egress_enforcement_suite_scenario_count_matches": (
+            credential_broker_egress_enforcement_suite["scenario_count"]
+            == len(CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES)
+        ),
+        "credential_broker_egress_enforcement_suite_axis_matches": (
+            credential_broker_egress_enforcement_suite["benchmark_axis"]
+            == "credential_broker_egress_enforcement_v1"
+        ),
+        "external_security_certification_suite_present": (
+            "external_security_certification_scope_behavior"
+            in external_security_certification_suite["scenario_names"]
+        ),
+        "external_security_certification_suite_scenario_count_matches": (
+            external_security_certification_suite["scenario_count"]
+            == len(EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES)
+        ),
+        "external_security_certification_suite_axis_matches": (
+            external_security_certification_suite["benchmark_axis"] == "external_security_certification_v1"
+        ),
+        "hostile_runtime_escape_gauntlet_suite_present": (
+            "hostile_runtime_credential_exfiltration_behavior"
+            in hostile_runtime_escape_gauntlet_suite["scenario_names"]
+        ),
+        "hostile_runtime_escape_gauntlet_suite_scenario_count_matches": (
+            hostile_runtime_escape_gauntlet_suite["scenario_count"]
+            == len(HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES)
+        ),
+        "hostile_runtime_escape_gauntlet_suite_axis_matches": (
+            hostile_runtime_escape_gauntlet_suite["benchmark_axis"] == "hostile_runtime_escape_gauntlet_v1"
         ),
         "computer_suite_present": "browser_execution_task_replay_behavior" in computer_suite["scenario_names"],
         "channels_suite_present": "device_pairing_revocation_fail_closed" in channels_suite["scenario_names"],

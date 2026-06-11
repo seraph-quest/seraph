@@ -312,6 +312,19 @@ from src.guardian.live_human_outcome_learning import (
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
     build_live_human_outcome_learning_contract,
 )
+from src.guardian.generalized_guardian_outcomes import (
+    CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES,
+    CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SUITE_NAME,
+    FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SUITE_NAME,
+    GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES,
+    GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SUITE_NAME,
+    GENERALIZED_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS,
+    GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
+    MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
+    MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME,
+    build_generalized_guardian_outcomes_contract,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
     INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
@@ -15596,6 +15609,126 @@ async def _eval_longitudinal_guardian_outcomes_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_generalized_guardian_outcomes_behavior() -> dict[str, Any]:
+    contract = build_generalized_guardian_outcomes_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    studies = contract["generalized_outcome_studies"]
+    providers = contract["memory_provider_parity_matrix"]
+    causal = contract["causal_learning_thresholds"]
+    baselines = contract["memory_baseline_comparisons"]
+    suites = benchmark_suite_report()
+    study_suite = next(
+        item for item in suites if item["name"] == GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SUITE_NAME
+    )
+    provider_suite = next(
+        item for item in suites if item["name"] == FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SUITE_NAME
+    )
+    causal_suite = next(
+        item for item in suites if item["name"] == CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SUITE_NAME
+    )
+    baseline_suite = next(
+        item for item in suites if item["name"] == MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME
+    )
+    safe_receipts = [
+        item.get("safe_receipt", {})
+        for item in [*studies, *providers, *causal, *baselines]
+    ]
+    required_decisions = {
+        "act",
+        "defer",
+        "bundle",
+        "clarify",
+        "approval",
+        "stay_silent",
+        "recovery",
+        "followthrough",
+    }
+    return {
+        "operator_status_visible": summary["operator_status"]
+        == "generalized_guardian_outcomes_receipts_visible",
+        "study_suite_visible": (
+            study_suite["scenario_count"] == len(GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES)
+        ),
+        "provider_suite_visible": (
+            provider_suite["scenario_count"] == len(FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+        ),
+        "causal_suite_visible": (
+            causal_suite["scenario_count"] == len(CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES)
+        ),
+        "baseline_suite_visible": (
+            baseline_suite["scenario_count"] == len(MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES)
+        ),
+        "predeclared_protocol_visible": summary["predeclared_protocol_count"] == summary["study_count"],
+        "decision_family_coverage_visible": required_decisions <= {item["decision"] for item in studies},
+        "task_family_coverage_visible": summary["task_family_count"] >= 8,
+        "sample_threshold_visible": summary["sample_size_total"] >= 800,
+        "independent_evaluators_visible": summary["independent_evaluator_count"] == summary["study_count"],
+        "consent_withdrawal_visible": all(
+            item.get("consent", {}).get("withdrawal_supported") is True
+            and item.get("consent", {}).get("anonymization_state") == "anonymized"
+            for item in studies
+        ),
+        "fairness_and_adverse_review_visible": (
+            summary["fairness_review_count"] == summary["study_count"]
+            and summary["adverse_event_reviewed_count"] == summary["adverse_event_count"]
+        ),
+        "redaction_safe": (
+            summary["raw_transcript_stored_count"] == 0
+            and summary["secret_leak_count"] == 0
+            and summary["unredacted_identifier_count"] == 0
+            and summary["provider_payload_leak_count"] == 0
+            and summary["raw_receipt_path_exposed_count"] == 0
+            and all(receipt.get("contains_raw_transcript") is False for receipt in safe_receipts)
+            and all(receipt.get("contains_secret") is False for receipt in safe_receipts)
+            and all(receipt.get("contains_provider_payload") is False for receipt in safe_receipts)
+            and all(receipt.get("raw_receipt_path_exposed") is False for receipt in safe_receipts)
+        ),
+        "provider_matrix_visible": summary["provider_count"] >= 6 and summary["provider_dimension_count"] >= 12,
+        "canonical_precedence_visible": (
+            summary["canonical_precedence_preserved_count"] == summary["provider_count"]
+        ),
+        "provider_override_blocks_visible": summary["provider_override_blocked_count"] >= 5,
+        "provider_failed_dimensions_visible": summary["provider_failed_dimension_count"] >= 1,
+        "provider_privacy_regression_visible": summary["privacy_regression_count"] >= 1,
+        "delete_export_visible": summary["delete_export_receipt_count"] == summary["provider_count"],
+        "stale_recall_blocks_visible": summary["stale_recall_blocked_count"] >= summary["provider_count"],
+        "provider_quarantine_visible": summary["quarantine_count"] >= 2,
+        "reinstatement_review_visible": summary["reinstatement_review_count"] >= 2,
+        "unsafe_provider_behavior_blocked": any(
+            item.get("provider_runtime_state") == "quarantined"
+            and item.get("behavior_change_allowed") is False
+            for item in providers
+        ),
+        "causal_thresholds_visible": summary["causal_threshold_count"] >= 3,
+        "causal_threshold_passes_visible": summary["causal_threshold_pass_count"] == summary["causal_threshold_count"],
+        "counterfactuals_visible": summary["causal_counterfactual_count"] == summary["causal_threshold_count"],
+        "confounders_visible": all(bool(item.get("confounders")) for item in causal),
+        "negative_controls_visible": all(bool(item.get("negative_controls")) for item in causal),
+        "rollback_authority_visible": summary["rollback_authority_count"] == summary["causal_threshold_count"],
+        "promotion_gates_visible": all(
+            "operator_review_required" in item.get("promotion_gate_state", "")
+            or "blocked" in item.get("promotion_gate_state", "")
+            for item in causal
+        ),
+        "baseline_sources_visible": summary["current_source_baseline_count"] == summary["baseline_count"],
+        "baseline_pressure_only_visible": summary["pressure_only_baseline_count"] == summary["baseline_count"],
+        "baseline_limits_visible": all(
+            item.get("source_url")
+            and item.get("source_checked_at")
+            and item.get("access_caveat")
+            and item.get("limitations")
+            and "not_named_baseline_win" in item.get("comparison_disposition", "")
+            for item in baselines
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(GENERALIZED_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/generalized-guardian-outcomes" in policy["receipt_surfaces"],
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in policy["receipt_surfaces"],
+    }
+
+
 def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 
@@ -17033,6 +17166,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     learning_safety_monitor_v2_suite = next(
         item for item in suites if item["name"] == LEARNING_SAFETY_MONITOR_V2_SUITE_NAME
     )
+    generalized_guardian_outcome_study_v1_suite = next(
+        item for item in suites if item["name"] == GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SUITE_NAME
+    )
+    full_memory_provider_parity_matrix_v1_suite = next(
+        item for item in suites if item["name"] == FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SUITE_NAME
+    )
+    causal_learning_outcome_thresholds_v1_suite = next(
+        item for item in suites if item["name"] == CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SUITE_NAME
+    )
+    memory_baseline_comparison_v1_suite = next(
+        item for item in suites if item["name"] == MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME
+    )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -18079,6 +18224,65 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "learning_safety_monitor_v2_gate_required": (
             LEARNING_SAFETY_MONITOR_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "generalized_guardian_outcome_study_v1_suite_present": (
+            "generalized_outcome_predeclared_protocol_behavior"
+            in generalized_guardian_outcome_study_v1_suite["scenario_names"]
+        ),
+        "generalized_guardian_outcome_study_v1_suite_scenario_count_matches": (
+            generalized_guardian_outcome_study_v1_suite["scenario_count"]
+            == len(GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES)
+        ),
+        "generalized_guardian_outcome_study_v1_suite_axis_matches": (
+            generalized_guardian_outcome_study_v1_suite["benchmark_axis"]
+            == "generalized_guardian_outcome_study_v1"
+        ),
+        "generalized_guardian_outcome_study_v1_gate_required": (
+            GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "full_memory_provider_parity_matrix_v1_suite_present": (
+            "full_memory_provider_dimension_matrix_behavior"
+            in full_memory_provider_parity_matrix_v1_suite["scenario_names"]
+        ),
+        "full_memory_provider_parity_matrix_v1_suite_scenario_count_matches": (
+            full_memory_provider_parity_matrix_v1_suite["scenario_count"]
+            == len(FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+        ),
+        "full_memory_provider_parity_matrix_v1_suite_axis_matches": (
+            full_memory_provider_parity_matrix_v1_suite["benchmark_axis"]
+            == "full_memory_provider_parity_matrix_v1"
+        ),
+        "full_memory_provider_parity_matrix_v1_gate_required": (
+            FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "causal_learning_outcome_thresholds_v1_suite_present": (
+            "causal_threshold_counterfactual_design_behavior"
+            in causal_learning_outcome_thresholds_v1_suite["scenario_names"]
+        ),
+        "causal_learning_outcome_thresholds_v1_suite_scenario_count_matches": (
+            causal_learning_outcome_thresholds_v1_suite["scenario_count"]
+            == len(CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES)
+        ),
+        "causal_learning_outcome_thresholds_v1_suite_axis_matches": (
+            causal_learning_outcome_thresholds_v1_suite["benchmark_axis"]
+            == "causal_learning_outcome_thresholds_v1"
+        ),
+        "causal_learning_outcome_thresholds_v1_gate_required": (
+            CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "memory_baseline_comparison_v1_suite_present": (
+            "memory_baseline_current_source_limit_behavior"
+            in memory_baseline_comparison_v1_suite["scenario_names"]
+        ),
+        "memory_baseline_comparison_v1_suite_scenario_count_matches": (
+            memory_baseline_comparison_v1_suite["scenario_count"]
+            == len(MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES)
+        ),
+        "memory_baseline_comparison_v1_suite_axis_matches": (
+            memory_baseline_comparison_v1_suite["benchmark_axis"] == "memory_baseline_comparison_v1"
+        ),
+        "memory_baseline_comparison_v1_gate_required": (
+            MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -21854,6 +22058,54 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_longitudinal_guardian_outcomes_behavior,
         )
         for name in LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch DD exposes predeclared generalized guardian outcome protocols, independent evaluators, "
+                "fairness, adverse-event review, redaction, and bounded claim receipts."
+            ),
+            runner=_eval_generalized_guardian_outcomes_behavior,
+        )
+        for name in GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch DD expands memory-provider comparison across canonical authority, advisory usefulness, "
+                "freshness, privacy, delete/export, stale recall, quarantine, and reinstatement gates."
+            ),
+            runner=_eval_generalized_guardian_outcomes_behavior,
+        )
+        for name in FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch DD requires counterfactual or controlled causal thresholds, confounders, negative controls, "
+                "promotion review, rollback authority, and no-superiority boundaries."
+            ),
+            runner=_eval_generalized_guardian_outcomes_behavior,
+        )
+        for name in CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch DD keeps named memory baselines current-source-limited and pressure-only until exact "
+                "claim-ledger wording changes."
+            ),
+            runner=_eval_generalized_guardian_outcomes_behavior,
+        )
+        for name in MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

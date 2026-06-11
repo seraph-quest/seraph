@@ -136,6 +136,14 @@ from src.guardian.live_human_outcome_learning import (
     LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
 )
+from src.guardian.generalized_guardian_outcomes import (
+    CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES,
+    FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES,
+    GENERALIZED_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS,
+    GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
+    MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
     INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
@@ -3230,6 +3238,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["longitudinal_guardian_outcomes_claim_boundary"]
         == LONGITUDINAL_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
     )
+    assert (
+        payload["summary"]["generalized_guardian_outcomes_posture"]
+        == "generalized_guardian_outcomes_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["generalized_guardian_outcomes_claim_boundary"]
+        == GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -3934,6 +3950,26 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     learning_safety_suite = next(item for item in payload["suites"] if item["name"] == "learning_safety_monitor_v2")
     assert "learning_safety_harm_privacy_block_behavior" in learning_safety_suite["scenario_names"]
     assert learning_safety_suite["scenario_count"] == len(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES)
+    generalized_outcome_suite = next(
+        item for item in payload["suites"] if item["name"] == "generalized_guardian_outcome_study_v1"
+    )
+    assert "generalized_outcome_predeclared_protocol_behavior" in generalized_outcome_suite["scenario_names"]
+    assert generalized_outcome_suite["scenario_count"] == len(GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES)
+    full_provider_suite = next(
+        item for item in payload["suites"] if item["name"] == "full_memory_provider_parity_matrix_v1"
+    )
+    assert "full_memory_provider_dimension_matrix_behavior" in full_provider_suite["scenario_names"]
+    assert full_provider_suite["scenario_count"] == len(FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+    causal_threshold_suite = next(
+        item for item in payload["suites"] if item["name"] == "causal_learning_outcome_thresholds_v1"
+    )
+    assert "causal_threshold_counterfactual_design_behavior" in causal_threshold_suite["scenario_names"]
+    assert causal_threshold_suite["scenario_count"] == len(CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES)
+    memory_baseline_suite = next(
+        item for item in payload["suites"] if item["name"] == "memory_baseline_comparison_v1"
+    )
+    assert "memory_baseline_current_source_limit_behavior" in memory_baseline_suite["scenario_names"]
+    assert memory_baseline_suite["scenario_count"] == len(MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES)
     assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
@@ -4216,6 +4252,25 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert set(LONGITUDINAL_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= set(
         payload["longitudinal_guardian_outcomes"]["policy"]["blocked_claims"]
+    )
+    assert payload["generalized_guardian_outcomes"]["summary"]["operator_status"] == (
+        "generalized_guardian_outcomes_receipts_visible"
+    )
+    assert payload["generalized_guardian_outcomes"]["summary"]["study_count"] == 8
+    assert payload["generalized_guardian_outcomes"]["summary"]["task_family_count"] == 8
+    assert payload["generalized_guardian_outcomes"]["summary"]["provider_count"] >= 6
+    assert payload["generalized_guardian_outcomes"]["summary"]["provider_dimension_count"] >= 12
+    assert payload["generalized_guardian_outcomes"]["summary"]["causal_threshold_count"] == 3
+    assert payload["generalized_guardian_outcomes"]["summary"]["baseline_count"] == 3
+    assert payload["generalized_guardian_outcomes"]["summary"]["secret_leak_count"] == 0
+    assert payload["generalized_guardian_outcomes"]["policy"]["claim_boundary"] == (
+        GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
+    )
+    assert set(GENERALIZED_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= set(
+        payload["generalized_guardian_outcomes"]["policy"]["blocked_claims"]
+    )
+    assert "full_memory_provider_parity" in (
+        payload["generalized_guardian_outcomes"]["policy"]["blocked_claims"]
     )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
@@ -5175,6 +5230,60 @@ async def test_operator_longitudinal_guardian_outcomes_surface_reports_batch_cv_
         and item["safe_receipt"]["contains_secret"] is False
         and item["safe_receipt"]["raw_receipt_path_exposed"] is False
         for item in payload["contract"]["longitudinal_outcome_studies"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_generalized_guardian_outcomes_surface_reports_batch_dd_receipts(client):
+    resp = await client.get("/api/operator/generalized-guardian-outcomes")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "generalized_guardian_outcomes_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "generalized_guardian_outcomes_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES)
+        + len(FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+        + len(CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES)
+        + len(MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["study_count"] == 8
+    assert payload["summary"]["decision_type_count"] == 8
+    assert payload["summary"]["predeclared_protocol_count"] == payload["summary"]["study_count"]
+    assert payload["summary"]["adverse_event_reviewed_count"] == payload["summary"]["adverse_event_count"]
+    assert payload["summary"]["raw_transcript_stored_count"] == 0
+    assert payload["summary"]["secret_leak_count"] == 0
+    assert payload["summary"]["unredacted_identifier_count"] == 0
+    assert payload["summary"]["provider_payload_leak_count"] == 0
+    assert payload["summary"]["raw_receipt_path_exposed_count"] == 0
+    assert payload["summary"]["provider_count"] >= 6
+    assert payload["summary"]["provider_dimension_count"] >= 12
+    assert payload["summary"]["canonical_precedence_preserved_count"] == payload["summary"]["provider_count"]
+    assert payload["summary"]["delete_export_receipt_count"] == payload["summary"]["provider_count"]
+    assert payload["summary"]["privacy_regression_count"] >= 1
+    assert payload["summary"]["quarantine_count"] >= 2
+    assert payload["summary"]["causal_threshold_count"] == 3
+    assert payload["summary"]["causal_threshold_pass_count"] == payload["summary"]["causal_threshold_count"]
+    assert payload["summary"]["baseline_count"] == 3
+    assert payload["summary"]["pressure_only_baseline_count"] == payload["summary"]["baseline_count"]
+    assert payload["policy"]["claim_boundary"] == GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
+    assert set(GENERALIZED_GUARDIAN_OUTCOMES_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "full_memory_provider_parity" in payload["policy"]["blocked_claims"]
+    assert "named_baseline_win" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/generalized-guardian-outcomes" in payload["policy"]["receipt_surfaces"]
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+    assert all(
+        item["safe_receipt"]["contains_raw_transcript"] is False
+        and item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["contains_provider_payload"] is False
+        and item["safe_receipt"]["raw_receipt_path_exposed"] is False
+        for group in (
+            payload["contract"]["generalized_outcome_studies"],
+            payload["contract"]["memory_provider_parity_matrix"],
+            payload["contract"]["causal_learning_thresholds"],
+            payload["contract"]["memory_baseline_comparisons"],
+        )
+        for item in group
     )
 
 

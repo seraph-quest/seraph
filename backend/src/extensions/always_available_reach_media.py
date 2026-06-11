@@ -23,7 +23,7 @@ ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES = (
 VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME = "voice_media_parity_runtime_v1"
 VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES = (
     "voice_media_provider_latency_quality_behavior",
-    "voice_media_correction_deletion_privacy_behavior",
+    "voice_media_runtime_correction_deletion_privacy_behavior",
     "voice_media_fallback_regression_behavior",
     "voice_media_parity_claim_boundary_behavior",
 )

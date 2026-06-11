@@ -1385,6 +1385,19 @@ def test_run_benchmark_suites_executes_unique_suite_scenarios():
     }
 
 
+def test_batch_dc_scenarios_do_not_collide_with_existing_registry_names():
+    scenario_names = [scenario.name for scenario in available_scenarios()]
+    batch_dc_names = (
+        ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES
+        + VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES
+        + MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES
+        + REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES
+    )
+    duplicates = sorted({name for name in batch_dc_names if scenario_names.count(name) != 1})
+
+    assert duplicates == []
+
+
 def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
     summary = asyncio.run(run_benchmark_suites(["guardian_memory_quality"]))
 

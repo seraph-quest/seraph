@@ -74,6 +74,16 @@ from src.extensions.marketplace_security_corpus import (
     MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
     PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
 )
+from src.extensions.production_secure_marketplace import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES,
+    MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_BLOCKED_CLAIMS,
+    PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY,
+    PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES,
+    REQUIRED_HOSTILE_PACKAGE_DRILLS,
+    REQUIRED_MARKETPLACE_LIFECYCLE_FLOWS,
+    THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
@@ -2721,6 +2731,68 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_production_secure_marketplace_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "operator_status": "production_secure_marketplace_receipts_visible",
+                    "benchmark_posture": "production_secure_marketplace_ci_gated_operator_visible",
+                    "scenario_count": (
+                        len(PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES)
+                        + len(THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES)
+                        + len(MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES)
+                        + len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES)
+                    ),
+                    "live_corpus_package_count": 12,
+                    "required_hostile_drills_covered": True,
+                    "safe_receipts_redacted": True,
+                    "production_secure_marketplace_claim_allowed": False,
+                    "third_party_package_security_solved_claim_allowed": False,
+                    "claim_boundary": PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY,
+                    "active_failure_count": 0,
+                },
+                "scenario_names": {
+                    "production_secure_marketplace_v1": list(PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES),
+                    "third_party_package_security_certification_v1": list(
+                        THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES
+                    ),
+                    "marketplace_live_corpus_operations_v2": list(
+                        MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES
+                    ),
+                    "hostile_package_lifecycle_gauntlet_v1": list(
+                        HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {
+                    "summary": {
+                        "operator_status": "production_secure_marketplace_receipts_visible",
+                        "live_corpus_package_count": 12,
+                        "required_hostile_drills_covered": True,
+                    },
+                    "lifecycle_flow_receipts": [
+                        {"flow": "rollback", "state": "rolled_back"},
+                    ],
+                    "hostile_package_lifecycle_gauntlet": [
+                        {"drill_class": "secret_exfiltration", "decision": "deny_secret_destination_mismatch"},
+                    ],
+                },
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY,
+                    "blocked_claims": list(PRODUCTION_SECURE_MARKETPLACE_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/production-secure-marketplace",
+                        "/api/operator/marketplace-security-corpus",
+                        "/api/operator/production-marketplace-security",
+                        "/api/operator/benchmark-proof",
+                    ],
+                    "ci_gate_mode": "required_benchmark_suite",
+                },
+                "latest_run": {"total": 17, "passed": 17, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_browser_provider_usability_report",
         AsyncMock(
             return_value={
@@ -3303,6 +3375,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == MARKETPLACE_SECURITY_CORPUS_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["production_secure_marketplace_posture"]
+        == "production_secure_marketplace_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["production_secure_marketplace_claim_boundary"]
+        == PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["browser_provider_usability_posture"]
         == "browser_provider_usability_ci_gated_operator_visible"
     )
@@ -3392,6 +3472,15 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert set(OPERATOR_CONTROL_CERTIFICATION_BLOCKED_CLAIMS) <= set(
         payload["operator_control_certification"]["policy"]["blocked_claims"]
     )
+    assert payload["production_secure_marketplace"]["summary"]["live_corpus_package_count"] >= 12
+    assert payload["production_secure_marketplace"]["summary"]["required_hostile_drills_covered"] is True
+    assert payload["production_secure_marketplace"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["production_secure_marketplace"]["policy"]["claim_boundary"] == (
+        PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY
+    )
+    assert set(PRODUCTION_SECURE_MARKETPLACE_BLOCKED_CLAIMS) <= set(
+        payload["production_secure_marketplace"]["policy"]["blocked_claims"]
+    )
     assert (
         "operator_control_population_study"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -3412,6 +3501,22 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "long_work_recovery_slo_v2" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     assert (
         "operator_error_detectability_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "production_secure_marketplace_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "third_party_package_security_certification_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "marketplace_live_corpus_operations_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "hostile_package_lifecycle_gauntlet_v1"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert payload["governed_improvement"]["target_count"] == 2
@@ -3928,6 +4033,30 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "publisher_ops_identity_key_rotation_behavior" in publisher_trust_suite["scenario_names"]
     assert publisher_trust_suite["scenario_count"] == len(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+    production_secure_marketplace_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_secure_marketplace_v1"
+    )
+    assert "production_secure_marketplace_gate_matrix_behavior" in production_secure_marketplace_suite["scenario_names"]
+    assert production_secure_marketplace_suite["scenario_count"] == len(
+        PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES
+    )
+    package_certification_suite = next(
+        item for item in payload["suites"] if item["name"] == "third_party_package_security_certification_v1"
+    )
+    assert "third_party_package_certification_reviewer_scope_behavior" in package_certification_suite["scenario_names"]
+    assert package_certification_suite["scenario_count"] == len(
+        THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES
+    )
+    live_corpus_v2_suite = next(
+        item for item in payload["suites"] if item["name"] == "marketplace_live_corpus_operations_v2"
+    )
+    assert "marketplace_live_corpus_v2_inventory_quality_behavior" in live_corpus_v2_suite["scenario_names"]
+    assert live_corpus_v2_suite["scenario_count"] == len(MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES)
+    hostile_lifecycle_suite = next(
+        item for item in payload["suites"] if item["name"] == "hostile_package_lifecycle_gauntlet_v1"
+    )
+    assert "hostile_package_lifecycle_malicious_update_behavior" in hostile_lifecycle_suite["scenario_names"]
+    assert hostile_lifecycle_suite["scenario_count"] == len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES)
     managed_browser_suite = next(
         item for item in payload["suites"] if item["name"] == "managed_browser_provider_attestation"
     )
@@ -4586,6 +4715,78 @@ async def test_operator_marketplace_security_corpus_surface_reports_batch_cx_rec
         if item["boundary_class"] == "secret_ref_injection"
     )
     assert secret_boundary["decision"] == "deny_destination_host_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_operator_production_secure_marketplace_surface_reports_batch_df_receipts(client):
+    resp = await client.get("/api/operator/production-secure-marketplace")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "production_secure_marketplace_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "production_secure_marketplace_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES)
+        + len(THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES)
+        + len(MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES)
+        + len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["live_corpus_package_count"] >= 12
+    assert payload["summary"]["required_lifecycle_flows_covered"] is True
+    assert payload["summary"]["required_hostile_drills_covered"] is True
+    assert payload["summary"]["hostile_gauntlet_fail_closed"] is True
+    assert payload["summary"]["promoted_package_proof_complete"] is True
+    assert payload["summary"]["certification_review_proofs_bound"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["summary"]["third_party_package_security_solved_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_SECURE_MARKETPLACE_CLAIM_BOUNDARY
+    assert set(PRODUCTION_SECURE_MARKETPLACE_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/production-secure-marketplace" in payload["policy"]["receipt_surfaces"]
+    assert set(REQUIRED_MARKETPLACE_LIFECYCLE_FLOWS) <= {
+        item["flow"] for item in payload["contract"]["lifecycle_flow_receipts"]
+    }
+    assert set(REQUIRED_HOSTILE_PACKAGE_DRILLS) <= {
+        item["drill_class"] for item in payload["contract"]["hostile_package_lifecycle_gauntlet"]
+    }
+    suspicious = next(
+        item for item in payload["contract"]["live_corpus_operations_v2"]
+        if item["package_id"] == "marketplace.suspicious-exporter"
+    )
+    assert suspicious["promotion_decision"] == "deny_and_quarantine"
+    secret_drill = next(
+        item for item in payload["contract"]["hostile_package_lifecycle_gauntlet"]
+        if item["drill_class"] == "secret_exfiltration"
+    )
+    assert secret_drill["decision"] == "deny_secret_destination_mismatch"
+    install_script_drill = next(
+        item for item in payload["contract"]["hostile_package_lifecycle_gauntlet"]
+        if item["drill_class"] == "install_script_execution"
+    )
+    assert install_script_drill["decision"] == "deny_install_hook_execution"
+    certification = payload["contract"]["third_party_package_security_certification"][0]
+    assert certification["reviewer_identity_verified"] is True
+    assert certification["reviewer_conflict_checked"] is True
+    assert certification["publisher_conflict_detected"] is False
+    assert certification["review_report_digest"]
+    assert certification["scope_artifact_digest"]
+    assert certification["signed_reviewer_receipt"]
+    assert all(
+        item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["contains_private_path"] is False
+        and item["safe_receipt"]["contains_raw_package_path"] is False
+        and item["safe_receipt"]["redaction_layer"] == "production_secure_marketplace_v1"
+        and item["safe_receipt"]["sanitized_payload_digest"] == item["safe_receipt"]["evidence_body_digest"]
+        and item["safe_receipt"]["tamper_evident_digest"] != item["safe_receipt"]["evidence_body_digest"]
+        for group in (
+            payload["contract"]["production_gates"],
+            payload["contract"]["third_party_package_security_certification"],
+            payload["contract"]["live_corpus_operations_v2"],
+            payload["contract"]["lifecycle_flow_receipts"],
+            payload["contract"]["hostile_package_lifecycle_gauntlet"],
+        )
+        for item in group
+    )
 
 
 @pytest.mark.asyncio

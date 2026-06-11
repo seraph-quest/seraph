@@ -111,6 +111,16 @@ from src.extensions.marketplace_security_corpus import (
     PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
     PUBLISHER_TRUST_OPERATIONS_SUITE_NAME,
 )
+from src.extensions.production_secure_marketplace import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SUITE_NAME,
+    MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES,
+    MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SUITE_NAME,
+    PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_V1_SUITE_NAME,
+    THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
+    THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SUITE_NAME,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -2256,6 +2266,75 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Publisher trust operations remain bounded receipts, not ecosystem superiority or full marketplace parity."
         ),
         scenario_names=PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_SECURE_MARKETPLACE_V1_SUITE_NAME,
+        label="Production secure marketplace v1",
+        description=(
+            "Pins Batch DF bounded production-secure marketplace gate receipts for promotion policy, signed "
+            "provenance, SBOM/dependency evidence, scanner freshness, waiver/remediation policy, fail-closed "
+            "lifecycle operations, and blocked-claim visibility."
+        ),
+        benchmark_axis="production_secure_marketplace_v1",
+        operator_summary=(
+            "Marketplace promotion requires operator-visible evidence gates and fail-closed lifecycle receipts before "
+            "runtime contribution."
+        ),
+        remaining_gap=(
+            "This is bounded DF evidence, not a blanket production-secure marketplace or solved package-security claim."
+        ),
+        scenario_names=PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SUITE_NAME,
+        label="Third-party package security certification v1",
+        description=(
+            "Pins bounded reviewer-scope, finding, remediation, waiver, retest, residual-risk, and claim-boundary "
+            "receipts for third-party package-security review."
+        ),
+        benchmark_axis="third_party_package_security_certification_v1",
+        operator_summary=(
+            "Package-security certification receipts record review scope and retest evidence while keeping formal "
+            "certification and solved-security wording blocked."
+        ),
+        remaining_gap=(
+            "This is reviewer/certification-scope evidence, not formal product certification or solved security."
+        ),
+        scenario_names=THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SUITE_NAME,
+        label="Marketplace live corpus operations v2",
+        description=(
+            "Pins larger live-corpus v2 receipts for package families, signatures, publisher verification, "
+            "SBOM/dependency graph evidence, compatibility, scanner freshness, waiver expiry, remediation SLA, "
+            "quarantine, and re-entry state."
+        ),
+        benchmark_axis="marketplace_live_corpus_operations_v2",
+        operator_summary=(
+            "The marketplace corpus is judged by quality and security receipts rather than package-count claims."
+        ),
+        remaining_gap=(
+            "Corpus quality evidence does not prove package-count superiority, full marketplace parity, or production readiness."
+        ),
+        scenario_names=MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SUITE_NAME,
+        label="Hostile package lifecycle gauntlet v1",
+        description=(
+            "Pins private-network, SSRF, redirect/DNS, secret exfiltration, workspace access, dependency-confusion, "
+            "lifecycle rollback, quarantine-bypass, and malicious-update drills with fail-closed outcomes."
+        ),
+        benchmark_axis="hostile_package_lifecycle_gauntlet_v1",
+        operator_summary=(
+            "Hostile package behavior must deny, quarantine, or roll back before runtime contribution and expose "
+            "operator recovery receipts."
+        ),
+        remaining_gap=(
+            "This is hostile lifecycle drill evidence; solved third-party package-security claims remain blocked."
+        ),
+        scenario_names=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,

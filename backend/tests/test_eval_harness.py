@@ -109,6 +109,14 @@ from src.extensions.full_browser_parity import (
     REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
     SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
 )
+from src.extensions.browser_computer_use_production import (
+    BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES,
+    BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES,
+    CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
+    SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -843,6 +851,30 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["browser_session_partition_certification_v1_suite_scenario_count_matches"] is True
     assert details["browser_session_partition_certification_v1_suite_axis_matches"] is True
     assert details["browser_session_partition_certification_v1_gate_required"] is True
+    assert details["browser_computer_use_production_safety_v1_suite_present"] is True
+    assert details["browser_computer_use_production_safety_v1_suite_scenario_count_matches"] is True
+    assert details["browser_computer_use_production_safety_v1_suite_axis_matches"] is True
+    assert details["browser_computer_use_production_safety_v1_gate_required"] is True
+    assert details["safe_browser_automation_live_ops_v1_suite_present"] is True
+    assert details["safe_browser_automation_live_ops_v1_suite_scenario_count_matches"] is True
+    assert details["safe_browser_automation_live_ops_v1_suite_axis_matches"] is True
+    assert details["safe_browser_automation_live_ops_v1_gate_required"] is True
+    assert details["credentialed_site_recovery_v1_suite_present"] is True
+    assert details["credentialed_site_recovery_v1_suite_scenario_count_matches"] is True
+    assert details["credentialed_site_recovery_v1_suite_axis_matches"] is True
+    assert details["credentialed_site_recovery_v1_gate_required"] is True
+    assert details["browser_provider_parity_candidate_v1_suite_present"] is True
+    assert details["browser_provider_parity_candidate_v1_suite_scenario_count_matches"] is True
+    assert details["browser_provider_parity_candidate_v1_suite_axis_matches"] is True
+    assert details["browser_provider_parity_candidate_v1_gate_required"] is True
+    assert details["browser_session_partition_attestation_v2_suite_present"] is True
+    assert details["browser_session_partition_attestation_v2_suite_scenario_count_matches"] is True
+    assert details["browser_session_partition_attestation_v2_suite_axis_matches"] is True
+    assert details["browser_session_partition_attestation_v2_gate_required"] is True
+    assert details["browser_false_claim_scan_v1_suite_present"] is True
+    assert details["browser_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["browser_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["browser_false_claim_scan_v1_gate_required"] is True
     assert details["production_operator_control_parity_suite_present"] is True
     assert details["production_operator_control_parity_suite_scenario_count_matches"] is True
     assert details["production_operator_control_parity_suite_axis_matches"] is True
@@ -2327,6 +2359,53 @@ def test_run_browser_session_partition_certification_v1_benchmark_suite_passes()
     assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
 
 
+def test_run_browser_computer_use_production_safety_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_computer_use_production_safety_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES)
+    assert all(result.details["provider_modes_visible"] is True for result in summary.results)
+    assert all(result.details["production_boundary_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["production_boundaries_enforced"] is True for result in summary.results)
+    assert all(result.details["hostile_pages_fail_closed"] is True for result in summary.results)
+    assert all(result.details["dangerous_action_policy_visible"] is True for result in summary.results)
+    assert all(result.details["browser_claims_blocked"] is True for result in summary.results)
+
+
+def test_run_browser_computer_use_production_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "safe_browser_automation_live_ops_v1",
+            "credentialed_site_recovery_v1",
+            "browser_provider_parity_candidate_v1",
+            "browser_session_partition_attestation_v2",
+            "browser_false_claim_scan_v1",
+        ])
+    )
+
+    result_names = {result.name for result in summary.results}
+    expected = (
+        set(SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES)
+        | set(CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES)
+        | set(BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES)
+        | set(BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES)
+        | set(BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert result_names == expected
+    assert all(result.details["live_ops_receipts_visible"] is True for result in summary.results)
+    assert all(result.details["credentialed_site_recovery_visible"] is True for result in summary.results)
+    assert all(result.details["credentialed_site_recovery_fails_closed"] is True for result in summary.results)
+    assert all(result.details["provider_parity_candidate_visible"] is True for result in summary.results)
+    assert all(result.details["remote_degradation_cases_visible"] is True for result in summary.results)
+    assert all(result.details["partition_attestation_v2_visible"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
 
@@ -3362,6 +3441,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "full_browser_parity_matrix_v1" in captured.out
     assert "real_site_drift_recovery_v2" in captured.out
     assert "browser_session_partition_certification_v1" in captured.out
+    assert "browser_computer_use_production_safety_v1" in captured.out
+    assert "safe_browser_automation_live_ops_v1" in captured.out
+    assert "credentialed_site_recovery_v1" in captured.out
+    assert "browser_provider_parity_candidate_v1" in captured.out
+    assert "browser_session_partition_attestation_v2" in captured.out
+    assert "browser_false_claim_scan_v1" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -3494,6 +3579,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "full_browser_parity_matrix_v1",
         "real_site_drift_recovery_v2",
         "browser_session_partition_certification_v1",
+        "browser_computer_use_production_safety_v1",
+        "safe_browser_automation_live_ops_v1",
+        "credentialed_site_recovery_v1",
+        "browser_provider_parity_candidate_v1",
+        "browser_session_partition_attestation_v2",
+        "browser_false_claim_scan_v1",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

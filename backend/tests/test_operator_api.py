@@ -146,6 +146,16 @@ from src.extensions.full_browser_parity import (
     REQUIRED_HOSTILE_BROWSER_CASES,
     SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
 )
+from src.extensions.browser_computer_use_production import (
+    BROWSER_COMPUTER_USE_PRODUCTION_BLOCKED_CLAIMS,
+    BROWSER_COMPUTER_USE_PRODUCTION_CLAIM_BOUNDARY,
+    BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES,
+    BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES,
+    CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
+    SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -3612,6 +3622,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["summary"]["full_browser_parity_claim_boundary"] == BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY
     assert (
+        payload["summary"]["browser_computer_use_production_posture"]
+        == "browser_computer_use_production_safety_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["browser_computer_use_production_claim_boundary"] == (
+        BROWSER_COMPUTER_USE_PRODUCTION_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["browser_computer_use_production_operator_status"] == (
+        "browser_computer_use_production_safety_receipts_visible"
+    )
+    assert (
         payload["summary"]["production_operator_control_parity_posture"]
         == "production_operator_control_parity_ci_gated_operator_visible"
     )
@@ -4712,6 +4732,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert set(BROWSER_PARITY_EVIDENCE_BLOCKED_CLAIMS) <= set(
         payload["full_browser_parity"]["policy"]["blocked_claims"]
     )
+    assert payload["browser_computer_use_production"]["summary"]["operator_status"] == (
+        "browser_computer_use_production_safety_receipts_visible"
+    )
+    assert payload["browser_computer_use_production"]["summary"]["required_provider_modes_covered"] is True
+    assert payload["browser_computer_use_production"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["browser_computer_use_production"]["summary"]["full_browser_parity_claim_allowed"] is False
+    assert payload["browser_computer_use_production"]["policy"]["claim_boundary"] == (
+        BROWSER_COMPUTER_USE_PRODUCTION_CLAIM_BOUNDARY
+    )
+    assert set(BROWSER_COMPUTER_USE_PRODUCTION_BLOCKED_CLAIMS) <= set(
+        payload["browser_computer_use_production"]["policy"]["blocked_claims"]
+    )
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -5484,6 +5516,80 @@ async def test_operator_full_browser_parity_surface_reports_batch_dg_receipts(cl
         and len(item["raw_seed_payload_digest"]) == 64
         and len(item["seed_marker_digest"]) == 64
         for item in payload["contract"]["redaction_scan_receipts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_browser_computer_use_production_surface_reports_batch_do_receipts(client):
+    resp = await client.get("/api/operator/browser-computer-use-production")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "browser_computer_use_production_safety_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == (
+        "browser_computer_use_production_safety_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["scenario_count"] == (
+        len(BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES)
+        + len(SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES)
+        + len(CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES)
+        + len(BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES)
+        + len(BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES)
+        + len(BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["required_provider_modes_covered"] is True
+    assert payload["summary"]["unsupported_paths_explicit"] is True
+    assert payload["summary"]["all_boundaries_enforced"] is True
+    assert payload["summary"]["boundary_leak_count"] == 0
+    assert payload["summary"]["hostile_cases_fail_closed"] is True
+    assert payload["summary"]["required_live_ops_covered"] is True
+    assert payload["summary"]["required_credentialed_recovery_cases_covered"] is True
+    assert payload["summary"]["credentialed_recovery_fails_closed"] is True
+    assert payload["summary"]["remote_degradation_cases_covered"] is True
+    assert payload["summary"]["existing_session_unpartitioned_blocked"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["false_claim_scan_clean"] is True
+    assert payload["summary"]["safe_browser_automation_claim_allowed"] is False
+    assert payload["summary"]["safe_autonomous_computer_use_claim_allowed"] is False
+    assert payload["summary"]["full_browser_parity_claim_allowed"] is False
+    assert payload["summary"]["openclaw_class_browser_reach_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == BROWSER_COMPUTER_USE_PRODUCTION_CLAIM_BOUNDARY
+    assert set(BROWSER_COMPUTER_USE_PRODUCTION_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/browser-computer-use-production" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["browser_computer_use_production_safety_v1"] == list(
+        BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["safe_browser_automation_live_ops_v1"] == list(
+        SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["credentialed_site_recovery_v1"] == list(
+        CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_provider_parity_candidate_v1"] == list(
+        BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_session_partition_attestation_v2"] == list(
+        BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_false_claim_scan_v1"] == list(BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    assert {item["provider_mode"] for item in payload["contract"]["production_safety_providers"]} == set(
+        REQUIRED_BROWSER_PROVIDER_MODES
+    )
+    assert all(
+        item["external_mutation_allowed"] is False
+        for item in payload["contract"]["safe_browser_automation_live_ops"]
+    )
+    assert all(
+        item["raw_secret_exposed"] is False
+        and item["credential_leak_count"] == 0
+        and item["cookie_leak_count"] == 0
+        and item["private_data_leak_count"] == 0
+        for item in payload["contract"]["credentialed_site_recovery"]
+    )
+    assert all(
+        item["safe_receipt"]["redaction_layer"] == "browser_computer_use_production_v1"
+        for item in payload["contract"]["browser_session_partition_attestation_v2"]
     )
 
 

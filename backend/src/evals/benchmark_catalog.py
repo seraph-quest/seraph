@@ -46,6 +46,18 @@ from src.cockpit.operator_control_certification import (
     OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
     OPERATOR_ERROR_DETECTABILITY_V1_SUITE_NAME,
 )
+from src.cockpit.operator_control_production_certification import (
+    AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES,
+    AUTHORITY_TRANSFER_RECOVERY_V1_SUITE_NAME,
+    OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V2_SUITE_NAME,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_LIVE_POPULATION_V1_SUITE_NAME,
+    TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
+    TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -2979,6 +2991,92 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This does not prove solved operator control, tamper-proof audit, production readiness, or full parity."
         ),
         scenario_names=OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_CERTIFICATION_V2_SUITE_NAME,
+        label="Operator control certification v2",
+        description=(
+            "Pins Batch DM required-control coverage for dense long-work inspect, approve, deny, pause, resume, "
+            "retry, repair, branch, compare, revoke, quarantine, handoff, rollback, audit, search, replay, and "
+            "runbook controls with stronger stale-approval, safe-denial, recovery, and takeover receipts."
+        ),
+        benchmark_axis="operator_control_certification_v2",
+        operator_summary=(
+            "Operator-control v2 is judged by authority, stale-approval blocking, receipt-after-action, recovery "
+            "correctness, and operator-takeover visibility under production-certification-style pressure."
+        ),
+        remaining_gap=(
+            "This is bounded evidence, not solved operator control, best/world-class cockpit, formal certification, "
+            "production readiness, full parity, or reference-system exceedance."
+        ),
+        scenario_names=OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_LIVE_POPULATION_V1_SUITE_NAME,
+        label="Operator control live population v1",
+        description=(
+            "Pins recorded-live plus fixture population telemetry for click, keystroke, latency, recovery, "
+            "keyboard-only, accessibility, error-detectability, and fixture-vs-live boundaries."
+        ),
+        benchmark_axis="operator_control_live_population_v1",
+        operator_summary=(
+            "Population v1 keeps dense operator-control claims measurable while preserving reviewer independence, "
+            "redacted handles, and no baseline-win wording."
+        ),
+        remaining_gap=(
+            "This does not prove universal usability, fastest cockpit, solved control, or formal certification."
+        ),
+        scenario_names=OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME,
+        label="Tamper-evident audit candidate v1",
+        description=(
+            "Pins redacted audit-handle digest linkage, unauthorized mutation denial, replay denial on context drift, "
+            "and residual-risk wording for a tamper-evident audit candidate."
+        ),
+        benchmark_axis="tamper_evident_audit_candidate_v1",
+        operator_summary=(
+            "Audit candidate receipts must be digest-linked and operator-visible while tamper-proof and "
+            "formal-certification wording remains blocked."
+        ),
+        remaining_gap=(
+            "Tamper-evident candidate receipts are not tamper-proof audit, formal certification, or production-ready proof."
+        ),
+        scenario_names=TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=AUTHORITY_TRANSFER_RECOVERY_V1_SUITE_NAME,
+        label="Authority transfer recovery v1",
+        description=(
+            "Pins handoff, takeover, replay, rollback, quarantine, and revoke authority-transfer receipts with "
+            "scope renewal, checkpoint digest, actor authority, and approval-reuse denial."
+        ),
+        benchmark_axis="authority_transfer_recovery_v1",
+        operator_summary=(
+            "Authority transfer recovery is judged by scope renewal, safe denial, and recovery correctness before "
+            "mutation or replay."
+        ),
+        remaining_gap=(
+            "This does not prove approval transfer solved, solved control, formal certification, or full parity."
+        ),
+        scenario_names=AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+        label="Operator control false-claim scan v1",
+        description=(
+            "Pins the Batch DM false-claim scan receipt and blocked-claim policy for solved-control, best-cockpit, "
+            "tamper-proof-audit, formal-certification, production-ready, full-parity, and exceedance wording."
+        ),
+        benchmark_axis="operator_control_false_claim_scan_v1",
+        operator_summary=(
+            "DM claim scans keep production-certification evidence bounded until the claim ledger permits exact wording."
+        ),
+        remaining_gap=(
+            "The scan is a wording gate and does not itself prove solved control or certification."
+        ),
+        scenario_names=OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,

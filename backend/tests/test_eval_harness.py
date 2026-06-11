@@ -38,6 +38,13 @@ from src.cockpit.operator_control_certification import (
     OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
     OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
 )
+from src.cockpit.operator_control_production_certification import (
+    AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
+    TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
@@ -840,6 +847,26 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["operator_error_detectability_v1_suite_scenario_count_matches"] is True
     assert details["operator_error_detectability_v1_suite_axis_matches"] is True
     assert details["operator_error_detectability_v1_gate_required"] is True
+    assert details["operator_control_certification_v2_suite_present"] is True
+    assert details["operator_control_certification_v2_suite_scenario_count_matches"] is True
+    assert details["operator_control_certification_v2_suite_axis_matches"] is True
+    assert details["operator_control_certification_v2_gate_required"] is True
+    assert details["operator_control_live_population_v1_suite_present"] is True
+    assert details["operator_control_live_population_v1_suite_scenario_count_matches"] is True
+    assert details["operator_control_live_population_v1_suite_axis_matches"] is True
+    assert details["operator_control_live_population_v1_gate_required"] is True
+    assert details["tamper_evident_audit_candidate_v1_suite_present"] is True
+    assert details["tamper_evident_audit_candidate_v1_suite_scenario_count_matches"] is True
+    assert details["tamper_evident_audit_candidate_v1_suite_axis_matches"] is True
+    assert details["tamper_evident_audit_candidate_v1_gate_required"] is True
+    assert details["authority_transfer_recovery_v1_suite_present"] is True
+    assert details["authority_transfer_recovery_v1_suite_scenario_count_matches"] is True
+    assert details["authority_transfer_recovery_v1_suite_axis_matches"] is True
+    assert details["authority_transfer_recovery_v1_gate_required"] is True
+    assert details["operator_control_false_claim_scan_v1_suite_present"] is True
+    assert details["operator_control_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["operator_control_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["operator_control_false_claim_scan_v1_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
@@ -1120,6 +1147,32 @@ def test_run_operator_control_certification_v1_benchmark_suite_passes():
     assert all(result.details["required_controls_visible"] for result in summary.results)
     assert all(result.details["stale_approval_negative_cases_visible"] for result in summary.results)
     assert all(result.details["formal_certification_and_solved_control_blocked"] for result in summary.results)
+
+
+def test_run_operator_control_production_certification_benchmark_suites_pass():
+    suite_names = [
+        "operator_control_certification_v2",
+        "operator_control_live_population_v1",
+        "tamper_evident_audit_candidate_v1",
+        "authority_transfer_recovery_v1",
+        "operator_control_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected = (
+        set(OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES)
+        | set(OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES)
+        | set(TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES)
+        | set(AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES)
+        | set(OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["dm_suites_visible"] for result in summary.results)
+    assert all(result.details["dm_suites_gate_required"] for result in summary.results)
+    assert all(result.details["tamper_evident_audit_candidate_visible_not_tamper_proof"] for result in summary.results)
+    assert all(result.details["unsupported_claims_remain_blocked"] for result in summary.results)
 
 
 def test_run_mission_control_population_study_v2_benchmark_suite_passes():
@@ -3299,6 +3352,11 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "mission_control_population_study_v2" in captured.out
     assert "long_work_recovery_slo_v2" in captured.out
     assert "operator_error_detectability_v1" in captured.out
+    assert "operator_control_certification_v2" in captured.out
+    assert "operator_control_live_population_v1" in captured.out
+    assert "tamper_evident_audit_candidate_v1" in captured.out
+    assert "authority_transfer_recovery_v1" in captured.out
+    assert "operator_control_false_claim_scan_v1" in captured.out
     assert "final_source_backed_parity_audit" in captured.out
     assert "final_claim_ledger_reconciliation" in captured.out
     assert "operator_final_parity_readiness_report" in captured.out
@@ -3473,6 +3531,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "mission_control_population_study_v2",
         "long_work_recovery_slo_v2",
         "operator_error_detectability_v1",
+        "operator_control_certification_v2",
+        "operator_control_live_population_v1",
+        "tamper_evident_audit_candidate_v1",
+        "authority_transfer_recovery_v1",
+        "operator_control_false_claim_scan_v1",
         "production_operator_control_parity",
         "production_parity_train",
         "final_source_backed_parity_audit",

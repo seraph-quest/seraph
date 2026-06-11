@@ -219,6 +219,19 @@ from src.extensions.field_reach_operations import (
     VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME,
     build_broad_reach_field_ops_contract,
 )
+from src.extensions.always_available_reach_media import (
+    ALWAYS_AVAILABLE_REACH_MEDIA_BLOCKED_CLAIMS,
+    ALWAYS_AVAILABLE_REACH_MEDIA_CLAIM_BOUNDARY,
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES,
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SUITE_NAME,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SUITE_NAME,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SUITE_NAME,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME,
+    build_always_available_reach_media_contract,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -13408,6 +13421,82 @@ async def _eval_broad_reach_field_ops_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_always_available_reach_media_behavior() -> dict[str, Any]:
+    contract = build_always_available_reach_media_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    channels = contract["selected_reach_channels"]
+    selected_channels = [item for item in channels if not item.get("coverage_gap")]
+    voice_media = contract["voice_media_runtime_receipts"]
+    continuity = contract["mobile_cross_surface_continuity"]
+    campaign = contract["field_campaign"]
+    suites = benchmark_suite_report()
+    reach_ops_suite = next(
+        item for item in suites if item["name"] == ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SUITE_NAME
+    )
+    voice_runtime_suite = next(
+        item for item in suites if item["name"] == VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME
+    )
+    continuity_suite = next(
+        item for item in suites if item["name"] == MOBILE_CROSS_SURFACE_CONTINUITY_V1_SUITE_NAME
+    )
+    field_campaign_suite = next(
+        item for item in suites if item["name"] == REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SUITE_NAME
+    )
+    return {
+        "operator_status_visible": summary["operator_status"] == "always_available_reach_media_receipts_visible",
+        "always_available_reach_operations_suite_visible": (
+            reach_ops_suite["scenario_count"] == len(ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES)
+        ),
+        "voice_media_parity_runtime_suite_visible": (
+            voice_runtime_suite["scenario_count"] == len(VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES)
+        ),
+        "mobile_cross_surface_continuity_suite_visible": (
+            continuity_suite["scenario_count"] == len(MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES)
+        ),
+        "reach_degraded_recovery_field_campaign_suite_visible": (
+            field_campaign_suite["scenario_count"]
+            == len(REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES)
+        ),
+        "selected_reach_channel_breadth_visible": summary["selected_channel_count"] >= 5
+        and summary["channel_family_count"] >= 5,
+        "campaign_14_day_equivalent_visible": summary["campaign_14_day_equivalent_count"] >= 5,
+        "pairing_revocation_visible": summary["paired_revocation_count"] >= 5,
+        "rate_abuse_degraded_offline_recovery_visible": summary["rate_abuse_recovery_count"] >= 5,
+        "channel_continuity_visible": summary["continuity_channel_count"] >= 5,
+        "coverage_gap_visible": summary["coverage_gap_count"] >= 1,
+        "selected_channels_not_raw_channel_count": all(
+            item.get("continuity", {}).get("operator_handoff_preserved") is True
+            and item.get("recovery", {}).get("unsafe_mutation_blocked") is True
+            for item in selected_channels
+        ),
+        "voice_media_provider_family_visible": summary["voice_media_provider_family_count"] >= 5,
+        "voice_media_quality_latency_visible": summary["voice_media_quality_pass_count"] >= 5
+        and summary["voice_media_latency_pass_count"] >= 5,
+        "voice_media_privacy_deletion_visible": summary["voice_media_privacy_control_count"] >= 5,
+        "voice_media_fallback_regression_visible": summary["voice_media_fallback_regression_count"] >= 5,
+        "cross_surface_continuity_visible": summary["cross_surface_continuity_count"] >= 4
+        and summary["continuity_failure_survival_count"] >= 4,
+        "field_campaign_repair_metrics_visible": summary["field_campaign_count"] >= 1
+        and summary["field_campaign_operator_repair_count"] >= 5,
+        "false_and_missed_delivery_metrics_visible": "false_delivery_count" in summary
+        and "missed_delivery_count" in summary,
+        "safe_receipt_redaction_visible": summary["safe_receipt_redaction_count"]
+        >= (len(channels) + len(voice_media) + len(continuity) + len(campaign)),
+        "no_raw_payloads_visible": all(
+            item.get("safe_receipt", {}).get("contains_message_body") is False
+            and item.get("safe_receipt", {}).get("contains_secret") is False
+            and item.get("safe_receipt", {}).get("contains_audio_payload") is False
+            and item.get("safe_receipt", {}).get("contains_media_payload") is False
+            for item in [*channels, *voice_media, *continuity, *campaign]
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == ALWAYS_AVAILABLE_REACH_MEDIA_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(ALWAYS_AVAILABLE_REACH_MEDIA_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": "/api/operator/always-available-reach-media" in policy["receipt_surfaces"],
+    }
+
+
 async def _eval_browser_provider_usability_behavior() -> dict[str, Any]:
     contract = build_browser_provider_usability_contract()
     summary = contract["summary"]
@@ -16860,6 +16949,18 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     always_available_reach_slo_suite = next(
         item for item in suites if item["name"] == ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME
     )
+    always_available_reach_operations_v1_suite = next(
+        item for item in suites if item["name"] == ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SUITE_NAME
+    )
+    voice_media_parity_runtime_v1_suite = next(
+        item for item in suites if item["name"] == VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME
+    )
+    mobile_cross_surface_continuity_v1_suite = next(
+        item for item in suites if item["name"] == MOBILE_CROSS_SURFACE_CONTINUITY_V1_SUITE_NAME
+    )
+    reach_degraded_recovery_field_campaign_suite = next(
+        item for item in suites if item["name"] == REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SUITE_NAME
+    )
     managed_browser_provider_attestation_suite = next(
         item for item in suites if item["name"] == MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME
     )
@@ -17600,6 +17701,63 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "always_available_reach_slo_gate_required": (
             ALWAYS_AVAILABLE_REACH_SLO_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "always_available_reach_operations_v1_suite_present": (
+            "always_available_reach_channel_campaign_behavior"
+            in always_available_reach_operations_v1_suite["scenario_names"]
+        ),
+        "always_available_reach_operations_v1_suite_scenario_count_matches": (
+            always_available_reach_operations_v1_suite["scenario_count"]
+            == len(ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES)
+        ),
+        "always_available_reach_operations_v1_suite_axis_matches": (
+            always_available_reach_operations_v1_suite["benchmark_axis"] == "always_available_reach_operations_v1"
+        ),
+        "always_available_reach_operations_v1_gate_required": (
+            ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "voice_media_parity_runtime_v1_suite_present": (
+            "voice_media_provider_latency_quality_behavior"
+            in voice_media_parity_runtime_v1_suite["scenario_names"]
+        ),
+        "voice_media_parity_runtime_v1_suite_scenario_count_matches": (
+            voice_media_parity_runtime_v1_suite["scenario_count"]
+            == len(VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES)
+        ),
+        "voice_media_parity_runtime_v1_suite_axis_matches": (
+            voice_media_parity_runtime_v1_suite["benchmark_axis"] == "voice_media_parity_runtime_v1"
+        ),
+        "voice_media_parity_runtime_v1_gate_required": (
+            VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "mobile_cross_surface_continuity_v1_suite_present": (
+            "mobile_cross_surface_thread_memory_behavior"
+            in mobile_cross_surface_continuity_v1_suite["scenario_names"]
+        ),
+        "mobile_cross_surface_continuity_v1_suite_scenario_count_matches": (
+            mobile_cross_surface_continuity_v1_suite["scenario_count"]
+            == len(MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES)
+        ),
+        "mobile_cross_surface_continuity_v1_suite_axis_matches": (
+            mobile_cross_surface_continuity_v1_suite["benchmark_axis"] == "mobile_cross_surface_continuity_v1"
+        ),
+        "mobile_cross_surface_continuity_v1_gate_required": (
+            MOBILE_CROSS_SURFACE_CONTINUITY_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "reach_degraded_recovery_field_campaign_suite_present": (
+            "reach_field_campaign_14_day_window_behavior"
+            in reach_degraded_recovery_field_campaign_suite["scenario_names"]
+        ),
+        "reach_degraded_recovery_field_campaign_suite_scenario_count_matches": (
+            reach_degraded_recovery_field_campaign_suite["scenario_count"]
+            == len(REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES)
+        ),
+        "reach_degraded_recovery_field_campaign_suite_axis_matches": (
+            reach_degraded_recovery_field_campaign_suite["benchmark_axis"]
+            == "reach_degraded_recovery_field_campaign"
+        ),
+        "reach_degraded_recovery_field_campaign_gate_required": (
+            REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "managed_browser_provider_attestation_suite_present": (
             "managed_browser_provider_identity_evidence_behavior"
@@ -20700,6 +20858,54 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_broad_reach_field_ops_behavior,
         )
         for name in ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch DC exposes selected mobile, messaging, native, browser, and web reach campaign receipts "
+                "for pairing, revocation, rate limits, abuse handling, degraded recovery, and coverage gaps."
+            ),
+            runner=_eval_always_available_reach_media_behavior,
+        )
+        for name in ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch DC exposes STT, TTS, voice-command, media-analysis, and media-delivery quality, latency, "
+                "privacy, correction, deletion, fallback, and provider-regression receipts."
+            ),
+            runner=_eval_always_available_reach_media_behavior,
+        )
+        for name in VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch DC records cross-surface thread, memory, approval, notification, operator-handoff, "
+                "offline, provider-failure, and revocation continuity receipts."
+            ),
+            runner=_eval_always_available_reach_media_behavior,
+        )
+        for name in MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch DC records 14-day equivalent degraded recovery campaign metrics for false deliveries, "
+                "missed deliveries, handoff success, operator repair, and bounded claim posture."
+            ),
+            runner=_eval_always_available_reach_media_behavior,
+        )
+        for name in REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

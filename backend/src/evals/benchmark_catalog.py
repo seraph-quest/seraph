@@ -167,6 +167,16 @@ from src.extensions.field_reach_operations import (
     VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
     VOICE_MEDIA_QUALITY_OPERATIONS_SUITE_NAME,
 )
+from src.extensions.always_available_reach_media import (
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES,
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SUITE_NAME,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SUITE_NAME,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SUITE_NAME,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -639,6 +649,77 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Always-available reach, production readiness, and full parity remain blocked."
         ),
         scenario_names=ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SUITE_NAME,
+        label="Always-available reach operations v1",
+        description=(
+            "Pins Batch DC selected mobile, messaging, native, browser, and web reach campaign receipts for "
+            "production pairing, revocation, rate limits, abuse handling, degraded recovery, offline recovery, "
+            "continuity, coverage gaps, and safe receipt redaction."
+        ),
+        benchmark_axis="always_available_reach_operations_v1",
+        operator_summary=(
+            "Reach proof now exposes a broader selected-channel operational campaign while keeping "
+            "OpenClaw-class reach, complete channel coverage, and always-available wording blocked."
+        ),
+        remaining_gap=(
+            "Always-available operation, complete channel coverage, and OpenClaw-class reach remain blocked."
+        ),
+        scenario_names=ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=VOICE_MEDIA_PARITY_RUNTIME_V1_SUITE_NAME,
+        label="Voice/media parity runtime v1",
+        description=(
+            "Pins Batch DC STT, TTS, voice-command, media-analysis, and media-delivery receipts for latency, "
+            "quality, correction, deletion, consent, privacy, fallback, and provider-regression behavior."
+        ),
+        benchmark_axis="voice_media_parity_runtime_v1",
+        operator_summary=(
+            "Voice/media proof now exposes broader runtime-provider receipts while keeping voice parity, "
+            "multimodal parity, and production STT/TTS solved claims blocked."
+        ),
+        remaining_gap=(
+            "Full voice/media parity and production STT/TTS solved claims remain blocked."
+        ),
+        scenario_names=VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MOBILE_CROSS_SURFACE_CONTINUITY_V1_SUITE_NAME,
+        label="Mobile cross-surface continuity v1",
+        description=(
+            "Pins Batch DC continuity receipts proving thread, memory, approval, notification, and operator "
+            "handoff survival across offline windows, provider failure, device handoff, channel revocation, "
+            "and recovery."
+        ),
+        benchmark_axis="mobile_cross_surface_continuity_v1",
+        operator_summary=(
+            "Cross-surface reach proof now exposes mobile/device handoff and recovery continuity receipts "
+            "without claiming always-available operation."
+        ),
+        remaining_gap=(
+            "Always-available daily-life reach remains blocked pending stronger live operational evidence."
+        ),
+        scenario_names=MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SUITE_NAME,
+        label="Reach degraded recovery field campaign",
+        description=(
+            "Pins Batch DC 14-day equivalent field-campaign receipts for channel uptime, handoff success, "
+            "degraded recovery, false delivery, missed delivery, operator repair actions, and redacted raw "
+            "receipt handles."
+        ),
+        benchmark_axis="reach_degraded_recovery_field_campaign",
+        operator_summary=(
+            "Reach proof now exposes field-campaign recovery metrics while keeping always-available and "
+            "production-ready claims blocked."
+        ),
+        remaining_gap=(
+            "Always-available operation, production readiness, full parity, and reach superiority remain blocked."
+        ),
+        scenario_names=REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,

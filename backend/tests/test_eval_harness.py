@@ -32,6 +32,12 @@ from src.cockpit.operator_mission_control import (
     NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
     OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
 )
+from src.cockpit.operator_control_certification import (
+    LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
+    OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
@@ -727,6 +733,22 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["long_work_debugging_slo_suite_scenario_count_matches"] is True
     assert details["long_work_debugging_slo_suite_axis_matches"] is True
     assert details["long_work_debugging_slo_gate_required"] is True
+    assert details["operator_control_certification_v1_suite_present"] is True
+    assert details["operator_control_certification_v1_suite_scenario_count_matches"] is True
+    assert details["operator_control_certification_v1_suite_axis_matches"] is True
+    assert details["operator_control_certification_v1_gate_required"] is True
+    assert details["mission_control_population_study_v2_suite_present"] is True
+    assert details["mission_control_population_study_v2_suite_scenario_count_matches"] is True
+    assert details["mission_control_population_study_v2_suite_axis_matches"] is True
+    assert details["mission_control_population_study_v2_gate_required"] is True
+    assert details["long_work_recovery_slo_v2_suite_present"] is True
+    assert details["long_work_recovery_slo_v2_suite_scenario_count_matches"] is True
+    assert details["long_work_recovery_slo_v2_suite_axis_matches"] is True
+    assert details["long_work_recovery_slo_v2_gate_required"] is True
+    assert details["operator_error_detectability_v1_suite_present"] is True
+    assert details["operator_error_detectability_v1_suite_scenario_count_matches"] is True
+    assert details["operator_error_detectability_v1_suite_axis_matches"] is True
+    assert details["operator_error_detectability_v1_gate_required"] is True
     assert details["live_replay_gate_required"] is True
     assert details["required_suite_count_matches"] is True
     assert details["gate_requires_review"] is True
@@ -952,6 +974,47 @@ def test_run_long_work_debugging_slo_benchmark_suite_passes():
         for result in summary.results
     )
     assert all(result.details["long_work_debugging_slo_gate_required"] for result in summary.results)
+
+
+def test_run_operator_control_certification_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_control_certification_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["required_controls_visible"] for result in summary.results)
+    assert all(result.details["stale_approval_negative_cases_visible"] for result in summary.results)
+    assert all(result.details["formal_certification_and_solved_control_blocked"] for result in summary.results)
+
+
+def test_run_mission_control_population_study_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["mission_control_population_study_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES)
+    assert all(result.details["population_telemetry_visible"] for result in summary.results)
+    assert all(result.details["keyboard_and_recovery_floors_met"] for result in summary.results)
+    assert all(result.details["baseline_rows_are_pressure_only"] for result in summary.results)
+
+
+def test_run_long_work_recovery_slo_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["long_work_recovery_slo_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES)
+    assert all(result.details["long_work_slos_cover_required_dimensions"] for result in summary.results)
+    assert all(result.details["source_and_residual_drilldown_visible"] for result in summary.results)
+    assert all(result.details["long_work_recovery_slo_v2_gate_required"] for result in summary.results)
+
+
+def test_run_operator_error_detectability_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_error_detectability_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES)
+    assert all(result.details["error_detectability_and_calibration_met"] for result in summary.results)
+    assert all(result.details["safe_denial_and_stale_approval_blocks_visible"] for result in summary.results)
+    assert all(result.details["operator_error_detectability_gate_required"] for result in summary.results)
 
 
 def test_run_final_source_backed_parity_audit_benchmark_suite_passes():
@@ -2897,6 +2960,10 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "operator_control_population_study" in captured.out
     assert "named_baseline_cockpit_comparison" in captured.out
     assert "long_work_debugging_slo" in captured.out
+    assert "operator_control_certification_v1" in captured.out
+    assert "mission_control_population_study_v2" in captured.out
+    assert "long_work_recovery_slo_v2" in captured.out
+    assert "operator_error_detectability_v1" in captured.out
     assert "final_source_backed_parity_audit" in captured.out
     assert "final_claim_ledger_reconciliation" in captured.out
     assert "operator_final_parity_readiness_report" in captured.out
@@ -3032,6 +3099,10 @@ def test_main_lists_available_benchmark_suites(capsys):
         "operator_control_population_study",
         "named_baseline_cockpit_comparison",
         "long_work_debugging_slo",
+        "operator_control_certification_v1",
+        "mission_control_population_study_v2",
+        "long_work_recovery_slo_v2",
+        "operator_error_detectability_v1",
         "production_operator_control_parity",
         "production_parity_train",
         "final_source_backed_parity_audit",

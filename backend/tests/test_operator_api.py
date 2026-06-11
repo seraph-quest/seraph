@@ -22,6 +22,15 @@ from src.cockpit.operator_mission_control import (
     OPERATOR_MISSION_CONTROL_BLOCKED_CLAIMS,
     OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY,
 )
+from src.cockpit.operator_control_certification import (
+    LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_BLOCKED_CLAIMS,
+    OPERATOR_CONTROL_CERTIFICATION_CLAIM_BOUNDARY,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
+    OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
+    REQUIRED_OPERATOR_CONTROL_ACTIONS,
+)
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals.final_parity_audit import (
     FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
@@ -3339,6 +3348,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["operator_control_certification_posture"]
+        == "operator_control_certification_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["operator_control_certification_claim_boundary"]
+        == OPERATOR_CONTROL_CERTIFICATION_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["final_parity_readiness_posture"]
         == "final_parity_audit_ci_gated_operator_visible"
     )
@@ -3366,6 +3383,15 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["operator_mission_control_population"]["policy"]["claim_boundary"] == (
         OPERATOR_MISSION_CONTROL_CLAIM_BOUNDARY
     )
+    assert payload["operator_control_certification"]["summary"]["required_controls_visible"] is True
+    assert payload["operator_control_certification"]["summary"]["population_operator_count"] >= 80
+    assert payload["operator_control_certification"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["operator_control_certification"]["policy"]["claim_boundary"] == (
+        OPERATOR_CONTROL_CERTIFICATION_CLAIM_BOUNDARY
+    )
+    assert set(OPERATOR_CONTROL_CERTIFICATION_BLOCKED_CLAIMS) <= set(
+        payload["operator_control_certification"]["policy"]["blocked_claims"]
+    )
     assert (
         "operator_control_population_study"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -3375,6 +3401,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert "long_work_debugging_slo" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "operator_control_certification_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "mission_control_population_study_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert "long_work_recovery_slo_v2" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "operator_error_detectability_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
     assert payload["governed_improvement"]["target_count"] == 2
     assert payload["governed_improvement"]["target_types"] == ["prompt_pack", "skill"]
     assert payload["governed_improvement"]["gate_policy"]["requires_human_review"] is True
@@ -3460,6 +3499,19 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert (
         "production_parity_train"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "operator_control_certification_v1"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert (
+        "mission_control_population_study_v2"
+        in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    )
+    assert "long_work_recovery_slo_v2" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
+    assert (
+        "operator_error_detectability_v1"
         in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
     )
     assert "live_workflow_endurance_canary" in payload["governed_improvement"]["gate_policy"]["required_benchmark_suites"]
@@ -3979,6 +4031,24 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     parity_train_suite = next(item for item in payload["suites"] if item["name"] == "production_parity_train")
     assert "production_parity_train_batch_merge_receipt_behavior" in parity_train_suite["scenario_names"]
     assert parity_train_suite["scenario_count"] == len(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+    certification_suite = next(
+        item for item in payload["suites"] if item["name"] == "operator_control_certification_v1"
+    )
+    assert "operator_certification_control_coverage_behavior" in certification_suite["scenario_names"]
+    assert certification_suite["scenario_count"] == len(OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES)
+    population_v2_suite = next(
+        item for item in payload["suites"] if item["name"] == "mission_control_population_study_v2"
+    )
+    assert "mission_control_population_v2_telemetry_behavior" in population_v2_suite["scenario_names"]
+    assert population_v2_suite["scenario_count"] == len(MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES)
+    recovery_slo_v2_suite = next(item for item in payload["suites"] if item["name"] == "long_work_recovery_slo_v2")
+    assert "long_work_recovery_slo_v2_multisession_behavior" in recovery_slo_v2_suite["scenario_names"]
+    assert recovery_slo_v2_suite["scenario_count"] == len(LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES)
+    error_detectability_suite = next(
+        item for item in payload["suites"] if item["name"] == "operator_error_detectability_v1"
+    )
+    assert "operator_error_detectability_stale_approval_behavior" in error_detectability_suite["scenario_names"]
+    assert error_detectability_suite["scenario_count"] == len(OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES)
     final_source_suite = next(item for item in payload["suites"] if item["name"] == "final_source_backed_parity_audit")
     assert "final_current_source_coverage_behavior" in final_source_suite["scenario_names"]
     assert final_source_suite["scenario_count"] == len(FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES)
@@ -5374,6 +5444,80 @@ async def test_operator_control_population_study_surface_reports_batch_cw_receip
             payload["contract"]["population_study_receipts"],
             payload["contract"]["named_baseline_comparisons"],
             payload["contract"]["debugging_slo_receipts"],
+        )
+        for item in group
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_control_certification_surface_reports_batch_de_receipts(client):
+    resp = await client.get("/api/operator/operator-control-certification")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "operator_control_certification_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "operator_control_certification_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES)
+        + len(MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES)
+        + len(LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES)
+        + len(OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["required_controls_visible"] is True
+    assert payload["summary"]["population_required_controls_covered"] is True
+    assert set(REQUIRED_OPERATOR_CONTROL_ACTIONS) <= set(payload["summary"]["population_covered_actions"])
+    assert payload["summary"]["population_operator_count"] >= 80
+    assert payload["summary"]["all_slos_met"] is True
+    assert payload["summary"]["error_detectability_floor_met"] is True
+    assert payload["summary"]["baseline_source_receipts_linked"] is True
+    assert payload["summary"]["baseline_claim_lift_blocked"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["formal_certification_allowed"] is False
+    assert payload["summary"]["solved_control_claim_allowed"] is False
+    assert payload["summary"]["tamper_proof_audit_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == OPERATOR_CONTROL_CERTIFICATION_CLAIM_BOUNDARY
+    assert set(OPERATOR_CONTROL_CERTIFICATION_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/operator-control-certification" in payload["policy"]["receipt_surfaces"]
+    assert set(REQUIRED_OPERATOR_CONTROL_ACTIONS) <= {
+        item["action"] for item in payload["contract"]["control_certification_receipts"]
+    }
+    assert all(
+        set(item["covered_actions"]) <= set(REQUIRED_OPERATOR_CONTROL_ACTIONS)
+        and item["covered_actions"]
+        for item in payload["contract"]["population_study_v2_receipts"]
+    )
+    assert all(
+        item["source_type"] == "post_cq_reference_system_source_refresh_v2"
+        and item["source_receipt"]["url"].startswith("https://")
+        and item["source_receipt"]["claim_use"] == "source_backed_pressure_only"
+        and item["source_receipt"]["runtime_fetch_performed"] is False
+        and item["claim_lift_allowed"] is False
+        for item in payload["contract"]["named_baseline_pressure_receipts"]
+    )
+    assert any(
+        item["action"] == "replay"
+        and item["stale_approval_blocked"] is True
+        and item["negative_case"] == "approval_context_changed_blocks_replay"
+        for item in payload["contract"]["control_certification_receipts"]
+    )
+    assert any(
+        item["error_class"] == "approval_context_changed"
+        and item["replay_allowed"] is False
+        and item["resume_plan"] is None
+        and item["replay_block_reason"] == "approval_context_changed"
+        for item in payload["contract"]["error_detectability_receipts"]
+    )
+    assert all(
+        item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["contains_private_path"] is False
+        and item["safe_receipt"]["contains_unredacted_operator_identifier"] is False
+        and item["safe_receipt"]["redaction_layer"] == "operator_control_certification_v1"
+        for group in (
+            payload["contract"]["control_certification_receipts"],
+            payload["contract"]["population_study_v2_receipts"],
+            payload["contract"]["long_work_recovery_slo_v2_receipts"],
+            payload["contract"]["error_detectability_receipts"],
+            payload["contract"]["named_baseline_pressure_receipts"],
         )
         for item in group
     )

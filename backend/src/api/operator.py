@@ -78,6 +78,7 @@ from src.guardian.brain import (
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
 from src.guardian.generalized_guardian_outcomes import build_generalized_guardian_outcomes_report
+from src.guardian.live_guardian_memory_field_program import build_live_guardian_memory_field_program_report
 from src.guardian.independent_learning_memory_parity import build_independent_learning_memory_parity_report
 from src.guardian.longitudinal_guardian_outcomes import build_longitudinal_guardian_outcomes_report
 from src.guardian.live_human_outcome_learning import build_live_human_outcome_learning_report
@@ -3454,6 +3455,7 @@ async def get_operator_benchmark_proof():
         independent_learning_memory_parity,
         longitudinal_guardian_outcomes,
         generalized_guardian_outcomes,
+        live_guardian_memory_field_program,
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
@@ -3517,6 +3519,7 @@ async def get_operator_benchmark_proof():
         build_independent_learning_memory_parity_report(),
         build_longitudinal_guardian_outcomes_report(),
         build_generalized_guardian_outcomes_report(),
+        build_live_guardian_memory_field_program_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
@@ -3587,6 +3590,7 @@ async def get_operator_benchmark_proof():
         str(independent_learning_memory_parity["summary"]["benchmark_posture"]),
         str(longitudinal_guardian_outcomes["summary"]["benchmark_posture"]),
         str(generalized_guardian_outcomes["summary"]["benchmark_posture"]),
+        str(live_guardian_memory_field_program["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
@@ -3712,6 +3716,15 @@ async def get_operator_benchmark_proof():
             ],
             "generalized_guardian_outcomes_posture": generalized_guardian_outcomes["summary"]["benchmark_posture"],
             "generalized_guardian_outcomes_claim_boundary": generalized_guardian_outcomes["policy"]["claim_boundary"],
+            "live_guardian_memory_field_program_posture": live_guardian_memory_field_program["summary"][
+                "benchmark_posture"
+            ],
+            "live_guardian_memory_field_program_claim_boundary": live_guardian_memory_field_program["policy"][
+                "claim_boundary"
+            ],
+            "live_guardian_memory_field_program_operator_status": live_guardian_memory_field_program["summary"][
+                "operator_status"
+            ],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
@@ -3812,6 +3825,7 @@ async def get_operator_benchmark_proof():
         "independent_learning_memory_parity": independent_learning_memory_parity,
         "longitudinal_guardian_outcomes": longitudinal_guardian_outcomes,
         "generalized_guardian_outcomes": generalized_guardian_outcomes,
+        "live_guardian_memory_field_program": live_guardian_memory_field_program,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
@@ -3950,6 +3964,11 @@ async def get_operator_longitudinal_guardian_outcomes():
 @router.get("/operator/generalized-guardian-outcomes")
 async def get_operator_generalized_guardian_outcomes():
     return await build_generalized_guardian_outcomes_report()
+
+
+@router.get("/operator/live-guardian-memory-field-program")
+async def get_operator_live_guardian_memory_field_program():
+    return await build_live_guardian_memory_field_program_report()
 
 
 @router.get("/operator/m6-memory-superiority-benchmark")

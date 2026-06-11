@@ -195,6 +195,16 @@ from src.guardian.generalized_guardian_outcomes import (
     GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY,
     MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
 )
+from src.guardian.live_guardian_memory_field_program import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES,
+    LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_BLOCKED_CLAIMS,
+    LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_CLAIM_BOUNDARY,
+    LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES,
+    LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES,
+    LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
     INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
@@ -3390,6 +3400,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["summary"]["generalized_guardian_outcomes_claim_boundary"]
         == GENERALIZED_GUARDIAN_OUTCOMES_CLAIM_BOUNDARY
     )
+    assert (
+        payload["summary"]["live_guardian_memory_field_program_posture"]
+        == "live_guardian_memory_field_program_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["live_guardian_memory_field_program_claim_boundary"]
+        == LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["live_guardian_memory_field_program_operator_status"] == (
+        "live_guardian_memory_field_program_receipts_visible"
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -4219,6 +4240,40 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "memory_baseline_current_source_limit_behavior" in memory_baseline_suite["scenario_names"]
     assert memory_baseline_suite["scenario_count"] == len(MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES)
+    live_field_suite = next(
+        item for item in payload["suites"] if item["name"] == "live_long_horizon_guardian_learning_field_study_v1"
+    )
+    assert "live_field_preregistered_protocol_behavior" in live_field_suite["scenario_names"]
+    assert live_field_suite["scenario_count"] == len(
+        LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES
+    )
+    memory_ablation_suite = next(
+        item for item in payload["suites"] if item["name"] == "memory_behavior_change_ablation_v1"
+    )
+    assert "memory_ablation_decision_family_behavior" in memory_ablation_suite["scenario_names"]
+    assert memory_ablation_suite["scenario_count"] == len(MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES)
+    live_provider_suite = next(
+        item for item in payload["suites"] if item["name"] == "live_memory_provider_parity_operations_v1"
+    )
+    assert "live_provider_role_state_matrix_behavior" in live_provider_suite["scenario_names"]
+    assert live_provider_suite["scenario_count"] == len(LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES)
+    independent_candidate_suite = next(
+        item for item in payload["suites"] if item["name"] == "independent_guardian_outcome_candidate_review_v1"
+    )
+    assert "independent_candidate_review_protocol_behavior" in independent_candidate_suite["scenario_names"]
+    assert independent_candidate_suite["scenario_count"] == len(
+        INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES
+    )
+    safety_monitor_suite = next(
+        item for item in payload["suites"] if item["name"] == "longitudinal_learning_safety_monitor_v3"
+    )
+    assert "longitudinal_safety_negative_case_matrix_behavior" in safety_monitor_suite["scenario_names"]
+    assert safety_monitor_suite["scenario_count"] == len(LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES)
+    claim_scan_suite = next(
+        item for item in payload["suites"] if item["name"] == "guardian_memory_false_claim_scan_v1"
+    )
+    assert "guardian_memory_false_claim_scan_receipt_behavior" in claim_scan_suite["scenario_names"]
+    assert claim_scan_suite["scenario_count"] == len(GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
     assert publisher_suite["scenario_count"] == len(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
     operator_control_suite = next(
         item for item in payload["suites"] if item["name"] == "production_operator_control_parity"
@@ -4570,6 +4625,24 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "full_memory_provider_parity" in (
         payload["generalized_guardian_outcomes"]["policy"]["blocked_claims"]
+    )
+    assert payload["live_guardian_memory_field_program"]["summary"]["operator_status"] == (
+        "live_guardian_memory_field_program_receipts_visible"
+    )
+    assert payload["live_guardian_memory_field_program"]["summary"]["field_study_count"] >= 6
+    assert payload["live_guardian_memory_field_program"]["summary"]["decision_type_count"] == 8
+    assert payload["live_guardian_memory_field_program"]["summary"]["provider_count"] >= 8
+    assert payload["live_guardian_memory_field_program"]["summary"]["negative_case_count"] >= 10
+    assert payload["live_guardian_memory_field_program"]["summary"]["false_claim_hit_count"] == 0
+    assert payload["live_guardian_memory_field_program"]["summary"]["secret_leak_count"] == 0
+    assert payload["live_guardian_memory_field_program"]["policy"]["claim_boundary"] == (
+        LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_CLAIM_BOUNDARY
+    )
+    assert set(LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_BLOCKED_CLAIMS) <= set(
+        payload["live_guardian_memory_field_program"]["policy"]["blocked_claims"]
+    )
+    assert "full_production_parity" in (
+        payload["live_guardian_memory_field_program"]["policy"]["blocked_claims"]
     )
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
@@ -5837,6 +5910,70 @@ async def test_operator_generalized_guardian_outcomes_surface_reports_batch_dd_r
             payload["contract"]["memory_provider_parity_matrix"],
             payload["contract"]["causal_learning_thresholds"],
             payload["contract"]["memory_baseline_comparisons"],
+        )
+        for item in group
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_live_guardian_memory_field_program_surface_reports_batch_dl_receipts(client):
+    resp = await client.get("/api/operator/live-guardian-memory-field-program")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "live_guardian_memory_field_program_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "live_guardian_memory_field_program_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES)
+        + len(MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES)
+        + len(LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES)
+        + len(INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES)
+        + len(LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES)
+        + len(GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["field_study_count"] >= 6
+    assert payload["summary"]["pre_registered_count"] == payload["summary"]["field_study_count"]
+    assert payload["summary"]["withdrawal_supported_count"] == payload["summary"]["field_study_count"]
+    assert payload["summary"]["anonymized_count"] == payload["summary"]["field_study_count"]
+    assert payload["summary"]["independent_evaluator_count"] == payload["summary"]["field_study_count"]
+    assert payload["summary"]["adverse_event_reviewed_count"] == payload["summary"]["adverse_event_count"]
+    assert payload["summary"]["rollback_authority_count"] == payload["summary"]["field_study_count"]
+    assert payload["summary"]["decision_type_count"] == 8
+    assert payload["summary"]["counterfactual_count"] == payload["summary"]["ablation_count"]
+    assert payload["summary"]["memory_changed_behavior_count"] == payload["summary"]["ablation_count"]
+    assert payload["summary"]["provider_count"] >= 8
+    assert payload["summary"]["canonical_precedence_preserved_count"] == payload["summary"]["provider_count"]
+    assert payload["summary"]["privacy_regression_count"] >= 2
+    assert payload["summary"]["delete_export_propagated_count"] == payload["summary"]["provider_count"]
+    assert payload["summary"]["quarantine_count"] >= 4
+    assert payload["summary"]["reinstatement_review_count"] >= 3
+    assert payload["summary"]["independent_review_count"] >= 4
+    assert payload["summary"]["negative_case_count"] >= 10
+    assert payload["summary"]["negative_case_detected_count"] == payload["summary"]["negative_case_count"]
+    assert payload["summary"]["false_claim_scan_count"] >= 1
+    assert payload["summary"]["false_claim_hit_count"] == 0
+    assert payload["summary"]["raw_transcript_stored_count"] == 0
+    assert payload["summary"]["secret_leak_count"] == 0
+    assert payload["summary"]["unredacted_identifier_count"] == 0
+    assert payload["summary"]["provider_payload_leak_count"] == 0
+    assert payload["summary"]["raw_receipt_path_exposed_count"] == 0
+    assert payload["policy"]["claim_boundary"] == LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_CLAIM_BOUNDARY
+    assert set(LIVE_GUARDIAN_MEMORY_FIELD_PROGRAM_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "solved_long_term_learning" in payload["policy"]["blocked_claims"]
+    assert "/api/operator/live-guardian-memory-field-program" in payload["policy"]["receipt_surfaces"]
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+    assert all(
+        item["safe_receipt"]["contains_raw_transcript"] is False
+        and item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["contains_provider_payload"] is False
+        and item["safe_receipt"]["raw_receipt_path_exposed"] is False
+        for group in (
+            payload["contract"]["field_studies"],
+            payload["contract"]["memory_behavior_ablations"],
+            payload["contract"]["memory_provider_operations"],
+            payload["contract"]["independent_candidate_reviews"],
+            payload["contract"]["safety_monitor"],
+            payload["contract"]["false_claim_scans"],
         )
         for item in group
     )

@@ -165,6 +165,13 @@ from src.workflows.continuous_orchestration_slo import (
     CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
     SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
 )
+from src.workflows.production_workflow_guarantees import (
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
+    PRODUCTION_WORKFLOW_GUARANTEES_BLOCKED_CLAIMS,
+    PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
+)
 from src.security.production_isolation import (
     PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
     PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
@@ -2938,6 +2945,48 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         ),
         ))
         stack.enter_context(patch(
+        "src.api.operator.build_production_workflow_guarantees_report",
+        AsyncMock(
+            return_value={
+                "summary": {
+                    "benchmark_posture": "production_workflow_guarantees_ci_gated_missing_persisted_evidence",
+                    "operator_status": "production_workflow_guarantees_visible",
+                    "scenario_count": (
+                        len(PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES)
+                        + len(CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES)
+                        + len(EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES)
+                    ),
+                    "runtime_status": "production_workflow_authority_missing_live_receipts",
+                    "missing_live_evidence": ["persisted_authority_state"],
+                    "claim_boundary": PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY,
+                },
+                "scenario_names": {
+                    "production_workflow_state_machine_v1": list(
+                        PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES
+                    ),
+                    "crash_proof_orchestration_fault_campaign": list(
+                        CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES
+                    ),
+                    "external_side_effect_reconciliation_v3": list(
+                        EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES
+                    ),
+                },
+                "contract": {},
+                "persisted_runtime": {"missing_evidence": ["persisted_authority_state"]},
+                "failure_report": [],
+                "policy": {
+                    "claim_boundary": PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY,
+                    "blocked_claims": list(PRODUCTION_WORKFLOW_GUARANTEES_BLOCKED_CLAIMS),
+                    "receipt_surfaces": [
+                        "/api/operator/production-workflow-guarantees",
+                        "/api/operator/benchmark-proof",
+                    ],
+                },
+                "latest_run": {"total": 23, "passed": 23, "failed": 0, "duration_ms": 100},
+            }
+        ),
+        ))
+        stack.enter_context(patch(
         "src.api.operator.build_governed_capability_pack_hardening_report",
         AsyncMock(
             return_value={
@@ -3034,6 +3083,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["continuous_orchestration_slo_claim_boundary"] == (
         CONTINUOUS_ORCHESTRATION_SLO_CLAIM_BOUNDARY
     )
+    assert (
+        payload["summary"]["production_workflow_guarantees_posture"]
+        == "production_workflow_guarantees_ci_gated_missing_persisted_evidence"
+    )
+    assert payload["summary"]["production_workflow_guarantees_claim_boundary"] == (
+        PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["production_workflow_guarantees_runtime_status"]
+        == "production_workflow_authority_missing_live_receipts"
+    )
+    assert "persisted_authority_state" in payload["summary"]["production_workflow_guarantees_missing_live_evidence"]
     assert payload["summary"]["m5_operating_layer_benchmark_posture"] == "m5_ci_gated_operator_visible"
     assert payload["summary"]["trust_boundary_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["secure_capability_host_benchmark_posture"] == "secure_host_ci_gated_operator_visible"
@@ -3247,6 +3308,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["governed_improvement_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["m5_operating_layer_benchmark"]["summary"]["suite_name"] == "m5_jobs_routines_workflows_delegation"
     assert payload["durable_workflow_engine"]["summary"]["suite_name"] == "durable_workflow_engine_v1"
+    assert payload["production_workflow_guarantees"]["summary"]["operator_status"] == (
+        "production_workflow_guarantees_visible"
+    )
+    assert (
+        payload["production_workflow_guarantees"]["policy"]["claim_boundary"]
+        == PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY
+    )
     assert payload["dense_operator_recovery_control"]["summary"]["task_matrix_count"] >= 8
     assert payload["dense_operator_recovery_control"]["policy"]["claim_boundary"] == DENSE_OPERATOR_RECOVERY_CLAIM_BOUNDARY
     assert payload["operator_mission_control_population"]["summary"]["population_operator_count"] >= 60
@@ -3506,6 +3574,21 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert "duplicate_side_effect_audit_receipt_behavior" in duplicate_audit_suite["scenario_names"]
     assert duplicate_audit_suite["scenario_count"] == len(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+    production_state_suite = next(
+        item for item in payload["suites"] if item["name"] == "production_workflow_state_machine_v1"
+    )
+    assert "production_workflow_persisted_state_ownership_behavior" in production_state_suite["scenario_names"]
+    assert production_state_suite["scenario_count"] == len(PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES)
+    fault_campaign_suite = next(
+        item for item in payload["suites"] if item["name"] == "crash_proof_orchestration_fault_campaign"
+    )
+    assert "fault_campaign_scheduler_crash_behavior" in fault_campaign_suite["scenario_names"]
+    assert fault_campaign_suite["scenario_count"] == len(CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES)
+    side_effect_v3_suite = next(
+        item for item in payload["suites"] if item["name"] == "external_side_effect_reconciliation_v3"
+    )
+    assert "side_effect_v3_idempotency_scope_behavior" in side_effect_v3_suite["scenario_names"]
+    assert side_effect_v3_suite["scenario_count"] == len(EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES)
     assert payload["production_sla_orchestration"]["summary"]["operator_status"] == (
         "production_sla_orchestration_receipts_visible"
     )
@@ -4755,6 +4838,50 @@ async def test_operator_continuous_orchestration_slo_surface_reports_batch_cs_re
     assert any(
         item["side_effect_state"] == "completed_unacknowledged"
         for item in payload["contract"]["crash_failover_soak_receipts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_production_workflow_guarantees_surface_reports_batch_da_receipts(client):
+    resp = await client.get("/api/operator/production-workflow-guarantees")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "production_workflow_guarantees_visible"
+    assert payload["summary"]["benchmark_posture"] == "production_workflow_guarantees_ci_gated_missing_persisted_evidence"
+    assert payload["summary"]["scenario_count"] == (
+        len(PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES)
+        + len(CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES)
+        + len(EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["state_machine_receipt_count"] == 3
+    assert payload["summary"]["fault_campaign_receipt_count"] == 9
+    assert payload["summary"]["external_side_effect_reconciliation_v3_count"] == 3
+    assert payload["summary"]["all_state_receipts_persisted"] is True
+    assert payload["summary"]["all_fault_modes_have_replay_decisions"] is True
+    assert payload["summary"]["reconciliation_v3_complete"] is True
+    assert payload["summary"]["runtime_status"] == "production_workflow_authority_missing_live_receipts"
+    assert "persisted_authority_state" in payload["summary"]["missing_live_evidence"]
+    assert payload["policy"]["claim_boundary"] == PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY
+    assert set(PRODUCTION_WORKFLOW_GUARANTEES_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/production-workflow-guarantees" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["production_workflow_state_machine_v1"] == list(
+        PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["crash_proof_orchestration_fault_campaign"] == list(
+        CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["external_side_effect_reconciliation_v3"] == list(
+        EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES
+    )
+    assert any(
+        item["blocked_replay_reason"] == "approval_context_changed"
+        for item in payload["contract"]["state_machine_receipts"]
+    )
+    assert any(
+        item["external_confirmation_state"] == "quarantined"
+        for item in payload["contract"]["external_side_effect_reconciliation_v3_receipts"]
     )
 
 

@@ -304,6 +304,14 @@ from src.workflows.continuous_orchestration_slo import (
     SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
     SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME,
 )
+from src.workflows.production_workflow_guarantees import (
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SUITE_NAME,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SUITE_NAME,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -1325,6 +1333,55 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Reconciliation receipts are scoped to declared boundaries, not global exactly-once delivery.",
         scenario_names=SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME,
+        label="Production workflow state machine v1",
+        description=(
+            "Pins Batch DA persisted production workflow authority receipts: scheduler state owner, workflow "
+            "lease, worker owner, resumable step state, replay window, recovery authority, and blocked replay."
+        ),
+        benchmark_axis="production_workflow_state_machine_v1",
+        operator_summary=(
+            "Production workflow state-machine proof must expose persisted ownership and replay authority "
+            "rather than reuse bounded projection receipts alone."
+        ),
+        remaining_gap=(
+            "This narrows production orchestration residuals but still blocks unconditional exactly-once, "
+            "crash-proof, and full distributed workflow claims."
+        ),
+        scenario_names=PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SUITE_NAME,
+        label="Crash-proof orchestration fault campaign",
+        description=(
+            "Pins Batch DA fault-campaign receipts for scheduler crash, worker crash, duplicate delivery, "
+            "provider timeout, stale lease, partial and irreversible side effects, approval-wait restart, "
+            "and trust-boundary drift replay blocks."
+        ),
+        benchmark_axis="crash_proof_orchestration_fault_campaign",
+        operator_summary=(
+            "The suite name tracks the target claim under test; passing receipts are bounded fault-campaign "
+            "evidence, not a granted crash-proof claim."
+        ),
+        remaining_gap="Fault-campaign coverage is not a proof of universal crash-proof orchestration.",
+        scenario_names=CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SUITE_NAME,
+        label="External side-effect reconciliation v3",
+        description=(
+            "Pins Batch DA side-effect reconciliation v3 receipts for idempotency scope, duplicate suppression, "
+            "external confirmation, manual repair, safe/unsafe replay decisions, and redacted receipt handles."
+        ),
+        benchmark_axis="external_side_effect_reconciliation_v3",
+        operator_summary=(
+            "Side-effect v3 proof must show pre-effect idempotency, post-effect reconciliation, manual repair "
+            "authorization, and operator-visible replay decisions."
+        ),
+        remaining_gap="V3 reconciliation remains scoped to declared side-effect boundaries, not global exactly-once.",
+        scenario_names=EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

@@ -256,6 +256,70 @@ class WorkflowArtifactReview(SQLModel, table=True):
     decided_at: Optional[datetime] = Field(default=None, index=True)
 
 
+class ProductionWorkflowAuthorityState(SQLModel, table=True):
+    __tablename__ = "production_workflow_authority_states"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True, unique=True)
+    workflow_name: str = Field(default="", index=True)
+    scheduler_state_owner: str = Field(index=True)
+    workflow_lease_id: str = Field(index=True)
+    worker_owner: str = Field(index=True)
+    lease_revision: int = Field(default=0, index=True)
+    workflow_phase: str = Field(default="running", index=True)
+    resumable_step_state: str = Field(default="", index=True)
+    replay_window: str = Field(default="")
+    recovery_authority: str = Field(default="")
+    safe_replay_decision: str = Field(default="unsafe", index=True)
+    blocked_replay_reason: Optional[str] = Field(default=None, index=True)
+    side_effect_status: str = Field(default="not_started", index=True)
+    residual_risk: str = Field(default="")
+    transition_ledger_json: str = Field(default="[]")
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProductionWorkflowFaultReceipt(SQLModel, table=True):
+    __tablename__ = "production_workflow_fault_receipts"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    fault_key: str = Field(index=True, unique=True)
+    run_identity: Optional[str] = Field(default=None, index=True)
+    injection_method: str = Field(index=True)
+    campaign_window: str = Field(default="14d_accelerated_fault_campaign_equivalent", index=True)
+    recovery_result: str = Field(index=True)
+    replay_decision: str = Field(index=True)
+    duplicate_suppressed_count: int = Field(default=0)
+    operator_intervention_required: bool = Field(default=False, index=True)
+    raw_receipt_handle: str = Field(index=True)
+    residual_risk: str = Field(default="")
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProductionWorkflowSideEffectReceipt(SQLModel, table=True):
+    __tablename__ = "production_workflow_side_effect_receipts"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    reconciliation_id: str = Field(index=True, unique=True)
+    run_identity: Optional[str] = Field(default=None, index=True)
+    side_effect_kind: str = Field(index=True)
+    idempotency_scope: str = Field(index=True)
+    idempotency_key: str = Field(index=True, unique=True)
+    external_confirmation_state: str = Field(index=True)
+    provider_receipt: str = Field(default="")
+    duplicate_suppression_receipt: str = Field(default="")
+    reconciliation_outcome: str = Field(index=True)
+    manual_repair_state: str = Field(default="", index=True)
+    operator_replay_decision: str = Field(default="unsafe_retry_blocked", index=True)
+    redacted_receipt_handle: str = Field(default="", index=True)
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Memory ──────────────────────────────────────────────
 
 class Memory(SQLModel, table=True):

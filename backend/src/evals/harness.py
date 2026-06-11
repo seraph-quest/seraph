@@ -393,6 +393,17 @@ from src.workflows.continuous_orchestration_slo import (
     SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME,
     build_continuous_orchestration_slo_contract,
 )
+from src.workflows.production_workflow_guarantees import (
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SUITE_NAME,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SUITE_NAME,
+    PRODUCTION_WORKFLOW_GUARANTEES_BLOCKED_CLAIMS,
+    PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME,
+    build_production_workflow_guarantees_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -18478,6 +18489,112 @@ async def _eval_continuous_orchestration_slo_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_production_workflow_guarantees_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    state_suite = next(item for item in suites if item["name"] == PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME)
+    fault_suite = next(
+        item for item in suites if item["name"] == CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SUITE_NAME
+    )
+    reconciliation_suite = next(
+        item for item in suites if item["name"] == EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SUITE_NAME
+    )
+    contract = build_production_workflow_guarantees_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    states = contract["state_machine_receipts"]
+    faults = contract["fault_campaign_receipts"]
+    reconciliations = contract["external_side_effect_reconciliation_v3_receipts"]
+    controls = contract["operator_recovery_receipts"]
+    receipt_index = contract["receipt_index"]
+    required_fault_modes = {
+        "scheduler_crash",
+        "worker_crash",
+        "duplicate_delivery",
+        "provider_timeout",
+        "stale_lease",
+        "partial_external_side_effect",
+        "irreversible_side_effect",
+        "restart_during_approval_wait",
+        "trust_boundary_drift_replay",
+    }
+    required_surfaces = {
+        "/api/operator/production-workflow-guarantees",
+        "/api/operator/benchmark-proof",
+        "/api/operator/continuous-orchestration-slo",
+        "/api/operator/production-sla-orchestration",
+        "/api/operator/live-external-orchestration",
+        "/api/operator/durable-workflow-engine-v2",
+    }
+    required_controls = {
+        "inspect",
+        "audit",
+        "resume",
+        "repair",
+        "suppress_duplicate",
+        "quarantine",
+        "branch",
+        "cancel",
+    }
+    return {
+        "state_suite_visible": state_suite["scenario_count"] == len(PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES),
+        "fault_suite_visible": (
+            fault_suite["scenario_count"] == len(CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES)
+        ),
+        "reconciliation_suite_visible": (
+            reconciliation_suite["scenario_count"] == len(EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES)
+        ),
+        "state_axis_visible": state_suite["benchmark_axis"] == "production_workflow_state_machine_v1",
+        "fault_axis_visible": fault_suite["benchmark_axis"] == "crash_proof_orchestration_fault_campaign",
+        "reconciliation_axis_visible": reconciliation_suite["benchmark_axis"] == "external_side_effect_reconciliation_v3",
+        "operator_status_visible": summary["operator_status"] == "production_workflow_guarantees_visible",
+        "da_only_state_machine_visible": summary["state_machine_receipt_count"] >= 3
+        and summary["all_state_receipts_persisted"] is True
+        and all(item.get("persisted_runtime_state") for item in states),
+        "lease_and_owner_authority_visible": all(
+            item.get("workflow_lease_id") and item.get("worker_owner") and item.get("scheduler_state_owner")
+            for item in states
+        ),
+        "replay_authority_visible": all(
+            item.get("replay_window") and item.get("recovery_authority") and item.get("safe_replay_decision")
+            for item in states
+        ),
+        "unsafe_replay_blocks_visible": any(item.get("blocked_replay_reason") for item in states)
+        and summary["unsafe_replay_decision_count"] >= 2,
+        "fault_campaign_visible": summary["fault_campaign_receipt_count"] >= len(required_fault_modes)
+        and required_fault_modes <= set(summary["fault_modes_covered"]),
+        "fault_receipt_handles_visible": summary["raw_receipt_handle_count"] == len(faults)
+        and all(item.get("raw_receipt_handle") for item in faults),
+        "fault_campaign_threshold_visible": summary["campaign_window"] == "14d_accelerated_fault_campaign_equivalent",
+        "side_effect_v3_visible": summary["external_side_effect_reconciliation_v3_count"] >= 3
+        and summary["reconciliation_v3_complete"] is True,
+        "side_effect_confirmation_states_visible": {"confirmed", "compensated", "quarantined"} <= {
+            item["external_confirmation_state"] for item in reconciliations
+        },
+        "manual_repair_and_replay_decisions_visible": all(
+            item.get("manual_repair_state") and item.get("operator_replay_decision")
+            for item in reconciliations
+        ),
+        "receipt_index_is_da_only": bool(receipt_index.get("state_machine_receipts"))
+        and bool(receipt_index.get("fault_campaign_receipts"))
+        and bool(receipt_index.get("external_side_effect_reconciliation_v3_receipts")),
+        "predecessor_sources_are_context_only": summary["composed_proof_source_count"] == 4
+        and bool(receipt_index.get("composed_sources")),
+        "operator_controls_visible": summary["required_controls_visible"] is True
+        and required_controls <= {item["action"] for item in controls},
+        "controls_leave_receipts": all(item.get("enabled") and item.get("receipt_after_action") for item in controls),
+        "claim_boundary_visible": policy["claim_boundary"] == PRODUCTION_WORKFLOW_GUARANTEES_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(PRODUCTION_WORKFLOW_GUARANTEES_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "unconditional_exactly_once_not_claimed": "unconditional_exactly_once_scheduler" in policy["not_claimed"],
+        "state_gate_required": PRODUCTION_WORKFLOW_STATE_MACHINE_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "fault_gate_required": CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "reconciliation_v3_gate_required": EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -20115,6 +20232,42 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_continuous_orchestration_slo_behavior,
         )
         for name in SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DA proves DA-only persisted workflow state-machine receipts for scheduler ownership, "
+                "leases, worker ownership, replay windows, recovery authority, and blocked replay decisions."
+            ),
+            runner=_eval_production_workflow_guarantees_behavior,
+        )
+        for name in PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DA records a bounded fault campaign for the crash-proof orchestration target claim while "
+                "keeping crash-proof wording blocked."
+            ),
+            runner=_eval_production_workflow_guarantees_behavior,
+        )
+        for name in CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DA records external side-effect reconciliation v3 receipts with idempotency, external "
+                "confirmation, manual repair, and safe/unsafe replay decisions."
+            ),
+            runner=_eval_production_workflow_guarantees_behavior,
+        )
+        for name in EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

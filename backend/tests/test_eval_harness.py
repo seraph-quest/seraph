@@ -96,6 +96,12 @@ from src.extensions.field_reach_operations import (
     BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES,
     VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
 )
+from src.extensions.always_available_reach_media import (
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
+)
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
@@ -550,6 +556,22 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["always_available_reach_slo_suite_scenario_count_matches"] is True
     assert details["always_available_reach_slo_suite_axis_matches"] is True
     assert details["always_available_reach_slo_gate_required"] is True
+    assert details["always_available_reach_operations_v1_suite_present"] is True
+    assert details["always_available_reach_operations_v1_suite_scenario_count_matches"] is True
+    assert details["always_available_reach_operations_v1_suite_axis_matches"] is True
+    assert details["always_available_reach_operations_v1_gate_required"] is True
+    assert details["voice_media_parity_runtime_v1_suite_present"] is True
+    assert details["voice_media_parity_runtime_v1_suite_scenario_count_matches"] is True
+    assert details["voice_media_parity_runtime_v1_suite_axis_matches"] is True
+    assert details["voice_media_parity_runtime_v1_gate_required"] is True
+    assert details["mobile_cross_surface_continuity_v1_suite_present"] is True
+    assert details["mobile_cross_surface_continuity_v1_suite_scenario_count_matches"] is True
+    assert details["mobile_cross_surface_continuity_v1_suite_axis_matches"] is True
+    assert details["mobile_cross_surface_continuity_v1_gate_required"] is True
+    assert details["reach_degraded_recovery_field_campaign_suite_present"] is True
+    assert details["reach_degraded_recovery_field_campaign_suite_scenario_count_matches"] is True
+    assert details["reach_degraded_recovery_field_campaign_suite_axis_matches"] is True
+    assert details["reach_degraded_recovery_field_campaign_gate_required"] is True
     assert details["guardian_learning_arbitration_suite_present"] is True
     assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
     assert details["guardian_learning_arbitration_suite_axis_matches"] is True
@@ -1101,6 +1123,48 @@ def test_run_always_available_reach_slo_benchmark_suite_passes():
     assert all(result.details["always_available_claim_boundary_visible"] for result in summary.results)
 
 
+def test_run_always_available_reach_operations_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["always_available_reach_operations_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES)
+    assert all(result.details["selected_reach_channel_breadth_visible"] for result in summary.results)
+    assert all(result.details["campaign_14_day_equivalent_visible"] for result in summary.results)
+    assert all(result.details["pairing_revocation_visible"] for result in summary.results)
+    assert all(result.details["coverage_gap_visible"] for result in summary.results)
+
+
+def test_run_voice_media_parity_runtime_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["voice_media_parity_runtime_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES)
+    assert all(result.details["voice_media_provider_family_visible"] for result in summary.results)
+    assert all(result.details["voice_media_quality_latency_visible"] for result in summary.results)
+    assert all(result.details["voice_media_privacy_deletion_visible"] for result in summary.results)
+    assert all(result.details["voice_media_fallback_regression_visible"] for result in summary.results)
+
+
+def test_run_mobile_cross_surface_continuity_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["mobile_cross_surface_continuity_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES)
+    assert all(result.details["cross_surface_continuity_visible"] for result in summary.results)
+    assert all(result.details["channel_continuity_visible"] for result in summary.results)
+    assert all(result.details["no_raw_payloads_visible"] for result in summary.results)
+
+
+def test_run_reach_degraded_recovery_field_campaign_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["reach_degraded_recovery_field_campaign"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES)
+    assert all(result.details["field_campaign_repair_metrics_visible"] for result in summary.results)
+    assert all(result.details["false_and_missed_delivery_metrics_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+
+
 def test_run_managed_browser_provider_attestation_benchmark_suite_passes():
     summary = asyncio.run(run_benchmark_suites(["managed_browser_provider_attestation"]))
 
@@ -1319,6 +1383,19 @@ def test_run_benchmark_suites_executes_unique_suite_scenarios():
         "capability_repair_behavior",
         "capability_preflight_behavior",
     }
+
+
+def test_batch_dc_scenarios_do_not_collide_with_existing_registry_names():
+    scenario_names = [scenario.name for scenario in available_scenarios()]
+    batch_dc_names = (
+        ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES
+        + VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES
+        + MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES
+        + REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES
+    )
+    duplicates = sorted({name for name in batch_dc_names if scenario_names.count(name) != 1})
+
+    assert duplicates == []
 
 
 def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
@@ -2678,6 +2755,10 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "broad_reach_field_operations" in captured.out
     assert "voice_media_quality_operations" in captured.out
     assert "always_available_reach_slo" in captured.out
+    assert "always_available_reach_operations_v1" in captured.out
+    assert "voice_media_parity_runtime_v1" in captured.out
+    assert "mobile_cross_surface_continuity_v1" in captured.out
+    assert "reach_degraded_recovery_field_campaign" in captured.out
     assert "managed_browser_provider_attestation" in captured.out
     assert "live_multi_operator_usability_study" in captured.out
     assert "browser_computer_use_recovery_drill" in captured.out
@@ -2763,6 +2844,10 @@ def test_main_lists_available_benchmark_suites(capsys):
         "broad_reach_field_operations",
         "voice_media_quality_operations",
         "always_available_reach_slo",
+        "always_available_reach_operations_v1",
+        "voice_media_parity_runtime_v1",
+        "mobile_cross_surface_continuity_v1",
+        "reach_degraded_recovery_field_campaign",
         "managed_browser_provider_attestation",
         "live_multi_operator_usability_study",
         "browser_computer_use_recovery_drill",

@@ -113,6 +113,13 @@ from src.extensions.field_reach_operations import (
     BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY,
     VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
 )
+from src.extensions.always_available_reach_media import (
+    ALWAYS_AVAILABLE_REACH_MEDIA_CLAIM_BOUNDARY,
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
+)
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
     GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
@@ -3176,6 +3183,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == BROAD_REACH_FIELD_OPS_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["always_available_reach_media_posture"]
+        == "always_available_reach_media_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["always_available_reach_media_claim_boundary"]
+        == ALWAYS_AVAILABLE_REACH_MEDIA_CLAIM_BOUNDARY
+    )
+    assert (
         payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
         == "guardian_learning_arbitration_ci_gated_operator_visible"
     )
@@ -3888,6 +3903,24 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     reach_slo_suite = next(item for item in payload["suites"] if item["name"] == "always_available_reach_slo")
     assert "reach_slo_window_budget_behavior" in reach_slo_suite["scenario_names"]
     assert reach_slo_suite["scenario_count"] == len(ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES)
+    reach_ops_suite = next(
+        item for item in payload["suites"] if item["name"] == "always_available_reach_operations_v1"
+    )
+    assert "always_available_reach_channel_campaign_behavior" in reach_ops_suite["scenario_names"]
+    assert reach_ops_suite["scenario_count"] == len(ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES)
+    voice_media_suite = next(item for item in payload["suites"] if item["name"] == "voice_media_parity_runtime_v1")
+    assert "voice_media_provider_latency_quality_behavior" in voice_media_suite["scenario_names"]
+    assert voice_media_suite["scenario_count"] == len(VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES)
+    continuity_suite = next(
+        item for item in payload["suites"] if item["name"] == "mobile_cross_surface_continuity_v1"
+    )
+    assert "mobile_cross_surface_thread_memory_behavior" in continuity_suite["scenario_names"]
+    assert continuity_suite["scenario_count"] == len(MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES)
+    campaign_suite = next(
+        item for item in payload["suites"] if item["name"] == "reach_degraded_recovery_field_campaign"
+    )
+    assert "reach_field_campaign_14_day_window_behavior" in campaign_suite["scenario_names"]
+    assert campaign_suite["scenario_count"] == len(REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES)
     longitudinal_suite = next(
         item for item in payload["suites"] if item["name"] == "longitudinal_guardian_outcome_study"
     )
@@ -4125,6 +4158,13 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         payload["production_reach_voice_mobile"]["policy"]["claim_boundary"]
         == PRODUCTION_REACH_VOICE_MOBILE_CLAIM_BOUNDARY
     )
+    assert payload["always_available_reach_media"]["summary"]["operator_status"] == (
+        "always_available_reach_media_receipts_visible"
+    )
+    assert payload["always_available_reach_media"]["summary"]["selected_channel_count"] >= 5
+    assert payload["always_available_reach_media"]["summary"]["voice_media_provider_family_count"] >= 5
+    assert payload["always_available_reach_media"]["summary"]["field_campaign_operator_repair_count"] >= 5
+    assert payload["always_available_reach_media"]["policy"]["claim_boundary"] == ALWAYS_AVAILABLE_REACH_MEDIA_CLAIM_BOUNDARY
     assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
     assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
         "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
@@ -5459,6 +5499,48 @@ async def test_operator_broad_reach_field_ops_surface_reports_batch_cu_receipts(
     assert signal["operator_identity"]["pairing_state"] == "requires_pairing"
     assert signal["field_window"]["window_met"] is False
     assert signal["safe_receipt"]["contains_contact_identifier"] is False
+
+
+@pytest.mark.asyncio
+async def test_operator_always_available_reach_media_surface_reports_batch_dc_receipts(client):
+    resp = await client.get("/api/operator/always-available-reach-media")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "always_available_reach_media_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "always_available_reach_media_receipts_visible"
+    assert payload["summary"]["selected_channel_count"] >= 5
+    assert payload["summary"]["campaign_14_day_equivalent_count"] >= 5
+    assert payload["summary"]["paired_revocation_count"] >= 5
+    assert payload["summary"]["rate_abuse_recovery_count"] >= 5
+    assert payload["summary"]["voice_media_provider_family_count"] >= 5
+    assert payload["summary"]["voice_media_quality_pass_count"] >= 5
+    assert payload["summary"]["cross_surface_continuity_count"] >= 4
+    assert payload["summary"]["field_campaign_operator_repair_count"] >= 5
+    assert payload["summary"]["claim_boundary"] == ALWAYS_AVAILABLE_REACH_MEDIA_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["always_available_reach_operations_v1"] == list(
+        ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["voice_media_parity_runtime_v1"] == list(
+        VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["mobile_cross_surface_continuity_v1"] == list(
+        MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["reach_degraded_recovery_field_campaign"] == list(
+        REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES
+    )
+    assert "always_available_operation" in payload["policy"]["blocked_claims"]
+    assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert "voice_parity" in payload["policy"]["blocked_claims"]
+    assert payload["policy"]["safe_receipt_redaction_boundary"] == (
+        "redacted_no_message_body_secret_contact_audio_media_payload_or_transcript"
+    )
+    assert "/api/operator/always-available-reach-media" in payload["policy"]["receipt_surfaces"]
+    gap = next(item for item in payload["contract"]["selected_reach_channels"] if item["coverage_gap"])
+    assert gap["pairing"]["pairing_state"] == "requires_pairing"
+    assert gap["recovery"]["unsafe_mutation_blocked"] is True
+    assert gap["safe_receipt"]["contains_contact_identifier"] is False
 
 
 @pytest.mark.asyncio

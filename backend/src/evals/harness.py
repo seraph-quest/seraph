@@ -2019,6 +2019,7 @@ def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
             self.name = name
             self.description = "Connector-backed tool"
             self.inputs = {
+                "url": {"type": "string", "description": "Request URL"},
                 "headers": {"type": "object", "description": "Authentication headers"},
                 "body": {"type": "string", "description": "Request body"},
             }
@@ -2054,16 +2055,22 @@ def _eval_secret_ref_egress_boundary_behavior() -> dict[str, Any]:
         allowlisted_tool = SecretRefResolvingTool(raw_allowlisted_tool)
         unallowlisted_tool = SecretRefResolvingTool(_EvalMCPTool("mcp_unallowlisted", None))
 
-        allowlisted_result = allowlisted_tool(headers={"Authorization": f"Bearer {secret_ref}"})
+        allowlisted_result = allowlisted_tool(
+            url="https://api.example.com/v1",
+            headers={"Authorization": f"Bearer {secret_ref}"},
+        )
         body_error = ""
         try:
-            allowlisted_tool(body=f"token={secret_ref}")
+            allowlisted_tool(url="https://api.example.com/v1", body=f"token={secret_ref}")
         except ValueError as exc:
             body_error = str(exc)
 
         allowlist_error = ""
         try:
-            unallowlisted_tool(headers={"Authorization": f"Bearer {secret_ref}"})
+            unallowlisted_tool(
+                url="https://api.example.com/v1",
+                headers={"Authorization": f"Bearer {secret_ref}"},
+            )
         except ValueError as exc:
             allowlist_error = str(exc)
 

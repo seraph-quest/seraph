@@ -77,6 +77,14 @@ from src.extensions.production_secure_marketplace import (
     PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES,
     THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
 )
+from src.extensions.marketplace_production_security import (
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
@@ -783,6 +791,30 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["hostile_package_lifecycle_gauntlet_v1_suite_scenario_count_matches"] is True
     assert details["hostile_package_lifecycle_gauntlet_v1_suite_axis_matches"] is True
     assert details["hostile_package_lifecycle_gauntlet_v1_gate_required"] is True
+    assert details["marketplace_security_certification_track_v1_suite_present"] is True
+    assert details["marketplace_security_certification_track_v1_suite_scenario_count_matches"] is True
+    assert details["marketplace_security_certification_track_v1_suite_axis_matches"] is True
+    assert details["marketplace_security_certification_track_v1_gate_required"] is True
+    assert details["production_secure_marketplace_live_ops_v2_suite_present"] is True
+    assert details["production_secure_marketplace_live_ops_v2_suite_scenario_count_matches"] is True
+    assert details["production_secure_marketplace_live_ops_v2_suite_axis_matches"] is True
+    assert details["production_secure_marketplace_live_ops_v2_gate_required"] is True
+    assert details["ecosystem_supply_chain_operations_v1_suite_present"] is True
+    assert details["ecosystem_supply_chain_operations_v1_suite_scenario_count_matches"] is True
+    assert details["ecosystem_supply_chain_operations_v1_suite_axis_matches"] is True
+    assert details["ecosystem_supply_chain_operations_v1_gate_required"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_suite_present"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_suite_scenario_count_matches"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_suite_axis_matches"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_gate_required"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_suite_present"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_suite_scenario_count_matches"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_suite_axis_matches"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_gate_required"] is True
+    assert details["marketplace_false_claim_scan_v1_suite_present"] is True
+    assert details["marketplace_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["marketplace_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["marketplace_false_claim_scan_v1_gate_required"] is True
     assert details["managed_browser_provider_attestation_suite_present"] is True
     assert details["managed_browser_provider_attestation_suite_scenario_count_matches"] is True
     assert details["managed_browser_provider_attestation_suite_axis_matches"] is True
@@ -2113,6 +2145,43 @@ def test_run_hostile_package_lifecycle_gauntlet_v1_benchmark_suite_passes():
     assert all(result.details["hostile_gauntlet_fail_closed"] is True for result in summary.results)
 
 
+def test_run_marketplace_security_certification_track_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_security_certification_track_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES)
+    assert all(result.details["certification_track_scope_visible"] is True for result in summary.results)
+    assert all(result.details["marketplace_claims_blocked"] is True for result in summary.results)
+
+
+def test_run_marketplace_production_security_benchmark_suites_pass():
+    suite_names = [
+        "production_secure_marketplace_live_ops_v2",
+        "ecosystem_supply_chain_operations_v1",
+        "hostile_package_lifecycle_gauntlet_v2",
+        "publisher_trust_vulnerability_ops_v1",
+        "marketplace_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert set(PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES) <= result_names
+    assert set(ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES) <= result_names
+    assert set(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES) <= result_names
+    assert set(PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES) <= result_names
+    assert all(result.details["live_ops_v2_lifecycle_coverage_visible"] is True for result in summary.results)
+    assert all(result.details["supply_chain_fields_and_promotion_policy_visible"] is True for result in summary.results)
+    assert all(result.details["hostile_v2_boundary_denials_visible"] is True for result in summary.results)
+    assert all(result.details["publisher_vulnerability_ops_visible"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
 def test_run_live_browser_task_depth_benchmark_suite_passes():
     summary = asyncio.run(run_benchmark_suites(["live_browser_task_depth"]))
 
@@ -3340,6 +3409,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "third_party_package_security_certification_v1" in captured.out
     assert "marketplace_live_corpus_operations_v2" in captured.out
     assert "hostile_package_lifecycle_gauntlet_v1" in captured.out
+    assert "marketplace_security_certification_track_v1" in captured.out
+    assert "production_secure_marketplace_live_ops_v2" in captured.out
+    assert "ecosystem_supply_chain_operations_v1" in captured.out
+    assert "hostile_package_lifecycle_gauntlet_v2" in captured.out
+    assert "publisher_trust_vulnerability_ops_v1" in captured.out
+    assert "marketplace_false_claim_scan_v1" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
     assert "long_work_debugging_recovery" in captured.out
@@ -3521,6 +3596,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "third_party_package_security_certification_v1",
         "marketplace_live_corpus_operations_v2",
         "hostile_package_lifecycle_gauntlet_v1",
+        "marketplace_security_certification_track_v1",
+        "production_secure_marketplace_live_ops_v2",
+        "ecosystem_supply_chain_operations_v1",
+        "hostile_package_lifecycle_gauntlet_v2",
+        "publisher_trust_vulnerability_ops_v1",
+        "marketplace_false_claim_scan_v1",
         "long_work_debugging_recovery",
         "operator_control_density",
         "independent_operator_usability_accessibility",

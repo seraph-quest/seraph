@@ -143,6 +143,20 @@ from src.extensions.production_secure_marketplace import (
     THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
     THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SUITE_NAME,
 )
+from src.extensions.marketplace_production_security import (
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES,
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -2820,6 +2834,108 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "This is hostile lifecycle drill evidence; solved third-party package-security claims remain blocked."
         ),
         scenario_names=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SUITE_NAME,
+        label="Marketplace security certification-track v1",
+        description=(
+            "Pins Batch DN certification-track marketplace review receipts for scope, findings, retests, waivers, "
+            "expiry, fixture-vs-live labels, redacted handles, and blocked formal-certification claims."
+        ),
+        benchmark_axis="marketplace_security_certification_track_v1",
+        operator_summary=(
+            "Marketplace certification-track receipts must expose reviewer independence, findings, retests, waiver "
+            "expiry, residual risk, and claim boundaries without implying formal package-security certification."
+        ),
+        remaining_gap=(
+            "This is certification-track evidence, not formal certification or solved third-party package security."
+        ),
+        scenario_names=MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SUITE_NAME,
+        label="Production secure marketplace live ops v2",
+        description=(
+            "Pins marketplace install, update, downgrade, disable, rollback, quarantine, re-entry, failed-update "
+            "recovery, publisher trust change, scanner freshness, and operator diagnostics receipts."
+        ),
+        benchmark_axis="production_secure_marketplace_live_ops_v2",
+        operator_summary=(
+            "Marketplace live-ops v2 evidence is judged by lifecycle coverage, fail-closed recovery, scanner "
+            "freshness, and operator-visible diagnostics."
+        ),
+        remaining_gap=(
+            "This is bounded live-ops-shaped evidence, not full marketplace parity or production readiness."
+        ),
+        scenario_names=PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SUITE_NAME,
+        label="Ecosystem supply-chain operations v1",
+        description=(
+            "Pins package provenance, signed digests, publisher keys, revocation state, SBOM/dependency graph "
+            "digests, compatibility, review state, permissions, enforcement, audit, and promotion decisions."
+        ),
+        benchmark_axis="ecosystem_supply_chain_operations_v1",
+        operator_summary=(
+            "Supply-chain operations must fail closed unless signatures, publishers, key state, vulnerability "
+            "freshness, compatibility, permission declarations, and audit requirements are satisfied."
+        ),
+        remaining_gap=(
+            "This is supply-chain enforcement evidence, not solved third-party package security."
+        ),
+        scenario_names=ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SUITE_NAME,
+        label="Hostile package lifecycle gauntlet v2",
+        description=(
+            "Pins private-network/SSRF, DNS rebinding, secret exfiltration, workspace egress, malicious update, "
+            "dependency confusion, rollback bypass, quarantine bypass, and package-network incident denial receipts."
+        ),
+        benchmark_axis="hostile_package_lifecycle_gauntlet_v2",
+        operator_summary=(
+            "Hostile lifecycle v2 fixtures must deny runtime contribution, quarantine or roll back, and expose "
+            "network, credential, workspace, DNS, and re-entry boundary evidence."
+        ),
+        remaining_gap=(
+            "This is hostile lifecycle drill evidence, not exhaustive package-security certification."
+        ),
+        scenario_names=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME,
+        label="Publisher trust vulnerability ops v1",
+        description=(
+            "Pins publisher identity, review freshness, key rotation/revocation, scanner source freshness, waiver "
+            "expiry, remediation SLA, critical/high denial, and operator diagnostic receipts."
+        ),
+        benchmark_axis="publisher_trust_vulnerability_ops_v1",
+        operator_summary=(
+            "Publisher trust and vulnerability operations keep stale reviews, revoked keys, expired waivers, and "
+            "critical/high findings visible as deny or quarantine decisions."
+        ),
+        remaining_gap=(
+            "Publisher trust evidence remains bounded and does not prove ecosystem superiority."
+        ),
+        scenario_names=PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+        label="Marketplace false-claim scan v1",
+        description=(
+            "Pins marketplace-specific false-claim scan receipts for blocked production-secure, solved-security, "
+            "formal-certification, full-parity, superiority, and exceedance wording."
+        ),
+        benchmark_axis="marketplace_false_claim_scan_v1",
+        operator_summary=(
+            "Marketplace false-claim scan receipts must show blocked claims checked, zero forbidden hits, allowed "
+            "bounded wording, validation command, and residual risk."
+        ),
+        remaining_gap=(
+            "A clean marketplace scan does not lift final parity, production readiness, or superiority claims."
+        ),
+        scenario_names=MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,

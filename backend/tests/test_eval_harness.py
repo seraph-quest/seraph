@@ -2587,6 +2587,9 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "memory_provider_quality_gate" in captured.out
     assert "workflow_endurance_and_repair" in captured.out
     assert "live_workflow_endurance_canary" in captured.out
+    assert "production_workflow_state_machine_v1" in captured.out
+    assert "crash_proof_orchestration_fault_campaign" in captured.out
+    assert "external_side_effect_reconciliation_v3" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
@@ -2745,6 +2748,9 @@ def test_main_lists_available_benchmark_suites(capsys):
         "continuous_orchestration_slo_monitor",
         "crash_failover_soak_v1",
         "side_effect_reconciliation_v2",
+        "production_workflow_state_machine_v1",
+        "crash_proof_orchestration_fault_campaign",
+        "external_side_effect_reconciliation_v3",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

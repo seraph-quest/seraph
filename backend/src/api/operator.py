@@ -60,6 +60,7 @@ from src.extensions.production_secure_marketplace import build_production_secure
 from src.extensions.production_marketplace_security import build_production_marketplace_security_report
 from src.extensions.safe_browser_computer_use import build_safe_browser_computer_use_report
 from src.extensions.browser_computer_use_parity_depth import build_browser_computer_use_parity_depth_report
+from src.extensions.full_browser_parity import build_full_browser_parity_report
 from src.extensions.field_reach_operations import build_broad_reach_field_ops_report
 from src.extensions.always_available_reach_media import build_always_available_reach_media_report
 from src.extensions.live_reach_media import build_live_reach_media_report
@@ -3473,6 +3474,7 @@ async def get_operator_benchmark_proof():
         browser_provider_usability,
         safe_browser_computer_use,
         browser_computer_use_parity_depth,
+        full_browser_parity,
         production_operator_control,
         dense_operator_recovery,
         operator_mission_control,
@@ -3531,6 +3533,7 @@ async def get_operator_benchmark_proof():
         build_browser_provider_usability_report(),
         build_safe_browser_computer_use_report(),
         build_browser_computer_use_parity_depth_report(),
+        build_full_browser_parity_report(),
         build_production_operator_control_report(),
         build_dense_operator_recovery_report(),
         build_operator_mission_control_report(),
@@ -3596,6 +3599,7 @@ async def get_operator_benchmark_proof():
         str(browser_provider_usability["summary"]["benchmark_posture"]),
         str(safe_browser_computer_use["summary"]["benchmark_posture"]),
         str(browser_computer_use_parity_depth["summary"]["benchmark_posture"]),
+        str(full_browser_parity["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
         str(dense_operator_recovery["summary"]["benchmark_posture"]),
         str(operator_mission_control["summary"]["benchmark_posture"]),
@@ -3732,6 +3736,8 @@ async def get_operator_benchmark_proof():
             "browser_computer_use_parity_depth_claim_boundary": browser_computer_use_parity_depth["policy"][
                 "claim_boundary"
             ],
+            "full_browser_parity_posture": full_browser_parity["summary"]["benchmark_posture"],
+            "full_browser_parity_claim_boundary": full_browser_parity["policy"]["claim_boundary"],
             "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
             "production_operator_control_parity_claim_boundary": production_operator_control["policy"]["claim_boundary"],
             "dense_operator_recovery_control_posture": dense_operator_recovery["summary"]["benchmark_posture"],
@@ -3796,6 +3802,7 @@ async def get_operator_benchmark_proof():
         "browser_provider_usability": browser_provider_usability,
         "safe_browser_computer_use": safe_browser_computer_use,
         "browser_computer_use_parity_depth": browser_computer_use_parity_depth,
+        "full_browser_parity": full_browser_parity,
         "production_operator_control": production_operator_control,
         "dense_operator_recovery_control": dense_operator_recovery,
         "operator_mission_control_population": operator_mission_control,
@@ -4078,6 +4085,11 @@ async def get_operator_safe_autonomous_browser_computer_use():
 @router.get("/operator/browser-computer-use-parity-depth")
 async def get_operator_browser_computer_use_parity_depth():
     return await build_browser_computer_use_parity_depth_report()
+
+
+@router.get("/operator/full-browser-parity")
+async def get_operator_full_browser_parity():
+    return await build_full_browser_parity_report()
 
 
 @router.get("/operator/production-operator-control-parity")

@@ -108,6 +108,17 @@ from src.extensions.browser_computer_use_parity_depth import (
     BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
     SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
 )
+from src.extensions.full_browser_parity import (
+    BROWSER_PARITY_EVIDENCE_BLOCKED_CLAIMS,
+    BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY,
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
+    FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
+    REQUIRED_BROWSER_BOUNDARIES,
+    REQUIRED_BROWSER_PROVIDER_MODES,
+    REQUIRED_HOSTILE_BROWSER_CASES,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -3404,6 +3415,11 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY
     )
     assert (
+        payload["summary"]["full_browser_parity_posture"]
+        == "browser_parity_evidence_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["full_browser_parity_claim_boundary"] == BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY
+    assert (
         payload["summary"]["production_operator_control_parity_posture"]
         == "production_operator_control_parity_ci_gated_operator_visible"
     )
@@ -4326,6 +4342,15 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         BROWSER_COMPUTER_USE_PARITY_DEPTH_CLAIM_BOUNDARY
     )
     assert "full_browser_parity" in payload["browser_computer_use_parity_depth"]["policy"]["blocked_claims"]
+    assert payload["full_browser_parity"]["summary"]["operator_status"] == "browser_parity_evidence_receipts_visible"
+    assert payload["full_browser_parity"]["summary"]["runtime_task_count"] >= 12
+    assert payload["full_browser_parity"]["summary"]["managed_remote_live_provider_claimed"] is False
+    assert payload["full_browser_parity"]["summary"]["existing_session_unpartitioned_blocked"] is True
+    assert payload["full_browser_parity"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["full_browser_parity"]["policy"]["claim_boundary"] == BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY
+    assert set(BROWSER_PARITY_EVIDENCE_BLOCKED_CLAIMS) <= set(
+        payload["full_browser_parity"]["policy"]["blocked_claims"]
+    )
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -4912,6 +4937,115 @@ async def test_operator_browser_computer_use_parity_depth_surface_reports_batch_
         for item in payload["contract"]["auth_partition_operations"]
     )
     assert all(item["external_action_allowed"] is False for item in payload["contract"]["site_drift_recovery_slo"])
+
+
+@pytest.mark.asyncio
+async def test_operator_full_browser_parity_surface_reports_batch_dg_receipts(client):
+    resp = await client.get("/api/operator/full-browser-parity")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "browser_parity_evidence_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == "browser_parity_evidence_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES)
+        + len(FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+        + len(REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES)
+        + len(BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["runtime_task_count"] >= 12
+    assert payload["summary"]["runtime_sample_total"] >= 350
+    assert payload["summary"]["required_provider_modes_covered"] is True
+    assert payload["summary"]["managed_remote_live_provider_claimed"] is False
+    assert payload["summary"]["existing_session_unpartitioned_blocked"] is True
+    assert payload["summary"]["dangerous_actions_default_blocked"] is True
+    assert payload["summary"]["required_boundaries_covered"] is True
+    assert payload["summary"]["all_boundaries_enforced"] is True
+    assert payload["summary"]["boundary_leak_count"] == 0
+    assert payload["summary"]["boundary_negative_case_count"] >= (
+        len(REQUIRED_BROWSER_PROVIDER_MODES) * len(REQUIRED_BROWSER_BOUNDARIES)
+    )
+    assert payload["summary"]["required_hostile_browser_cases_covered"] is True
+    assert payload["summary"]["hostile_cases_fail_closed"] is True
+    assert payload["summary"]["credential_leak_count"] == 0
+    assert payload["summary"]["cookie_leak_count"] == 0
+    assert payload["summary"]["private_data_leak_count"] == 0
+    assert payload["summary"]["clipboard_leak_count"] == 0
+    assert payload["summary"]["unapproved_mutation_count"] == 0
+    assert payload["summary"]["partition_session_leak_count"] == 0
+    assert payload["summary"]["partition_claim_lift_blocked"] is True
+    assert payload["summary"]["partition_verified_provider_mode_count"] == len(REQUIRED_BROWSER_PROVIDER_MODES) - 1
+    assert payload["summary"]["existing_session_partition_certificate_blocked"] is True
+    assert payload["summary"]["redaction_scan_count"] == len(payload["contract"]["redaction_scan_receipts"])
+    assert payload["summary"]["redaction_scan_passed"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["safe_browser_automation_claim_allowed"] is False
+    assert payload["summary"]["full_browser_parity_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == BROWSER_PARITY_EVIDENCE_CLAIM_BOUNDARY
+    assert set(BROWSER_PARITY_EVIDENCE_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/full-browser-parity" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["safe_autonomous_browser_runtime_v1"] == list(
+        SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["full_browser_parity_matrix_v1"] == list(
+        FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["real_site_drift_recovery_v2"] == list(
+        REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_session_partition_certification_v1"] == list(
+        BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES
+    )
+    assert {item["provider_mode"] for item in payload["contract"]["full_browser_parity_matrix"]} == set(
+        REQUIRED_BROWSER_PROVIDER_MODES
+    )
+    assert set(REQUIRED_BROWSER_BOUNDARIES) <= {
+        boundary["boundary"]
+        for item in payload["contract"]["full_browser_parity_matrix"]
+        for boundary in item["boundaries"]
+    }
+    assert all(
+        boundary["negative_case_verified"] is True
+        and boundary["negative_case_receipt"]["decision"] == "blocked"
+        and boundary["negative_case_receipt"]["seeded_sensitive_value_present_in_raw_fixture"] is True
+        and boundary["negative_case_receipt"]["seeded_sensitive_value_present_in_safe_receipt"] is False
+        and len(boundary["negative_case_receipt"]["seeded_sensitive_value_digest"]) == 64
+        and len(boundary["negative_case_receipt"]["safe_receipt_digest"]) == 64
+        for item in payload["contract"]["full_browser_parity_matrix"]
+        for boundary in item["boundaries"]
+    )
+    assert all(
+        item["real_site_fixture_mode"] == "deterministic_safe_target_fixture_with_redacted_artifact_digests"
+        and item["fixture_artifact_id"].startswith("artifact:browser-dg:site-drift:")
+        and len(item["selector_diff_digest"]) == 64
+        and len(item["dom_snapshot_digest"]) == 64
+        and len(item["screenshot_digest"]) == 64
+        and len(item["auth_or_network_trace_digest"]) == 64
+        for item in payload["contract"]["real_site_drift_recovery_v2"]
+    )
+    assert set(REQUIRED_HOSTILE_BROWSER_CASES) <= {
+        item["hostile_case"]
+        for item in payload["contract"]["hostile_browser_negative_cases"]
+    }
+    existing_session = next(
+        item
+        for item in payload["contract"]["browser_session_partition_certification"]
+        if item["provider_mode"] == "existing_session_unpartitioned_blocked"
+    )
+    assert existing_session["negative_certification_receipt"] is True
+    assert existing_session["profile_partition_verified"] is False
+    assert existing_session["cookie_jar_isolated"] is False
+    assert existing_session["credential_scope_verified"] is False
+    assert existing_session["network_private_egress_blocked"] is False
+    assert all(
+        item["seed_marker_present_in_raw_fixture"] is True
+        and item["seed_marker_present_in_safe_receipt"] is False
+        and item["scan_passed"] is True
+        and len(item["raw_seed_payload_digest"]) == 64
+        and len(item["seed_marker_digest"]) == 64
+        for item in payload["contract"]["redaction_scan_receipts"]
+    )
 
 
 @pytest.mark.asyncio

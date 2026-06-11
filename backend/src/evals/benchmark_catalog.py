@@ -209,6 +209,16 @@ from src.guardian.live_human_outcome_learning import (
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
     MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SUITE_NAME,
 )
+from src.guardian.generalized_guardian_outcomes import (
+    CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES,
+    CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SUITE_NAME,
+    FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SUITE_NAME,
+    GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES,
+    GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SUITE_NAME,
+    MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
+    MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME,
@@ -1140,6 +1150,64 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Autonomous production learning and solved long-term learning remain blocked.",
         scenario_names=LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SUITE_NAME,
+        label="Generalized guardian outcome study v1",
+        description=(
+            "Pins predeclared multi-task outcome protocols, independent evaluators, consent, fairness, adverse "
+            "events, and bounded claim receipts for Batch DD."
+        ),
+        benchmark_axis="generalized_guardian_outcome_study_v1",
+        operator_summary=(
+            "Generalized guardian outcome evidence now exposes broader decision families and adverse-event review "
+            "before any stronger learning claim can move."
+        ),
+        remaining_gap="Guardian outcome superiority, solved learning, and live-human-outcome superiority remain blocked.",
+        scenario_names=GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SUITE_NAME,
+        label="Full memory provider parity matrix v1",
+        description=(
+            "Pins expanded provider rows across canonical authority, advisory roles, usefulness, freshness, privacy, "
+            "delete/export, stale recall, quarantine, reinstatement, and baseline limitations."
+        ),
+        benchmark_axis="full_memory_provider_parity_matrix_v1",
+        operator_summary=(
+            "Memory-provider parity pressure is represented as a richer matrix while full provider parity remains "
+            "blocked by failed dimensions and review gates."
+        ),
+        remaining_gap="Full memory-provider parity, memory superiority, and best-in-class memory claims remain blocked.",
+        scenario_names=FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SUITE_NAME,
+        label="Causal learning outcome thresholds v1",
+        description=(
+            "Pins counterfactual or controlled designs, confounders, negative controls, threshold rationale, "
+            "promotion review, rollback authority, and no-superiority boundaries."
+        ),
+        benchmark_axis="causal_learning_outcome_thresholds_v1",
+        operator_summary=(
+            "Learning threshold evidence now requires causal design notes and rollback authority before promotion."
+        ),
+        remaining_gap="Generalized causal superiority and autonomous production learning remain blocked.",
+        scenario_names=CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME,
+        label="Memory baseline comparison v1",
+        description=(
+            "Pins named baseline source, version, source freshness caveat, fairness constraints, limitations, and "
+            "pressure-only wording for Batch DD."
+        ),
+        benchmark_axis="memory_baseline_comparison_v1",
+        operator_summary=(
+            "Named memory baselines remain current-source-limited pressure evidence rather than baseline wins."
+        ),
+        remaining_gap="Named baseline wins, full memory-provider parity, and reference-system exceedance remain blocked.",
+        scenario_names=MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

@@ -72,6 +72,7 @@ from src.guardian.brain import (
 )
 from src.guardian.feedback import guardian_feedback_repository
 from src.guardian.learning_arbitration_benchmark import build_guardian_learning_arbitration_report
+from src.guardian.generalized_guardian_outcomes import build_generalized_guardian_outcomes_report
 from src.guardian.independent_learning_memory_parity import build_independent_learning_memory_parity_report
 from src.guardian.longitudinal_guardian_outcomes import build_longitudinal_guardian_outcomes_report
 from src.guardian.live_human_outcome_learning import build_live_human_outcome_learning_report
@@ -3442,6 +3443,7 @@ async def get_operator_benchmark_proof():
         live_human_outcome_learning,
         independent_learning_memory_parity,
         longitudinal_guardian_outcomes,
+        generalized_guardian_outcomes,
         live_replay_benchmark,
         trust_boundary_benchmark,
         secure_capability_host_benchmark,
@@ -3497,6 +3499,7 @@ async def get_operator_benchmark_proof():
         build_live_human_outcome_learning_report(),
         build_independent_learning_memory_parity_report(),
         build_longitudinal_guardian_outcomes_report(),
+        build_generalized_guardian_outcomes_report(),
         build_live_replay_benchmark_report(),
         build_trust_boundary_benchmark_report(),
         build_secure_capability_host_benchmark_report(),
@@ -3559,6 +3562,7 @@ async def get_operator_benchmark_proof():
         str(live_human_outcome_learning["summary"]["benchmark_posture"]),
         str(independent_learning_memory_parity["summary"]["benchmark_posture"]),
         str(longitudinal_guardian_outcomes["summary"]["benchmark_posture"]),
+        str(generalized_guardian_outcomes["summary"]["benchmark_posture"]),
         str(live_replay_benchmark["summary"]["benchmark_posture"]),
         str(trust_boundary_benchmark["summary"]["benchmark_posture"]),
         str(secure_capability_host_benchmark["summary"]["benchmark_posture"]),
@@ -3667,6 +3671,8 @@ async def get_operator_benchmark_proof():
             "longitudinal_guardian_outcomes_claim_boundary": longitudinal_guardian_outcomes["policy"][
                 "claim_boundary"
             ],
+            "generalized_guardian_outcomes_posture": generalized_guardian_outcomes["summary"]["benchmark_posture"],
+            "generalized_guardian_outcomes_claim_boundary": generalized_guardian_outcomes["policy"]["claim_boundary"],
             "live_replay_benchmark_posture": live_replay_benchmark["summary"]["benchmark_posture"],
             "trust_boundary_benchmark_posture": trust_boundary_benchmark["summary"]["benchmark_posture"],
             "secure_capability_host_benchmark_posture": secure_capability_host_benchmark["summary"]["benchmark_posture"],
@@ -3751,6 +3757,7 @@ async def get_operator_benchmark_proof():
         "live_human_outcome_learning": live_human_outcome_learning,
         "independent_learning_memory_parity": independent_learning_memory_parity,
         "longitudinal_guardian_outcomes": longitudinal_guardian_outcomes,
+        "generalized_guardian_outcomes": generalized_guardian_outcomes,
         "live_replay_benchmark": live_replay_benchmark,
         "trust_boundary_benchmark": trust_boundary_benchmark,
         "secure_capability_host_benchmark": secure_capability_host_benchmark,
@@ -3873,6 +3880,11 @@ async def get_operator_independent_learning_memory_parity():
 @router.get("/operator/longitudinal-guardian-outcomes")
 async def get_operator_longitudinal_guardian_outcomes():
     return await build_longitudinal_guardian_outcomes_report()
+
+
+@router.get("/operator/generalized-guardian-outcomes")
+async def get_operator_generalized_guardian_outcomes():
+    return await build_generalized_guardian_outcomes_report()
 
 
 @router.get("/operator/m6-memory-superiority-benchmark")

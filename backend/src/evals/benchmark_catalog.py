@@ -271,6 +271,20 @@ from src.guardian.generalized_guardian_outcomes import (
     MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
     MEMORY_BASELINE_COMPARISON_V1_SUITE_NAME,
 )
+from src.guardian.live_guardian_memory_field_program import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES,
+    INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SUITE_NAME,
+    LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES,
+    LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SUITE_NAME,
+    LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES,
+    LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SUITE_NAME,
+    LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES,
+    LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SUITE_NAME,
+    MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SUITE_NAME,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME,
@@ -1435,6 +1449,89 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Named baseline wins, full memory-provider parity, and reference-system exceedance remain blocked.",
         scenario_names=MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SUITE_NAME,
+        label="Live long-horizon guardian-learning field study v1",
+        description=(
+            "Pins pre-registered live or recorded-live field windows, cohort boundaries, consent, withdrawal, "
+            "anonymization, evaluator independence, adverse-event review, and rollback authority for Batch DL."
+        ),
+        benchmark_axis="live_long_horizon_guardian_learning_field_study_v1",
+        operator_summary=(
+            "Live guardian-memory field evidence now separates real windows from fixtures before any stronger "
+            "learning claim can move."
+        ),
+        remaining_gap="Solved live learning, memory superiority, and full parity remain blocked.",
+        scenario_names=LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SUITE_NAME,
+        label="Memory behavior-change ablation v1",
+        description=(
+            "Pins act, defer, bundle, clarify, approval, stay-silent, recovery, and follow-through behavior changes "
+            "against memory-disabled or memory-limited counterfactuals."
+        ),
+        benchmark_axis="memory_behavior_change_ablation_v1",
+        operator_summary=(
+            "Memory influence is exposed as bounded behavior-change receipts rather than memory superiority."
+        ),
+        remaining_gap="Best-in-class memory and solved long-term learning remain blocked.",
+        scenario_names=MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SUITE_NAME,
+        label="Live memory-provider parity operations v1",
+        description=(
+            "Pins canonical, advisory, degraded, stale, conflicting, privacy-limited, quarantined, and reinstatement "
+            "provider operations with delete/export and canonical-authority receipts."
+        ),
+        benchmark_axis="live_memory_provider_parity_operations_v1",
+        operator_summary=(
+            "Provider operations show quality-gated advisory influence while canonical memory retains authority."
+        ),
+        remaining_gap="Full memory-provider parity and memory superiority remain blocked.",
+        scenario_names=LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SUITE_NAME,
+        label="Independent guardian outcome candidate review v1",
+        description=(
+            "Pins independent longitudinal adjudication, sample and power rationale, fairness and adverse-event "
+            "review, promotion state, and no-superiority/no-baseline-win boundaries."
+        ),
+        benchmark_axis="independent_guardian_outcome_candidate_review_v1",
+        operator_summary=(
+            "Candidate guardian-learning improvements require independent review before promotion."
+        ),
+        remaining_gap="Guardian intelligence superiority and named baseline wins remain blocked.",
+        scenario_names=INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SUITE_NAME,
+        label="Longitudinal learning safety monitor v3",
+        description=(
+            "Pins stale recall, over-personalization, noisy provider evidence, false confidence, privacy regression, "
+            "unsafe intervention, hallucinated obligation, provider drift, conflicting anchors, and ignored correction."
+        ),
+        benchmark_axis="longitudinal_learning_safety_monitor_v3",
+        operator_summary=(
+            "Learning safety monitors expose rollback, quarantine, reinstatement, and operator review receipts."
+        ),
+        remaining_gap="Autonomous production learning and solved long-term learning remain blocked.",
+        scenario_names=LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+        label="Guardian memory false-claim scan v1",
+        description=(
+            "Pins false-claim scan receipts and claim-boundary visibility for guardian learning, memory, provider "
+            "parity, production readiness, full parity, and reference-system exceedance claims."
+        ),
+        benchmark_axis="guardian_memory_false_claim_scan_v1",
+        operator_summary="Batch DL exposes the claims still blocked by the field-program evidence.",
+        remaining_gap="Final parity, production readiness, and reference-system exceedance remain blocked.",
+        scenario_names=GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

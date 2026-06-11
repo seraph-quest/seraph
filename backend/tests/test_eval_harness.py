@@ -146,6 +146,14 @@ from src.guardian.generalized_guardian_outcomes import (
     GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES,
     MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
 )
+from src.guardian.live_guardian_memory_field_program import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES,
+    LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES,
+    LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES,
+    LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
     MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
@@ -675,6 +683,30 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["memory_baseline_comparison_v1_suite_scenario_count_matches"] is True
     assert details["memory_baseline_comparison_v1_suite_axis_matches"] is True
     assert details["memory_baseline_comparison_v1_gate_required"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_suite_present"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_suite_scenario_count_matches"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_suite_axis_matches"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_gate_required"] is True
+    assert details["memory_behavior_change_ablation_v1_suite_present"] is True
+    assert details["memory_behavior_change_ablation_v1_suite_scenario_count_matches"] is True
+    assert details["memory_behavior_change_ablation_v1_suite_axis_matches"] is True
+    assert details["memory_behavior_change_ablation_v1_gate_required"] is True
+    assert details["live_memory_provider_parity_operations_v1_suite_present"] is True
+    assert details["live_memory_provider_parity_operations_v1_suite_scenario_count_matches"] is True
+    assert details["live_memory_provider_parity_operations_v1_suite_axis_matches"] is True
+    assert details["live_memory_provider_parity_operations_v1_gate_required"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_suite_present"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_suite_scenario_count_matches"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_suite_axis_matches"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_gate_required"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_suite_present"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_suite_scenario_count_matches"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_suite_axis_matches"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_gate_required"] is True
+    assert details["guardian_memory_false_claim_scan_v1_suite_present"] is True
+    assert details["guardian_memory_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v1_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -1628,6 +1660,36 @@ def test_run_memory_baseline_comparison_v1_benchmark_suite_passes():
     assert all(result.details["blocked_claims_visible"] for result in summary.results)
 
 
+def test_run_live_guardian_memory_field_program_benchmark_suites_pass():
+    suites = [
+        "live_long_horizon_guardian_learning_field_study_v1",
+        "memory_behavior_change_ablation_v1",
+        "live_memory_provider_parity_operations_v1",
+        "independent_guardian_outcome_candidate_review_v1",
+        "longitudinal_learning_safety_monitor_v3",
+        "guardian_memory_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suites))
+
+    expected_names = set(
+        LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES
+        + MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES
+        + LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES
+        + INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES
+        + LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES
+        + GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["field_program_coverage_visible"] for result in summary.results)
+    assert all(result.details["counterfactual_memory_ablation_visible"] for result in summary.results)
+    assert all(result.details["provider_state_matrix_visible"] for result in summary.results)
+    assert all(result.details["negative_case_matrix_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
 def test_run_benchmark_suites_executes_unique_suite_scenarios():
     summary = asyncio.run(run_benchmark_suites(["governed_improvement"]))
 
@@ -1666,6 +1728,21 @@ def test_batch_dd_scenarios_do_not_collide_with_existing_registry_names():
         + MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES
     )
     duplicates = sorted({name for name in batch_dd_names if scenario_names.count(name) != 1})
+
+    assert duplicates == []
+
+
+def test_batch_dl_scenarios_do_not_collide_with_existing_registry_names():
+    scenario_names = [scenario.name for scenario in available_scenarios()]
+    batch_dl_names = (
+        LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES
+        + MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES
+        + LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES
+        + INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES
+        + LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES
+        + GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    )
+    duplicates = sorted({name for name in batch_dl_names if scenario_names.count(name) != 1})
 
     assert duplicates == []
 
@@ -3181,6 +3258,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "full_memory_provider_parity_matrix_v1" in captured.out
     assert "causal_learning_outcome_thresholds_v1" in captured.out
     assert "memory_baseline_comparison_v1" in captured.out
+    assert "live_long_horizon_guardian_learning_field_study_v1" in captured.out
+    assert "memory_behavior_change_ablation_v1" in captured.out
+    assert "live_memory_provider_parity_operations_v1" in captured.out
+    assert "independent_guardian_outcome_candidate_review_v1" in captured.out
+    assert "longitudinal_learning_safety_monitor_v3" in captured.out
+    assert "guardian_memory_false_claim_scan_v1" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -3297,6 +3380,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "full_memory_provider_parity_matrix_v1",
         "causal_learning_outcome_thresholds_v1",
         "memory_baseline_comparison_v1",
+        "live_long_horizon_guardian_learning_field_study_v1",
+        "memory_behavior_change_ablation_v1",
+        "live_memory_provider_parity_operations_v1",
+        "independent_guardian_outcome_candidate_review_v1",
+        "longitudinal_learning_safety_monitor_v3",
+        "guardian_memory_false_claim_scan_v1",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

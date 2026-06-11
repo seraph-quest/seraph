@@ -3409,6 +3409,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "third_party_package_security_certification_v1" in captured.out
     assert "marketplace_live_corpus_operations_v2" in captured.out
     assert "hostile_package_lifecycle_gauntlet_v1" in captured.out
+    assert "marketplace_security_certification_track_v1" in captured.out
+    assert "production_secure_marketplace_live_ops_v2" in captured.out
+    assert "ecosystem_supply_chain_operations_v1" in captured.out
+    assert "hostile_package_lifecycle_gauntlet_v2" in captured.out
+    assert "publisher_trust_vulnerability_ops_v1" in captured.out
+    assert "marketplace_false_claim_scan_v1" in captured.out
     assert "production_operator_control_parity" in captured.out
     assert "production_parity_train" in captured.out
     assert "long_work_debugging_recovery" in captured.out
@@ -3590,6 +3596,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "third_party_package_security_certification_v1",
         "marketplace_live_corpus_operations_v2",
         "hostile_package_lifecycle_gauntlet_v1",
+        "marketplace_security_certification_track_v1",
+        "production_secure_marketplace_live_ops_v2",
+        "ecosystem_supply_chain_operations_v1",
+        "hostile_package_lifecycle_gauntlet_v2",
+        "publisher_trust_vulnerability_ops_v1",
+        "marketplace_false_claim_scan_v1",
         "long_work_debugging_recovery",
         "operator_control_density",
         "independent_operator_usability_accessibility",

@@ -197,6 +197,20 @@ from src.extensions.full_browser_parity import (
     SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
     SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SUITE_NAME,
 )
+from src.extensions.browser_computer_use_production import (
+    BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SUITE_NAME,
+    BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    BROWSER_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+    BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SUITE_NAME,
+    BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITION_ATTESTATION_V2_SUITE_NAME,
+    CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
+    CREDENTIALED_SITE_RECOVERY_V1_SUITE_NAME,
+    SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
+    SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -1187,6 +1201,96 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Formal certification and full browser parity remain blocked.",
         scenario_names=BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SUITE_NAME,
+        label="Browser computer-use production safety v1",
+        description=(
+            "Pins Batch DO production-safety provider modes, boundary matrices, hostile-page fail-closed behavior, "
+            "and dangerous-action policy receipts above the DG browser parity evidence floor."
+        ),
+        benchmark_axis="browser_computer_use_production_safety_v1",
+        operator_summary=(
+            "Browser/computer-use production safety now has bounded provider, boundary, hostile-page, and "
+            "dangerous-action receipts while safe automation and full browser parity claims remain blocked."
+        ),
+        remaining_gap="Safe autonomous browser/computer-use and full browser parity remain claim-ledger gated.",
+        scenario_names=BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SUITE_NAME,
+        label="Safe browser automation live ops v1",
+        description=(
+            "Pins Batch DO recorded-live safe-target operations, provider degradation, operator takeover, "
+            "dangerous-action blocks, and redacted receipt handling."
+        ),
+        benchmark_axis="safe_browser_automation_live_ops_v1",
+        operator_summary=(
+            "Safe-target browser operations now expose live/fixture labels, fallback decisions, takeover receipts, "
+            "and redacted digests without claiming safe browser automation."
+        ),
+        remaining_gap="Arbitrary website compatibility and safe browser automation claims remain blocked.",
+        scenario_names=SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CREDENTIALED_SITE_RECOVERY_V1_SUITE_NAME,
+        label="Credentialed site recovery v1",
+        description=(
+            "Pins Batch DO test-account recovery receipts for reauth, auth expiry, site drift, provider failure, "
+            "rate limits, anti-bot boundaries, and partial completion."
+        ),
+        benchmark_axis="credentialed_site_recovery_v1",
+        operator_summary=(
+            "Credentialed browser recovery is represented as test-account or safe-target metadata receipts with "
+            "human-review anti-bot boundaries and no raw credential exposure."
+        ),
+        remaining_gap="User credentialed browsing and arbitrary private-page automation remain blocked.",
+        scenario_names=CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SUITE_NAME,
+        label="Browser provider parity candidate v1",
+        description=(
+            "Pins Batch DO provider identity, local/managed/remote-CDP/existing-session support states, "
+            "remote degradation cases, fallback labels, and residual-risk receipts."
+        ),
+        benchmark_axis="browser_provider_parity_candidate_v1",
+        operator_summary=(
+            "Browser providers now expose parity-candidate identity and degradation evidence without silently "
+            "counting staged or unsupported providers as full parity."
+        ),
+        remaining_gap="Managed/remote live-provider attestation and full browser parity remain blocked.",
+        scenario_names=BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_SESSION_PARTITION_ATTESTATION_V2_SUITE_NAME,
+        label="Browser session partition attestation v2",
+        description=(
+            "Pins Batch DO v2 session/profile/cookie/credential/file/clipboard/network/private-data partition "
+            "attestation receipts and explicit existing-session blocks."
+        ),
+        benchmark_axis="browser_session_partition_attestation_v2",
+        operator_summary=(
+            "Browser partition evidence now includes v2 attestation receipts for production-safety review, with "
+            "existing-session attachment still blocked until fresh partition proof exists."
+        ),
+        remaining_gap="Formal certification and arbitrary existing-session safety remain blocked.",
+        scenario_names=BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_FALSE_CLAIM_SCAN_V1_SUITE_NAME,
+        label="Browser false claim scan v1",
+        description=(
+            "Pins Batch DO browser-specific false-claim scan receipts for safe automation, autonomous computer-use, "
+            "full browser parity, production readiness, full parity, superiority, and exceedance wording."
+        ),
+        benchmark_axis="browser_false_claim_scan_v1",
+        operator_summary=(
+            "Browser production-safety wording is now claim-ledger bounded and cannot lift safe automation, "
+            "full browser parity, production readiness, superiority, or exceedance claims."
+        ),
+        remaining_gap="Final source-backed parity/release reconciliation remains future proof work.",
+        scenario_names=BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

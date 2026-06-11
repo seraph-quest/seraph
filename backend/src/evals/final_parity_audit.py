@@ -9,6 +9,8 @@ production-ready evidence.
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import json
 from typing import Any
 
 
@@ -62,6 +64,46 @@ FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES = (
     "false_completion_issue_pr_scan_behavior",
     "false_completion_claim_ledger_replacement_behavior",
     "false_completion_final_gate_behavior",
+)
+PRODUCTION_READINESS_SOAK_V1_SUITE_NAME = "production_readiness_soak_v1"
+PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES = (
+    "production_readiness_runtime_security_soak_behavior",
+    "production_readiness_reach_learning_operator_soak_behavior",
+    "production_readiness_marketplace_browser_soak_behavior",
+    "production_readiness_residual_risk_behavior",
+    "production_readiness_claim_boundary_behavior",
+)
+FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME = "final_full_parity_claim_lift_v1"
+FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES = (
+    "final_full_parity_da_dg_reconciliation_behavior",
+    "final_full_parity_claim_ledger_scl_043_050_behavior",
+    "final_full_parity_broad_claim_block_behavior",
+    "final_full_parity_allowed_wording_behavior",
+    "final_full_parity_critic_disposition_behavior",
+)
+REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME = "reference_system_source_refresh_v3"
+REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES = (
+    "reference_system_source_refresh_v3_urls_dates_behavior",
+    "reference_system_source_refresh_v3_pressure_mapping_behavior",
+    "reference_system_source_refresh_v3_access_caveat_behavior",
+    "reference_system_source_refresh_v3_claim_lift_block_behavior",
+    "reference_system_source_refresh_v3_stale_source_guard_behavior",
+)
+FALSE_COMPLETION_SCAN_V3_SUITE_NAME = "false_completion_scan_v3"
+FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES = (
+    "false_completion_v3_docs_scan_behavior",
+    "false_completion_v3_code_operator_scan_behavior",
+    "false_completion_v3_github_tracking_scan_behavior",
+    "false_completion_v3_stale_pr_closure_behavior",
+    "false_completion_v3_final_gate_behavior",
+)
+BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME = "board_pr_issue_reconciliation_v3"
+BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES = (
+    "board_pr_issue_da_dg_done_merged_passed_behavior",
+    "board_pr_issue_dh_active_branch_behavior",
+    "board_pr_issue_parent_program_state_behavior",
+    "board_pr_issue_stale_pr_closed_behavior",
+    "board_pr_issue_project_field_receipt_behavior",
 )
 FINAL_PARITY_AUDIT_CLAIM_BOUNDARY = (
     "final_claim_lift_audit_permits_only_exact_bounded_wording_not_full_parity"
@@ -151,6 +193,40 @@ POST_CQ_FALSE_COMPLETION_ALLOWED_CONTEXT_MARKERS = (
     "replacement",
     "false-completion",
     "false_completion",
+)
+FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY = (
+    "final_production_parity_gate_exposes_da_dg_soak_readiness_and_claim_reconciliation_without_full_parity_claim_lift"
+)
+FINAL_PRODUCTION_PARITY_ALLOWED_WORDING = (
+    "Seraph has completed a final production-readiness reconciliation and claim-lift evidence gate "
+    "with bounded DA-DG receipts."
+)
+FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS = (
+    "fully_at_parity",
+    "reference_systems_exceeded",
+    "production_ready_product",
+    "secure_private_by_default",
+    "production_security_solved",
+    "ironclaw_class_secure_execution",
+    "openclaw_class_reach",
+    "complete_channel_coverage",
+    "voice_or_multimodal_parity",
+    "always_available_operation",
+    "safe_browser_automation",
+    "safe_autonomous_browser_computer_use",
+    "full_browser_parity",
+    "production_secure_marketplace",
+    "third_party_package_security_solved",
+    "solved_operator_control",
+    "best_cockpit",
+    "world_class_cockpit",
+    "guardian_intelligence_superiority",
+    "solved_live_or_long_term_learning",
+    "live_human_outcome_superiority",
+    "memory_superiority",
+    "full_memory_provider_parity",
+    "exactly_once_or_crash_proof_orchestration",
+    "hardware_backed_tee_cvm_wasm_or_container_isolation_implemented_or_certified",
 )
 
 
@@ -1616,6 +1692,419 @@ async def build_post_cq_claim_readiness_report() -> dict[str, Any]:
         },
         "contract": contract,
         "failure_report": _failure_report(summary, suite_name="post_cq_claim_readiness"),
+        "policy": contract["policy"],
+        "latest_run": {
+            "total": int(getattr(summary, "total", 0) or 0),
+            "passed": int(getattr(summary, "passed", 0) or 0),
+            "failed": int(getattr(summary, "failed", 0) or 0),
+            "duration_ms": int(getattr(summary, "duration_ms", 0) or 0),
+        },
+    }
+
+
+def final_production_parity_policy_payload() -> dict[str, Any]:
+    return {
+        "benchmark_suites": [
+            PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
+            FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
+            REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME,
+            FALSE_COMPLETION_SCAN_V3_SUITE_NAME,
+            BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME,
+        ],
+        "claim_boundary": FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY,
+        "allowed_wording": FINAL_PRODUCTION_PARITY_ALLOWED_WORDING,
+        "source_policy": (
+            "final production-parity wording requires current official/source-backed Hermes, OpenClaw, "
+            "and IronClaw URLs reviewed on 2026-06-11 with manual-source caveats and pressure-only claim use; "
+            "these receipts are not runtime fetch proof"
+        ),
+        "board_policy": (
+            "Batch DH reconciles #475 and #540-#547 after #555 merged, closes stale roadmap PR #548, "
+            "and keeps broad product claims blocked unless the claim ledger permits exact wording"
+        ),
+        "claim_policy": (
+            "the final gate may expose bounded DA-DG production-readiness soak-readiness reconciliation receipts, "
+            "but it does not "
+            "by itself permit full parity, production readiness, superiority, secure/private, OpenClaw-class, "
+            "IronClaw-class, safe-browser, solved-control, or marketplace-superiority wording"
+        ),
+        "receipt_surfaces": [
+            "/api/operator/final-production-parity",
+            "/api/operator/benchmark-proof",
+            "/api/operator/post-cq-claim-readiness",
+            "/api/operator/production-workflow-guarantees",
+            "/api/operator/certified-secure-host",
+            "/api/operator/always-available-reach-media",
+            "/api/operator/generalized-guardian-outcomes",
+            "/api/operator/operator-control-certification",
+            "/api/operator/production-secure-marketplace",
+            "/api/operator/full-browser-parity",
+            "docs/research/19-strategy-claim-ledger.md",
+            "docs/research/20-seraph-agent-parity-and-exceedance-goals.md",
+            "docs/implementation/16-agent-parity-execution-roadmap.md",
+            "docs/implementation/09-benchmark-status.md",
+        ],
+        "blocked_claims": list(FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS),
+        "not_claimed": [
+            "full_product_parity",
+            "reference_systems_exceeded",
+            "production_ready",
+            "secure_private_by_default",
+            "ironclaw_class_secure_execution",
+            "openclaw_class_reach",
+            "safe_autonomous_browser_computer_use",
+            "production_secure_marketplace",
+        ],
+    }
+
+
+def reference_system_source_refresh_v3_receipts() -> list[dict[str, Any]]:
+    receipts = reference_system_source_refresh_v2_receipts()
+    evidence_locators = {
+        "hermes-features-overview": "lines_45_82_cover_memory_delegation_browser_voice_provider_routing_plugins",
+        "hermes-tools-toolsets": "lines_61_82_cover_web_terminal_browser_media_delegation_memory_cron_delivery_mcp",
+        "openclaw-control-ui": "control_ui_docs_cover_pairing_runtime_config_history_pwa_push_auth_media_debugging",
+        "openclaw-browser": "browser_docs_cover_managed_profiles_remote_cdp_existing_session_and_secret_bearing_paths",
+        "openclaw-plugins": "plugin_docs_cover_channel_model_agent_tool_skill_speech_media_web_extension_points",
+        "ironclaw-security-site": "official_site_covers_vaults_endpoint_allowlists_wasm_tee_rust_and_leak_detection",
+        "ironclaw-feature-parity-matrix": "staging_matrix_reviewed_2026_03_10_covers_control_ui_channels_api_diagnostics_extensions",
+    }
+    for receipt in receipts:
+        receipt["checked_on"] = "2026-06-11"
+        receipt["accessed_on"] = "2026-06-11"
+        receipt["verification_method"] = "manual_team_lead_web_review_2026_06_11"
+        receipt["runtime_fetch_performed"] = False
+        receipt["source_refresh_kind"] = "manual_current_source_review_receipt"
+        receipt["source_refresh_version"] = "v3_final_production_parity_gate"
+        receipt["source_freshness_status"] = "manual_sources_reopened_on_2026_06_11"
+        receipt["evidence_locator"] = evidence_locators.get(receipt["source_id"], "current_source_opened")
+        receipt["claim_lift_allowed"] = False
+        receipt["claim_use"] = "current_source_pressure_only"
+        receipt["access_caveat"] = (
+            "Source was manually reviewed during the 2026-06-11 Batch DH review; use only for pressure "
+            "mapping and stale-source guardrails, not as proof of Seraph parity or superiority."
+        )
+    return receipts
+
+
+def final_da_dg_batch_reconciliation_receipts() -> list[dict[str, Any]]:
+    completed_batches = [
+        ("DA", 540, "production_workflow_state_machine_v1", 549, "/api/operator/production-workflow-guarantees"),
+        ("DB", 541, "runtime_isolation_implementation_v1", 550, "/api/operator/certified-secure-host"),
+        ("DC", 542, "always_available_reach_operations_v1", 551, "/api/operator/always-available-reach-media"),
+        ("DD", 543, "generalized_guardian_outcome_study_v1", 552, "/api/operator/generalized-guardian-outcomes"),
+        ("DE", 544, "operator_control_certification_v1", 553, "/api/operator/operator-control-certification"),
+        ("DF", 545, "production_secure_marketplace_v1", 554, "/api/operator/production-secure-marketplace"),
+        ("DG", 546, "safe_autonomous_browser_runtime_v1", 555, "/api/operator/full-browser-parity"),
+    ]
+    receipts = [
+        {
+            "batch": batch,
+            "issue": issue,
+            "primary_suite": suite,
+            "operator_surface": surface,
+            "merged_pr": pr,
+            "status": "done",
+            "project_status": "Done",
+            "project_pr": "Merged",
+            "code_review": "Passed",
+            "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
+            "live_project_verification": "verified_before_batch_dh_branch_start",
+            "operator_visible": True,
+        }
+        for batch, issue, suite, pr, surface in completed_batches
+    ]
+    receipts.append({
+        "batch": "DH",
+        "issue": 547,
+        "primary_suite": PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
+        "operator_surface": "/api/operator/final-production-parity",
+        "merged_pr": None,
+        "status": "in_progress_on_feature_branch",
+        "project_status": "In Progress",
+        "project_pr": "Not Ready",
+        "code_review": "Not Ready",
+        "active_branch": "feat/batch-dh-final-production-parity",
+        "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
+        "live_project_verification": "verified_when_batch_dh_started",
+        "operator_visible": True,
+    })
+    return receipts
+
+
+def production_readiness_soak_v1_receipts() -> list[dict[str, Any]]:
+    rows = [
+        ("runtime_reliability", "DA", "production_workflow_state_machine_v1", "/api/operator/production-workflow-guarantees"),
+        ("trust_boundaries", "DB", "credential_broker_egress_enforcement_v1", "/api/operator/certified-secure-host"),
+        ("presence_and_reach", "DC", "always_available_reach_operations_v1", "/api/operator/always-available-reach-media"),
+        ("guardian_intelligence", "DD", "generalized_guardian_outcome_study_v1", "/api/operator/generalized-guardian-outcomes"),
+        ("operator_control", "DE", "operator_control_certification_v1", "/api/operator/operator-control-certification"),
+        ("ecosystem_and_marketplace", "DF", "production_secure_marketplace_v1", "/api/operator/production-secure-marketplace"),
+        ("browser_computer_use", "DG", "safe_autonomous_browser_runtime_v1", "/api/operator/full-browser-parity"),
+    ]
+    return [
+        {
+            "area": area,
+            "batch": batch,
+            "primary_suite": suite,
+            "operator_surface": surface,
+            "soak_window": "final_batch_dh_representative_receipt_window",
+            "evidence_mode": "representative_cross_surface_reconciliation",
+            "actual_runtime_soak_performed": False,
+            "operational_window": "not_a_live_soak_window",
+            "sample_count": None,
+            "failure_counter_source": "upstream_batch_receipts_only",
+            "raw_receipt_handle": f"operator-dh:{batch.lower()}:{suite}",
+            "raw_receipt_digest": _stable_digest({
+                "area": area,
+                "batch": batch,
+                "suite": suite,
+                "surface": surface,
+            }),
+            "residual_risk": (
+                "soak_readiness_reconciliation_only_not_product_wide_production_ready_claim"
+            ),
+            "claim_lift_allowed": False,
+            "operator_recovery_visible": True,
+            "aggregate_benchmark_visible": True,
+        }
+        for area, batch, suite, surface in rows
+    ]
+
+
+def _stable_digest(payload: dict[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def final_full_parity_claim_lift_v1_receipts() -> list[dict[str, Any]]:
+    rows = [
+        ("SCL-043", "DA", 540, "/api/operator/production-workflow-guarantees"),
+        ("SCL-044", "DB", 541, "/api/operator/certified-secure-host"),
+        ("SCL-045", "DC", 542, "/api/operator/always-available-reach-media"),
+        ("SCL-046", "DD", 543, "/api/operator/generalized-guardian-outcomes"),
+        ("SCL-047", "DE", 544, "/api/operator/operator-control-certification"),
+        ("SCL-048", "DF", 545, "/api/operator/production-secure-marketplace"),
+        ("SCL-049", "DG", 546, "/api/operator/full-browser-parity"),
+        ("SCL-050", "DH", 547, "/api/operator/final-production-parity"),
+    ]
+    receipts = []
+    for claim_id, batch, issue, surface in rows:
+        receipts.append({
+            "claim_id": claim_id,
+            "batch": batch,
+            "issue": issue,
+            "operator_surface": surface,
+            "allowed_wording": (
+                FINAL_PRODUCTION_PARITY_ALLOWED_WORDING
+                if claim_id == "SCL-050"
+                else "bounded DA-DG evidence receipts are visible"
+            ),
+            "claim_lift_allowed": claim_id == "SCL-050",
+            "broad_claim_lift_allowed": False,
+            "blocked_claims": list(FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS),
+            "disposition": "bounded_wording_only_broad_claims_blocked",
+        })
+    return receipts
+
+
+def false_completion_scan_v3_receipts() -> list[dict[str, Any]]:
+    scans = false_completion_scan_v2_receipts()
+    local_scans = [item for item in scans if item.get("scan_mode") == "local_repository_file_scan"]
+    return [
+        {
+            **item,
+            "scan_id": item["scan_id"].replace("post-cq", "batch-dh"),
+            "replacement_rule": "use exact SCL-050 bounded receipt wording or a blocked-claim sentence",
+        }
+        for item in local_scans
+    ] + [
+        {
+            "scan_id": "batch-dh-github-tracking-false-completion-scan",
+            "scan_mode": "external_github_pr_issue_review_performed",
+            "scope": [
+                "parent issue #475",
+                "batch issue #546 after PR #555 merge",
+                "batch issue #547 active branch receipt",
+                "stale roadmap PR #548 closure",
+                "Batch DH PR body before merge",
+            ],
+            "runtime_static_scan": False,
+            "violations_found": 0,
+            "external_scan_status": "performed_after_issue_475_body_refresh",
+            "issue_475_body_refreshed": True,
+            "replacement_rule": "issues and PRs distinguish bounded receipts from product-wide parity",
+        },
+        {
+            "scan_id": "batch-dh-stale-pr-closure-scan",
+            "scan_mode": "github_pr_state_receipt",
+            "scope": ["PR #548"],
+            "stale_pr_number": 548,
+            "stale_pr_state": "CLOSED",
+            "stale_pr_reason": "superseded_dirty_branch_would_delete_merged_da_df_code",
+            "violations_found": 0,
+        },
+    ]
+
+
+def final_production_parity_critic_receipts() -> list[dict[str, Any]]:
+    return [
+        {
+            "review_id": "dh-external-critic-evidence-quality",
+            "role": "Critic/Contrarian",
+            "finding": (
+                "source refresh, production-readiness soak, and GitHub tracking scans must not be represented "
+                "as runtime fetch proof, live soak evidence, or clean external state while stale issue text remains"
+            ),
+            "disposition": "accepted_fixed",
+            "resolution": (
+                "downgraded source receipts to manual review, marked soak-readiness receipts as representative "
+                "reconciliation only, and refreshed #475 DA-DH issue-body rows"
+            ),
+            "operator_visible": True,
+        },
+        {
+            "review_id": "dh-local-critic-stale-pr-548",
+            "role": "Critic/Contrarian",
+            "finding": "PR #548 was stale and dirty; keeping it open made #475 board state falsely show active review",
+            "disposition": "accepted_fixed",
+            "resolution": "closed #548 as superseded and reset #475 PR and Code Review fields to Not Ready",
+            "operator_visible": True,
+        },
+        {
+            "review_id": "dh-critic-no-duplicate-parent",
+            "role": "Critic/Contrarian",
+            "finding": "creating a second full-parity parent would duplicate #475",
+            "disposition": "accepted",
+            "resolution": "reused #475 and #547 as the active final gate",
+            "operator_visible": True,
+        },
+        {
+            "review_id": "dh-critic-claim-boundary",
+            "role": "Critic/Contrarian",
+            "finding": "Batch DH must not imply production readiness or full parity from bounded DA-DG receipts",
+            "disposition": "accepted",
+            "resolution": "operator report exposes bounded allowed wording and keeps broad claims blocked",
+            "operator_visible": True,
+        },
+    ]
+
+
+def build_final_production_parity_contract() -> dict[str, Any]:
+    sources = reference_system_source_refresh_v3_receipts()
+    batches = final_da_dg_batch_reconciliation_receipts()
+    soak = production_readiness_soak_v1_receipts()
+    claim_lift = final_full_parity_claim_lift_v1_receipts()
+    scans = false_completion_scan_v3_receipts()
+    critic = final_production_parity_critic_receipts()
+    policy = final_production_parity_policy_payload()
+    completed_batches = [item for item in batches if item["status"] == "done"]
+    local_scans = [item for item in scans if item.get("scan_mode") == "local_repository_file_scan"]
+    false_completion_violation_count = sum(
+        int(item["violations_found"])
+        for item in scans
+        if isinstance(item.get("violations_found"), int)
+    )
+    return {
+        "summary": {
+            "operator_status": "final_production_parity_gate_visible",
+            "source_receipt_count": len(sources),
+            "competitor_count": len({item["system"] for item in sources}),
+            "current_source_date": "2026-06-11",
+            "completed_da_dg_batch_count": len(completed_batches),
+            "dh_batch_status": next(item["status"] for item in batches if item["batch"] == "DH"),
+            "soak_receipt_count": len(soak),
+            "soak_receipts_are_reconciliation_only": all(
+                item.get("evidence_mode") == "representative_cross_surface_reconciliation"
+                and item.get("actual_runtime_soak_performed") is False
+                for item in soak
+            ),
+            "claim_lift_receipt_count": len(claim_lift),
+            "false_completion_scan_count": len(scans),
+            "false_completion_violation_count": false_completion_violation_count,
+            "all_local_false_completion_scans_clean": all(item.get("violations_found") == 0 for item in local_scans),
+            "critic_disposition_count": len(critic),
+            "all_sources_have_urls_and_dates": all(item.get("url") and item.get("checked_on") for item in sources),
+            "all_sources_are_manual_review_receipts": all(
+                item.get("runtime_fetch_performed") is False
+                and item.get("source_refresh_kind") == "manual_current_source_review_receipt"
+                for item in sources
+            ),
+            "all_sources_reachable_with_caveats": all(
+                item.get("access_status") == "reachable"
+                and item.get("access_caveat")
+                and item.get("competitor_claim_uncertainty")
+                for item in sources
+            ),
+            "all_completed_da_dg_batches_done_merged_passed": all(
+                item["project_status"] == "Done"
+                and item["project_pr"] == "Merged"
+                and item["code_review"] == "Passed"
+                for item in completed_batches
+            ),
+            "dg_merged_pr": next(item for item in batches if item["batch"] == "DG")["merged_pr"],
+            "stale_roadmap_pr_closed": any(item.get("stale_pr_number") == 548 for item in scans),
+            "bounded_final_production_parity_wording_allowed": True,
+            "bounded_final_production_parity_allowed_wording": FINAL_PRODUCTION_PARITY_ALLOWED_WORDING,
+            "full_parity_claim_allowed": False,
+            "reference_systems_exceeded_claim_allowed": False,
+            "production_ready_claim_allowed": False,
+            "secure_private_by_default_claim_allowed": False,
+            "claim_boundary": FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY,
+        },
+        "reference_system_source_refresh_v3": sources,
+        "da_dg_batch_reconciliation_receipts": batches,
+        "production_readiness_soak_v1": soak,
+        "final_full_parity_claim_lift_v1": claim_lift,
+        "false_completion_scan_v3": scans,
+        "critic_disposition_receipts": critic,
+        "policy": policy,
+    }
+
+
+async def _run_final_production_parity_suites():
+    from src.evals.harness import run_benchmark_suites
+
+    return await run_benchmark_suites([
+        PRODUCTION_READINESS_SOAK_V1_SUITE_NAME,
+        FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
+        REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME,
+        FALSE_COMPLETION_SCAN_V3_SUITE_NAME,
+        BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME,
+    ])
+
+
+async def build_final_production_parity_report() -> dict[str, Any]:
+    summary = await _run_final_production_parity_suites()
+    contract = build_final_production_parity_contract()
+    healthy = int(getattr(summary, "failed", 0) or 0) == 0
+    return {
+        "summary": {
+            **contract["summary"],
+            "benchmark_posture": (
+                "final_production_parity_ci_gated_operator_visible"
+                if healthy
+                else "final_production_parity_regressions_detected_operator_visible"
+            ),
+            "scenario_count": (
+                len(PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES)
+                + len(FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES)
+                + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES)
+                + len(FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES)
+                + len(BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES)
+            ),
+            "active_failure_count": int(getattr(summary, "failed", 0) or 0),
+        },
+        "scenario_names": {
+            PRODUCTION_READINESS_SOAK_V1_SUITE_NAME: list(PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES),
+            FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME: list(FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES),
+            REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SUITE_NAME: list(REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES),
+            FALSE_COMPLETION_SCAN_V3_SUITE_NAME: list(FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES),
+            BOARD_PR_ISSUE_RECONCILIATION_V3_SUITE_NAME: list(BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES),
+        },
+        "contract": contract,
+        "failure_report": _failure_report(summary, suite_name="final_production_parity"),
         "policy": contract["policy"],
         "latest_run": {
             "total": int(getattr(summary, "total", 0) or 0),

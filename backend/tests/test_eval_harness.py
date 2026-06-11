@@ -3122,6 +3122,11 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "post_cq_claim_ledger_reconciliation" in captured.out
     assert "reference_system_source_refresh_v2" in captured.out
     assert "false_completion_scan_v2" in captured.out
+    assert "production_readiness_soak_v1" in captured.out
+    assert "final_full_parity_claim_lift_v1" in captured.out
+    assert "reference_system_source_refresh_v3" in captured.out
+    assert "false_completion_scan_v3" in captured.out
+    assert "board_pr_issue_reconciliation_v3" in captured.out
     assert "live_external_orchestration_attestation" in captured.out
     assert "orchestration_crash_recovery_study" in captured.out
     assert "production_sla_orchestration" in captured.out
@@ -3271,6 +3276,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "post_cq_claim_ledger_reconciliation",
         "reference_system_source_refresh_v2",
         "false_completion_scan_v2",
+        "production_readiness_soak_v1",
+        "final_full_parity_claim_lift_v1",
+        "reference_system_source_refresh_v3",
+        "false_completion_scan_v3",
+        "board_pr_issue_reconciliation_v3",
     )
 
 

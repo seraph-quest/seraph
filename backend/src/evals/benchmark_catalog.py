@@ -334,6 +334,20 @@ from src.security.certified_secure_host import (
     RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
     RUNTIME_ISOLATION_IMPLEMENTATION_SUITE_NAME,
 )
+from src.security.production_grade_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES,
+    CREDENTIAL_BROKER_EGRESS_SOAK_SUITE_NAME,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SUITE_NAME,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SUITE_NAME,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SUITE_NAME,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SUITE_NAME,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -2040,6 +2054,97 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="This is covered hostile-case proof, not solved production security.",
         scenario_names=HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SUITE_NAME,
+        label="Production-grade secure capability-host evidence v1",
+        description=(
+            "Pins Batch DJ surface-matrix and receipt-field evidence across shell/process, browser, connector, "
+            "MCP, extension/package, workflow replay, delegation, background execution, provider fallback, "
+            "filesystem, network, and credential paths."
+        ),
+        benchmark_axis="production_grade_secure_capability_host_evidence_v1",
+        operator_summary=(
+            "Production-grade secure-host evidence makes cross-surface boundary fields and blocked security "
+            "claims visible without claiming secure/private-by-default execution."
+        ),
+        remaining_gap=(
+            "This is bounded certification-track receipt proof, not IronClaw-class secure execution or formal "
+            "security certification."
+        ),
+        scenario_names=PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SUITE_NAME,
+        label="Secure-host cross-surface attack chain v1",
+        description=(
+            "Pins Batch DJ hostile chains from prompt injection, connector secrets, browser sessions, packages, "
+            "MCP endpoints, background processes, and provider fallback into fail-closed receipts."
+        ),
+        benchmark_axis="secure_host_cross_surface_attack_chain_v1",
+        operator_summary=(
+            "Cross-surface attack-chain receipts show source surface, destination surface, credential scope, "
+            "session owner, network decision, recovery action, and redaction digest."
+        ),
+        remaining_gap="This is covered-chain proof, not solved production security or safe autonomous computer use.",
+        scenario_names=SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CREDENTIAL_BROKER_EGRESS_SOAK_SUITE_NAME,
+        label="Credential-broker egress soak v1",
+        description=(
+            "Pins Batch DJ field/destination-scoped secret injection, endpoint allowlists, DNS/redirect "
+            "rechecks, revocation epochs, rotation outcomes, private-network denial, and raw-secret leak blocks."
+        ),
+        benchmark_axis="credential_broker_egress_soak_v1",
+        operator_summary=(
+            "Credential-broker egress soak receipts make secret-bearing endpoint decisions and leak-denial "
+            "posture operator-visible."
+        ),
+        remaining_gap="This is bounded fixture-soak proof, not continuous live security certification.",
+        scenario_names=CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=RUNTIME_ISOLATION_ATTESTATION_MATRIX_SUITE_NAME,
+        label="Runtime isolation attestation matrix v1",
+        description=(
+            "Pins Batch DJ implemented runtime boundaries separately from unsupported hardware, TEE, CVM, "
+            "Wasm, container, and formal-certification claims."
+        ),
+        benchmark_axis="runtime_isolation_attestation_matrix_v1",
+        operator_summary=(
+            "Runtime attestation matrix receipts distinguish implemented policy boundaries from substitutes "
+            "and unsupported security claims."
+        ),
+        remaining_gap="This is attestation-matrix proof, not formal certification or hardware-backed isolation.",
+        scenario_names=RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME,
+        label="Secure-host operator recovery authority v1",
+        description=(
+            "Pins Batch DJ deny, quarantine, rotate, rollback, revoke, replay-block, repair, and audit "
+            "authority receipts for secure-host incidents."
+        ),
+        benchmark_axis="secure_host_operator_recovery_authority_v1",
+        operator_summary=(
+            "Secure-host recovery authority makes operator remediation choices and redacted evidence digests "
+            "visible after hostile or degraded paths."
+        ),
+        remaining_gap="This is operator-authority proof, not solved operator control or tamper-proof audit.",
+        scenario_names=SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_HOST_FALSE_CLAIM_SCAN_SUITE_NAME,
+        label="Secure-host false claim scan v1",
+        description=(
+            "Pins Batch DJ false-claim scans for secure/private-by-default, IronClaw-class, hardware-backed, "
+            "formal-certification, production-ready, full-parity, and superiority wording."
+        ),
+        benchmark_axis="secure_host_false_claim_scan_v1",
+        operator_summary="Secure-host false-claim scans keep stronger security claims blocked.",
+        remaining_gap="Static claim scans do not replace independent security review or external certification.",
+        scenario_names=SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

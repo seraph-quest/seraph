@@ -253,6 +253,16 @@ from src.security.certified_secure_host import (
     HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
     RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
 )
+from src.security.production_grade_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES,
+    PRODUCTION_GRADE_SECURE_HOST_BLOCKED_CLAIMS,
+    PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -3247,6 +3257,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == "certified_secure_host_covered_path_ci_gated_operator_visible"
     )
     assert payload["summary"]["certified_secure_host_claim_boundary"] == CERTIFIED_SECURE_HOST_CLAIM_BOUNDARY
+    assert (
+        payload["summary"]["production_grade_secure_host_posture"]
+        == "production_grade_secure_host_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["production_grade_secure_host_claim_boundary"] == (
+        PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["production_grade_secure_host_operator_status"] == (
+        "production_grade_secure_host_receipts_visible"
+    )
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
@@ -4279,6 +4299,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["certified_secure_host"]["policy"]["claim_boundary"] == CERTIFIED_SECURE_HOST_CLAIM_BOUNDARY
     assert "formal_security_certification" in payload["certified_secure_host"]["policy"]["blocked_claims"]
+    assert (
+        payload["production_grade_secure_host"]["summary"]["benchmark_posture"]
+        == "production_grade_secure_host_ci_gated_operator_visible"
+    )
+    assert payload["production_grade_secure_host"]["policy"]["claim_boundary"] == (
+        PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY
+    )
+    assert "ironclaw_class_secure_execution" in payload["production_grade_secure_host"]["policy"]["blocked_claims"]
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["marketplace_lifecycle_maturity"]["summary"]["operator_status"] == (
@@ -6837,6 +6865,100 @@ async def test_operator_certified_secure_host_surface_reports_batch_db_receipts(
         item["case_id"] == "credential_exfiltration" and item["fail_closed"] is True
         for item in payload["contract"]["hostile_runtime_escape_cases"]
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_production_grade_secure_host_surface_reports_batch_dj_receipts(client):
+    resp = await client.get("/api/operator/production-grade-secure-capability-host")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "production_grade_secure_host"
+    assert payload["summary"]["benchmark_posture"] == "production_grade_secure_host_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "production_grade_secure_host_receipts_visible"
+    assert payload["summary"]["surface_count"] >= 12
+    assert payload["summary"]["attack_chain_count"] >= 7
+    assert payload["summary"]["attack_chain_fail_closed_count"] == payload["summary"]["attack_chain_count"]
+    assert payload["summary"]["credential_egress_block_count"] >= 4
+    assert payload["summary"]["credential_leak_count"] == 0
+    assert payload["summary"]["unsupported_boundary_count"] >= 2
+    assert payload["summary"]["operator_recovery_action_count"] >= 8
+    assert payload["summary"]["claim_boundary"] == PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["production_grade_secure_capability_host_evidence_v1"] == list(
+        PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_host_cross_surface_attack_chain_v1"] == list(
+        SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["credential_broker_egress_soak_v1"] == list(
+        CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["runtime_isolation_attestation_matrix_v1"] == list(
+        RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_host_operator_recovery_authority_v1"] == list(
+        SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_host_false_claim_scan_v1"] == list(
+        SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES
+    )
+    assert payload["latest_run"]["failed"] == 0
+    assert "/api/operator/production-grade-secure-capability-host" in payload["policy"]["receipt_surfaces"]
+    assert set(PRODUCTION_GRADE_SECURE_HOST_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "ironclaw_class_secure_execution" in payload["policy"]["blocked_claims"]
+    assert "hardware_backed_isolation" in payload["policy"]["blocked_claims"]
+    assert "formal_security_certification" in payload["policy"]["blocked_claims"]
+    surface_by_id = {
+        item["surface_id"]: item
+        for item in payload["contract"]["surface_matrix"]
+    }
+    assert all(
+        item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/")
+        for item in payload["contract"]["surface_matrix"]
+    )
+    for surface_id in (
+        "authenticated_connector",
+        "external_mcp",
+        "extension_runtime",
+        "workflow_replay",
+        "provider_fallback",
+        "credential",
+    ):
+        assert surface_by_id[surface_id]["credential_scope"] == "field_and_destination_scoped_secret_ref"
+    assert all(item["fail_closed"] is True for item in payload["contract"]["cross_surface_attack_chains"])
+    assert all(item["redaction_digest"] for item in payload["contract"]["cross_surface_attack_chains"])
+    assert all(
+        item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/")
+        for item in payload["contract"]["cross_surface_attack_chains"]
+    )
+    assert all(
+        item["fixture_vs_live"] == "attack_chain_fixture_not_live_external_target"
+        for item in payload["contract"]["cross_surface_attack_chains"]
+    )
+    assert all(
+        item["raw_secret_leaked"] is False
+        and item["dns_redirect_rechecked"] is True
+        and item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/")
+        for item in payload["contract"]["credential_broker_egress_soak"]
+    )
+    assert any(
+        item["surface"] == "hardware_backed_runtime" and item["implemented"] is False
+        for item in payload["contract"]["runtime_isolation_attestation_matrix"]
+    )
+    assert all(
+        item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/")
+        for item in payload["contract"]["runtime_isolation_attestation_matrix"]
+    )
+    assert any(item["action"] == "quarantine" for item in payload["contract"]["operator_recovery_authority"])
+    assert all(
+        item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/")
+        for item in payload["contract"]["operator_recovery_authority"]
+    )
+    false_claim_scan = payload["contract"]["false_claim_scan_receipts"][0]
+    assert false_claim_scan["redacted_receipt_handle"].startswith("seraph://receipts/batch-dj/")
+    assert false_claim_scan["validation_command"] == "python3 scripts/check_strategy_claims.py"
+    assert false_claim_scan["forbidden_hit_count"] == 0
+    assert false_claim_scan["blocked_claims_found"] == []
 
 
 @pytest.mark.asyncio

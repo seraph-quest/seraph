@@ -107,6 +107,16 @@ from src.extensions.marketplace_production_security import (
     PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
     PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
 )
+from src.extensions.post_dp_marketplace_lifecycle_gap_closure import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
@@ -2413,6 +2423,38 @@ def test_run_marketplace_production_security_benchmark_suites_pass():
     assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
 
 
+def test_run_post_dp_marketplace_lifecycle_benchmark_suites_pass():
+    suite_names = [
+        "post_dp_capability_marketplace_lifecycle_gap_closure_v1",
+        "marketplace_lifecycle_operations_v3",
+        "package_review_waiver_policy_v2",
+        "marketplace_vulnerability_monitoring_v2",
+        "hostile_package_lifecycle_gauntlet_v3",
+        "marketplace_rollback_quarantine_diagnostics_v2",
+        "marketplace_secure_host_audit_integration_v1",
+        "marketplace_lifecycle_false_claim_scan_v2",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert set(POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES) <= result_names
+    assert set(PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES) <= result_names
+    assert set(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES) <= result_names
+    assert all(result.details["lifecycle_receipt_fields_visible"] is True for result in summary.results)
+    assert all(result.details["waiver_denial_policy_visible"] is True for result in summary.results)
+    assert all(result.details["rollback_quarantine_diagnostics_visible"] is True for result in summary.results)
+    assert all(result.details["secure_host_audit_integration_visible"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
 def test_run_live_browser_task_depth_benchmark_suite_passes():
     summary = asyncio.run(run_benchmark_suites(["live_browser_task_depth"]))
 
@@ -3951,6 +3993,14 @@ def test_main_lists_available_benchmark_suites(capsys):
         "hostile_package_lifecycle_gauntlet_v2",
         "publisher_trust_vulnerability_ops_v1",
         "marketplace_false_claim_scan_v1",
+        "post_dp_capability_marketplace_lifecycle_gap_closure_v1",
+        "marketplace_lifecycle_operations_v3",
+        "package_review_waiver_policy_v2",
+        "marketplace_vulnerability_monitoring_v2",
+        "hostile_package_lifecycle_gauntlet_v3",
+        "marketplace_rollback_quarantine_diagnostics_v2",
+        "marketplace_secure_host_audit_integration_v1",
+        "marketplace_lifecycle_false_claim_scan_v2",
         "long_work_debugging_recovery",
         "operator_control_density",
         "independent_operator_usability_accessibility",

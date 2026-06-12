@@ -185,6 +185,24 @@ from src.extensions.marketplace_production_security import (
     PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
     PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SUITE_NAME,
 )
+from src.extensions.post_dp_marketplace_lifecycle_gap_closure import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SUITE_NAME,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SUITE_NAME,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SUITE_NAME,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SUITE_NAME,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SUITE_NAME,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SUITE_NAME,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SUITE_NAME,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -3460,6 +3478,143 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "A clean marketplace scan does not lift final parity, production readiness, or superiority claims."
         ),
         scenario_names=MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SUITE_NAME,
+        label="Post-DP capability marketplace lifecycle gap closure v1",
+        description=(
+            "Pins Batch DV post-DP marketplace lifecycle receipts that bind DN marketplace production-security "
+            "evidence and DR secure-host evidence to concrete lifecycle operations and operator audit receipts."
+        ),
+        benchmark_axis="post_dp_capability_marketplace_lifecycle_gap_closure_v1",
+        operator_summary=(
+            "DV gap closure is judged by lifecycle operation receipts, explicit claim boundaries, secure-host "
+            "integration, and operator-visible audit evidence without duplicating DN/DR scope."
+        ),
+        remaining_gap=(
+            "This closes lifecycle receipt gaps but does not prove a production-secure marketplace or full parity."
+        ),
+        scenario_names=POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SUITE_NAME,
+        label="Marketplace lifecycle operations v3",
+        description=(
+            "Pins install, update, downgrade, disable, rollback, quarantine, re-entry, and failed-update recovery "
+            "receipts with provenance, signatures, publisher, SBOM/dependency, vulnerability, compatibility, "
+            "permission, trust-tier, secure-host, and audit fields."
+        ),
+        benchmark_axis="marketplace_lifecycle_operations_v3",
+        operator_summary=(
+            "Marketplace lifecycle operations must expose complete package, permission, trust-tier, rollback, and "
+            "operator audit receipts for every risky transition."
+        ),
+        remaining_gap=(
+            "Lifecycle receipt coverage is bounded fixture evidence and not full marketplace parity."
+        ),
+        scenario_names=MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=PACKAGE_REVIEW_WAIVER_POLICY_V2_SUITE_NAME,
+        label="Package review waiver policy v2",
+        description=(
+            "Pins high/critical package-review denial behavior, explicit waiver scope and expiry checks, expired "
+            "or out-of-scope waiver denials, retest evidence, and operator receipts."
+        ),
+        benchmark_axis="package_review_waiver_policy_v2",
+        operator_summary=(
+            "Package review gates must deny critical/high risk unless waiver scope, expiry, package, finding, and "
+            "retest evidence are explicit and current."
+        ),
+        remaining_gap=(
+            "Waiver enforcement evidence does not constitute formal package-security certification."
+        ),
+        scenario_names=PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_VULNERABILITY_MONITORING_V2_SUITE_NAME,
+        label="Marketplace vulnerability monitoring v2",
+        description=(
+            "Pins scanner freshness, dependency impact, publisher key revocation, and critical/high fail-closed "
+            "marketplace vulnerability monitoring receipts."
+        ),
+        benchmark_axis="marketplace_vulnerability_monitoring_v2",
+        operator_summary=(
+            "Vulnerability monitoring must keep stale scanners, dependency impact, revoked publisher keys, and "
+            "critical/high denials visible to operators."
+        ),
+        remaining_gap=(
+            "Monitoring receipts are not solved third-party package security or ecosystem superiority."
+        ),
+        scenario_names=MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SUITE_NAME,
+        label="Hostile package lifecycle gauntlet v3",
+        description=(
+            "Pins malicious update, rollback bypass, quarantine bypass, runtime-boundary, permission-drift, and "
+            "publisher-key hostile lifecycle denial receipts."
+        ),
+        benchmark_axis="hostile_package_lifecycle_gauntlet_v3",
+        operator_summary=(
+            "Hostile lifecycle v3 fixtures must deny runtime contribution, quarantine or roll back, and expose "
+            "operator diagnostics before re-entry."
+        ),
+        remaining_gap=(
+            "Hostile lifecycle drills remain bounded evidence and do not certify arbitrary third-party packages."
+        ),
+        scenario_names=HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SUITE_NAME,
+        label="Marketplace rollback quarantine diagnostics v2",
+        description=(
+            "Pins failed-update, rollback, and quarantine re-entry diagnostics for compatibility, permission drift, "
+            "dependency, scanner, publisher, and runtime-boundary causes."
+        ),
+        benchmark_axis="marketplace_rollback_quarantine_diagnostics_v2",
+        operator_summary=(
+            "Rollback and quarantine diagnostics must identify the exact lifecycle failure cause and operator "
+            "action instead of only reporting a generic failed update."
+        ),
+        remaining_gap=(
+            "Diagnostics improve operator recovery but do not prove production readiness."
+        ),
+        scenario_names=MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SUITE_NAME,
+        label="Marketplace secure host audit integration v1",
+        description=(
+            "Pins marketplace lifecycle integration with secure capability-host runtime profiles, permission-delta "
+            "review, credential and egress rechecks, operator authority, and audit chains."
+        ),
+        benchmark_axis="marketplace_secure_host_audit_integration_v1",
+        operator_summary=(
+            "Marketplace lifecycle operations must pass through secure-host permission and audit gates before "
+            "runtime contribution, rollback, quarantine, or re-entry."
+        ),
+        remaining_gap=(
+            "Secure-host integration receipts do not imply hardware-backed isolation or formal security certification."
+        ),
+        scenario_names=MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Marketplace lifecycle false-claim scan v2",
+        description=(
+            "Pins Batch DV false-claim scan receipts for blocked production-secure marketplace, solved package "
+            "security, full-marketplace-parity, production-readiness, and reference-exceedance wording."
+        ),
+        benchmark_axis="marketplace_lifecycle_false_claim_scan_v2",
+        operator_summary=(
+            "Marketplace lifecycle false-claim scans must show blocked claims checked, zero forbidden hits, allowed "
+            "bounded wording, and residual final-gate risk."
+        ),
+        remaining_gap=(
+            "A clean DV scan does not lift DX final parity, production readiness, or superiority claims."
+        ),
+        scenario_names=MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LONG_WORK_DEBUGGING_RECOVERY_SUITE_NAME,

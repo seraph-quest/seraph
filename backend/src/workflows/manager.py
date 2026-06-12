@@ -95,6 +95,14 @@ def _run_durable_state_write(coro) -> Any | None:
         return None
 
 
+def _is_missing_durable_state_schema_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    durable_state_tables = ("workflow_run_states", "workflow_step_states")
+    return any(table in message for table in durable_state_tables) and (
+        "no such table" in message or "does not exist" in message
+    )
+
+
 class DurableWorkflowStateUnavailable(RuntimeError):
     """Raised when a workflow cannot safely continue without durable state."""
 
@@ -103,6 +111,9 @@ def _run_required_durable_state_write(coro, *, phase: str) -> Any:
     try:
         return _run_async(coro)
     except Exception as exc:
+        if _is_missing_durable_state_schema_error(exc):
+            logger.warning("Durable workflow state required write skipped during %s: %s", phase, exc)
+            return None
         logger.warning("Durable workflow state required write failed during %s: %s", phase, exc)
         raise DurableWorkflowStateUnavailable(
             f"Durable workflow state unavailable before {phase}; refusing unsafe workflow continuation."

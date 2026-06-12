@@ -863,6 +863,38 @@ def test_workflow_tool_fails_closed_before_tool_call_when_required_durable_state
     assert durable_repository.record_step_completed.await_count == 0
 
 
+def test_workflow_tool_allows_partial_migration_missing_durable_state_tables():
+    workflow = Workflow(
+        name="partial-migration",
+        description="Allows local partial migration runs",
+        inputs={"query": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+        ],
+        requires_tools=["web_search"],
+        result_template="{{ steps.search.result }}",
+    )
+    search = DummyTool("web_search", lambda query: f"fresh result for {query}")
+    workflow_tool = WorkflowTool(workflow, {"web_search": search})
+    missing_run_table = RuntimeError("sqlite3.OperationalError: no such table: workflow_run_states")
+    missing_step_table = RuntimeError("sqlite3.OperationalError: no such table: workflow_step_states")
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(side_effect=missing_run_table),
+        record_step_started=AsyncMock(side_effect=missing_step_table),
+        record_step_completed=AsyncMock(side_effect=missing_step_table),
+        record_step_failed=AsyncMock(side_effect=missing_step_table),
+        finish_run=AsyncMock(side_effect=missing_run_table),
+    )
+
+    with patch("src.workflows.manager.workflow_state_repository", durable_repository):
+        result = workflow_tool(query="seraph")
+
+    assert result == "fresh result for seraph"
+    assert search.calls == [{"query": "seraph"}]
+    assert durable_repository.create_run.await_count == 1
+    assert durable_repository.record_step_started.await_count == 1
+
+
 def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
     workflow = Workflow(
         name="delegation-replay",

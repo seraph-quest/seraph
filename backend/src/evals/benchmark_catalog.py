@@ -281,6 +281,20 @@ from src.extensions.reach_voice_production_ops import (
     VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
     VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SUITE_NAME,
 )
+from src.extensions.post_dp_reach_channel_gap_closure import (
+    CHANNEL_DEGRADED_RECOVERY_V2_SCENARIO_NAMES,
+    CHANNEL_DEGRADED_RECOVERY_V2_SUITE_NAME,
+    GUARDIAN_REACH_CONTINUITY_V2_SCENARIO_NAMES,
+    GUARDIAN_REACH_CONTINUITY_V2_SUITE_NAME,
+    POST_DP_REACH_CHANNEL_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_REACH_CHANNEL_GAP_CLOSURE_SUITE_NAME,
+    REACH_CHANNEL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    REACH_CHANNEL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    SELECTED_REACH_SURFACE_READINESS_V2_SCENARIO_NAMES,
+    SELECTED_REACH_SURFACE_READINESS_V2_SUITE_NAME,
+    VOICE_MEDIA_PRIVACY_FALLBACK_V2_SCENARIO_NAMES,
+    VOICE_MEDIA_PRIVACY_FALLBACK_V2_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -961,6 +975,94 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "Claim lifting still requires future evidence, current-source review, and final claim-ledger approval."
         ),
         scenario_names=REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_REACH_CHANNEL_GAP_CLOSURE_SUITE_NAME,
+        label="Post-DP reach/channel gap closure v1",
+        description=(
+            "Pins Batch DS post-DP reach/channel gap-closure receipts for selected surface readiness, "
+            "guardian continuity, privacy fallback, safe redaction, and blocked reach claims."
+        ),
+        benchmark_axis="post_dp_reach_channel_gap_closure",
+        operator_summary=(
+            "Reach proof now exposes post-DP selected-surface gap-closure receipts while keeping "
+            "OpenClaw-class reach, always-available operation, and voice/media parity wording blocked."
+        ),
+        remaining_gap=(
+            "Complete channel coverage, always-available operation, voice/media parity, production readiness, "
+            "full parity, and reach superiority remain blocked."
+        ),
+        scenario_names=POST_DP_REACH_CHANNEL_GAP_CLOSURE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SELECTED_REACH_SURFACE_READINESS_V2_SUITE_NAME,
+        label="Selected reach surface readiness v2",
+        description=(
+            "Pins Batch DS selected native-notification and websocket reach readiness receipts for pairing, "
+            "consent, revocation, provider identity, rate-limit policy, abuse handling, outage fallback, "
+            "offline recovery, staged channel gaps, and approval authority."
+        ),
+        benchmark_axis="selected_reach_surface_readiness_v2",
+        operator_summary=(
+            "Selected native-notification and websocket reach surfaces now expose readiness receipts without "
+            "claiming complete channel coverage."
+        ),
+        remaining_gap="Unselected channels and OpenClaw-class reach remain future proof work.",
+        scenario_names=SELECTED_REACH_SURFACE_READINESS_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CHANNEL_DEGRADED_RECOVERY_V2_SUITE_NAME,
+        label="Channel degraded recovery v2",
+        description=(
+            "Pins Batch DS provider outage, rate-limit, abuse-storm, offline, fallback, revocation recheck, "
+            "safe mutation block, and operator-visible recovery receipts."
+        ),
+        benchmark_axis="channel_degraded_recovery_v2",
+        operator_summary=(
+            "Reach proof now exposes post-DP degraded recovery receipts while keeping always-available claims blocked."
+        ),
+        remaining_gap="Provider-wide incident SLAs and always-available reach remain blocked.",
+        scenario_names=CHANNEL_DEGRADED_RECOVERY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_REACH_CONTINUITY_V2_SUITE_NAME,
+        label="Guardian reach continuity v2",
+        description=(
+            "Pins Batch DS guardian-aware reach continuity receipts for thread, memory, approval, handoff, "
+            "timing, restraint, replay authority, audit, and unsafe-authority blocking."
+        ),
+        benchmark_axis="guardian_reach_continuity_v2",
+        operator_summary=(
+            "Reach proof now exposes guardian context improving timing, restraint, and continuity for selected surfaces."
+        ),
+        remaining_gap="Generalized daily-life reach superiority remains blocked.",
+        scenario_names=GUARDIAN_REACH_CONTINUITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=VOICE_MEDIA_PRIVACY_FALLBACK_V2_SUITE_NAME,
+        label="Voice/media privacy fallback v2",
+        description=(
+            "Pins Batch DS STT, TTS, voice-command, and media-analysis privacy/fallback receipts for correction, "
+            "deletion, revocation, memory review, provider fallback, and unsafe-action denial."
+        ),
+        benchmark_axis="voice_media_privacy_fallback_v2",
+        operator_summary=(
+            "Voice/media reach proof now exposes privacy and fallback receipts while keeping voice/media parity blocked."
+        ),
+        remaining_gap="Voice/media parity, multimodal parity, and production STT/TTS solved claims remain blocked.",
+        scenario_names=VOICE_MEDIA_PRIVACY_FALLBACK_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REACH_CHANNEL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Reach/channel false-claim scan v2",
+        description=(
+            "Pins Batch DS false-claim scan receipts that keep OpenClaw-class reach, complete channel coverage, "
+            "always-available operation, voice/media parity, production readiness, full parity, and exceedance blocked."
+        ),
+        benchmark_axis="reach_channel_false_claim_scan_v2",
+        operator_summary="Reach/channel proof now exposes DS false-claim scan receipts.",
+        remaining_gap="Claim lifting still requires stronger evidence and exact claim-ledger permission.",
+        scenario_names=REACH_CHANNEL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,

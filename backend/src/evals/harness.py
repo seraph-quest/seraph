@@ -291,6 +291,33 @@ from src.extensions.browser_computer_use_production import (
     SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SUITE_NAME,
     build_browser_computer_use_production_contract,
 )
+from src.extensions.post_dp_browser_computer_use_reliability import (
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SUITE_NAME,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SUITE_NAME,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SUITE_NAME,
+    BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES,
+    BROWSER_PROVIDER_DEGRADATION_V2_SUITE_NAME,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SUITE_NAME,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SUITE_NAME,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_BLOCKED_CLAIMS,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_CLAIM_BOUNDARY,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SUITE_NAME,
+    REQUIRED_DW_BOUNDARIES,
+    REQUIRED_DW_DEGRADATION_CASES,
+    REQUIRED_DW_HOSTILE_CASES,
+    REQUIRED_DW_PROVIDER_MODES,
+    REQUIRED_DW_RECOVERY_CASES,
+    REQUIRED_DW_SITE_DRIFT_CASES,
+    build_post_dp_browser_computer_use_reliability_contract,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_CLAIM_BOUNDARY,
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
@@ -15210,6 +15237,181 @@ async def _eval_browser_computer_use_production_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_dp_browser_computer_use_reliability_behavior() -> dict[str, Any]:
+    contract = build_post_dp_browser_computer_use_reliability_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    provider_reliability = contract["provider_reliability"]
+    boundaries = contract["session_boundary_enforcement"]
+    credentialed_recovery = contract["credentialed_recovery"]
+    site_drift = contract["site_drift_recovery"]
+    hostile = contract["hostile_page_safety"]
+    degradation = contract["provider_degradation"]
+    false_claim_scan = contract["false_claim_scan"]
+    validator = contract["negative_validator"]
+    suites = benchmark_suite_report()
+    suite_counts = {item["name"]: item["scenario_count"] for item in suites}
+    gate_policy = evolution_benchmark_gate_policy()
+    required_surfaces = {
+        "/api/operator/post-dp-browser-computer-use-reliability",
+        "/api/operator/browser-computer-use-production",
+        "/api/operator/full-browser-parity",
+        "/api/operator/benchmark-proof",
+    }
+    safe_receipts = [
+        item["safe_receipt"]
+        for item in [
+            *provider_reliability,
+            *boundaries,
+            *credentialed_recovery,
+            *site_drift,
+            *hostile,
+            *degradation,
+            false_claim_scan,
+        ]
+    ]
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "post_dp_browser_computer_use_reliability_receipts_visible"
+        ),
+        "post_dp_suite_visible": (
+            suite_counts[POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SUITE_NAME]
+            == len(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES)
+        ),
+        "provider_reliability_suite_visible": (
+            suite_counts[BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SUITE_NAME]
+            == len(BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES)
+        ),
+        "session_boundary_suite_visible": (
+            suite_counts[BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SUITE_NAME]
+            == len(BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES)
+        ),
+        "credentialed_recovery_suite_visible": (
+            suite_counts[BROWSER_CREDENTIALED_RECOVERY_V2_SUITE_NAME]
+            == len(BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES)
+        ),
+        "site_drift_suite_visible": (
+            suite_counts[BROWSER_SITE_DRIFT_RECOVERY_V3_SUITE_NAME]
+            == len(BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES)
+        ),
+        "hostile_page_suite_visible": (
+            suite_counts[BROWSER_HOSTILE_PAGE_SAFETY_V2_SUITE_NAME]
+            == len(BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES)
+        ),
+        "provider_degradation_suite_visible": (
+            suite_counts[BROWSER_PROVIDER_DEGRADATION_V2_SUITE_NAME]
+            == len(BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES)
+        ),
+        "false_claim_scan_suite_visible": (
+            suite_counts[BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SUITE_NAME]
+            == len(BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+        ),
+        "non_duplicate_delta_matrix_visible": summary["non_duplicate_delta_matrix_visible"] is True
+        and {item["predecessor_issue"] for item in policy["non_duplicate_delta_matrix"]}
+        == {"#496", "#511", "#529", "#546", "#561", "#563"},
+        "artifact_provenance_complete": summary["artifact_provenance_complete"] is True
+        and summary["artifact_secret_scan_clean"] is True
+        and all(item["artifact_handle"] and len(item["artifact_body_digest"]) == 64 for item in provider_reliability),
+        "provider_reliability_visible": summary["required_provider_modes_covered"] is True
+        and set(REQUIRED_DW_PROVIDER_MODES) <= {item["provider_mode"] for item in provider_reliability}
+        and summary["provider_identity_visible"] is True
+        and summary["provider_degradation_operator_visible"] is True
+        and summary["silent_fallback_blocked"] is True
+        and summary["operator_takeover_visible"] is True,
+        "session_boundaries_enforced": summary["required_boundaries_covered"] is True
+        and set(REQUIRED_DW_BOUNDARIES) <= {item["boundary"] for item in boundaries}
+        and summary["all_boundaries_enforced"] is True
+        and summary["boundary_leak_count"] == 0
+        and summary["existing_session_unpartitioned_blocked"] is True
+        and all(
+            item["enforced"] is True
+            and item["raw_secret_exposed"] is False
+            and item["credential_leak_count"] == 0
+            and item["cookie_leak_count"] == 0
+            and item["clipboard_leak_count"] == 0
+            and item["private_data_leak_count"] == 0
+            and item["unreviewed_file_mutation_allowed"] is False
+            for item in boundaries
+        ),
+        "credentialed_recovery_fails_closed": summary["credentialed_recovery_cases_covered"] is True
+        and set(REQUIRED_DW_RECOVERY_CASES) <= {item["recovery_case"] for item in credentialed_recovery}
+        and summary["credentialed_recovery_preserves_partitions"] is True
+        and summary["credentialed_recovery_fails_closed"] is True
+        and all(item["credential_surface"] == "scoped_secret_ref_only" for item in credentialed_recovery),
+        "site_drift_preserves_authority": summary["site_drift_cases_covered"] is True
+        and set(REQUIRED_DW_SITE_DRIFT_CASES) <= {item["drift_case"] for item in site_drift}
+        and summary["site_drift_preserves_approval_audit_partition"] is True,
+        "hostile_pages_fail_closed": summary["hostile_cases_covered"] is True
+        and set(REQUIRED_DW_HOSTILE_CASES) <= {item["hostile_case"] for item in hostile}
+        and summary["hostile_cases_fail_closed"] is True
+        and summary["dangerous_actions_denied"] is True,
+        "provider_degradation_fails_closed": summary["provider_degradation_cases_covered"] is True
+        and set(REQUIRED_DW_DEGRADATION_CASES) <= {item["degradation_case"] for item in degradation}
+        and summary["provider_degradation_fails_closed"] is True,
+        "safe_receipts_redacted": summary["safe_receipts_redacted"] is True
+        and all(
+            receipt["redaction_layer"] == "post_dp_browser_computer_use_reliability_v1"
+            and receipt["redaction_degraded"] is False
+            and receipt["contains_secret"] is False
+            and receipt["contains_cookie"] is False
+            and receipt["contains_raw_dom"] is False
+            and receipt["contains_screenshot"] is False
+            and receipt["contains_clipboard_content"] is False
+            and receipt["contains_downloaded_filename"] is False
+            and receipt["contains_profile_dir"] is False
+            and receipt["contains_download_path"] is False
+            and len(receipt["evidence_body_digest"]) == 64
+            and len(receipt["sanitized_payload_digest"]) == 64
+            and len(receipt["tamper_evident_digest"]) == 64
+            for receipt in safe_receipts
+        ),
+        "negative_validator_clean": validator["passes"] is True
+        and validator["failure_count"] == 0
+        and validator["regressions_detected"] is False,
+        "false_claim_scan_command_backed": summary["false_claim_scan_command_executed"] is True
+        and summary["false_claim_scan_clean"] is True
+        and false_claim_scan["validation_command"] == "python3 scripts/check_strategy_claims.py"
+        and false_claim_scan["command_exit_code"] == 0
+        and false_claim_scan["forbidden_hit_count"] == 0
+        and set(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_BLOCKED_CLAIMS)
+        <= set(false_claim_scan["blocked_claims_checked"]),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_BLOCKED_CLAIMS)
+        <= set(policy["blocked_claims"]),
+        "browser_claims_blocked": summary["safe_browser_automation_claim_allowed"] is False
+        and summary["full_browser_parity_claim_allowed"] is False
+        and summary["openclaw_class_browser_reach_claim_allowed"] is False
+        and summary["production_ready_claim_allowed"] is False
+        and summary["reference_systems_exceeded_claim_allowed"] is False,
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "prior_do_boundary_visible": summary["prior_do_boundary_visible"] is True,
+        "post_dp_browser_computer_use_reliability_gate_required": (
+            POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_live_provider_reliability_v2_gate_required": (
+            BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_session_boundary_enforcement_v3_gate_required": (
+            BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_credentialed_recovery_v2_gate_required": (
+            BROWSER_CREDENTIALED_RECOVERY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_site_drift_recovery_v3_gate_required": (
+            BROWSER_SITE_DRIFT_RECOVERY_V3_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_hostile_page_safety_v2_gate_required": (
+            BROWSER_HOSTILE_PAGE_SAFETY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_provider_degradation_v2_gate_required": (
+            BROWSER_PROVIDER_DEGRADATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "browser_computer_use_false_claim_scan_v2_gate_required": (
+            BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 def _m5_operating_layer_fixture() -> dict[str, Any]:
     scheduled_jobs = [
         {
@@ -25859,6 +26061,102 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_browser_computer_use_production_behavior,
         )
         for name in BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records post-DP browser/computer-use reliability gap-closure receipts and a "
+                "non-duplication delta matrix over CH, CP, CY, DG, DO, and DP."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records selected local, managed, and remote-CDP provider identity, degradation, "
+                "fallback, and operator-takeover receipts with no silent fallback."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records session, profile, cookie, credential, download, upload, filesystem, "
+                "clipboard, network, and private-data boundary enforcement under recovery pressure."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records credentialed test-account recovery with approval scope, audit visibility, "
+                "session partition preservation, and anti-bot human review."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records site-drift recovery receipts that preserve approval, audit, partition, and "
+                "operator takeover boundaries."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records hostile-page and dangerous-action fail-closed receipts with redacted operator "
+                "evidence and no credential, cookie, clipboard, or private-data leaks."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records managed/remote provider degradation, stale profile, token-missing, screenshot "
+                "stream, and labeled local fallback receipts."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="browser",
+            description=(
+                "Batch DW records command-backed false-claim scan receipts that keep safe browser automation, "
+                "OpenClaw-class reach, full browser parity, production readiness, and exceedance blocked."
+            ),
+            runner=_eval_post_dp_browser_computer_use_reliability_behavior,
+        )
+        for name in BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     ),
     EvalScenario(
         name="live_replay_fixture_contract_behavior",

@@ -132,6 +132,18 @@ from src.extensions.marketplace_production_security import (
     PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
     PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
 )
+from src.extensions.post_dp_marketplace_lifecycle_gap_closure import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS,
+    POST_DP_MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_PROVIDER_USABILITY_BLOCKED_CLAIMS,
@@ -3684,6 +3696,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         "marketplace_production_security_receipts_visible"
     )
     assert (
+        payload["summary"]["post_dp_marketplace_lifecycle_posture"]
+        == "post_dp_marketplace_lifecycle_gap_closure_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["post_dp_marketplace_lifecycle_claim_boundary"]
+        == POST_DP_MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["post_dp_marketplace_lifecycle_operator_status"] == (
+        "post_dp_marketplace_lifecycle_gap_closure_receipts_visible"
+    )
+    assert (
         payload["summary"]["browser_provider_usability_posture"]
         == "browser_provider_usability_ci_gated_operator_visible"
     )
@@ -3848,6 +3871,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert set(MARKETPLACE_PRODUCTION_SECURITY_BLOCKED_CLAIMS) <= set(
         payload["marketplace_production_security"]["policy"]["blocked_claims"]
+    )
+    assert payload["post_dp_marketplace_lifecycle"]["summary"]["required_lifecycle_operations_covered"] is True
+    assert payload["post_dp_marketplace_lifecycle"]["summary"]["diagnostic_causes_covered"] is True
+    assert payload["post_dp_marketplace_lifecycle"]["summary"]["secure_host_permissions_integrated"] is True
+    assert payload["post_dp_marketplace_lifecycle"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["post_dp_marketplace_lifecycle"]["summary"]["false_claim_scan_clean"] is True
+    assert payload["post_dp_marketplace_lifecycle"]["policy"]["claim_boundary"] == (
+        POST_DP_MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
+    )
+    assert set(POST_DP_MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS) <= set(
+        payload["post_dp_marketplace_lifecycle"]["policy"]["blocked_claims"]
     )
     assert (
         "operator_control_population_study"
@@ -5436,6 +5470,56 @@ async def test_operator_marketplace_production_security_surface_reports_batch_dn
     claim_scan = payload["contract"]["marketplace_false_claim_scan"]
     assert claim_scan["forbidden_hit_count"] == 0
     assert "formal_package_security_certification" in claim_scan["blocked_claims_checked"]
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dp_marketplace_lifecycle_surface_reports_batch_dv_receipts(client):
+    resp = await client.get("/api/operator/post-dp-marketplace-lifecycle-gap-closure")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "post_dp_marketplace_lifecycle_gap_closure_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == (
+        "post_dp_marketplace_lifecycle_gap_closure_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES)
+        + len(MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES)
+        + len(PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES)
+        + len(MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES)
+        + len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES)
+        + len(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES)
+        + len(MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES)
+        + len(MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["required_lifecycle_operations_covered"] is True
+    assert payload["summary"]["required_lifecycle_receipt_fields_visible"] is True
+    assert payload["summary"]["diagnostic_causes_covered"] is True
+    assert payload["summary"]["high_critical_denied_without_valid_waiver"] is True
+    assert payload["summary"]["expired_or_out_of_scope_waivers_denied"] is True
+    assert payload["summary"]["vulnerability_monitoring_fail_closed"] is True
+    assert payload["summary"]["hostile_gauntlet_v3_fail_closed"] is True
+    assert payload["summary"]["secure_host_permissions_integrated"] is True
+    assert payload["summary"]["operator_audit_receipts_visible"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["false_claim_scan_clean"] is True
+    assert payload["summary"]["production_secure_marketplace_claim_allowed"] is False
+    assert payload["summary"]["third_party_package_security_solved_claim_allowed"] is False
+    assert payload["summary"]["full_marketplace_parity_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == POST_DP_MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY
+    assert set(POST_DP_MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/post-dp-marketplace-lifecycle-gap-closure" in payload["policy"]["receipt_surfaces"]
+    assert payload["scenario_names"]["marketplace_lifecycle_operations_v3"] == list(
+        MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES
+    )
+    assert any(
+        item["cause_class"] == "permission_drift"
+        for item in payload["contract"]["rollback_quarantine_diagnostics_v2"]
+    )
+    assert all(
+        item["secure_host"]["permission_delta_reviewed"] is True
+        for item in payload["contract"]["secure_host_audit_integration_v1"]
+    )
 
 
 @pytest.mark.asyncio

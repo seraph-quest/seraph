@@ -190,6 +190,30 @@ from src.extensions.marketplace_production_security import (
     REQUIRED_SUPPLY_CHAIN_FIELDS,
     build_marketplace_production_security_contract,
 )
+from src.extensions.post_dp_marketplace_lifecycle_gap_closure import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SUITE_NAME,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SUITE_NAME,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SUITE_NAME,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SUITE_NAME,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SUITE_NAME,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SUITE_NAME,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SUITE_NAME,
+    POST_DP_MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS,
+    POST_DP_MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+    REQUIRED_DIAGNOSTIC_CAUSES,
+    REQUIRED_LIFECYCLE_OPERATIONS,
+    REQUIRED_LIFECYCLE_RECEIPT_FIELDS,
+    build_post_dp_marketplace_lifecycle_contract,
+)
 from src.extensions.browser_provider_usability import (
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
     BROWSER_COMPUTER_USE_RECOVERY_DRILL_SUITE_NAME,
@@ -18479,6 +18503,203 @@ async def _eval_marketplace_production_security_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_dp_marketplace_lifecycle_behavior() -> dict[str, Any]:
+    contract = build_post_dp_marketplace_lifecycle_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    lifecycle = contract["lifecycle_operations_v3"]
+    reviews = contract["package_review_waiver_policy_v2"]
+    vulnerabilities = contract["vulnerability_monitoring_v2"]
+    hostile = contract["hostile_package_lifecycle_gauntlet_v3"]
+    diagnostics = contract["rollback_quarantine_diagnostics_v2"]
+    secure_host_audit = contract["secure_host_audit_integration_v1"]
+    false_claim_scan = contract["marketplace_lifecycle_false_claim_scan_v2"]
+    suites = benchmark_suite_report()
+    post_dp_suite = next(
+        item for item in suites
+        if item["name"] == POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SUITE_NAME
+    )
+    lifecycle_suite = next(item for item in suites if item["name"] == MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SUITE_NAME)
+    waiver_suite = next(item for item in suites if item["name"] == PACKAGE_REVIEW_WAIVER_POLICY_V2_SUITE_NAME)
+    vulnerability_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_VULNERABILITY_MONITORING_V2_SUITE_NAME
+    )
+    hostile_suite = next(item for item in suites if item["name"] == HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SUITE_NAME)
+    diagnostics_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SUITE_NAME
+    )
+    secure_host_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SUITE_NAME
+    )
+    claim_scan_suite = next(
+        item for item in suites if item["name"] == MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+    )
+    gate_policy = evolution_benchmark_gate_policy()
+    safe_receipts = [
+        item["safe_receipt"]
+        for item in [*lifecycle, *reviews, *vulnerabilities, *hostile, *diagnostics, *secure_host_audit, false_claim_scan]
+    ]
+    required_surfaces = {
+        "/api/operator/post-dp-marketplace-lifecycle-gap-closure",
+        "/api/operator/marketplace-production-security",
+        "/api/operator/post-dp-secure-capability-host",
+        "/api/operator/benchmark-proof",
+    }
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "post_dp_marketplace_lifecycle_gap_closure_receipts_visible"
+        ),
+        "post_dp_marketplace_lifecycle_gap_closure_suite_visible": (
+            post_dp_suite["scenario_count"]
+            == len(POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES)
+        ),
+        "marketplace_lifecycle_operations_v3_suite_visible": (
+            lifecycle_suite["scenario_count"] == len(MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES)
+        ),
+        "package_review_waiver_policy_v2_suite_visible": (
+            waiver_suite["scenario_count"] == len(PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES)
+        ),
+        "marketplace_vulnerability_monitoring_v2_suite_visible": (
+            vulnerability_suite["scenario_count"] == len(MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES)
+        ),
+        "hostile_package_lifecycle_gauntlet_v3_suite_visible": (
+            hostile_suite["scenario_count"] == len(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES)
+        ),
+        "marketplace_rollback_quarantine_diagnostics_v2_suite_visible": (
+            diagnostics_suite["scenario_count"] == len(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES)
+        ),
+        "marketplace_secure_host_audit_integration_v1_suite_visible": (
+            secure_host_suite["scenario_count"] == len(MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES)
+        ),
+        "marketplace_lifecycle_false_claim_scan_v2_suite_visible": (
+            claim_scan_suite["scenario_count"] == len(MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+        ),
+        "lifecycle_receipt_fields_visible": (
+            summary["required_lifecycle_operations_covered"] is True
+            and summary["required_lifecycle_receipt_fields_visible"] is True
+            and set(REQUIRED_LIFECYCLE_OPERATIONS) <= {item["operation"] for item in lifecycle}
+            and all(set(REQUIRED_LIFECYCLE_RECEIPT_FIELDS) <= set(item["operator_visible_fields"]) for item in lifecycle)
+            and all(item["operator_audit_receipt"] and item["audit_chain_digest"] for item in lifecycle)
+        ),
+        "waiver_denial_policy_visible": (
+            summary["high_critical_denied_without_valid_waiver"] is True
+            and summary["explicit_waiver_scope_and_expiry_visible"] is True
+            and summary["expired_or_out_of_scope_waivers_denied"] is True
+            and any(item["waiver_state"] == "scoped_current" and item["waiver_scope_explicit"] for item in reviews)
+            and all(
+                item["decision"] != "allow_runtime_contribution"
+                for item in reviews
+                if item["severity"] in {"critical", "high"} and item["waiver_state"] != "scoped_current"
+            )
+        ),
+        "vulnerability_monitoring_fail_closed": (
+            summary["vulnerability_monitoring_fail_closed"] is True
+            and all(
+                item["critical_high_blocked"] is True
+                for item in vulnerabilities
+                if item["severity"] in {"critical", "high"}
+            )
+            and any(item["freshness_status"] == "stale" and item["operator_action"] == "deny_until_rescan"
+                    for item in vulnerabilities)
+        ),
+        "hostile_lifecycle_v3_fail_closed": (
+            summary["hostile_gauntlet_v3_fail_closed"] is True
+            and all(item["runtime_contribution_allowed"] is False for item in hostile)
+            and any(item["drill_class"] == "rollback_bypass" for item in hostile)
+            and any(item["drill_class"] == "quarantine_bypass" for item in hostile)
+        ),
+        "rollback_quarantine_diagnostics_visible": (
+            summary["diagnostic_causes_covered"] is True
+            and summary["failed_update_and_rollback_diagnostics_visible"] is True
+            and set(REQUIRED_DIAGNOSTIC_CAUSES) <= {item["cause_class"] for item in diagnostics}
+            and all(item["operator_audit_receipt"] and item["root_cause"] for item in diagnostics)
+        ),
+        "secure_host_audit_integration_visible": (
+            summary["secure_host_permissions_integrated"] is True
+            and summary["operator_audit_receipts_visible"] is True
+            and all(
+                item["secure_host"]["permission_delta_reviewed"] is True
+                and item["secure_host"]["credential_scope_rechecked"] is True
+                and item["secure_host"]["egress_policy_rechecked"] is True
+                for item in secure_host_audit
+            )
+        ),
+        "upstream_foundation_visible": (
+            summary["upstream_marketplace_receipt_digest"]
+            and summary["upstream_secure_host_receipt_digest"]
+            and summary["upstream_marketplace_claim_boundary"] == MARKETPLACE_PRODUCTION_SECURITY_CLAIM_BOUNDARY
+            and summary["upstream_secure_host_claim_boundary"] == POST_DP_SECURE_HOST_CLAIM_BOUNDARY
+        ),
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt["contains_secret"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["contains_raw_package_path"] is False
+                and receipt["contains_raw_transcript"] is False
+                and receipt["raw_receipt_path_exposed"] is False
+                and receipt["workspace_dir_exposed"] is False
+                and receipt["package_path_exposed"] is False
+                and receipt["redaction"] == "metadata_only_receipt_handle"
+                and receipt["redaction_layer"] == "post_dp_marketplace_lifecycle_gap_closure_v1"
+                and receipt["redaction_degraded"] is False
+                and len(receipt["evidence_body_digest"]) == 64
+                and len(receipt["sanitized_payload_digest"]) == 64
+                and len(receipt["tamper_evident_digest"]) == 64
+                and receipt["tamper_evident_digest"] != receipt["evidence_body_digest"]
+                for receipt in safe_receipts
+            )
+        ),
+        "false_claim_scan_visible": (
+            summary["false_claim_scan_clean"] is True
+            and false_claim_scan["suite_name"] == MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+            and false_claim_scan["validation_command"] == "python3 scripts/check_strategy_claims.py"
+            and set(POST_DP_MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS)
+            <= set(false_claim_scan["blocked_claims_checked"])
+            and false_claim_scan["forbidden_hit_count"] == 0
+            and false_claim_scan["claim_lift_allowed"] is False
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DP_MARKETPLACE_LIFECYCLE_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DP_MARKETPLACE_LIFECYCLE_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "marketplace_claims_blocked": (
+            summary["production_secure_marketplace_claim_allowed"] is False
+            and summary["third_party_package_security_solved_claim_allowed"] is False
+            and summary["formal_certification_claim_allowed"] is False
+            and summary["full_marketplace_parity_claim_allowed"] is False
+            and summary["reference_systems_exceeded_claim_allowed"] is False
+        ),
+        "post_dp_marketplace_lifecycle_gap_closure_gate_required": (
+            POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SUITE_NAME
+            in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_lifecycle_operations_v3_gate_required": (
+            MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "package_review_waiver_policy_v2_gate_required": (
+            PACKAGE_REVIEW_WAIVER_POLICY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_vulnerability_monitoring_v2_gate_required": (
+            MARKETPLACE_VULNERABILITY_MONITORING_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "hostile_package_lifecycle_gauntlet_v3_gate_required": (
+            HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_rollback_quarantine_diagnostics_v2_gate_required": (
+            MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SUITE_NAME
+            in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_secure_host_audit_integration_v1_gate_required": (
+            MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SUITE_NAME
+            in gate_policy["required_benchmark_suites"]
+        ),
+        "marketplace_lifecycle_false_claim_scan_v2_gate_required": (
+            MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+            in gate_policy["required_benchmark_suites"]
+        ),
+    }
+
+
 async def _eval_production_operator_control_parity_behavior() -> dict[str, Any]:
     contract = build_production_operator_control_contract()
     summary = contract["summary"]
@@ -26997,6 +27218,102 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_marketplace_production_security_behavior,
         )
         for name in MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV binds DN marketplace production-security evidence and DR secure-host evidence to "
+                "post-DP lifecycle gap-closure receipts, operator audit chains, and blocked claims."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV records marketplace lifecycle v3 receipts for install, update, downgrade, disable, "
+                "rollback, quarantine, re-entry, failed-update recovery, package trust fields, and audit evidence."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV enforces package review waiver policy v2 for high/critical denials, explicit waiver "
+                "scope and expiry, expired/out-of-scope denials, retests, and operator receipts."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV keeps marketplace vulnerability monitoring v2 visible for scanner freshness, dependency "
+                "impact, publisher key revocation, and critical/high fail-closed behavior."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV runs hostile package lifecycle gauntlet v3 for malicious update, rollback bypass, "
+                "quarantine bypass, runtime boundary, permission drift, and publisher-key denial receipts."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV exposes rollback and quarantine diagnostics v2 for compatibility, permission drift, "
+                "dependency, scanner, publisher, and runtime-boundary failure causes."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV integrates marketplace lifecycle operations with secure-host runtime profiles, permission "
+                "delta reviews, credential/egress rechecks, operator authority, and audit chains."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="extensions",
+            description=(
+                "Batch DV records marketplace lifecycle false-claim scans for blocked production-secure marketplace, "
+                "solved package-security, full-parity, production-readiness, and exceedance wording."
+            ),
+            runner=_eval_post_dp_marketplace_lifecycle_behavior,
+        )
+        for name in MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

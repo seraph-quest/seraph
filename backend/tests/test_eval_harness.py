@@ -51,6 +51,22 @@ from src.cockpit.operator_control_production_certification import (
     OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
     TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
 )
+from src.cockpit.post_dp_operator_debugging_recovery import (
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+    DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+    DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+    OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+    OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+)
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
     M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
@@ -1294,6 +1310,38 @@ def test_run_operator_control_production_certification_benchmark_suites_pass():
     assert all(result.details["dm_suites_visible"] for result in summary.results)
     assert all(result.details["dm_suites_gate_required"] for result in summary.results)
     assert all(result.details["tamper_evident_audit_candidate_visible_not_tamper_proof"] for result in summary.results)
+    assert all(result.details["unsupported_claims_remain_blocked"] for result in summary.results)
+
+
+def test_run_post_dp_operator_debugging_recovery_benchmark_suites_pass():
+    suite_names = [
+        POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+        DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+        OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+        OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+        AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+        OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+        OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected = (
+        set(POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES)
+        | set(DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES)
+        | set(OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES)
+        | set(OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES)
+        | set(AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES)
+        | set(OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES)
+        | set(OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["du_suites_visible"] for result in summary.results)
+    assert all(result.details["du_suites_gate_required"] for result in summary.results)
+    assert all(result.details["control_flows_exercise_recovery_boundaries"] for result in summary.results)
+    assert all(result.details["authority_transfer_fails_closed"] for result in summary.results)
+    assert all(result.details["real_false_claim_scan_visible"] for result in summary.results)
     assert all(result.details["unsupported_claims_remain_blocked"] for result in summary.results)
 
 
@@ -3691,6 +3739,13 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "tamper_evident_audit_candidate_v1" in captured.out
     assert "authority_transfer_recovery_v1" in captured.out
     assert "operator_control_false_claim_scan_v1" in captured.out
+    assert "post_dp_operator_debugging_recovery_control_v1" in captured.out
+    assert "dense_long_work_debugging_v2" in captured.out
+    assert "operator_recovery_slo_v3" in captured.out
+    assert "operator_effort_reduction_v2" in captured.out
+    assert "authority_transfer_integrity_v2" in captured.out
+    assert "operator_audit_accessibility_v2" in captured.out
+    assert "operator_control_false_claim_scan_v2" in captured.out
     assert "final_source_backed_parity_audit" in captured.out
     assert "final_claim_ledger_reconciliation" in captured.out
     assert "operator_final_parity_readiness_report" in captured.out
@@ -3911,6 +3966,13 @@ def test_main_lists_available_benchmark_suites(capsys):
         "tamper_evident_audit_candidate_v1",
         "authority_transfer_recovery_v1",
         "operator_control_false_claim_scan_v1",
+        "post_dp_operator_debugging_recovery_control_v1",
+        "dense_long_work_debugging_v2",
+        "operator_recovery_slo_v3",
+        "operator_effort_reduction_v2",
+        "authority_transfer_integrity_v2",
+        "operator_audit_accessibility_v2",
+        "operator_control_false_claim_scan_v2",
         "production_operator_control_parity",
         "production_parity_train",
         "final_source_backed_parity_audit",

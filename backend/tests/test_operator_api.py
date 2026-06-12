@@ -341,6 +341,16 @@ from src.security.production_grade_secure_host import (
     SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
     SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
 )
+from src.security.post_dp_secure_host_gap_closure import (
+    DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SCENARIO_NAMES,
+    HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SCENARIO_NAMES,
+    POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_SECURE_HOST_BLOCKED_CLAIMS,
+    POST_DP_SECURE_HOST_CLAIM_BOUNDARY,
+    RUNTIME_PROFILE_SELECTION_V2_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -3433,6 +3443,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["production_grade_secure_host_operator_status"] == (
         "production_grade_secure_host_receipts_visible"
     )
+    assert (
+        payload["summary"]["post_dp_secure_host_posture"]
+        == "post_dp_secure_capability_host_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["post_dp_secure_host_claim_boundary"] == POST_DP_SECURE_HOST_CLAIM_BOUNDARY
+    assert payload["summary"]["post_dp_secure_host_operator_status"] == (
+        "post_dp_secure_capability_host_gap_closure_visible"
+    )
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
@@ -4689,6 +4707,12 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         PRODUCTION_GRADE_SECURE_HOST_CLAIM_BOUNDARY
     )
     assert "ironclaw_class_secure_execution" in payload["production_grade_secure_host"]["policy"]["blocked_claims"]
+    assert (
+        payload["post_dp_secure_host"]["summary"]["benchmark_posture"]
+        == "post_dp_secure_capability_host_ci_gated_operator_visible"
+    )
+    assert payload["post_dp_secure_host"]["policy"]["claim_boundary"] == POST_DP_SECURE_HOST_CLAIM_BOUNDARY
+    assert "ironclaw_class_secure_execution" in payload["post_dp_secure_host"]["policy"]["blocked_claims"]
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["marketplace_lifecycle_maturity"]["summary"]["operator_status"] == (
@@ -7823,6 +7847,58 @@ async def test_operator_production_grade_secure_host_surface_reports_batch_dj_re
     assert false_claim_scan["validation_command"] == "python3 scripts/check_strategy_claims.py"
     assert false_claim_scan["forbidden_hit_count"] == 0
     assert false_claim_scan["blocked_claims_found"] == []
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dp_secure_host_surface_reports_batch_dr_receipts(client):
+    resp = await client.get("/api/operator/post-dp-secure-capability-host")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "post_dp_secure_capability_host_gap_closure"
+    assert payload["summary"]["benchmark_posture"] == "post_dp_secure_capability_host_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "post_dp_secure_capability_host_gap_closure_visible"
+    assert payload["summary"]["runtime_profile_count"] >= 7
+    assert payload["summary"]["runtime_profile_deny_default_count"] == payload["summary"]["runtime_profile_count"]
+    assert payload["summary"]["credential_egress_block_count"] >= 5
+    assert payload["summary"]["credential_leak_count"] == 0
+    assert payload["summary"]["hostile_chain_fail_closed_count"] == payload["summary"]["hostile_chain_count"]
+    assert payload["summary"]["quarantine_before_runtime_count"] == payload["summary"]["hostile_chain_count"]
+    assert payload["summary"]["operator_owned_recovery_count"] == payload["summary"]["recovery_action_count"]
+    assert payload["summary"]["automatic_authority_expansion_count"] == 0
+    assert payload["summary"]["claim_boundary"] == POST_DP_SECURE_HOST_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["post_dp_secure_capability_host_gap_closure_v1"] == list(
+        POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["runtime_profile_selection_v2"] == list(
+        RUNTIME_PROFILE_SELECTION_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["deny_default_credential_egress_v2"] == list(
+        DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["hostile_capability_chain_quarantine_v2"] == list(
+        HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_host_recovery_authority_v2"] == list(
+        SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_host_false_claim_scan_v2"] == list(
+        SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
+    )
+    assert set(POST_DP_SECURE_HOST_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/post-dp-secure-capability-host" in payload["policy"]["receipt_surfaces"]
+    assert all(item["deny_by_default"] is True for item in payload["contract"]["runtime_profiles"])
+    assert all(item["raw_secret_leaked"] is False for item in payload["contract"]["credential_egress"])
+    assert all(item["fail_closed"] is True for item in payload["contract"]["hostile_chains"])
+    assert all(
+        item["quarantine_before_runtime_contribution"] is True
+        for item in payload["contract"]["hostile_chains"]
+    )
+    assert all(item["operator_owned"] is True for item in payload["contract"]["recovery_authority"])
+    assert all(
+        item["automatic_authority_expansion"] is False
+        for item in payload["contract"]["recovery_authority"]
+    )
 
 
 @pytest.mark.asyncio

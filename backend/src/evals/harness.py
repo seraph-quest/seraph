@@ -749,6 +749,23 @@ from src.security.production_grade_secure_host import (
     SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME,
     build_production_grade_secure_host_contract,
 )
+from src.security.post_dp_secure_host_gap_closure import (
+    DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SCENARIO_NAMES,
+    DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SUITE_NAME,
+    HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SCENARIO_NAMES,
+    HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SUITE_NAME,
+    POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SUITE_NAME,
+    POST_DP_SECURE_HOST_BLOCKED_CLAIMS,
+    POST_DP_SECURE_HOST_CLAIM_BOUNDARY,
+    RUNTIME_PROFILE_SELECTION_V2_SCENARIO_NAMES,
+    RUNTIME_PROFILE_SELECTION_V2_SUITE_NAME,
+    SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_V2_SUITE_NAME,
+    build_post_dp_secure_host_contract,
+)
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.observer.sources.calendar_source import gather_calendar
 from src.observer.sources.goal_source import gather_goals
@@ -3673,6 +3690,135 @@ async def _eval_production_grade_secure_host_behavior() -> dict[str, Any]:
         "receipt_surfaces_visible": {
             "/api/operator/production-grade-secure-capability-host",
             "/api/operator/certified-secure-host",
+            "/api/operator/benchmark-proof",
+        }
+        <= required_surfaces,
+    }
+
+
+async def _eval_post_dp_secure_host_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    gate_policy = evolution_benchmark_gate_policy()
+    post_dp_suite = next(
+        item for item in suites if item["name"] == POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SUITE_NAME
+    )
+    runtime_suite = next(item for item in suites if item["name"] == RUNTIME_PROFILE_SELECTION_V2_SUITE_NAME)
+    egress_suite = next(item for item in suites if item["name"] == DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SUITE_NAME)
+    chain_suite = next(item for item in suites if item["name"] == HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SUITE_NAME)
+    recovery_suite = next(item for item in suites if item["name"] == SECURE_HOST_RECOVERY_AUTHORITY_V2_SUITE_NAME)
+    false_claim_suite = next(item for item in suites if item["name"] == SECURE_HOST_FALSE_CLAIM_SCAN_V2_SUITE_NAME)
+    contract = build_post_dp_secure_host_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    runtime_profiles = contract["runtime_profiles"]
+    egress = contract["credential_egress"]
+    hostile_chains = contract["hostile_chains"]
+    recovery = contract["recovery_authority"]
+    false_claims = contract["false_claim_scan_receipts"]
+    required_suites = set(gate_policy["required_benchmark_suites"])
+    blocked = set(policy["blocked_claims"])
+    not_claimed = set(policy["not_claimed"])
+    required_surfaces = set(policy["receipt_surfaces"])
+
+    return {
+        "post_dp_secure_host_suite_present": (
+            "post_dp_secure_host_runtime_profile_selection_behavior" in post_dp_suite["scenario_names"]
+        ),
+        "post_dp_secure_host_suite_axis_matches": (
+            post_dp_suite["benchmark_axis"] == "post_dp_secure_capability_host_gap_closure"
+        ),
+        "runtime_profile_selection_suite_present": (
+            "runtime_profile_tool_process_deny_default_egress_behavior" in runtime_suite["scenario_names"]
+        ),
+        "deny_default_egress_suite_present": (
+            "deny_default_unknown_endpoint_behavior" in egress_suite["scenario_names"]
+        ),
+        "hostile_chain_quarantine_suite_present": (
+            "hostile_package_to_runtime_chain_quarantines_behavior" in chain_suite["scenario_names"]
+        ),
+        "recovery_authority_v2_suite_present": (
+            "secure_host_recovery_revoke_rotate_reissue_behavior" in recovery_suite["scenario_names"]
+        ),
+        "false_claim_scan_v2_suite_present": (
+            "secure_host_false_claim_v2_blocks_ironclaw_class" in false_claim_suite["scenario_names"]
+        ),
+        "all_new_suites_gate_required": {
+            POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SUITE_NAME,
+            RUNTIME_PROFILE_SELECTION_V2_SUITE_NAME,
+            DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SUITE_NAME,
+            HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SUITE_NAME,
+            SECURE_HOST_RECOVERY_AUTHORITY_V2_SUITE_NAME,
+            SECURE_HOST_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        }
+        <= required_suites,
+        "operator_status_visible": summary["operator_status"]
+        == "post_dp_secure_capability_host_gap_closure_visible",
+        "runtime_profiles_cover_required_surfaces": {
+            "tool_process",
+            "browser_automation",
+            "authenticated_connector",
+            "external_mcp",
+            "extension_package",
+            "workflow_replay",
+            "background_execution",
+        }
+        <= {item["capability_surface"] for item in runtime_profiles},
+        "runtime_profiles_selected_before_execution": (
+            summary["runtime_profile_count"] >= 7
+            and summary["runtime_profile_deny_default_count"] == summary["runtime_profile_count"]
+            and all(item["profile_selected_before_execution"] for item in runtime_profiles)
+            and all(item["deny_by_default"] for item in runtime_profiles)
+            and all(item["redacted_receipt_handle"].startswith("seraph://receipts/batch-dr/") for item in runtime_profiles)
+        ),
+        "credential_egress_denies_by_default": (
+            summary["credential_egress_decision_count"] >= 6
+            and summary["credential_egress_block_count"] >= 5
+            and summary["credential_leak_count"] == 0
+            and all(item["default_posture"] == "deny" for item in egress)
+            and all(item["field_destination_scope_enforced"] for item in egress)
+            and all(item["raw_secret_leaked"] is False for item in egress)
+        ),
+        "hostile_chains_fail_closed_and_quarantine": (
+            summary["hostile_chain_count"] >= 5
+            and summary["hostile_chain_fail_closed_count"] == summary["hostile_chain_count"]
+            and summary["quarantine_before_runtime_count"] == summary["hostile_chain_count"]
+            and all(item["quarantine_before_runtime_contribution"] for item in hostile_chains)
+            and all(item["fail_closed"] for item in hostile_chains)
+            and all(item["raw_secret_present"] is False for item in hostile_chains)
+        ),
+        "operator_recovery_authority_no_auto_expansion": (
+            summary["operator_owned_recovery_count"] == summary["recovery_action_count"]
+            and summary["automatic_authority_expansion_count"] == 0
+            and all(item["operator_owned"] for item in recovery)
+            and all(item["automatic_authority_expansion"] is False for item in recovery)
+        ),
+        "false_claim_scan_visible": (
+            summary["false_claim_scan_count"] >= 1
+            and all(item["forbidden_hit_count"] == 0 for item in false_claims)
+            and all(not item["blocked_claims_found"] for item in false_claims)
+        ),
+        "claim_boundary_visible": summary["claim_boundary"] == POST_DP_SECURE_HOST_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DP_SECURE_HOST_BLOCKED_CLAIMS) <= blocked,
+        "security_overclaims_remain_blocked": {
+            "secure_private_by_default",
+            "production_security_solved",
+            "ironclaw_class_secure_execution",
+            "hardware_backed_isolation",
+            "formal_security_certification",
+            "production_ready_product",
+            "full_parity",
+        }
+        <= blocked,
+        "not_claimed_boundary_visible": {
+            "ironclaw_class_secure_execution",
+            "hardware_backed_isolation",
+            "formal_security_certification",
+            "full_parity_achieved",
+        }
+        <= not_claimed,
+        "receipt_surfaces_visible": {
+            "/api/operator/post-dp-secure-capability-host",
+            "/api/operator/production-grade-secure-capability-host",
             "/api/operator/benchmark-proof",
         }
         <= required_surfaces,
@@ -23805,6 +23951,77 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_grade_secure_host_behavior,
         )
         for name in SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Post-DP secure-host gap-closure receipts expose runtime profiles, deny-default egress, "
+                "operator redaction, and blocked security claims above DJ."
+            ),
+            runner=_eval_post_dp_secure_host_behavior,
+        )
+        for name in POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Runtime profile selection v2 receipts prove high-risk capability paths select bounded profiles before execution."
+            ),
+            runner=_eval_post_dp_secure_host_behavior,
+        )
+        for name in RUNTIME_PROFILE_SELECTION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Deny-default credential egress v2 receipts block unknown, private, redirected, raw-secret, "
+                "and revoked-epoch paths while allowing only scoped destinations."
+            ),
+            runner=_eval_post_dp_secure_host_behavior,
+        )
+        for name in DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Hostile capability-chain quarantine v2 receipts fail closed across browser, MCP, package, "
+                "workflow, shell, and background chains before runtime contribution."
+            ),
+            runner=_eval_post_dp_secure_host_behavior,
+        )
+        for name in HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="recovery",
+            description=(
+                "Secure-host recovery authority v2 receipts keep revoke, rotate, quarantine, rollback, "
+                "reapproval, and audit authority operator-owned."
+            ),
+            runner=_eval_post_dp_secure_host_behavior,
+        )
+        for name in SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="safety",
+            description=(
+                "Secure-host false-claim scan v2 blocks IronClaw-class, secure/private, certification, "
+                "production-ready, full-parity, and superiority wording."
+            ),
+            runner=_eval_post_dp_secure_host_behavior,
+        )
+        for name in SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     ),
     EvalScenario(
         name="delegated_tool_workflow_behavior",

@@ -51,6 +51,7 @@ from src.evals.final_parity_audit import (
     build_final_production_parity_report,
     build_full_parity_release_gate_report,
     build_post_cq_claim_readiness_report,
+    build_post_dq_dw_claim_readiness_report,
 )
 from src.evals.production_parity_readiness import build_production_parity_readiness_report
 from src.execution.benchmark import build_m2_execution_benchmark_report
@@ -3521,6 +3522,7 @@ async def get_operator_benchmark_proof():
         post_cq_claim_readiness,
         final_production_parity,
         full_parity_release_gate,
+        post_dq_dw_claim_readiness,
     ) = await asyncio.gather(
         build_production_parity_readiness_report(),
         build_guardian_memory_benchmark_report(),
@@ -3596,6 +3598,7 @@ async def get_operator_benchmark_proof():
         build_post_cq_claim_readiness_report(),
         build_final_production_parity_report(),
         build_full_parity_release_gate_report(),
+        build_post_dq_dw_claim_readiness_report(),
     )
     evolution_targets = list_evolution_targets()
     required_suite_names = {
@@ -3678,6 +3681,7 @@ async def get_operator_benchmark_proof():
         str(post_cq_claim_readiness["summary"]["benchmark_posture"]),
         str(final_production_parity["summary"]["benchmark_posture"]),
         str(full_parity_release_gate["summary"]["benchmark_posture"]),
+        str(post_dq_dw_claim_readiness["summary"]["benchmark_posture"]),
     ]
     has_regressions = any("regressions_detected" in posture for posture in child_benchmark_postures)
     unique_scenarios = {
@@ -3922,6 +3926,15 @@ async def get_operator_benchmark_proof():
             "final_production_parity_claim_boundary": final_production_parity["policy"]["claim_boundary"],
             "full_parity_release_gate_posture": full_parity_release_gate["summary"]["benchmark_posture"],
             "full_parity_release_gate_claim_boundary": full_parity_release_gate["policy"]["claim_boundary"],
+            "post_dq_dw_claim_readiness_posture": post_dq_dw_claim_readiness["summary"][
+                "benchmark_posture"
+            ],
+            "post_dq_dw_claim_readiness_claim_boundary": post_dq_dw_claim_readiness["policy"][
+                "claim_boundary"
+            ],
+            "post_dq_dw_claim_readiness_operator_status": post_dq_dw_claim_readiness["summary"][
+                "operator_status"
+            ],
         },
         "suites": suites,
         "production_parity_readiness": production_parity_readiness,
@@ -3997,6 +4010,7 @@ async def get_operator_benchmark_proof():
         "post_cq_claim_readiness": post_cq_claim_readiness,
         "final_production_parity": final_production_parity,
         "full_parity_release_gate": full_parity_release_gate,
+        "post_dq_dw_claim_readiness": post_dq_dw_claim_readiness,
         "governed_improvement": {
             "target_count": len(evolution_targets),
             "target_types": target_types,
@@ -4388,6 +4402,11 @@ async def get_operator_final_production_parity():
 @router.get("/operator/full-parity-release-gate")
 async def get_operator_full_parity_release_gate():
     return await build_full_parity_release_gate_report()
+
+
+@router.get("/operator/post-dq-dw-claim-readiness")
+async def get_operator_post_dq_dw_claim_readiness():
+    return await build_post_dq_dw_claim_readiness_report()
 
 
 @router.get("/operator/governed-improvement-benchmark")

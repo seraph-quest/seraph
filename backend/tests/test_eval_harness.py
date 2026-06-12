@@ -15,12 +15,17 @@ from src.evals.final_parity_audit import (
     FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
 )
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
@@ -1515,6 +1520,31 @@ def test_run_final_critic_contrarian_no_block_v1_benchmark_suite_passes():
     assert all(result.details["critic_no_block_visible"] for result in summary.results)
     assert all(result.details["claim_boundary_visible"] for result in summary.results)
     assert all(result.details["operator_surfaces_visible"] for result in summary.results)
+
+
+def test_run_post_dq_dw_claim_readiness_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dq_dw_board_pr_issue_reconciliation_v1",
+            "post_dq_dw_claim_ledger_reconciliation_v1",
+            "reference_system_source_refresh_v5",
+            "false_completion_scan_v5",
+            "post_dq_dw_critic_contrarian_no_block_v1",
+        ])
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == (
+        set(POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES)
+        | set(FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES)
+        | set(POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert all(result.details["completed_dq_dw_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["bounded_dx_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["article_access_caveat_only"] for result in summary.results)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
 
 
 def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
@@ -3864,6 +3894,11 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "post_di_do_board_pr_issue_reconciliation_v1" in captured.out
     assert "false_completion_scan_v4" in captured.out
     assert "final_critic_contrarian_no_block_v1" in captured.out
+    assert "post_dq_dw_board_pr_issue_reconciliation_v1" in captured.out
+    assert "post_dq_dw_claim_ledger_reconciliation_v1" in captured.out
+    assert "reference_system_source_refresh_v5" in captured.out
+    assert "false_completion_scan_v5" in captured.out
+    assert "post_dq_dw_critic_contrarian_no_block_v1" in captured.out
     assert "live_external_orchestration_attestation" in captured.out
     assert "orchestration_crash_recovery_study" in captured.out
     assert "production_sla_orchestration" in captured.out
@@ -4109,6 +4144,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "post_di_do_board_pr_issue_reconciliation_v1",
         "false_completion_scan_v4",
         "final_critic_contrarian_no_block_v1",
+        "post_dq_dw_board_pr_issue_reconciliation_v1",
+        "post_dq_dw_claim_ledger_reconciliation_v1",
+        "reference_system_source_refresh_v5",
+        "false_completion_scan_v5",
+        "post_dq_dw_critic_contrarian_no_block_v1",
     )
 
 

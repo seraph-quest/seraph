@@ -3490,6 +3490,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "runtime_isolation_attestation_matrix_v1" in captured.out
     assert "secure_host_operator_recovery_authority_v1" in captured.out
     assert "secure_host_false_claim_scan_v1" in captured.out
+    assert "post_dp_secure_capability_host_gap_closure_v1" in captured.out
+    assert "runtime_profile_selection_v2" in captured.out
+    assert "deny_default_credential_egress_v2" in captured.out
+    assert "hostile_capability_chain_quarantine_v2" in captured.out
+    assert "secure_host_recovery_authority_v2" in captured.out
+    assert "secure_host_false_claim_scan_v2" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "one_excellent_reach_channel_canary" in captured.out
@@ -3763,6 +3769,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "runtime_isolation_attestation_matrix_v1",
         "secure_host_operator_recovery_authority_v1",
         "secure_host_false_claim_scan_v1",
+        "post_dp_secure_capability_host_gap_closure_v1",
+        "runtime_profile_selection_v2",
+        "deny_default_credential_egress_v2",
+        "hostile_capability_chain_quarantine_v2",
+        "secure_host_recovery_authority_v2",
+        "secure_host_false_claim_scan_v2",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

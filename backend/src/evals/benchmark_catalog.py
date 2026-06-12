@@ -426,6 +426,20 @@ from src.security.production_grade_secure_host import (
     SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
     SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SUITE_NAME,
 )
+from src.security.post_dp_secure_host_gap_closure import (
+    DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SCENARIO_NAMES,
+    DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SUITE_NAME,
+    HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SCENARIO_NAMES,
+    HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SUITE_NAME,
+    POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SUITE_NAME,
+    RUNTIME_PROFILE_SELECTION_V2_SCENARIO_NAMES,
+    RUNTIME_PROFILE_SELECTION_V2_SUITE_NAME,
+    SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_V2_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -2573,6 +2587,92 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         operator_summary="Secure-host false-claim scans keep stronger security claims blocked.",
         remaining_gap="Static claim scans do not replace independent security review or external certification.",
         scenario_names=SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SUITE_NAME,
+        label="Post-DP secure capability-host gap closure",
+        description=(
+            "Pins Batch DR post-DP secure-host gap-closure receipts above DJ for runtime profile selection, "
+            "deny-by-default egress, scoped credentials, hostile-chain quarantine, recovery authority, and "
+            "blocked security claims."
+        ),
+        benchmark_axis="post_dp_secure_capability_host_gap_closure",
+        operator_summary=(
+            "Post-DP secure-host receipts make the next implementation gap operator-visible while keeping "
+            "IronClaw-class, secure/private-by-default, certification, production-ready, and full-parity claims blocked."
+        ),
+        remaining_gap=(
+            "This is post-DP gap-closure receipt proof, not hardware-backed isolation, formal certification, "
+            "or solved production security."
+        ),
+        scenario_names=POST_DP_SECURE_CAPABILITY_HOST_GAP_CLOSURE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=RUNTIME_PROFILE_SELECTION_V2_SUITE_NAME,
+        label="Runtime profile selection v2",
+        description=(
+            "Pins DR capability runtime profile selection across tool processes, browser automation, connectors, "
+            "MCP, packages, workflow replay, and background execution."
+        ),
+        benchmark_axis="runtime_profile_selection_v2",
+        operator_summary=(
+            "Runtime profile receipts show each high-risk capability selects a bounded runtime profile before execution."
+        ),
+        remaining_gap="This is covered-path profile proof, not generalized container or hardware-backed isolation.",
+        scenario_names=RUNTIME_PROFILE_SELECTION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SUITE_NAME,
+        label="Deny-default credential egress v2",
+        description=(
+            "Pins DR deny-by-default secret-bearing egress decisions for unknown endpoints, private networks, "
+            "DNS redirects, raw secret output, revoked epochs, and allowlisted field scopes."
+        ),
+        benchmark_axis="deny_default_credential_egress_v2",
+        operator_summary=(
+            "Credential egress receipts show default denial, endpoint rechecks, field/destination scope, and redaction."
+        ),
+        remaining_gap="This is deterministic egress proof, not continuous live security certification.",
+        scenario_names=DENY_DEFAULT_CREDENTIAL_EGRESS_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SUITE_NAME,
+        label="Hostile capability-chain quarantine v2",
+        description=(
+            "Pins DR hostile cross-surface chains for browser, connector, MCP, package, workflow replay, shell, "
+            "and background execution into fail-closed quarantine receipts."
+        ),
+        benchmark_axis="hostile_capability_chain_quarantine_v2",
+        operator_summary=(
+            "Hostile-chain receipts show quarantine happens before runtime contribution and recovery requires operator authority."
+        ),
+        remaining_gap="This is covered-chain proof, not external penetration testing or solved security.",
+        scenario_names=HOSTILE_CAPABILITY_CHAIN_QUARANTINE_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_HOST_RECOVERY_AUTHORITY_V2_SUITE_NAME,
+        label="Secure-host recovery authority v2",
+        description=(
+            "Pins DR operator-owned revoke, rotate, quarantine, rollback, reapprove, and audit recovery receipts."
+        ),
+        benchmark_axis="secure_host_recovery_authority_v2",
+        operator_summary=(
+            "Recovery authority receipts keep credential/session recovery operator-owned and block automatic authority expansion."
+        ),
+        remaining_gap="This is recovery authority proof, not solved incident response or tamper-proof audit.",
+        scenario_names=SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_HOST_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Secure-host false claim scan v2",
+        description=(
+            "Pins DR false-claim scans for IronClaw-class, secure/private-by-default, formal certification, "
+            "production-ready, full-parity, and superiority wording."
+        ),
+        benchmark_axis="secure_host_false_claim_scan_v2",
+        operator_summary="Secure-host v2 false-claim scans keep stronger security claims blocked.",
+        remaining_gap="Static claim scans do not replace independent security review or external certification.",
+        scenario_names=SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

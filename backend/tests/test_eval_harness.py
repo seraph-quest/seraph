@@ -3493,6 +3493,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "channel_incident_response_v1" in captured.out
     assert "cross_surface_reach_continuity_v2" in captured.out
     assert "reach_media_false_claim_scan_v1" in captured.out
+    assert "post_dp_reach_channel_gap_closure_v1" in captured.out
+    assert "selected_reach_surface_readiness_v2" in captured.out
+    assert "channel_degraded_recovery_v2" in captured.out
+    assert "guardian_reach_continuity_v2" in captured.out
+    assert "voice_media_privacy_fallback_v2" in captured.out
+    assert "reach_channel_false_claim_scan_v2" in captured.out
     assert "managed_browser_provider_attestation" in captured.out
     assert "live_multi_operator_usability_study" in captured.out
     assert "browser_computer_use_recovery_drill" in captured.out
@@ -3637,6 +3643,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "channel_incident_response_v1",
         "cross_surface_reach_continuity_v2",
         "reach_media_false_claim_scan_v1",
+        "post_dp_reach_channel_gap_closure_v1",
+        "selected_reach_surface_readiness_v2",
+        "channel_degraded_recovery_v2",
+        "guardian_reach_continuity_v2",
+        "voice_media_privacy_fallback_v2",
+        "reach_channel_false_claim_scan_v2",
         "managed_browser_provider_attestation",
         "live_multi_operator_usability_study",
         "browser_computer_use_recovery_drill",

@@ -122,6 +122,7 @@ from src.workflows.production_workflow_guarantees import build_production_workfl
 from src.workflows.production_orchestration_hard_guarantees import (
     build_production_orchestration_hard_guarantees_report,
 )
+from src.workflows.post_dp_durable_orchestration import build_post_dp_durable_orchestration_report
 
 router = APIRouter()
 
@@ -3450,6 +3451,7 @@ async def get_operator_benchmark_proof():
         continuous_orchestration_slo,
         production_workflow_guarantees,
         production_orchestration_hard_guarantees,
+        post_dp_durable_orchestration,
         m5_operating_layer_benchmark,
         m6_memory_superiority_benchmark,
         memory_provider_quality_gate_benchmark,
@@ -3520,6 +3522,7 @@ async def get_operator_benchmark_proof():
         build_continuous_orchestration_slo_report(),
         build_production_workflow_guarantees_report(),
         build_production_orchestration_hard_guarantees_report(),
+        build_post_dp_durable_orchestration_report(),
         build_m5_operating_layer_benchmark_report(),
         build_m6_memory_superiority_benchmark_report(),
         build_memory_provider_quality_gate_report(),
@@ -3597,6 +3600,7 @@ async def get_operator_benchmark_proof():
         str(continuous_orchestration_slo["summary"]["benchmark_posture"]),
         str(production_workflow_guarantees["summary"]["benchmark_posture"]),
         str(production_orchestration_hard_guarantees["summary"]["benchmark_posture"]),
+        str(post_dp_durable_orchestration["summary"]["benchmark_posture"]),
         str(m5_operating_layer_benchmark["summary"]["benchmark_posture"]),
         str(m6_memory_superiority_benchmark["summary"]["benchmark_posture"]),
         str(memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"]),
@@ -3716,6 +3720,15 @@ async def get_operator_benchmark_proof():
             "production_orchestration_hard_guarantees_operator_status": production_orchestration_hard_guarantees[
                 "summary"
             ]["operator_status"],
+            "post_dp_durable_orchestration_posture": post_dp_durable_orchestration["summary"][
+                "benchmark_posture"
+            ],
+            "post_dp_durable_orchestration_claim_boundary": post_dp_durable_orchestration["policy"][
+                "claim_boundary"
+            ],
+            "post_dp_durable_orchestration_operator_status": post_dp_durable_orchestration["summary"][
+                "operator_status"
+            ],
             "m5_operating_layer_benchmark_posture": m5_operating_layer_benchmark["summary"]["benchmark_posture"],
             "m6_memory_superiority_benchmark_posture": m6_memory_superiority_benchmark["summary"]["benchmark_posture"],
             "memory_provider_quality_gate_benchmark_posture": memory_provider_quality_gate_benchmark["summary"]["benchmark_posture"],
@@ -3873,6 +3886,7 @@ async def get_operator_benchmark_proof():
         "continuous_orchestration_slo": continuous_orchestration_slo,
         "production_workflow_guarantees": production_workflow_guarantees,
         "production_orchestration_hard_guarantees": production_orchestration_hard_guarantees,
+        "post_dp_durable_orchestration": post_dp_durable_orchestration,
         "m5_operating_layer_benchmark": m5_operating_layer_benchmark,
         "m6_memory_superiority_benchmark": m6_memory_superiority_benchmark,
         "memory_provider_quality_gate_benchmark": memory_provider_quality_gate_benchmark,
@@ -3991,6 +4005,11 @@ async def get_operator_production_workflow_guarantees():
 @router.get("/operator/production-orchestration-hard-guarantees")
 async def get_operator_production_orchestration_hard_guarantees():
     return await build_production_orchestration_hard_guarantees_report()
+
+
+@router.get("/operator/post-dp-durable-orchestration")
+async def get_operator_post_dp_durable_orchestration():
+    return await build_post_dp_durable_orchestration_report()
 
 
 @router.get("/operator/m5-operating-layer-benchmark")

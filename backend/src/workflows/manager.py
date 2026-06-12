@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -64,8 +65,27 @@ _WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
 
 
 def _run_async(coro):
-    return asyncio.run(coro)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
 
+    result: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    if "value" in result:
+        return result["value"]
+    return None
 
 def _run_durable_state_write(coro) -> Any | None:
     try:
@@ -73,6 +93,31 @@ def _run_durable_state_write(coro) -> Any | None:
     except Exception as exc:  # pragma: no cover - defensive fail-soft path for partially migrated/local DBs.
         logger.warning("Durable workflow state write skipped: %s", exc)
         return None
+
+
+def _is_missing_durable_state_schema_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    durable_state_tables = ("workflow_run_states", "workflow_step_states")
+    return any(table in message for table in durable_state_tables) and (
+        "no such table" in message or "does not exist" in message
+    )
+
+
+class DurableWorkflowStateUnavailable(RuntimeError):
+    """Raised when a workflow cannot safely continue without durable state."""
+
+
+def _run_required_durable_state_write(coro, *, phase: str) -> Any:
+    try:
+        return _run_async(coro)
+    except Exception as exc:
+        if _is_missing_durable_state_schema_error(exc):
+            logger.warning("Durable workflow state required write skipped during %s: %s", phase, exc)
+            return None
+        logger.warning("Durable workflow state required write failed during %s: %s", phase, exc)
+        raise DurableWorkflowStateUnavailable(
+            f"Durable workflow state unavailable before {phase}; refusing unsafe workflow continuation."
+        ) from exc
 
 
 def _resolve_context_expr(expr: str, context: dict[str, Any]) -> Any:
@@ -848,19 +893,6 @@ class WorkflowTool(Tool):
         )
         parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
         root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
-        _run_durable_state_write(workflow_state_repository.create_run(
-            run_identity=durable_run_identity,
-            workflow_name=self.workflow.name,
-            tool_name=self.name,
-            session_id=current_session_id,
-            run_fingerprint=run_fingerprint,
-            arguments=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
-            approval_context=approval_context,
-            parent_run_identity=parent_run_identity,
-            root_run_identity=root_run_identity,
-            branch_kind=control_inputs.get("_seraph_branch_kind"),
-            branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
-        ))
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -873,12 +905,59 @@ class WorkflowTool(Tool):
         canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
         checkpoint_context: dict[str, dict[str, Any]] = {}
         start_index = 0
+        _run_required_durable_state_write(workflow_state_repository.create_run(
+            run_identity=durable_run_identity,
+            workflow_name=self.workflow.name,
+            tool_name=self.name,
+            session_id=current_session_id,
+            run_fingerprint=run_fingerprint,
+            arguments=_durable_arguments(audit_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
+            approval_context=approval_context,
+            parent_run_identity=parent_run_identity,
+            root_run_identity=root_run_identity,
+            branch_kind=control_inputs.get("_seraph_branch_kind"),
+            branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
+        ), phase="workflow_start")
         if control_inputs.get("_seraph_resume_from_step"):
-            start_index, restored_step_records, restored_artifact_paths, restored_context = self._restore_checkpoint_context(
-                control_inputs=control_inputs,
-                canonical_step_tools=canonical_step_tools,
-                approval_context=approval_context,
-            )
+            try:
+                start_index, restored_step_records, restored_artifact_paths, restored_context = self._restore_checkpoint_context(
+                    control_inputs=control_inputs,
+                    canonical_step_tools=canonical_step_tools,
+                    approval_context=approval_context,
+                )
+            except Exception as exc:
+                safe_error_summary = _safe_workflow_error_summary(exc)
+                self._last_audit_failure_payload = self._build_audit_payload(
+                    status="failed",
+                    run_fingerprint=run_fingerprint,
+                    approval_context=approval_context,
+                    canonical_step_tools=canonical_step_tools,
+                    step_records=step_records,
+                    artifact_paths=artifact_paths,
+                    continued_error_steps=continued_error_steps,
+                    canvas_output=None,
+                    checkpoint_context=checkpoint_context,
+                    checkpoint_context_allowed=checkpoint_context_allowed,
+                    control_inputs=control_inputs,
+                    error=safe_error_summary,
+                    durable_run_identity=durable_run_identity,
+                )
+                durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, "failed")
+                _run_durable_state_write(workflow_state_repository.finish_run(
+                    run_identity=durable_run_identity,
+                    status="failed",
+                    checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
+                    artifact_paths=artifact_paths,
+                    continued_error_steps=continued_error_steps,
+                    last_completed_step_id=None,
+                    error=safe_error_summary,
+                    metadata={
+                        "summary": f"{self.name} failed before checkpoint resume",
+                        "durable_audit_receipt_id": durable_audit_receipt_id,
+                        "content_redacted": True,
+                    },
+                ))
+                raise
             for step_id, state in restored_context.items():
                 context["steps"][step_id] = state
                 context["last_result"] = state.get("result", "")
@@ -899,14 +978,14 @@ class WorkflowTool(Tool):
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
                 )
             rendered_arguments = _render_value(step.arguments, context)
-            _run_durable_state_write(workflow_state_repository.record_step_started(
+            _run_required_durable_state_write(workflow_state_repository.record_step_started(
                 run_identity=durable_run_identity,
                 workflow_name=self.workflow.name,
                 step_id=step.id,
                 step_index=len(step_records) + 1,
                 tool_name=canonical_step_tool,
                 arguments=_durable_arguments(rendered_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
-            ))
+            ), phase=f"step_start:{step.id}")
             step_artifact_paths = _collect_artifact_paths(rendered_arguments)
             step_status = "succeeded"
             error_kind: str | None = None

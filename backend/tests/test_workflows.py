@@ -15,6 +15,7 @@ from src.extensions.governance import governance_signature_value
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
 from src.workflows.manager import (
+    DurableWorkflowStateUnavailable,
     WorkflowManager,
     WorkflowTool,
     _approval_context_for_workflow,
@@ -832,6 +833,68 @@ def test_workflow_tool_uses_unique_durable_identity_for_repeated_identical_runs(
     assert identities[1].endswith(":run-202")
 
 
+def test_workflow_tool_fails_closed_before_tool_call_when_required_durable_state_unavailable():
+    workflow = Workflow(
+        name="durable-required",
+        description="Requires durable state before execution",
+        inputs={"query": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+        ],
+        requires_tools=["web_search"],
+        result_template="{{ steps.search.result }}",
+    )
+    search = DummyTool("web_search", lambda query: f"fresh result for {query}")
+    workflow_tool = WorkflowTool(workflow, {"web_search": search})
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
+
+    with patch("src.workflows.manager.workflow_state_repository", durable_repository):
+        with pytest.raises(DurableWorkflowStateUnavailable):
+            workflow_tool(query="seraph")
+
+    assert search.calls == []
+    assert durable_repository.record_step_started.await_count == 0
+    assert durable_repository.record_step_completed.await_count == 0
+
+
+def test_workflow_tool_allows_partial_migration_missing_durable_state_tables():
+    workflow = Workflow(
+        name="partial-migration",
+        description="Allows local partial migration runs",
+        inputs={"query": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+        ],
+        requires_tools=["web_search"],
+        result_template="{{ steps.search.result }}",
+    )
+    search = DummyTool("web_search", lambda query: f"fresh result for {query}")
+    workflow_tool = WorkflowTool(workflow, {"web_search": search})
+    missing_run_table = RuntimeError("sqlite3.OperationalError: no such table: workflow_run_states")
+    missing_step_table = RuntimeError("sqlite3.OperationalError: no such table: workflow_step_states")
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(side_effect=missing_run_table),
+        record_step_started=AsyncMock(side_effect=missing_step_table),
+        record_step_completed=AsyncMock(side_effect=missing_step_table),
+        record_step_failed=AsyncMock(side_effect=missing_step_table),
+        finish_run=AsyncMock(side_effect=missing_run_table),
+    )
+
+    with patch("src.workflows.manager.workflow_state_repository", durable_repository):
+        result = workflow_tool(query="seraph")
+
+    assert result == "fresh result for seraph"
+    assert search.calls == [{"query": "seraph"}]
+    assert durable_repository.create_run.await_count == 1
+    assert durable_repository.record_step_started.await_count == 1
+
+
 def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
     workflow = Workflow(
         name="delegation-replay",
@@ -882,12 +945,20 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
         },
         "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
     }
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
 
     with (
         patch(
             "src.workflows.manager._load_workflow_checkpoint_payload",
             AsyncMock(return_value=checkpoint_payload),
         ),
+        patch("src.workflows.manager.workflow_state_repository", durable_repository),
         pytest.raises(RuntimeError, match="trust boundary"),
     ):
         workflow_tool(
@@ -896,6 +967,10 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
             _seraph_parent_run_identity=parent_run_identity,
             _seraph_root_run_identity=parent_run_identity,
         )
+    assert durable_repository.create_run.await_count == 1
+    assert durable_repository.record_step_started.await_count == 0
+    assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
+    assert durable_repository.finish_run.await_args.kwargs["last_completed_step_id"] is None
 
 
 def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface():
@@ -937,12 +1012,20 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         },
         "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
     }
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
 
     with (
         patch(
             "src.workflows.manager._load_workflow_checkpoint_payload",
             AsyncMock(return_value=checkpoint_payload),
         ),
+        patch("src.workflows.manager.workflow_state_repository", durable_repository),
         pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
     ):
         workflow_tool(
@@ -951,6 +1034,10 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
             _seraph_parent_run_identity=parent_run_identity,
             _seraph_root_run_identity=parent_run_identity,
         )
+    assert durable_repository.create_run.await_count == 1
+    assert durable_repository.record_step_started.await_count == 0
+    assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
+    assert durable_repository.finish_run.await_args.kwargs["last_completed_step_id"] is None
 
     def test_workflow_tool_audit_call_payload_uses_normalized_control_inputs_for_fingerprint(self):
         workflow = Workflow(

@@ -351,6 +351,20 @@ from src.guardian.live_guardian_memory_field_program import (
     MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
     MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SUITE_NAME,
 )
+from src.guardian.post_dp_guardian_memory_gap_closure import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME,
+    MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME,
+    MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES,
+    MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SUITE_NAME,
@@ -1802,6 +1816,92 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         operator_summary="Batch DL exposes the claims still blocked by the field-program evidence.",
         remaining_gap="Final parity, production readiness, and reference-system exceedance remain blocked.",
         scenario_names=GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME,
+        label="Post-DP guardian learning memory gap closure v1",
+        description=(
+            "Pins Batch DT as post-DP implementation gap closure beyond DL, requiring consented long-horizon "
+            "learning, memory-caused decision receipts, reversible deltas, provider operations, safety monitors, "
+            "and blocked-claim boundaries."
+        ),
+        benchmark_axis="post_dp_guardian_learning_memory_gap_closure",
+        operator_summary=(
+            "Guardian learning-memory receipts now explain bounded action, deferral, clarification, approval, "
+            "silence, recovery, and follow-through causality without claiming solved learning."
+        ),
+        remaining_gap=(
+            "Guardian intelligence superiority, memory superiority, full provider parity, and full parity remain blocked."
+        ),
+        scenario_names=POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME,
+        label="Long-horizon learning quality v2",
+        description=(
+            "Pins consent, withdrawal, anonymization, cohort boundaries, task families, outcome protocols, "
+            "adverse-event review, independent evaluator metadata, and rollback authority for DT."
+        ),
+        benchmark_axis="long_horizon_learning_quality_v2",
+        operator_summary=(
+            "Long-horizon guardian learning remains consented, reversible, redacted, and independently reviewable."
+        ),
+        remaining_gap="Solved learning and live-human-outcome superiority remain blocked.",
+        scenario_names=LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME,
+        label="Memory behavior ablation v2",
+        description=(
+            "Pins memory-enabled behavior changes against memory-disabled or memory-limited counterfactuals, "
+            "including action, deferral, clarification, approval, silence, recovery, and follow-through decisions."
+        ),
+        benchmark_axis="memory_behavior_ablation_v2",
+        operator_summary=(
+            "Operator receipts explain when guardian learning caused behavior and when stale or unsafe memory was blocked."
+        ),
+        remaining_gap="Memory superiority and named baseline wins remain blocked.",
+        scenario_names=MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME,
+        label="Memory provider operation v2",
+        description=(
+            "Pins canonical authority, advisory provider quality gates, stale-evidence decay, delete/export "
+            "propagation, quarantine, reinstatement review, and privacy regression handling for DT."
+        ),
+        benchmark_axis="memory_provider_operation_v2",
+        operator_summary=(
+            "Provider receipts keep canonical memory authoritative while advisory providers stay quality gated."
+        ),
+        remaining_gap="Full memory-provider parity and provider superiority remain blocked.",
+        scenario_names=MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME,
+        label="Learning safety regression v2",
+        description=(
+            "Pins rollback authority, privacy and harm monitor behavior, stale provider negative cases, "
+            "quarantine, reinstatement review, and promotion blocking for DT learning deltas."
+        ),
+        benchmark_axis="learning_safety_regression_v2",
+        operator_summary=(
+            "Learning deltas expose rollback, quarantine, and operator review before promotion."
+        ),
+        remaining_gap="Autonomous production learning and solved long-term learning remain blocked.",
+        scenario_names=LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Guardian memory false-claim scan v2",
+        description=(
+            "Pins DT false-claim scans that keep solved-learning, memory-superiority, production-readiness, "
+            "full-parity, and reference-system-exceedance wording blocked."
+        ),
+        benchmark_axis="guardian_memory_false_claim_scan_v2",
+        operator_summary="Batch DT exposes the guardian-learning and memory claims still blocked after gap closure.",
+        remaining_gap="Final parity, production readiness, and reference-system exceedance remain blocked.",
+        scenario_names=GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name="memory_continuity_workflows",

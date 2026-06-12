@@ -397,7 +397,11 @@ async def test_workflow_state_repository_v2_lease_transition_trigger_and_recover
     assert deduped_transition is not None
     assert deduped_transition["receipt"]["status"] == "deduped"
     assert trigger is not None
-    assert trigger["receipt"]["external_action_allowed"] is True
+    assert trigger["receipt"]["external_action_allowed"] is False
+    assert (
+        trigger["receipt"]["authority_required"]
+        == "recovery_plan_or_operator_resume_required_before_external_action"
+    )
     assert deduped_trigger is not None
     assert deduped_trigger["receipt"]["status"] == "deduped"
     assert deduped_trigger["receipt"]["external_action_allowed"] is False
@@ -405,6 +409,138 @@ async def test_workflow_state_repository_v2_lease_transition_trigger_and_recover
     assert blocked_recovery["receipt"]["status"] == "blocked"
     assert blocked_recovery["receipt"]["blocked_reason"] == "approval_context_changed"
     assert blocked_recovery["receipt"]["requires_fresh_run"] is True
+    assert blocked_recovery["orchestration_v2"]["unsafe_recovery_refusal_receipts"][-1]["requires_fresh_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_stale_interrupt_preserves_v2_metadata(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_stale_preserve:abc",
+        workflow_name="stale-preserve-v2",
+        tool_name="workflow_stale_preserve_v2",
+        session_id="session-v2",
+        run_fingerprint="stale-preserve",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_stale_preserve:abc",
+        owner="worker-a",
+        lease_id="lease-a",
+    )
+    await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_stale_preserve:abc",
+        transition_key="resume:draft",
+        transition_type="resume",
+        owner="worker-a",
+        step_id="draft",
+    )
+
+    interrupted = await workflow_state_repository.mark_stale_runs_interrupted(older_than_seconds=-1)
+
+    run = next(item for item in interrupted if item["run_identity"] == "session-v2:workflow_stale_preserve:abc")
+    orchestration_v2 = run["metadata"]["orchestration_v2"]
+    assert run["status"] == "interrupted"
+    assert run["metadata"]["resume_receipt"] is True
+    assert orchestration_v2["lease"]["owner"] == "worker-a"
+    assert orchestration_v2["lease"]["lease_id"] == "lease-a"
+    assert orchestration_v2["transition_ledger"][-1]["transition_key"] == "resume:draft"
+    assert orchestration_v2["restart_recovery_receipts"][-1]["preserved_orchestration_v2"] is True
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_rejects_stale_owner_before_transition_dedupe(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_stale_owner:abc",
+        workflow_name="stale-owner-v2",
+        tool_name="workflow_stale_owner_v2",
+        session_id="session-v2",
+        run_fingerprint="stale-owner",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_stale_owner:abc",
+        owner="worker-a",
+        lease_id="lease-a",
+    )
+    recorded = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_stale_owner:abc",
+        transition_key="resume:draft",
+        transition_type="resume",
+        owner="worker-a",
+        step_id="draft",
+    )
+    stale_owner = await workflow_state_repository.record_v2_transition(
+        run_identity="session-v2:workflow_stale_owner:abc",
+        transition_key="resume:draft",
+        transition_type="resume",
+        owner="worker-b",
+        step_id="draft",
+    )
+
+    assert recorded is not None
+    assert recorded["receipt"]["status"] == "recorded"
+    assert stale_owner is not None
+    assert stale_owner["receipt"]["status"] == "blocked"
+    assert stale_owner["receipt"]["blocked_reason"] == "active_owner_lease_required"
+    assert stale_owner["orchestration_v2"]["transition_block_receipts"][-1]["owner"] == "worker-b"
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_persists_dq_handoff_guardian_and_side_effect_receipts(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_dq_receipts:abc",
+        workflow_name="dq-receipts-v2",
+        tool_name="workflow_dq_receipts_v2",
+        session_id="session-v2",
+        run_fingerprint="dq-receipts",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity="session-v2:workflow_dq_receipts:abc",
+        owner="worker-a",
+        lease_id="lease-a",
+    )
+    handoff = await workflow_state_repository.record_v2_handoff(
+        run_identity="session-v2:workflow_dq_receipts:abc",
+        from_owner="worker-a",
+        to_owner="worker-b",
+        receiver_authority_accepted=False,
+    )
+    side_effect = await workflow_state_repository.record_v2_side_effect_boundary(
+        run_identity="session-v2:workflow_dq_receipts:abc",
+        side_effect_kind="repository_mutation",
+        idempotency_scope="repo_branch_commit_tree",
+        idempotency_key="raw-idempotency-key",
+        external_confirmation_state="unknown_ack",
+        reconciliation_status="manual_repair_required",
+        duplicate_suppressed=True,
+    )
+    guardian = await workflow_state_repository.record_v2_guardian_recovery_context(
+        run_identity="session-v2:workflow_dq_receipts:abc",
+        guardian_recovery_context={"recent_context_shift": True, "private": "redacted before digest"},
+        restraint_posture="operator_audit_required",
+        reason_codes=["recent_context_shift"],
+    )
+
+    assert handoff is not None
+    assert handoff["receipt"]["status"] == "blocked"
+    assert handoff["receipt"]["blocked_reason"] == "receiver_authority_not_accepted"
+    assert handoff["orchestration_v2"]["handoff_receipts"][-1]["to_owner"] == "worker-b"
+    assert side_effect is not None
+    assert side_effect["receipt"]["idempotency_key_digest"] != "raw-idempotency-key"
+    assert side_effect["receipt"]["duplicate_suppressed"] is True
+    assert side_effect["orchestration_v2"]["side_effect_boundary_receipts"][-1]["reconciliation_status"] == (
+        "manual_repair_required"
+    )
+    assert guardian is not None
+    assert guardian["receipt"]["authority_expanded"] is False
+    assert guardian["receipt"]["guardian_recovery_context_digest"] != "redacted before digest"
+    assert guardian["orchestration_v2"]["guardian_recovery_receipts"][-1]["restraint_posture"] == (
+        "operator_audit_required"
+    )
 
 
 @pytest.mark.asyncio

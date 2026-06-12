@@ -124,6 +124,11 @@ def _workflow_v2_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     v2.setdefault("trigger_ledger", [])
     v2.setdefault("recovery_receipts", [])
     v2.setdefault("artifact_adoption_receipts", [])
+    v2.setdefault("restart_recovery_receipts", [])
+    v2.setdefault("handoff_receipts", [])
+    v2.setdefault("guardian_recovery_receipts", [])
+    v2.setdefault("side_effect_boundary_receipts", [])
+    v2.setdefault("unsafe_recovery_refusal_receipts", [])
     payload["orchestration_v2"] = v2
     return payload
 
@@ -136,6 +141,10 @@ def _lease_active(lease: dict[str, Any], now: datetime | None = None) -> bool:
 def _stable_id(prefix: str, *parts: Any) -> str:
     seed = "|".join(str(part) for part in parts)
     return f"{prefix}_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _stable_digest(value: Any) -> str:
+    return hashlib.sha256(_dumps(value).encode("utf-8")).hexdigest()[:20]
 
 
 def durable_workflow_snapshot_dict(run: dict[str, Any]) -> dict[str, Any]:
@@ -726,9 +735,7 @@ class WorkflowStateRepository:
             revision_mismatch = expected_revision is not None and expected_revision != revision
             lease = _as_dict(v2.get("lease"))
             lease_owner_mismatch = not _lease_active(lease, now) or lease.get("owner") != owner
-            if existing:
-                receipt = {**existing, "status": "deduped", "operator_visible": True}
-            elif lease_owner_mismatch:
+            if lease_owner_mismatch:
                 receipt = {
                     "transition_key": transition_key,
                     "transition_type": transition_type,
@@ -774,6 +781,13 @@ class WorkflowStateRepository:
                 run.updated_at = now
                 run.metadata_json = _dumps(metadata)
                 await db.flush()
+            elif existing:
+                receipt = {
+                    **existing,
+                    "status": "deduped",
+                    "dedupe_authority": "lease_owner_and_revision_validated",
+                    "operator_visible": True,
+                }
             else:
                 receipt = {
                     "transition_key": transition_key,
@@ -830,8 +844,9 @@ class WorkflowStateRepository:
                     "trigger_kind": trigger_kind,
                     "source": source,
                     "status": "recorded",
-                    "external_action_allowed": True,
-                    "next_action": "recover_or_resume_with_operator_visible_receipt",
+                    "external_action_allowed": False,
+                    "authority_required": "recovery_plan_or_operator_resume_required_before_external_action",
+                    "next_action": "record_trigger_then_validate_recovery_authority",
                     "recorded_at": now.isoformat(),
                     "revision": v2["revision"],
                     "operator_visible": True,
@@ -889,6 +904,22 @@ class WorkflowStateRepository:
                 "operator_visible": True,
                 "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
             }
+            if blocked_reason:
+                refusals = [
+                    _as_dict(item)
+                    for item in _as_list(v2.get("unsafe_recovery_refusal_receipts"))
+                    if isinstance(item, dict)
+                ]
+                refusals.append({
+                    "kind": "unsafe_recovery_refusal",
+                    "run_identity": run_identity,
+                    "owner": owner,
+                    "blocked_reason": blocked_reason,
+                    "requires_fresh_run": True,
+                    "operator_visible": True,
+                    "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+                })
+                v2["unsafe_recovery_refusal_receipts"] = refusals[-10:]
             receipts = [
                 _as_dict(item)
                 for item in _as_list(v2.get("recovery_receipts"))
@@ -896,6 +927,158 @@ class WorkflowStateRepository:
             ]
             receipts.append(receipt)
             v2["recovery_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_handoff(
+        self,
+        *,
+        run_identity: str,
+        from_owner: str,
+        to_owner: str,
+        receiver_authority_accepted: bool = False,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            lease = _as_dict(v2.get("lease"))
+            revision = int(v2.get("revision") or 0)
+            blocked_reason = None
+            if not _lease_active(lease, now) or lease.get("owner") != from_owner:
+                blocked_reason = "active_owner_lease_required"
+            elif expected_revision is not None and expected_revision != revision:
+                blocked_reason = "revision_mismatch"
+            elif not receiver_authority_accepted:
+                blocked_reason = "receiver_authority_not_accepted"
+            receipt = {
+                "kind": "handoff",
+                "run_identity": run_identity,
+                "from_owner": from_owner,
+                "to_owner": to_owner,
+                "status": "blocked" if blocked_reason else "accepted",
+                "blocked_reason": blocked_reason,
+                "receiver_authority_accepted": receiver_authority_accepted,
+                "lease_owner": lease.get("owner"),
+                "lease_id_digest": _stable_digest(lease.get("lease_id")),
+                "expected_revision": expected_revision,
+                "actual_revision": revision,
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            handoffs = [
+                _as_dict(item)
+                for item in _as_list(v2.get("handoff_receipts"))
+                if isinstance(item, dict)
+            ]
+            handoffs.append(receipt)
+            v2["handoff_receipts"] = handoffs[-10:]
+            if not blocked_reason:
+                v2["revision"] = revision + 1
+                v2["lease"] = {
+                    **lease,
+                    "owner": to_owner,
+                    "renewed_at": now.isoformat(),
+                    "revision": v2["revision"],
+                }
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_side_effect_boundary(
+        self,
+        *,
+        run_identity: str,
+        side_effect_kind: str,
+        idempotency_scope: str,
+        idempotency_key: str,
+        external_confirmation_state: str,
+        reconciliation_status: str,
+        duplicate_suppressed: bool = False,
+        redacted_receipt_handle: str | None = None,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            receipt = {
+                "kind": "side_effect_boundary",
+                "run_identity": run_identity,
+                "side_effect_kind": side_effect_kind,
+                "idempotency_scope": idempotency_scope,
+                "idempotency_key_digest": _stable_digest(idempotency_key),
+                "external_confirmation_state": external_confirmation_state,
+                "reconciliation_status": reconciliation_status,
+                "duplicate_suppressed": bool(duplicate_suppressed),
+                "redacted_receipt_handle": redacted_receipt_handle
+                or f"receipt://workflow/{_stable_id('side_effect', run_identity, side_effect_kind)}",
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("side_effect_boundary_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["side_effect_boundary_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_guardian_recovery_context(
+        self,
+        *,
+        run_identity: str,
+        guardian_recovery_context: dict[str, Any],
+        restraint_posture: str,
+        reason_codes: list[str] | None = None,
+        authority_expanded: bool = False,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            receipt = {
+                "kind": "guardian_recovery",
+                "run_identity": run_identity,
+                "guardian_recovery_context_digest": _stable_digest(_as_dict(guardian_recovery_context)),
+                "restraint_posture": restraint_posture,
+                "reason_codes": list(reason_codes or []),
+                "authority_expanded": bool(authority_expanded),
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("guardian_recovery_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["guardian_recovery_receipts"] = receipts[-10:]
             run.metadata_json = _dumps(metadata)
             run.updated_at = now
             await db.flush()
@@ -975,7 +1158,31 @@ class WorkflowStateRepository:
                 run.status = "interrupted"
                 run.updated_at = now
                 run.finished_at = now
-                run.metadata_json = _dumps({"interrupted_by": "durable_workflow_heartbeat", "resume_receipt": True})
+                metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+                v2 = metadata["orchestration_v2"]
+                restart_receipts = [
+                    _as_dict(item)
+                    for item in _as_list(v2.get("restart_recovery_receipts"))
+                    if isinstance(item, dict)
+                ]
+                restart_receipts.append({
+                    "kind": "restart_recovery",
+                    "run_identity": run.run_identity,
+                    "previous_status": "running",
+                    "status": "interrupted",
+                    "interrupted_by": "durable_workflow_heartbeat",
+                    "resume_receipt": True,
+                    "preserved_orchestration_v2": True,
+                    "lease_id": _as_dict(v2.get("lease")).get("lease_id"),
+                    "transition_count": len(_as_list(v2.get("transition_ledger"))),
+                    "recovery_count": len(_as_list(v2.get("recovery_receipts"))),
+                    "operator_visible": True,
+                    "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+                })
+                v2["restart_recovery_receipts"] = restart_receipts[-10:]
+                metadata["interrupted_by"] = "durable_workflow_heartbeat"
+                metadata["resume_receipt"] = True
+                run.metadata_json = _dumps(metadata)
             await db.flush()
             for run in runs:
                 db.expunge(run)

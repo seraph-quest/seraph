@@ -609,6 +609,21 @@ from src.workflows.production_orchestration_hard_guarantees import (
     SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME,
     build_production_orchestration_hard_guarantees_contract,
 )
+from src.workflows.post_dp_durable_orchestration import (
+    MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    POST_DP_DURABLE_ORCHESTRATION_BLOCKED_CLAIMS,
+    POST_DP_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY,
+    POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME,
+    SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES,
+    SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME,
+    SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME,
+    build_post_dp_durable_orchestration_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -22090,6 +22105,70 @@ async def _eval_production_orchestration_hard_guarantees_behavior() -> dict[str,
     }
 
 
+async def _eval_post_dp_durable_orchestration_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    post_dp_suite = next(item for item in suites if item["name"] == POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME)
+    handoff_suite = next(item for item in suites if item["name"] == MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME)
+    scheduler_suite = next(item for item in suites if item["name"] == SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME)
+    side_effect_suite = next(item for item in suites if item["name"] == SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME)
+    scan_suite = next(item for item in suites if item["name"] == ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME)
+    contract = build_post_dp_durable_orchestration_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    packets = contract["recovery_packets"]
+    required_surfaces = {
+        "/api/operator/post-dp-durable-orchestration",
+        "/api/operator/durable-workflow-engine-v2",
+        "/api/operator/production-orchestration-hard-guarantees",
+        "/api/operator/benchmark-proof",
+    }
+    return {
+        "post_dp_suite_visible": post_dp_suite["scenario_count"]
+        == len(POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES),
+        "handoff_suite_visible": handoff_suite["scenario_count"] == len(MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES),
+        "scheduler_suite_visible": scheduler_suite["scenario_count"]
+        == len(SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES),
+        "side_effect_suite_visible": side_effect_suite["scenario_count"] == len(SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES),
+        "scan_suite_visible": scan_suite["scenario_count"] == len(ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES),
+        "post_dp_axis_visible": post_dp_suite["benchmark_axis"] == "post_dp_durable_orchestration",
+        "operator_status_visible": summary["operator_status"] == "post_dp_durable_orchestration_gap_closure_visible",
+        "recovery_packets_visible": summary["packet_count"] >= 2 and len(packets) >= 2,
+        "ready_and_blocked_recovery_visible": summary["ready_recovery_count"] >= 1
+        and summary["blocked_recovery_count"] >= 1,
+        "restart_metadata_preserved_visible": summary["metadata_preservation_count"] >= 1,
+        "handoff_blocks_visible": summary["handoff_block_count"] >= 1,
+        "lease_transition_blocks_visible": summary["transition_block_count"] >= 1,
+        "scheduler_trigger_dedupe_visible": summary["deduped_trigger_count"] >= 1,
+        "triggers_do_not_authorize_external_action": summary["trigger_external_action_allowed_count"] == 0,
+        "side_effect_reconciliation_visible": summary["side_effect_reconciliation_count"] >= 1
+        and summary["duplicate_suppression_count"] >= 1,
+        "replay_windows_visible": summary["replay_window_count"] >= 2
+        and all(packet["replay_window"]["authority_required"] for packet in packets),
+        "guardian_restraint_visible": summary["guardian_restraint_count"] >= 2
+        and all(packet["guardian_recovery"]["authority_expanded"] is False for packet in packets),
+        "unsafe_recovery_refusals_visible": summary["unsafe_recovery_refusal_count"] >= 1,
+        "operator_packets_redacted": summary["all_raw_payloads_redacted"] is True
+        and all(packet["raw_payloads_redacted"] is True for packet in packets)
+        and all("approval_context_digest" in packet for packet in packets)
+        and all("run_identity" not in packet and "workflow_name" not in packet for packet in packets)
+        and all("lease_id" not in packet and "lease_owner" not in packet for packet in packets),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DP_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DP_DURABLE_ORCHESTRATION_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["operator_surfaces"]),
+        "exactly_once_not_claimed": "exactly_once_scheduler" in policy["not_claimed"],
+        "post_dp_gate_required": POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "handoff_gate_required": MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "scheduler_gate_required": SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "side_effect_gate_required": SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+        "scan_gate_required": ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+        in evolution_benchmark_gate_policy()["required_benchmark_suites"],
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -23943,6 +24022,66 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_production_orchestration_hard_guarantees_behavior,
         )
         for name in ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DQ records post-DP durable orchestration recovery packets for restart, lease, "
+                "side-effect, guardian, redaction, and bounded-claim posture."
+            ),
+            runner=_eval_post_dp_durable_orchestration_behavior,
+        )
+        for name in POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DQ records multi-agent handoff recovery receipts for receiver authority, pending "
+                "approval fail-closed behavior, and revision guards."
+            ),
+            runner=_eval_post_dp_durable_orchestration_behavior,
+        )
+        for name in MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DQ records scheduler crash/restart receipts with trigger record-only semantics, "
+                "dedupe, and stale-heartbeat recovery packets."
+            ),
+            runner=_eval_post_dp_durable_orchestration_behavior,
+        )
+        for name in SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DQ records side-effect reconciliation v5 receipts for idempotency digests, "
+                "duplicate suppression, unknown acknowledgement, and manual repair."
+            ),
+            runner=_eval_post_dp_durable_orchestration_behavior,
+        )
+        for name in SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DQ records orchestration false-claim v2 scans so exactly-once, crash-proof, "
+                "full-parity, exceedance, and superiority wording remains blocked."
+            ),
+            runner=_eval_post_dp_durable_orchestration_behavior,
+        )
+        for name in ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

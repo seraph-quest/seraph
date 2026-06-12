@@ -15,6 +15,7 @@ from src.extensions.governance import governance_signature_value
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.workflows.loader import Workflow, WorkflowStep, _parse_workflow_file, load_workflows
 from src.workflows.manager import (
+    DurableWorkflowStateUnavailable,
     WorkflowManager,
     WorkflowTool,
     _approval_context_for_workflow,
@@ -830,6 +831,36 @@ def test_workflow_tool_uses_unique_durable_identity_for_repeated_identical_runs(
     assert identities[0] != identities[1]
     assert identities[0].endswith(":run-101")
     assert identities[1].endswith(":run-202")
+
+
+def test_workflow_tool_fails_closed_before_tool_call_when_required_durable_state_unavailable():
+    workflow = Workflow(
+        name="durable-required",
+        description="Requires durable state before execution",
+        inputs={"query": {"type": "string", "required": True}},
+        steps=[
+            WorkflowStep(id="search", tool="web_search", arguments={"query": "{{ query }}"}),
+        ],
+        requires_tools=["web_search"],
+        result_template="{{ steps.search.result }}",
+    )
+    search = DummyTool("web_search", lambda query: f"fresh result for {query}")
+    workflow_tool = WorkflowTool(workflow, {"web_search": search})
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
+
+    with patch("src.workflows.manager.workflow_state_repository", durable_repository):
+        with pytest.raises(DurableWorkflowStateUnavailable):
+            workflow_tool(query="seraph")
+
+    assert search.calls == []
+    assert durable_repository.record_step_started.await_count == 0
+    assert durable_repository.record_step_completed.await_count == 0
 
 
 def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():

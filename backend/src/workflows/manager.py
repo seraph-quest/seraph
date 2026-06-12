@@ -75,6 +75,20 @@ def _run_durable_state_write(coro) -> Any | None:
         return None
 
 
+class DurableWorkflowStateUnavailable(RuntimeError):
+    """Raised when a workflow cannot safely continue without durable state."""
+
+
+def _run_required_durable_state_write(coro, *, phase: str) -> Any:
+    try:
+        return _run_async(coro)
+    except Exception as exc:
+        logger.warning("Durable workflow state required write failed during %s: %s", phase, exc)
+        raise DurableWorkflowStateUnavailable(
+            f"Durable workflow state unavailable before {phase}; refusing unsafe workflow continuation."
+        ) from exc
+
+
 def _resolve_context_expr(expr: str, context: dict[str, Any]) -> Any:
     parts = [part.strip() for part in expr.split(".") if part.strip()]
     if not parts:
@@ -848,7 +862,7 @@ class WorkflowTool(Tool):
         )
         parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
         root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
-        _run_durable_state_write(workflow_state_repository.create_run(
+        _run_required_durable_state_write(workflow_state_repository.create_run(
             run_identity=durable_run_identity,
             workflow_name=self.workflow.name,
             tool_name=self.name,
@@ -860,7 +874,7 @@ class WorkflowTool(Tool):
             root_run_identity=root_run_identity,
             branch_kind=control_inputs.get("_seraph_branch_kind"),
             branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
-        ))
+        ), phase="workflow_start")
         context: dict[str, Any] = {
             "inputs": workflow_inputs,
             "steps": {},
@@ -899,14 +913,14 @@ class WorkflowTool(Tool):
                     f"Workflow '{self.workflow.name}' requires unavailable tool '{step.tool}'"
                 )
             rendered_arguments = _render_value(step.arguments, context)
-            _run_durable_state_write(workflow_state_repository.record_step_started(
+            _run_required_durable_state_write(workflow_state_repository.record_step_started(
                 run_identity=durable_run_identity,
                 workflow_name=self.workflow.name,
                 step_id=step.id,
                 step_index=len(step_records) + 1,
                 tool_name=canonical_step_tool,
                 arguments=_durable_arguments(rendered_arguments, checkpoint_context_allowed=checkpoint_context_allowed),
-            ))
+            ), phase=f"step_start:{step.id}")
             step_artifact_paths = _collect_artifact_paths(rendered_arguments)
             step_status = "succeeded"
             error_kind: str | None = None

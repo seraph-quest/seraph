@@ -507,6 +507,23 @@ from src.guardian.live_guardian_memory_field_program import (
     MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SUITE_NAME,
     build_live_guardian_memory_field_program_contract,
 )
+from src.guardian.post_dp_guardian_memory_gap_closure import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME,
+    MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME,
+    MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES,
+    MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME,
+    POST_DP_GUARDIAN_MEMORY_BLOCKED_CLAIMS,
+    POST_DP_GUARDIAN_MEMORY_CLAIM_BOUNDARY,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME,
+    build_post_dp_guardian_memory_contract,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_LEARNING_MEMORY_PARITY_BLOCKED_CLAIMS,
     INDEPENDENT_LEARNING_MEMORY_PARITY_CLAIM_BOUNDARY,
@@ -17217,6 +17234,181 @@ async def _eval_live_guardian_memory_field_program_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_dp_guardian_memory_behavior() -> dict[str, Any]:
+    contract = build_post_dp_guardian_memory_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    blocked = set(policy["blocked_claims"])
+    long_horizon = contract["long_horizon_learning_quality"]
+    ablations = contract["memory_behavior_ablations"]
+    providers = contract["memory_provider_operations"]
+    safety = contract["learning_safety_regressions"]
+    claim_scans = contract["false_claim_scans"]
+    suites = benchmark_suite_report()
+    gate_policy = evolution_benchmark_gate_policy()
+    post_dp_suite = next(
+        item for item in suites if item["name"] == POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME
+    )
+    long_horizon_suite = next(item for item in suites if item["name"] == LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME)
+    ablation_suite = next(item for item in suites if item["name"] == MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME)
+    provider_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME)
+    safety_suite = next(item for item in suites if item["name"] == LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME)
+    claim_scan_suite = next(item for item in suites if item["name"] == GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME)
+    safe_receipts = [
+        item.get("safe_receipt", {})
+        for item in [*long_horizon, *ablations, *providers, *safety, *claim_scans]
+    ]
+    required_decisions = {
+        "act",
+        "defer",
+        "bundle",
+        "clarify",
+        "approval",
+        "stay_silent",
+        "recovery",
+        "followthrough",
+    }
+    required_provider_states = {
+        "healthy",
+        "degraded",
+        "stale",
+        "conflicting",
+        "privacy_limited",
+        "quarantined",
+        "review_for_reinstatement",
+    }
+    required_negative_cases = {
+        "stale_recall",
+        "over_personalization",
+        "noisy_provider_evidence",
+        "false_confidence",
+        "privacy_regression",
+        "unsafe_intervention",
+        "hallucinated_obligation",
+        "provider_drift",
+        "conflicting_project_anchors",
+        "ignored_correction",
+    }
+    details = {
+        "operator_status_visible": summary["operator_status"] == "post_dp_guardian_learning_memory_gap_closure_visible",
+        "foundation_is_dl_not_duplicate": (
+            summary["foundation_operator_status"] == "live_guardian_memory_field_program_receipts_visible"
+            and summary["foundation_claim_boundary"] == policy["foundation_claim_boundary"]
+        ),
+        "post_dp_suite_visible": (
+            post_dp_suite["scenario_count"] == len(POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES)
+            and post_dp_suite["benchmark_axis"] == "post_dp_guardian_learning_memory_gap_closure"
+        ),
+        "long_horizon_suite_visible": (
+            long_horizon_suite["scenario_count"] == len(LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES)
+        ),
+        "ablation_suite_visible": (
+            ablation_suite["scenario_count"] == len(MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES)
+        ),
+        "provider_suite_visible": (
+            provider_suite["scenario_count"] == len(MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES)
+        ),
+        "safety_suite_visible": (
+            safety_suite["scenario_count"] == len(LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES)
+        ),
+        "claim_scan_suite_visible": (
+            claim_scan_suite["scenario_count"] == len(GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+        ),
+        "post_dp_gate_required": POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "long_horizon_gate_required": LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "ablation_gate_required": MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "provider_gate_required": MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "safety_gate_required": LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "claim_scan_gate_required": GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+        in gate_policy["required_benchmark_suites"],
+        "long_horizon_consent_protocol_visible": (
+            summary["long_horizon_study_count"] >= 8
+            and summary["pre_registered_count"] == summary["long_horizon_study_count"]
+            and summary["withdrawal_supported_count"] == summary["long_horizon_study_count"]
+            and summary["anonymized_count"] == summary["long_horizon_study_count"]
+            and summary["decision_type_count"] >= 8
+            and required_decisions <= {item["decision"] for item in long_horizon}
+        ),
+        "adverse_review_and_rollback_visible": (
+            summary["adverse_event_reviewed_count"] == summary["adverse_event_count"]
+            and summary["rollback_authority_count"] == summary["long_horizon_study_count"]
+            and summary["fixture_marked_count"] >= 1
+        ),
+        "counterfactual_memory_ablation_visible": (
+            summary["counterfactual_count"] == summary["ablation_count"]
+            and summary["memory_changed_behavior_count"] == summary["ablation_count"]
+            and summary["operator_decision_explanation_count"] == summary["ablation_count"]
+        ),
+        "caused_decision_receipts_visible": all(
+            item["guardian_learning_caused"] is True
+            and item["operator_receipt_explains_decision"] is True
+            and item["approval_scope_preserved"] is True
+            for item in ablations
+        ),
+        "unsafe_or_stale_change_blocks_visible": summary["unsafe_or_stale_change_blocked_count"] >= 2,
+        "provider_operations_visible": (
+            summary["provider_count"] >= 8
+            and required_provider_states <= {item["provider_runtime_state"] for item in providers}
+            and summary["canonical_precedence_preserved_count"] == summary["provider_count"]
+            and summary["provider_override_blocked_count"] >= 7
+        ),
+        "delete_export_stale_quarantine_visible": (
+            summary["delete_export_propagated_count"] == summary["provider_count"]
+            and summary["stale_evidence_decay_count"] >= 4
+            and summary["quarantine_count"] >= 4
+            and summary["reinstatement_review_count"] >= 4
+        ),
+        "safety_negative_cases_visible": (
+            summary["negative_case_count"] >= 10
+            and required_negative_cases <= {item["negative_case"] for item in safety}
+            and summary["negative_case_detected_count"] == summary["negative_case_count"]
+            and summary["rollback_or_quarantine_count"] == summary["negative_case_count"]
+        ),
+        "false_claim_scan_visible": (
+            summary["false_claim_scan_count"] >= 1
+            and summary["false_claim_hit_count"] == 0
+            and all(
+                str(item["command"]).startswith("python3 scripts/check_strategy_claims.py ")
+                for item in claim_scans
+            )
+            and all(item["exit_status"] == 0 for item in claim_scans)
+            and all(item["scanned_paths"] for item in claim_scans)
+            and all(item["forbidden_terms"] for item in claim_scans)
+            and all(item["stdout_digest"] for item in claim_scans)
+            and all(item["stderr_digest"] for item in claim_scans)
+        ),
+        "redaction_safe": (
+            summary["secret_leak_count"] == 0
+            and summary["unredacted_identifier_count"] == 0
+            and summary["provider_payload_leak_count"] == 0
+            and summary["raw_receipt_path_exposed_count"] == 0
+            and all(receipt.get("contains_raw_transcript") is False for receipt in safe_receipts)
+            and all(receipt.get("contains_secret") is False for receipt in safe_receipts)
+            and all(receipt.get("contains_personal_identifier") is False for receipt in safe_receipts)
+            and all(receipt.get("contains_provider_payload") is False for receipt in safe_receipts)
+            and all(receipt.get("raw_receipt_path_exposed") is False for receipt in safe_receipts)
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DP_GUARDIAN_MEMORY_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DP_GUARDIAN_MEMORY_BLOCKED_CLAIMS) <= blocked,
+        "operator_surface_visible": (
+            "/api/operator/post-dp-guardian-learning-memory-gap-closure" in policy["receipt_surfaces"]
+        ),
+        "benchmark_surface_visible": "/api/operator/benchmark-proof" in policy["receipt_surfaces"],
+    }
+    failed_checks = sorted(key for key, value in details.items() if value is not True)
+    if failed_checks:
+        raise AssertionError(
+            "Post-DP guardian learning/memory gap-closure checks failed: "
+            + ", ".join(failed_checks)
+        )
+    return details
+
+
 def _governed_capability_pack_hardening_receipts_by_scenario() -> dict[str, dict[str, Any]]:
     from src.extensions.benchmark import build_governed_capability_pack_hardening_receipts
 
@@ -19772,6 +19964,24 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     guardian_memory_false_claim_scan_v1_suite = next(
         item for item in suites if item["name"] == GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SUITE_NAME
     )
+    post_dp_guardian_memory_suite = next(
+        item for item in suites if item["name"] == POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME
+    )
+    long_horizon_learning_quality_v2_suite = next(
+        item for item in suites if item["name"] == LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME
+    )
+    memory_behavior_ablation_v2_suite = next(
+        item for item in suites if item["name"] == MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME
+    )
+    memory_provider_operation_v2_suite = next(
+        item for item in suites if item["name"] == MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME
+    )
+    learning_safety_regression_v2_suite = next(
+        item for item in suites if item["name"] == LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME
+    )
+    guardian_memory_false_claim_scan_v2_suite = next(
+        item for item in suites if item["name"] == GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+    )
     m6_memory_suite = next(item for item in suites if item["name"] == M6_MEMORY_SUPERIORITY_BENCHMARK_SUITE_NAME)
     memory_provider_gate_suite = next(item for item in suites if item["name"] == MEMORY_PROVIDER_QUALITY_GATE_SUITE_NAME)
     planning_suite = next(item for item in suites if item["name"] == "planning_retrieval_reporting")
@@ -21234,6 +21444,87 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "guardian_memory_false_claim_scan_v1_gate_required": (
             GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "post_dp_guardian_learning_memory_gap_closure_suite_present": (
+            "post_dp_guardian_memory_builds_on_dl_without_duplicate_scope"
+            in post_dp_guardian_memory_suite["scenario_names"]
+        ),
+        "post_dp_guardian_learning_memory_gap_closure_suite_scenario_count_matches": (
+            post_dp_guardian_memory_suite["scenario_count"]
+            == len(POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES)
+        ),
+        "post_dp_guardian_learning_memory_gap_closure_suite_axis_matches": (
+            post_dp_guardian_memory_suite["benchmark_axis"] == "post_dp_guardian_learning_memory_gap_closure"
+        ),
+        "post_dp_guardian_learning_memory_gap_closure_gate_required": (
+            POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "long_horizon_learning_quality_v2_suite_present": (
+            "long_horizon_learning_consent_withdrawal_behavior"
+            in long_horizon_learning_quality_v2_suite["scenario_names"]
+        ),
+        "long_horizon_learning_quality_v2_suite_scenario_count_matches": (
+            long_horizon_learning_quality_v2_suite["scenario_count"]
+            == len(LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES)
+        ),
+        "long_horizon_learning_quality_v2_suite_axis_matches": (
+            long_horizon_learning_quality_v2_suite["benchmark_axis"] == "long_horizon_learning_quality_v2"
+        ),
+        "long_horizon_learning_quality_v2_gate_required": (
+            LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "memory_behavior_ablation_v2_suite_present": (
+            "memory_ablation_v2_memory_enabled_counterfactual_behavior"
+            in memory_behavior_ablation_v2_suite["scenario_names"]
+        ),
+        "memory_behavior_ablation_v2_suite_scenario_count_matches": (
+            memory_behavior_ablation_v2_suite["scenario_count"] == len(MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES)
+        ),
+        "memory_behavior_ablation_v2_suite_axis_matches": (
+            memory_behavior_ablation_v2_suite["benchmark_axis"] == "memory_behavior_ablation_v2"
+        ),
+        "memory_behavior_ablation_v2_gate_required": (
+            MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "memory_provider_operation_v2_suite_present": (
+            "memory_provider_v2_canonical_authority_behavior"
+            in memory_provider_operation_v2_suite["scenario_names"]
+        ),
+        "memory_provider_operation_v2_suite_scenario_count_matches": (
+            memory_provider_operation_v2_suite["scenario_count"] == len(MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES)
+        ),
+        "memory_provider_operation_v2_suite_axis_matches": (
+            memory_provider_operation_v2_suite["benchmark_axis"] == "memory_provider_operation_v2"
+        ),
+        "memory_provider_operation_v2_gate_required": (
+            MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "learning_safety_regression_v2_suite_present": (
+            "learning_safety_v2_rollback_authority_behavior"
+            in learning_safety_regression_v2_suite["scenario_names"]
+        ),
+        "learning_safety_regression_v2_suite_scenario_count_matches": (
+            learning_safety_regression_v2_suite["scenario_count"] == len(LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES)
+        ),
+        "learning_safety_regression_v2_suite_axis_matches": (
+            learning_safety_regression_v2_suite["benchmark_axis"] == "learning_safety_regression_v2"
+        ),
+        "learning_safety_regression_v2_gate_required": (
+            LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "guardian_memory_false_claim_scan_v2_suite_present": (
+            "guardian_memory_false_claim_v2_blocks_solved_learning"
+            in guardian_memory_false_claim_scan_v2_suite["scenario_names"]
+        ),
+        "guardian_memory_false_claim_scan_v2_suite_scenario_count_matches": (
+            guardian_memory_false_claim_scan_v2_suite["scenario_count"]
+            == len(GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+        ),
+        "guardian_memory_false_claim_scan_v2_suite_axis_matches": (
+            guardian_memory_false_claim_scan_v2_suite["benchmark_axis"] == "guardian_memory_false_claim_scan_v2"
+        ),
+        "guardian_memory_false_claim_scan_v2_gate_required": (
+            GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "m6_memory_suite_present": "m6_long_horizon_recall_behavior" in m6_memory_suite["scenario_names"],
         "m6_memory_suite_scenario_count_matches": (
@@ -26069,6 +26360,78 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_live_guardian_memory_field_program_behavior,
         )
         for name in GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch DT exposes post-DP guardian learning-memory gap-closure receipts, preserving the DL "
+                "foundation while adding decision-causality, rollback, provider operations, and claim boundaries."
+            ),
+            runner=_eval_post_dp_guardian_memory_behavior,
+        )
+        for name in POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch DT records consent, withdrawal, anonymization, cohort boundaries, task families, "
+                "outcome protocols, adverse-event review, and rollback authority."
+            ),
+            runner=_eval_post_dp_guardian_memory_behavior,
+        )
+        for name in LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch DT compares memory-enabled behavior against memory-disabled or memory-limited "
+                "counterfactuals and explains guardian-caused decisions."
+            ),
+            runner=_eval_post_dp_guardian_memory_behavior,
+        )
+        for name in MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="memory",
+            description=(
+                "Batch DT keeps canonical memory authoritative while provider delete/export, stale-evidence "
+                "decay, quarantine, and reinstatement receipts stay operator-visible."
+            ),
+            runner=_eval_post_dp_guardian_memory_behavior,
+        )
+        for name in MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch DT exposes rollback, privacy, harm, stale-provider, and promotion-blocking safety "
+                "regression receipts for learning deltas."
+            ),
+            runner=_eval_post_dp_guardian_memory_behavior,
+        )
+        for name in LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="guardian",
+            description=(
+                "Batch DT blocks solved-learning, memory-superiority, production-ready, full-parity, and "
+                "reference-system-exceedance wording."
+            ),
+            runner=_eval_post_dp_guardian_memory_behavior,
+        )
+        for name in GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     ),
     EvalScenario(
         name="m9_manifest_governance_behavior",

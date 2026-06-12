@@ -183,6 +183,14 @@ from src.guardian.live_guardian_memory_field_program import (
     LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES,
     MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
 )
+from src.guardian.post_dp_guardian_memory_gap_closure import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES,
+    MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES,
+)
 from src.guardian.independent_learning_memory_parity import (
     INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
     MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
@@ -756,6 +764,30 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["guardian_memory_false_claim_scan_v1_suite_scenario_count_matches"] is True
     assert details["guardian_memory_false_claim_scan_v1_suite_axis_matches"] is True
     assert details["guardian_memory_false_claim_scan_v1_gate_required"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_suite_present"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_suite_scenario_count_matches"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_suite_axis_matches"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_gate_required"] is True
+    assert details["long_horizon_learning_quality_v2_suite_present"] is True
+    assert details["long_horizon_learning_quality_v2_suite_scenario_count_matches"] is True
+    assert details["long_horizon_learning_quality_v2_suite_axis_matches"] is True
+    assert details["long_horizon_learning_quality_v2_gate_required"] is True
+    assert details["memory_behavior_ablation_v2_suite_present"] is True
+    assert details["memory_behavior_ablation_v2_suite_scenario_count_matches"] is True
+    assert details["memory_behavior_ablation_v2_suite_axis_matches"] is True
+    assert details["memory_behavior_ablation_v2_gate_required"] is True
+    assert details["memory_provider_operation_v2_suite_present"] is True
+    assert details["memory_provider_operation_v2_suite_scenario_count_matches"] is True
+    assert details["memory_provider_operation_v2_suite_axis_matches"] is True
+    assert details["memory_provider_operation_v2_gate_required"] is True
+    assert details["learning_safety_regression_v2_suite_present"] is True
+    assert details["learning_safety_regression_v2_suite_scenario_count_matches"] is True
+    assert details["learning_safety_regression_v2_suite_axis_matches"] is True
+    assert details["learning_safety_regression_v2_gate_required"] is True
+    assert details["guardian_memory_false_claim_scan_v2_suite_present"] is True
+    assert details["guardian_memory_false_claim_scan_v2_suite_scenario_count_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v2_suite_axis_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v2_gate_required"] is True
     assert details["m6_memory_suite_present"] is True
     assert details["m6_memory_suite_scenario_count_matches"] is True
     assert details["m6_memory_suite_axis_matches"] is True
@@ -1892,6 +1924,37 @@ def test_run_live_guardian_memory_field_program_benchmark_suites_pass():
     assert all(result.details["counterfactual_memory_ablation_visible"] for result in summary.results)
     assert all(result.details["provider_state_matrix_visible"] for result in summary.results)
     assert all(result.details["negative_case_matrix_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_post_dp_guardian_memory_gap_closure_benchmark_suites_pass():
+    suites = [
+        "post_dp_guardian_learning_memory_gap_closure_v1",
+        "long_horizon_learning_quality_v2",
+        "memory_behavior_ablation_v2",
+        "memory_provider_operation_v2",
+        "learning_safety_regression_v2",
+        "guardian_memory_false_claim_scan_v2",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suites))
+
+    expected_names = set(
+        POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES
+        + LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES
+        + MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES
+        + MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES
+        + LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES
+        + GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["foundation_is_dl_not_duplicate"] for result in summary.results)
+    assert all(result.details["long_horizon_consent_protocol_visible"] for result in summary.results)
+    assert all(result.details["counterfactual_memory_ablation_visible"] for result in summary.results)
+    assert all(result.details["delete_export_stale_quarantine_visible"] for result in summary.results)
+    assert all(result.details["safety_negative_cases_visible"] for result in summary.results)
     assert all(result.details["false_claim_scan_visible"] for result in summary.results)
 
 
@@ -3576,6 +3639,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "independent_guardian_outcome_candidate_review_v1" in captured.out
     assert "longitudinal_learning_safety_monitor_v3" in captured.out
     assert "guardian_memory_false_claim_scan_v1" in captured.out
+    assert "post_dp_guardian_learning_memory_gap_closure_v1" in captured.out
+    assert "long_horizon_learning_quality_v2" in captured.out
+    assert "memory_behavior_ablation_v2" in captured.out
+    assert "memory_provider_operation_v2" in captured.out
+    assert "learning_safety_regression_v2" in captured.out
+    assert "guardian_memory_false_claim_scan_v2" in captured.out
     assert "live_long_horizon_eval_replay_v1" in captured.out
     assert "planning_retrieval_reporting" in captured.out
     assert "governed_improvement" in captured.out
@@ -3727,6 +3796,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "independent_guardian_outcome_candidate_review_v1",
         "longitudinal_learning_safety_monitor_v3",
         "guardian_memory_false_claim_scan_v1",
+        "post_dp_guardian_learning_memory_gap_closure_v1",
+        "long_horizon_learning_quality_v2",
+        "memory_behavior_ablation_v2",
+        "memory_provider_operation_v2",
+        "learning_safety_regression_v2",
+        "guardian_memory_false_claim_scan_v2",
         "memory_continuity_workflows",
         "m6_memory_superiority",
         "memory_provider_quality_gate",

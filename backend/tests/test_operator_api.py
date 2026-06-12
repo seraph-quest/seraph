@@ -225,6 +225,23 @@ from src.extensions.post_dp_reach_channel_gap_closure import (
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SCENARIO_NAMES,
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SUITE_NAME,
 )
+from src.guardian.post_dp_guardian_memory_gap_closure import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME,
+    MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME,
+    MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES,
+    MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME,
+    POST_DP_GUARDIAN_MEMORY_BLOCKED_CLAIMS,
+    POST_DP_GUARDIAN_MEMORY_CLAIM_BOUNDARY,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME,
+    POST_DP_GUARDIAN_MEMORY_REDACTION_BOUNDARY,
+)
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
     GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
@@ -3579,6 +3596,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["live_guardian_memory_field_program_operator_status"] == (
         "live_guardian_memory_field_program_receipts_visible"
     )
+    assert (
+        payload["summary"]["post_dp_guardian_memory_posture"]
+        == "post_dp_guardian_learning_memory_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["post_dp_guardian_memory_claim_boundary"] == POST_DP_GUARDIAN_MEMORY_CLAIM_BOUNDARY
+    assert payload["summary"]["post_dp_guardian_memory_operator_status"] == (
+        "post_dp_guardian_learning_memory_gap_closure_visible"
+    )
     assert payload["summary"]["live_replay_benchmark_posture"] == "live_replay_ci_gated_operator_visible"
     assert payload["summary"]["m6_memory_superiority_benchmark_posture"] == "m6_ci_gated_operator_visible"
     assert (
@@ -4990,6 +5015,25 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert "full_production_parity" in (
         payload["live_guardian_memory_field_program"]["policy"]["blocked_claims"]
     )
+    assert payload["post_dp_guardian_memory"]["summary"]["operator_status"] == (
+        "post_dp_guardian_learning_memory_gap_closure_visible"
+    )
+    assert payload["post_dp_guardian_memory"]["summary"]["long_horizon_study_count"] >= 8
+    assert payload["post_dp_guardian_memory"]["summary"]["decision_type_count"] >= 8
+    assert payload["post_dp_guardian_memory"]["summary"]["counterfactual_count"] == (
+        payload["post_dp_guardian_memory"]["summary"]["ablation_count"]
+    )
+    assert payload["post_dp_guardian_memory"]["summary"]["delete_export_propagated_count"] == (
+        payload["post_dp_guardian_memory"]["summary"]["provider_count"]
+    )
+    assert payload["post_dp_guardian_memory"]["summary"]["negative_case_count"] >= 10
+    assert payload["post_dp_guardian_memory"]["summary"]["false_claim_hit_count"] == 0
+    assert payload["post_dp_guardian_memory"]["summary"]["secret_leak_count"] == 0
+    assert payload["post_dp_guardian_memory"]["policy"]["claim_boundary"] == POST_DP_GUARDIAN_MEMORY_CLAIM_BOUNDARY
+    assert set(POST_DP_GUARDIAN_MEMORY_BLOCKED_CLAIMS) <= set(
+        payload["post_dp_guardian_memory"]["policy"]["blocked_claims"]
+    )
+    assert "memory_superiority" in payload["post_dp_guardian_memory"]["policy"]["blocked_claims"]
     assert payload["live_replay_benchmark"]["summary"]["suite_name"] == "live_long_horizon_eval_replay_v1"
     assert payload["live_replay_benchmark"]["policy"]["fixture_policy"] == "fake_providers_and_explicit_time_anchors_required"
     assert payload["m6_memory_superiority_benchmark"]["summary"]["suite_name"] == "m6_memory_superiority"
@@ -7133,6 +7177,66 @@ async def test_operator_post_dp_reach_channel_surface_reports_batch_ds_receipts(
             "false_claim_scan_receipts",
         )
         for item in payload["contract"][group_name]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dp_guardian_memory_surface_reports_batch_dt_receipts(client):
+    resp = await client.get("/api/operator/post-dp-guardian-learning-memory-gap-closure")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "post_dp_guardian_learning_memory_ci_gated_operator_visible"
+    assert payload["summary"]["operator_status"] == "post_dp_guardian_learning_memory_gap_closure_visible"
+    assert payload["summary"]["foundation_operator_status"] == "live_guardian_memory_field_program_receipts_visible"
+    assert payload["summary"]["long_horizon_study_count"] >= 8
+    assert payload["summary"]["pre_registered_count"] == payload["summary"]["long_horizon_study_count"]
+    assert payload["summary"]["withdrawal_supported_count"] == payload["summary"]["long_horizon_study_count"]
+    assert payload["summary"]["anonymized_count"] == payload["summary"]["long_horizon_study_count"]
+    assert payload["summary"]["adverse_event_reviewed_count"] == payload["summary"]["adverse_event_count"]
+    assert payload["summary"]["rollback_authority_count"] == payload["summary"]["long_horizon_study_count"]
+    assert payload["summary"]["counterfactual_count"] == payload["summary"]["ablation_count"]
+    assert payload["summary"]["memory_changed_behavior_count"] == payload["summary"]["ablation_count"]
+    assert payload["summary"]["operator_decision_explanation_count"] == payload["summary"]["ablation_count"]
+    assert payload["summary"]["delete_export_propagated_count"] == payload["summary"]["provider_count"]
+    assert payload["summary"]["stale_evidence_decay_count"] >= 4
+    assert payload["summary"]["quarantine_count"] >= 4
+    assert payload["summary"]["negative_case_detected_count"] == payload["summary"]["negative_case_count"]
+    assert payload["summary"]["rollback_or_quarantine_count"] == payload["summary"]["negative_case_count"]
+    assert payload["summary"]["false_claim_hit_count"] == 0
+    assert payload["summary"]["claim_boundary"] == POST_DP_GUARDIAN_MEMORY_CLAIM_BOUNDARY
+    assert payload["scenario_names"][POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SUITE_NAME] == list(
+        POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][LONG_HORIZON_LEARNING_QUALITY_V2_SUITE_NAME] == list(
+        LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][MEMORY_BEHAVIOR_ABLATION_V2_SUITE_NAME] == list(
+        MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][MEMORY_PROVIDER_OPERATION_V2_SUITE_NAME] == list(
+        MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][LEARNING_SAFETY_REGRESSION_V2_SUITE_NAME] == list(
+        LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME] == list(
+        GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
+    )
+    assert "solved_learning" in payload["policy"]["blocked_claims"]
+    assert "memory_superiority" in payload["policy"]["blocked_claims"]
+    assert "full_parity" in payload["policy"]["blocked_claims"]
+    assert payload["policy"]["safe_receipt_redaction_boundary"] == POST_DP_GUARDIAN_MEMORY_REDACTION_BOUNDARY
+    assert "/api/operator/post-dp-guardian-learning-memory-gap-closure" in payload["policy"]["receipt_surfaces"]
+    assert all(
+        item["consent"]["withdrawal_supported"] is True
+        for item in payload["contract"]["long_horizon_learning_quality"]
+    )
+    assert all(item["guardian_learning_caused"] is True for item in payload["contract"]["memory_behavior_ablations"])
+    assert all(item["delete_export_propagated"] is True for item in payload["contract"]["memory_provider_operations"])
+    assert all(
+        item["safe_receipt"]["contains_secret"] is False
+        for item in payload["contract"]["learning_safety_regressions"]
     )
 
 

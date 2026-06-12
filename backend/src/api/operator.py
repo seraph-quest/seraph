@@ -42,6 +42,9 @@ from src.cockpit.operator_control_certification import build_operator_control_ce
 from src.cockpit.operator_control_production_certification import (
     build_operator_control_production_certification_report,
 )
+from src.cockpit.post_dp_operator_debugging_recovery import (
+    build_post_dp_operator_debugging_recovery_report,
+)
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evals.final_parity_audit import (
     build_final_parity_readiness_report,
@@ -3507,6 +3510,7 @@ async def get_operator_benchmark_proof():
         operator_mission_control,
         operator_control_certification,
         operator_control_production_certification,
+        post_dp_operator_debugging_recovery,
         final_parity_readiness,
         post_cq_claim_readiness,
         final_production_parity,
@@ -3579,6 +3583,7 @@ async def get_operator_benchmark_proof():
         build_operator_mission_control_report(),
         build_operator_control_certification_report(),
         build_operator_control_production_certification_report(),
+        build_post_dp_operator_debugging_recovery_report(),
         build_final_parity_readiness_report(),
         build_post_cq_claim_readiness_report(),
         build_final_production_parity_report(),
@@ -3658,6 +3663,7 @@ async def get_operator_benchmark_proof():
         str(operator_mission_control["summary"]["benchmark_posture"]),
         str(operator_control_certification["summary"]["benchmark_posture"]),
         str(operator_control_production_certification["summary"]["benchmark_posture"]),
+        str(post_dp_operator_debugging_recovery["summary"]["benchmark_posture"]),
         str(final_parity_readiness["summary"]["benchmark_posture"]),
         str(post_cq_claim_readiness["summary"]["benchmark_posture"]),
         str(final_production_parity["summary"]["benchmark_posture"]),
@@ -3871,6 +3877,15 @@ async def get_operator_benchmark_proof():
             "operator_control_production_certification_operator_status": operator_control_production_certification[
                 "summary"
             ]["operator_status"],
+            "post_dp_operator_debugging_recovery_posture": post_dp_operator_debugging_recovery["summary"][
+                "benchmark_posture"
+            ],
+            "post_dp_operator_debugging_recovery_claim_boundary": post_dp_operator_debugging_recovery[
+                "policy"
+            ]["claim_boundary"],
+            "post_dp_operator_debugging_recovery_operator_status": post_dp_operator_debugging_recovery[
+                "summary"
+            ]["operator_status"],
             "final_parity_readiness_posture": final_parity_readiness["summary"]["benchmark_posture"],
             "final_parity_readiness_claim_boundary": final_parity_readiness["policy"]["claim_boundary"],
             "post_cq_claim_readiness_posture": post_cq_claim_readiness["summary"]["benchmark_posture"],
@@ -3947,6 +3962,7 @@ async def get_operator_benchmark_proof():
         "operator_mission_control_population": operator_mission_control,
         "operator_control_certification": operator_control_certification,
         "operator_control_production_certification": operator_control_production_certification,
+        "post_dp_operator_debugging_recovery": post_dp_operator_debugging_recovery,
         "final_parity_readiness": final_parity_readiness,
         "post_cq_claim_readiness": post_cq_claim_readiness,
         "final_production_parity": final_production_parity,
@@ -4307,6 +4323,11 @@ async def get_operator_control_certification():
 @router.get("/operator/operator-control-production-certification")
 async def get_operator_control_production_certification():
     return await build_operator_control_production_certification_report()
+
+
+@router.get("/operator/post-dp-operator-debugging-recovery-control")
+async def get_operator_post_dp_operator_debugging_recovery_control():
+    return await build_post_dp_operator_debugging_recovery_report()
 
 
 @router.get("/operator/final-parity-readiness-report")

@@ -58,6 +58,22 @@ from src.cockpit.operator_control_production_certification import (
     TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
     TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME,
 )
+from src.cockpit.post_dp_operator_debugging_recovery import (
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+    DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+    DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+    OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+    OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+)
 from src.execution.benchmark import M2_EXECUTION_BENCHMARK_SCENARIO_NAMES, M2_EXECUTION_BENCHMARK_SUITE_NAME
 from src.evolution.benchmark import (
     GOVERNED_IMPROVEMENT_BENCHMARK_SCENARIO_NAMES,
@@ -3701,6 +3717,113 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
             "The scan is a wording gate and does not itself prove solved control or certification."
         ),
         scenario_names=OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+        label="Post-DP operator debugging recovery control v1",
+        description=(
+            "Pins Batch DU aggregate receipts for dense long-work operator debugging, required recovery controls, "
+            "safe redaction, and explicit claim boundaries beyond Batch DM."
+        ),
+        benchmark_axis="post_dp_operator_debugging_recovery_control_v1",
+        operator_summary=(
+            "Post-DP operator debugging recovery is judged by visible controls, root-cause context, safe receipt "
+            "handles, and blocked solved-control or best-cockpit claims."
+        ),
+        remaining_gap=(
+            "This is bounded gap-closure evidence, not solved operator control, best/world-class cockpit, "
+            "production readiness, full parity, or reference-system exceedance."
+        ),
+        scenario_names=POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+        label="Dense long-work debugging v2",
+        description=(
+            "Pins DU root-cause, affected-artifact, recovery-option, branch-compare, stale-approval, and safe-denial "
+            "receipts for dense long-running operator work."
+        ),
+        benchmark_axis="dense_long_work_debugging_v2",
+        operator_summary=(
+            "Long-work failures expose root cause, affected artifacts, branch comparison, and recovery choices before "
+            "operator mutation."
+        ),
+        remaining_gap="Live universal usability and solved operator control remain blocked.",
+        scenario_names=DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+        label="Operator recovery SLO v3",
+        description=(
+            "Pins DU inspect, pause, resume, retry, repair, branch, compare, revoke, quarantine, handoff, rollback, "
+            "audit, search, replay, and runbook SLO receipts with stale-approval and unsafe-denial gates."
+        ),
+        benchmark_axis="operator_recovery_slo_v3",
+        operator_summary=(
+            "Recovery controls stay visible, authority-bound, and receipted after action with read-only replay until "
+            "scope matches."
+        ),
+        remaining_gap="This does not prove zero-click recovery, autonomous recovery, or production-ready operation.",
+        scenario_names=OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+        label="Operator effort reduction v2",
+        description=(
+            "Pins DU search, replay, runbook, branch, and compare effort receipts with keyboard-command budgets and "
+            "decision-time telemetry."
+        ),
+        benchmark_axis="operator_effort_reduction_v2",
+        operator_summary=(
+            "Operator effort reduction is measured through bounded command counts, keyboard paths, and visible "
+            "decision receipts."
+        ),
+        remaining_gap="Fastest-cockpit and best-cockpit claims remain blocked.",
+        scenario_names=OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+        label="Authority transfer integrity v2",
+        description=(
+            "Pins DU handoff, takeover, replay, rollback, quarantine, and revoke authority-transfer receipts with "
+            "fresh scope, checkpoint digest, receiver acceptance, and approval-reuse denial."
+        ),
+        benchmark_axis="authority_transfer_integrity_v2",
+        operator_summary=(
+            "Authority transfer fails closed on stale or broadened scope and requires fresh checkpoint-bound operator "
+            "authority."
+        ),
+        remaining_gap="Approval-transfer-solved and autonomous takeover claims remain blocked.",
+        scenario_names=AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+        label="Operator audit accessibility v2",
+        description=(
+            "Pins DU digest-linked audit, keyboard-only path, screen-reader label, focus-order, mutation-denial, and "
+            "safe-redaction receipts."
+        ),
+        benchmark_axis="operator_audit_accessibility_v2",
+        operator_summary=(
+            "Operator audit accessibility keeps recovery evidence keyboard-visible, labeled, digest-linked, and "
+            "redacted."
+        ),
+        remaining_gap="Tamper-proof audit, formal certification, and best-cockpit claims remain blocked.",
+        scenario_names=OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Operator control false-claim scan v2",
+        description=(
+            "Pins DU real false-claim scan command evidence and blocked wording for solved control, best cockpit, "
+            "formal certification, production readiness, full parity, and reference-system exceedance."
+        ),
+        benchmark_axis="operator_control_false_claim_scan_v2",
+        operator_summary=(
+            "DU claim scans keep post-DP operator debugging evidence bounded until the claim ledger permits exact wording."
+        ),
+        remaining_gap="The scan is a wording gate and does not itself prove solved operator control.",
+        scenario_names=OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=PRODUCTION_OPERATOR_CONTROL_PARITY_SUITE_NAME,

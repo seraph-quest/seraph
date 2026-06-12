@@ -440,6 +440,27 @@ from src.cockpit.operator_control_production_certification import (
     TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SUITE_NAME,
     build_operator_control_production_certification_contract,
 )
+from src.cockpit.post_dp_operator_debugging_recovery import (
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+    DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+    DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+    OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+    OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_BLOCKED_CLAIMS,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_CLAIM_BOUNDARY,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SURFACE,
+    REQUIRED_DU_OPERATOR_CONTROLS,
+    build_post_dp_operator_debugging_recovery_contract,
+)
 from src.guardian.brain import (
     M8_GUARDIAN_BRAIN_BENCHMARK_SCENARIO_NAMES,
     M8_GUARDIAN_BRAIN_BENCHMARK_SUITE_NAME,
@@ -19128,6 +19149,188 @@ async def _eval_operator_control_production_certification_behavior() -> dict[str
     }
 
 
+async def _eval_post_dp_operator_debugging_recovery_behavior() -> dict[str, Any]:
+    contract = build_post_dp_operator_debugging_recovery_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    aggregate = contract["post_dp_operator_debugging_recovery_receipts"]
+    debugging = contract["dense_long_work_debugging_v2_receipts"]
+    recovery_slo = contract["operator_recovery_slo_v3_receipts"]
+    control_flows = contract["operator_recovery_control_flow_receipts"]
+    effort = contract["operator_effort_reduction_v2_receipts"]
+    authority = contract["authority_transfer_integrity_v2_receipts"]
+    accessibility = contract["operator_audit_accessibility_v2_receipts"]
+    false_claims = contract["false_claim_scan_receipts"]
+    suites = benchmark_suite_report()
+    suite_names = {item["name"]: item for item in suites}
+    gate_policy = evolution_benchmark_gate_policy()
+    required_suites = {
+        POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME: (
+            POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES
+        ),
+        DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME: DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+        OPERATOR_RECOVERY_SLO_V3_SUITE_NAME: OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+        OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME: OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+        AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME: AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+        OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME: OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+        OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME: OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    }
+    safe_receipts = [
+        item["safe_receipt"]
+        for item in [
+            *aggregate,
+            *debugging,
+            *recovery_slo,
+            *control_flows,
+            *effort,
+            *authority,
+            *accessibility,
+            *false_claims,
+        ]
+    ]
+    return {
+        "operator_status_visible": (
+            summary["operator_status"] == "post_dp_operator_debugging_recovery_control_receipts_visible"
+        ),
+        "du_suites_visible": all(
+            suite_name in suite_names
+            and suite_names[suite_name]["scenario_count"] == len(scenario_names)
+            for suite_name, scenario_names in required_suites.items()
+        ),
+        "du_suites_gate_required": all(
+            suite_name in gate_policy["required_benchmark_suites"]
+            for suite_name in required_suites
+        ),
+        "required_controls_visible": (
+            summary["required_controls_visible"] is True
+            and set(REQUIRED_DU_OPERATOR_CONTROLS) <= {item["action"] for item in recovery_slo}
+        ),
+        "controls_have_authority_receipts_and_correctness": all(
+            item["enabled"] is True
+            and item["authority_visible"] is True
+            and item["receipt_after_action"]
+            and item["recovery_correctness_check"]
+            and item["affected_artifacts_visible"] is True
+            and item["recovery_options_visible"] is True
+            for item in recovery_slo
+        ),
+        "control_flows_exercise_recovery_boundaries": (
+            summary["all_exercised_control_flows_passed"] is True
+            and summary["exercised_control_flow_count"] == len(recovery_slo)
+            and summary["stale_approval_exercise_count"] >= 1
+            and summary["broadened_scope_denial_exercise_count"] >= 1
+            and summary["unsafe_denial_receipt_exercise_count"] >= 1
+            and summary["audit_write_exercise_count"] == len(control_flows)
+            and all(
+                item["operator_authority_checked"] is True
+                and item["audit_receipt_written"] is True
+                and len(item["audit_digest"]) == 64
+                and item["flow_passed"] is True
+                for item in control_flows
+            )
+        ),
+        "root_cause_artifacts_and_recovery_visible": (
+            summary["root_cause_visible_count"] == len(debugging)
+            and summary["affected_artifact_receipt_count"] == len(debugging)
+            and summary["recovery_options_visible_count"] == len(debugging)
+            and all(
+                item["root_cause_visible"] is True
+                and item["affected_artifacts"]
+                and item["recovery_option_count"] >= 3
+                for item in debugging
+            )
+        ),
+        "branch_compare_stale_approval_and_safe_denial_visible": (
+            any(item["branch_compare_available"] is True for item in debugging)
+            and summary["stale_approval_fail_closed_count"] >= 1
+            and summary["unsafe_denial_block_count"] >= 1
+            and any(item["stale_approval_detected"] is True for item in debugging)
+            and any(item["unsafe_denial_without_receipt_blocked"] is True for item in debugging)
+        ),
+        "effort_and_keyboard_receipts_visible": (
+            summary["effort_reduction_receipt_count"] >= 4
+            and all(
+                item["effort_reduction_receipt_visible"] is True
+                and item["keyboard_path_available"] is True
+                and item["command_count_p50"] <= 10
+                for item in effort
+            )
+        ),
+        "authority_transfer_fails_closed": (
+            summary["authority_transfer_fail_closed"] is True
+            and summary["broadened_scope_fail_closed_count"] == len(authority)
+            and all(
+                item["scope_renewal_required"] is True
+                and item["checkpoint_digest_required"] is True
+                and item["stale_approval_fails_closed"] is True
+                and item["broadened_scope_fails_closed"] is True
+                and item["approval_reuse_allowed"] is False
+                for item in authority
+            )
+        ),
+        "audit_accessibility_and_redaction_visible": (
+            summary["audit_digest_chain_linked"] is True
+            and summary["keyboard_receipt_count"] == len(accessibility)
+            and summary["accessibility_receipt_count"] == len(accessibility)
+            and all(
+                item["digest_links_previous"] is True
+                and item["keyboard_only_path_complete"] is True
+                and item["screen_reader_label"]
+                and item["focus_order_stable"] is True
+                and item["accessibility_blockers"] == []
+                and item["safe_redaction_verified"] is True
+                for item in accessibility
+            )
+        ),
+        "safe_receipts_redacted": (
+            summary["safe_receipts_redacted"] is True
+            and all(
+                receipt["contains_secret"] is False
+                and receipt["contains_private_path"] is False
+                and receipt["contains_raw_transcript"] is False
+                and receipt["contains_raw_artifact_payload"] is False
+                and receipt["contains_unredacted_operator_identifier"] is False
+                and receipt["workspace_dir_exposed"] is False
+                and receipt["redaction_layer"] == "post_dp_operator_debugging_recovery_control_v1"
+                and len(receipt["tamper_evident_digest"]) == 64
+                for receipt in safe_receipts
+            )
+        ),
+        "real_false_claim_scan_visible": (
+            summary["false_claim_scan_clean"] is True
+            and summary["real_false_claim_command_evidence"] is True
+            and all(
+                item["validation_command"] == "python3 scripts/check_strategy_claims.py"
+                and item["forbidden_hit_count"] == 0
+                and item["claim_lift_allowed"] is False
+                and item["command_evidence"]["executed"] is True
+                and item["command_evidence"]["returncode"] == 0
+                and item["command_evidence"]["timed_out"] is False
+                and item["du_scope_evidence"]["match_count"] == 0
+                and item["command_evidence"]["safe_redaction"]["raw_stdout_exposed"] is False
+                and item["command_evidence"]["safe_redaction"]["raw_stderr_exposed"] is False
+                for item in false_claims
+            )
+        ),
+        "claim_boundary_visible": (
+            policy["claim_boundary"] == POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_CLAIM_BOUNDARY
+        ),
+        "blocked_claims_visible": (
+            set(POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
+        ),
+        "unsupported_claims_remain_blocked": (
+            summary["solved_operator_control_claim_allowed"] is False
+            and summary["best_cockpit_claim_allowed"] is False
+            and summary["production_ready_claim_allowed"] is False
+            and summary["full_parity_claim_allowed"] is False
+        ),
+        "operator_surfaces_visible": {
+            POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SURFACE,
+            "/api/operator/benchmark-proof",
+        } <= set(policy["receipt_surfaces"]),
+    }
+
+
 async def _eval_final_parity_audit_behavior() -> dict[str, Any]:
     contract = build_final_parity_audit_contract()
     summary = contract["summary"]
@@ -26999,6 +27202,90 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_operator_control_production_certification_behavior,
         )
         for name in OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU pins post-DP operator debugging and recovery-control receipts beyond Batch DM while "
+                "blocking solved-control, best-cockpit, production-ready, full-parity, and exceedance claims."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU verifies dense long-work root-cause, affected-artifact, recovery-option, branch-compare, "
+                "stale-approval, and safe-denial debugging receipts."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU verifies recovery SLO v3 controls for inspect, pause, resume, retry, repair, branch, "
+                "compare, revoke, quarantine, handoff, rollback, audit, search, replay, and runbook actions."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU verifies effort-reduction receipts for search, replay, runbook, branch, compare, and "
+                "keyboard-command budgets."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU verifies authority-transfer integrity for handoff, takeover, replay, rollback, quarantine, "
+                "and revoke paths with stale or broadened scope failing closed."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU verifies digest-linked operator audit receipts, keyboard-only recovery, screen-reader "
+                "labels, focus order, and safe redaction."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="cockpit",
+            description=(
+                "Batch DU pins a real false-claim scan for solved-control, best-cockpit, formal-certification, "
+                "production-ready, full-parity, and reference-system-exceedance wording."
+            ),
+            runner=_eval_post_dp_operator_debugging_recovery_behavior,
+        )
+        for name in OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

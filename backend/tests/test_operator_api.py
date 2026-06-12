@@ -41,6 +41,19 @@ from src.cockpit.operator_control_production_certification import (
     REQUIRED_DM_OPERATOR_CONTROLS,
     TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
 )
+from src.cockpit.post_dp_operator_debugging_recovery import (
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+    DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_BLOCKED_CLAIMS,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_CLAIM_BOUNDARY,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SURFACE,
+    REQUIRED_DU_OPERATOR_CONTROLS,
+)
 from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
 from src.evals.final_parity_audit import (
     BOARD_PR_ISSUE_RECONCILIATION_V3_SCENARIO_NAMES,
@@ -3751,6 +3764,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         == "operator_control_production_certification_receipts_visible"
     )
     assert (
+        payload["summary"]["post_dp_operator_debugging_recovery_posture"]
+        == "post_dp_operator_debugging_recovery_control_ci_gated_operator_visible"
+    )
+    assert (
+        payload["summary"]["post_dp_operator_debugging_recovery_claim_boundary"]
+        == POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_CLAIM_BOUNDARY
+    )
+    assert (
+        payload["summary"]["post_dp_operator_debugging_recovery_operator_status"]
+        == "post_dp_operator_debugging_recovery_control_receipts_visible"
+    )
+    assert (
         payload["summary"]["final_parity_readiness_posture"]
         == "final_parity_audit_ci_gated_operator_visible"
     )
@@ -3795,6 +3820,15 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert set(OPERATOR_CONTROL_PRODUCTION_CERTIFICATION_BLOCKED_CLAIMS) <= set(
         payload["operator_control_production_certification"]["policy"]["blocked_claims"]
+    )
+    assert payload["post_dp_operator_debugging_recovery"]["summary"]["required_controls_visible"] is True
+    assert payload["post_dp_operator_debugging_recovery"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["post_dp_operator_debugging_recovery"]["summary"]["false_claim_scan_clean"] is True
+    assert payload["post_dp_operator_debugging_recovery"]["policy"]["claim_boundary"] == (
+        POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_CLAIM_BOUNDARY
+    )
+    assert set(POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_BLOCKED_CLAIMS) <= set(
+        payload["post_dp_operator_debugging_recovery"]["policy"]["blocked_claims"]
     )
     assert payload["production_secure_marketplace"]["summary"]["live_corpus_package_count"] >= 12
     assert payload["production_secure_marketplace"]["summary"]["required_hostile_drills_covered"] is True
@@ -6787,6 +6821,97 @@ async def test_operator_control_production_certification_surface_reports_batch_d
             payload["contract"]["operator_live_population_receipts"],
             payload["contract"]["tamper_evident_audit_candidate_receipts"],
             payload["contract"]["authority_transfer_recovery_receipts"],
+            payload["contract"]["false_claim_scan_receipts"],
+        )
+        for item in group
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_dp_operator_debugging_recovery_surface_reports_batch_du_receipts(client):
+    resp = await client.get("/api/operator/post-dp-operator-debugging-recovery-control")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "post_dp_operator_debugging_recovery_control_receipts_visible"
+    assert (
+        payload["summary"]["benchmark_posture"]
+        == "post_dp_operator_debugging_recovery_control_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES)
+        + len(DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES)
+        + len(OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES)
+        + len(OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES)
+        + len(AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES)
+        + len(OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES)
+        + len(OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["required_controls_visible"] is True
+    assert payload["summary"]["all_exercised_control_flows_passed"] is True
+    assert payload["summary"]["exercised_control_flow_count"] == len(REQUIRED_DU_OPERATOR_CONTROLS)
+    assert payload["summary"]["stale_approval_exercise_count"] >= 1
+    assert payload["summary"]["broadened_scope_denial_exercise_count"] >= 1
+    assert payload["summary"]["unsafe_denial_receipt_exercise_count"] >= 1
+    assert set(REQUIRED_DU_OPERATOR_CONTROLS) <= {
+        item["action"] for item in payload["contract"]["operator_recovery_slo_v3_receipts"]
+    }
+    assert payload["summary"]["root_cause_visible_count"] >= 4
+    assert payload["summary"]["affected_artifact_receipt_count"] >= 4
+    assert payload["summary"]["recovery_options_visible_count"] >= 4
+    assert payload["summary"]["stale_approval_fail_closed_count"] >= 1
+    assert payload["summary"]["unsafe_denial_block_count"] >= 1
+    assert payload["summary"]["authority_transfer_fail_closed"] is True
+    assert payload["summary"]["audit_digest_chain_linked"] is True
+    assert payload["summary"]["false_claim_scan_clean"] is True
+    assert payload["summary"]["real_false_claim_command_evidence"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["solved_operator_control_claim_allowed"] is False
+    assert payload["summary"]["best_cockpit_claim_allowed"] is False
+    assert payload["summary"]["production_ready_claim_allowed"] is False
+    assert payload["summary"]["full_parity_claim_allowed"] is False
+    assert payload["policy"]["operator_surface"] == POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SURFACE
+    assert payload["policy"]["claim_boundary"] == POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_CLAIM_BOUNDARY
+    assert set(POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_BLOCKED_CLAIMS) <= set(
+        payload["policy"]["blocked_claims"]
+    )
+    assert "/api/operator/benchmark-proof" in payload["policy"]["receipt_surfaces"]
+    assert all(
+        item["scope_renewal_required"] is True
+        and item["checkpoint_digest_required"] is True
+        and item["stale_approval_fails_closed"] is True
+        and item["broadened_scope_fails_closed"] is True
+        and item["approval_reuse_allowed"] is False
+        for item in payload["contract"]["authority_transfer_integrity_v2_receipts"]
+    )
+    assert all(
+        item["flow_passed"] is True
+        and item["operator_authority_checked"] is True
+        and item["audit_receipt_written"] is True
+        and len(item["audit_digest"]) == 64
+        for item in payload["contract"]["operator_recovery_control_flow_receipts"]
+    )
+    assert all(
+        item["keyboard_only_path_complete"] is True
+        and item["focus_order_stable"] is True
+        and item["screen_reader_label"]
+        and item["safe_redaction_verified"] is True
+        for item in payload["contract"]["operator_audit_accessibility_v2_receipts"]
+    )
+    assert all(
+        item["safe_receipt"]["contains_secret"] is False
+        and item["safe_receipt"]["contains_private_path"] is False
+        and item["safe_receipt"]["contains_raw_transcript"] is False
+        and item["safe_receipt"]["contains_raw_artifact_payload"] is False
+        and item["safe_receipt"]["redaction_layer"] == "post_dp_operator_debugging_recovery_control_v1"
+        for group in (
+            payload["contract"]["post_dp_operator_debugging_recovery_receipts"],
+            payload["contract"]["dense_long_work_debugging_v2_receipts"],
+            payload["contract"]["operator_recovery_slo_v3_receipts"],
+            payload["contract"]["operator_recovery_control_flow_receipts"],
+            payload["contract"]["operator_effort_reduction_v2_receipts"],
+            payload["contract"]["authority_transfer_integrity_v2_receipts"],
+            payload["contract"]["operator_audit_accessibility_v2_receipts"],
             payload["contract"]["false_claim_scan_receipts"],
         )
         for item in group

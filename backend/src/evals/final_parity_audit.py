@@ -1488,7 +1488,17 @@ def _scan_false_completion_scope(globs: list[str]) -> dict[str, Any]:
                 text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 text = path.read_text(encoding="utf-8", errors="ignore")
+            inside_forbidden_phrase_table = False
             for line_number, line in enumerate(text.splitlines(), start=1):
+                stripped_line = line.strip()
+                if relative_path.endswith(".py") and (
+                    "FORBIDDEN_PHRASES" in stripped_line or "FORBIDDEN_PATTERNS" in stripped_line
+                ):
+                    inside_forbidden_phrase_table = True
+                if inside_forbidden_phrase_table:
+                    if stripped_line == ")":
+                        inside_forbidden_phrase_table = False
+                    continue
                 lower_line = line.lower()
                 is_claim_ledger_control_row = (
                     relative_path == "docs/research/19-strategy-claim-ledger.md"

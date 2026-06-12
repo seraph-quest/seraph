@@ -257,6 +257,24 @@ from src.extensions.browser_computer_use_production import (
     SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
     SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SUITE_NAME,
 )
+from src.extensions.post_dp_browser_computer_use_reliability import (
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SUITE_NAME,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SUITE_NAME,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SUITE_NAME,
+    BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES,
+    BROWSER_PROVIDER_DEGRADATION_V2_SUITE_NAME,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SUITE_NAME,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SUITE_NAME,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SUITE_NAME,
+)
 from src.extensions.reach_channel_canary import (
     ONE_REACH_CHANNEL_CANARY_SCENARIO_NAMES,
     ONE_REACH_CHANNEL_CANARY_SUITE_NAME,
@@ -1479,6 +1497,126 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Final source-backed parity/release reconciliation remains future proof work.",
         scenario_names=BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SUITE_NAME,
+        label="Post-DP browser computer-use reliability v1",
+        description=(
+            "Pins Batch DW successor evidence above DO for selected provider reliability, operator-visible "
+            "degradation, redacted receipts, and blocked browser parity claims."
+        ),
+        benchmark_axis="post_dp_browser_computer_use_reliability_v1",
+        operator_summary=(
+            "Browser/computer-use reliability now exposes post-DP gap-closure receipts without claiming safe "
+            "browser automation, OpenClaw-class reach, or full browser parity."
+        ),
+        remaining_gap="Safe automation, arbitrary credentialed browsing, full browser parity, and production readiness remain blocked.",
+        scenario_names=POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SUITE_NAME,
+        label="Browser live provider reliability v2",
+        description=(
+            "Pins selected local, managed, and remote-CDP provider identity, evidence mode, degraded-state, "
+            "fallback, and operator-takeover receipts."
+        ),
+        benchmark_axis="browser_live_provider_reliability_v2",
+        operator_summary=(
+            "Provider reliability is now represented as explicit selected-mode receipts with no silent fallback "
+            "or unsupported-provider success claims."
+        ),
+        remaining_gap="Provider-wide SLA and arbitrary live site reliability remain blocked.",
+        scenario_names=BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SUITE_NAME,
+        label="Browser session boundary enforcement v3",
+        description=(
+            "Pins session, profile, cookie, credential, download, upload, filesystem, clipboard, network, and "
+            "private-data boundaries under degraded/recovery pressure."
+        ),
+        benchmark_axis="browser_session_boundary_enforcement_v3",
+        operator_summary=(
+            "Session partitions and sensitive browser boundaries now carry post-DP fail-closed receipts, including "
+            "explicit existing-session denial."
+        ),
+        remaining_gap="Formal browser isolation certification and arbitrary existing-session safety remain blocked.",
+        scenario_names=BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_CREDENTIALED_RECOVERY_V2_SUITE_NAME,
+        label="Browser credentialed recovery v2",
+        description=(
+            "Pins credentialed test-account recovery receipts for reauth, approval scope, audit visibility, "
+            "session partition preservation, and anti-bot human review."
+        ),
+        benchmark_axis="browser_credentialed_recovery_v2",
+        operator_summary=(
+            "Credentialed browser recovery remains limited to test accounts or safe targets with scoped secret refs, "
+            "audit receipts, and no raw credential exposure."
+        ),
+        remaining_gap="User credentialed browsing and private-page automation remain blocked.",
+        scenario_names=BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_SITE_DRIFT_RECOVERY_V3_SUITE_NAME,
+        label="Browser site drift recovery v3",
+        description=(
+            "Pins selector, navigation, auth-expiry, rate-limit, anti-bot, and partial-completion recovery receipts "
+            "that preserve approvals, auditability, and session partitions."
+        ),
+        benchmark_axis="browser_site_drift_recovery_v3",
+        operator_summary=(
+            "Site-drift recovery now carries post-DP approval, audit, and partition-preservation receipts rather "
+            "than broad website compatibility claims."
+        ),
+        remaining_gap="General website compatibility and arbitrary drift recovery remain blocked.",
+        scenario_names=BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_HOSTILE_PAGE_SAFETY_V2_SUITE_NAME,
+        label="Browser hostile page safety v2",
+        description=(
+            "Pins hostile page, private network, credential/cookie/clipboard exfiltration, dangerous-action, and "
+            "redaction fail-closed receipts."
+        ),
+        benchmark_axis="browser_hostile_page_safety_v2",
+        operator_summary=(
+            "Hostile browser cases now fail closed with redacted operator receipts and no mutation, credential, "
+            "cookie, clipboard, or private-data leaks in the covered corpus."
+        ),
+        remaining_gap="Solved hostile pages and safe autonomous browsing remain blocked.",
+        scenario_names=BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_PROVIDER_DEGRADATION_V2_SUITE_NAME,
+        label="Browser provider degradation v2",
+        description=(
+            "Pins managed-provider outage, remote-CDP disconnect, token-missing, stale-profile, screenshot-stream, "
+            "and labeled local fallback degradation receipts."
+        ),
+        benchmark_axis="browser_provider_degradation_v2",
+        operator_summary=(
+            "Provider degradation now blocks unsafe action and silent success claims while preserving operator-visible "
+            "recovery state."
+        ),
+        remaining_gap="Provider-wide availability and remote browser parity remain blocked.",
+        scenario_names=BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Browser computer-use false claim scan v2",
+        description=(
+            "Pins command-backed Batch DW false-claim scan receipts for safe automation, full browser parity, "
+            "OpenClaw-class reach, production readiness, full parity, superiority, and exceedance wording."
+        ),
+        benchmark_axis="browser_computer_use_false_claim_scan_v2",
+        operator_summary=(
+            "DW browser reliability wording remains claim-ledger bounded and cannot lift safe automation, browser "
+            "parity, OpenClaw-class reach, production readiness, or exceedance claims."
+        ),
+        remaining_gap="Final DX source-backed claim-readiness gate remains required before wording can lift.",
+        scenario_names=BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=GUARDIAN_LEARNING_ARBITRATION_SUITE_NAME,

@@ -72,6 +72,9 @@ from src.extensions.safe_browser_computer_use import build_safe_browser_computer
 from src.extensions.browser_computer_use_parity_depth import build_browser_computer_use_parity_depth_report
 from src.extensions.full_browser_parity import build_full_browser_parity_report
 from src.extensions.browser_computer_use_production import build_browser_computer_use_production_report
+from src.extensions.post_dp_browser_computer_use_reliability import (
+    build_post_dp_browser_computer_use_reliability_report,
+)
 from src.extensions.field_reach_operations import build_broad_reach_field_ops_report
 from src.extensions.always_available_reach_media import build_always_available_reach_media_report
 from src.extensions.live_reach_media import build_live_reach_media_report
@@ -3507,6 +3510,7 @@ async def get_operator_benchmark_proof():
         browser_computer_use_parity_depth,
         full_browser_parity,
         browser_computer_use_production,
+        post_dp_browser_computer_use_reliability,
         production_operator_control,
         dense_operator_recovery,
         operator_mission_control,
@@ -3581,6 +3585,7 @@ async def get_operator_benchmark_proof():
         build_browser_computer_use_parity_depth_report(),
         build_full_browser_parity_report(),
         build_browser_computer_use_production_report(),
+        build_post_dp_browser_computer_use_reliability_report(),
         build_production_operator_control_report(),
         build_dense_operator_recovery_report(),
         build_operator_mission_control_report(),
@@ -3662,6 +3667,7 @@ async def get_operator_benchmark_proof():
         str(browser_computer_use_parity_depth["summary"]["benchmark_posture"]),
         str(full_browser_parity["summary"]["benchmark_posture"]),
         str(browser_computer_use_production["summary"]["benchmark_posture"]),
+        str(post_dp_browser_computer_use_reliability["summary"]["benchmark_posture"]),
         str(production_operator_control["summary"]["benchmark_posture"]),
         str(dense_operator_recovery["summary"]["benchmark_posture"]),
         str(operator_mission_control["summary"]["benchmark_posture"]),
@@ -3873,6 +3879,15 @@ async def get_operator_benchmark_proof():
             "browser_computer_use_production_operator_status": browser_computer_use_production["summary"][
                 "operator_status"
             ],
+            "post_dp_browser_computer_use_reliability_posture": post_dp_browser_computer_use_reliability[
+                "summary"
+            ]["benchmark_posture"],
+            "post_dp_browser_computer_use_reliability_claim_boundary": post_dp_browser_computer_use_reliability[
+                "policy"
+            ]["claim_boundary"],
+            "post_dp_browser_computer_use_reliability_operator_status": post_dp_browser_computer_use_reliability[
+                "summary"
+            ]["operator_status"],
             "production_operator_control_parity_posture": production_operator_control["summary"]["benchmark_posture"],
             "production_operator_control_parity_claim_boundary": production_operator_control["policy"]["claim_boundary"],
             "dense_operator_recovery_control_posture": dense_operator_recovery["summary"]["benchmark_posture"],
@@ -3971,6 +3986,7 @@ async def get_operator_benchmark_proof():
         "browser_computer_use_parity_depth": browser_computer_use_parity_depth,
         "full_browser_parity": full_browser_parity,
         "browser_computer_use_production": browser_computer_use_production,
+        "post_dp_browser_computer_use_reliability": post_dp_browser_computer_use_reliability,
         "production_operator_control": production_operator_control,
         "dense_operator_recovery_control": dense_operator_recovery,
         "operator_mission_control_population": operator_mission_control,
@@ -4317,6 +4333,11 @@ async def get_operator_full_browser_parity():
 @router.get("/operator/browser-computer-use-production")
 async def get_operator_browser_computer_use_production():
     return await build_browser_computer_use_production_report()
+
+
+@router.get("/operator/post-dp-browser-computer-use-reliability")
+async def get_operator_post_dp_browser_computer_use_reliability():
+    return await build_post_dp_browser_computer_use_reliability_report()
 
 
 @router.get("/operator/production-operator-control-parity")

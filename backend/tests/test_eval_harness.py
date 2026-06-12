@@ -149,6 +149,16 @@ from src.extensions.browser_computer_use_production import (
     CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
     SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
 )
+from src.extensions.post_dp_browser_computer_use_reliability import (
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -2647,6 +2657,47 @@ def test_run_browser_computer_use_production_benchmark_suites_pass():
     assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
 
 
+def test_run_post_dp_browser_computer_use_reliability_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dp_browser_computer_use_reliability_v1",
+            "browser_live_provider_reliability_v2",
+            "browser_session_boundary_enforcement_v3",
+            "browser_credentialed_recovery_v2",
+            "browser_site_drift_recovery_v3",
+            "browser_hostile_page_safety_v2",
+            "browser_provider_degradation_v2",
+            "browser_computer_use_false_claim_scan_v2",
+        ])
+    )
+
+    result_names = {result.name for result in summary.results}
+    expected = (
+        set(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES)
+        | set(BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES)
+        | set(BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES)
+        | set(BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES)
+        | set(BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES)
+        | set(BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES)
+        | set(BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES)
+        | set(BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert result_names == expected
+    assert all(result.details["non_duplicate_delta_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["artifact_provenance_complete"] is True for result in summary.results)
+    assert all(result.details["provider_reliability_visible"] is True for result in summary.results)
+    assert all(result.details["session_boundaries_enforced"] is True for result in summary.results)
+    assert all(result.details["credentialed_recovery_fails_closed"] is True for result in summary.results)
+    assert all(result.details["site_drift_preserves_authority"] is True for result in summary.results)
+    assert all(result.details["hostile_pages_fail_closed"] is True for result in summary.results)
+    assert all(result.details["provider_degradation_fails_closed"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+    assert all(result.details["negative_validator_clean"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_command_backed"] is True for result in summary.results)
+
+
 def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
     summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
 
@@ -3705,6 +3756,14 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "browser_provider_parity_candidate_v1" in captured.out
     assert "browser_session_partition_attestation_v2" in captured.out
     assert "browser_false_claim_scan_v1" in captured.out
+    assert "post_dp_browser_computer_use_reliability_v1" in captured.out
+    assert "browser_live_provider_reliability_v2" in captured.out
+    assert "browser_session_boundary_enforcement_v3" in captured.out
+    assert "browser_credentialed_recovery_v2" in captured.out
+    assert "browser_site_drift_recovery_v3" in captured.out
+    assert "browser_hostile_page_safety_v2" in captured.out
+    assert "browser_provider_degradation_v2" in captured.out
+    assert "browser_computer_use_false_claim_scan_v2" in captured.out
     assert "live_guardian_learning_quality" in captured.out
     assert "guardian_intervention_outcome_cohorts" in captured.out
     assert "memory_provider_ecosystem_maturity_v1" in captured.out
@@ -3868,6 +3927,14 @@ def test_main_lists_available_benchmark_suites(capsys):
         "browser_provider_parity_candidate_v1",
         "browser_session_partition_attestation_v2",
         "browser_false_claim_scan_v1",
+        "post_dp_browser_computer_use_reliability_v1",
+        "browser_live_provider_reliability_v2",
+        "browser_session_boundary_enforcement_v3",
+        "browser_credentialed_recovery_v2",
+        "browser_site_drift_recovery_v3",
+        "browser_hostile_page_safety_v2",
+        "browser_provider_degradation_v2",
+        "browser_computer_use_false_claim_scan_v2",
         "guardian_learning_arbitration_v2",
         "live_guardian_learning_quality",
         "guardian_intervention_outcome_cohorts",

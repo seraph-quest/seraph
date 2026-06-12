@@ -189,6 +189,19 @@ from src.extensions.browser_computer_use_production import (
     CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
     SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
 )
+from src.extensions.post_dp_browser_computer_use_reliability import (
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_BLOCKED_CLAIMS,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_CLAIM_BOUNDARY,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES,
+    REQUIRED_DW_PROVIDER_MODES,
+)
 from src.extensions.production_reach_hardening import (
     BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
     GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
@@ -3743,6 +3756,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         "browser_computer_use_production_safety_receipts_visible"
     )
     assert (
+        payload["summary"]["post_dp_browser_computer_use_reliability_posture"]
+        == "post_dp_browser_computer_use_reliability_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["post_dp_browser_computer_use_reliability_claim_boundary"] == (
+        POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["post_dp_browser_computer_use_reliability_operator_status"] == (
+        "post_dp_browser_computer_use_reliability_receipts_visible"
+    )
+    assert (
         payload["summary"]["production_operator_control_parity_posture"]
         == "production_operator_control_parity_ci_gated_operator_visible"
     )
@@ -4904,6 +4927,25 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert set(BROWSER_COMPUTER_USE_PRODUCTION_BLOCKED_CLAIMS) <= set(
         payload["browser_computer_use_production"]["policy"]["blocked_claims"]
     )
+    assert payload["post_dp_browser_computer_use_reliability"]["summary"]["operator_status"] == (
+        "post_dp_browser_computer_use_reliability_receipts_visible"
+    )
+    assert payload["post_dp_browser_computer_use_reliability"]["summary"][
+        "required_provider_modes_covered"
+    ] is True
+    assert payload["post_dp_browser_computer_use_reliability"]["summary"][
+        "artifact_provenance_complete"
+    ] is True
+    assert payload["post_dp_browser_computer_use_reliability"]["summary"]["safe_receipts_redacted"] is True
+    assert payload["post_dp_browser_computer_use_reliability"]["summary"][
+        "false_claim_scan_clean"
+    ] is True
+    assert payload["post_dp_browser_computer_use_reliability"]["policy"]["claim_boundary"] == (
+        POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_CLAIM_BOUNDARY
+    )
+    assert set(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_BLOCKED_CLAIMS) <= set(
+        payload["post_dp_browser_computer_use_reliability"]["policy"]["blocked_claims"]
+    )
     assert payload["production_operator_control"]["summary"]["operator_status"] == (
         "production_operator_control_parity_receipts_visible"
     )
@@ -5827,6 +5869,77 @@ async def test_operator_browser_computer_use_production_surface_reports_batch_do
     assert all(
         item["safe_receipt"]["redaction_layer"] == "browser_computer_use_production_v1"
         for item in payload["contract"]["browser_session_partition_attestation_v2"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dp_browser_computer_use_reliability_surface_reports_batch_dw_receipts(client):
+    resp = await client.get("/api/operator/post-dp-browser-computer-use-reliability")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "post_dp_browser_computer_use_reliability_receipts_visible"
+    assert payload["summary"]["benchmark_posture"] == (
+        "post_dp_browser_computer_use_reliability_ci_gated_operator_visible"
+    )
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES)
+        + len(BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES)
+        + len(BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES)
+        + len(BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES)
+        + len(BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES)
+        + len(BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES)
+        + len(BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES)
+        + len(BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["required_provider_modes_covered"] is True
+    assert payload["summary"]["provider_degradation_operator_visible"] is True
+    assert payload["summary"]["silent_fallback_blocked"] is True
+    assert payload["summary"]["all_boundaries_enforced"] is True
+    assert payload["summary"]["existing_session_unpartitioned_blocked"] is True
+    assert payload["summary"]["credentialed_recovery_preserves_partitions"] is True
+    assert payload["summary"]["site_drift_preserves_approval_audit_partition"] is True
+    assert payload["summary"]["hostile_cases_fail_closed"] is True
+    assert payload["summary"]["provider_degradation_fails_closed"] is True
+    assert payload["summary"]["artifact_provenance_complete"] is True
+    assert payload["summary"]["artifact_secret_scan_clean"] is True
+    assert payload["summary"]["safe_receipts_redacted"] is True
+    assert payload["summary"]["false_claim_scan_command_executed"] is True
+    assert payload["summary"]["false_claim_scan_clean"] is True
+    assert payload["summary"]["safe_browser_automation_claim_allowed"] is False
+    assert payload["summary"]["full_browser_parity_claim_allowed"] is False
+    assert payload["summary"]["openclaw_class_browser_reach_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_CLAIM_BOUNDARY
+    assert set(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_BLOCKED_CLAIMS) <= set(
+        payload["policy"]["blocked_claims"]
+    )
+    assert {item["provider_mode"] for item in payload["contract"]["provider_reliability"]} == set(
+        REQUIRED_DW_PROVIDER_MODES
+    )
+    assert {item["predecessor_issue"] for item in payload["policy"]["non_duplicate_delta_matrix"]} == {
+        "#496",
+        "#511",
+        "#529",
+        "#546",
+        "#561",
+        "#563",
+    }
+    assert payload["contract"]["negative_validator"]["passes"] is True
+    assert payload["contract"]["false_claim_scan"]["command_exit_code"] == 0
+    assert all(
+        item["artifact_handle"].startswith("seraph://receipts/batch-dw/")
+        and item["safe_receipt"]["redaction_layer"] == "post_dp_browser_computer_use_reliability_v1"
+        for item in payload["contract"]["provider_reliability"]
+    )
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["post_dp_browser_computer_use_reliability_v1"] == list(
+        POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_live_provider_reliability_v2"] == list(
+        BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["browser_computer_use_false_claim_scan_v2"] == list(
+        BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
     )
 
 

@@ -1811,10 +1811,18 @@ def _eval_workflow_composition_behavior() -> dict[str, Any]:
             tool for tool in with_skill
             if tool.name == "workflow_web_brief_to_file"
         )
-        result = web_workflow(
-            query="workflow composition",
-            file_path="notes/workflow.md",
+        durable_repository = types.SimpleNamespace(
+            create_run=AsyncMock(),
+            record_step_started=AsyncMock(),
+            record_step_completed=AsyncMock(),
+            record_step_failed=AsyncMock(),
+            finish_run=AsyncMock(),
         )
+        with patch("src.workflows.manager.workflow_state_repository", durable_repository):
+            result = web_workflow(
+                query="workflow composition",
+                file_path="notes/workflow.md",
+            )
 
         workflow_tool = MagicMock()
         workflow_tool.name = "workflow_web_brief_to_file"
@@ -19183,6 +19191,21 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     side_effect_reconciliation_v2_suite = next(
         item for item in suites if item["name"] == SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME
     )
+    post_dp_durable_orchestration_suite = next(
+        item for item in suites if item["name"] == POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME
+    )
+    multi_agent_handoff_recovery_suite = next(
+        item for item in suites if item["name"] == MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME
+    )
+    scheduler_crash_restart_recovery_suite = next(
+        item for item in suites if item["name"] == SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME
+    )
+    side_effect_reconciliation_v5_suite = next(
+        item for item in suites if item["name"] == SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME
+    )
+    orchestration_false_claim_scan_v2_suite = next(
+        item for item in suites if item["name"] == ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME
+    )
     live_replay_suite = next(item for item in suites if item["name"] == LIVE_REPLAY_BENCHMARK_SUITE_NAME)
     m5_suite = next(item for item in suites if item["name"] == M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME)
     trust_suite = next(item for item in suites if item["name"] == "trust_boundary_and_safety_receipts")
@@ -19738,6 +19761,73 @@ def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
         ),
         "side_effect_reconciliation_v2_gate_required": (
             SIDE_EFFECT_RECONCILIATION_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "post_dp_durable_orchestration_suite_present": (
+            set(POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+            <= set(post_dp_durable_orchestration_suite["scenario_names"])
+        ),
+        "post_dp_durable_orchestration_suite_scenario_count_matches": (
+            post_dp_durable_orchestration_suite["scenario_count"]
+            == len(POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+        ),
+        "post_dp_durable_orchestration_suite_axis_matches": (
+            post_dp_durable_orchestration_suite["benchmark_axis"] == "post_dp_durable_orchestration"
+        ),
+        "post_dp_durable_orchestration_gate_required": (
+            POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "multi_agent_handoff_recovery_suite_present": (
+            set(MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES)
+            <= set(multi_agent_handoff_recovery_suite["scenario_names"])
+        ),
+        "multi_agent_handoff_recovery_suite_scenario_count_matches": (
+            multi_agent_handoff_recovery_suite["scenario_count"] == len(MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES)
+        ),
+        "multi_agent_handoff_recovery_suite_axis_matches": (
+            multi_agent_handoff_recovery_suite["benchmark_axis"] == "multi_agent_handoff_recovery_v1"
+        ),
+        "multi_agent_handoff_recovery_gate_required": (
+            MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "scheduler_crash_restart_recovery_suite_present": (
+            set(SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES)
+            <= set(scheduler_crash_restart_recovery_suite["scenario_names"])
+        ),
+        "scheduler_crash_restart_recovery_suite_scenario_count_matches": (
+            scheduler_crash_restart_recovery_suite["scenario_count"]
+            == len(SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES)
+        ),
+        "scheduler_crash_restart_recovery_suite_axis_matches": (
+            scheduler_crash_restart_recovery_suite["benchmark_axis"] == "scheduler_crash_restart_recovery_v1"
+        ),
+        "scheduler_crash_restart_recovery_gate_required": (
+            SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "side_effect_reconciliation_v5_suite_present": (
+            set(SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES)
+            <= set(side_effect_reconciliation_v5_suite["scenario_names"])
+        ),
+        "side_effect_reconciliation_v5_suite_scenario_count_matches": (
+            side_effect_reconciliation_v5_suite["scenario_count"] == len(SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES)
+        ),
+        "side_effect_reconciliation_v5_suite_axis_matches": (
+            side_effect_reconciliation_v5_suite["benchmark_axis"] == "side_effect_reconciliation_v5"
+        ),
+        "side_effect_reconciliation_v5_gate_required": (
+            SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME in gate_policy["required_benchmark_suites"]
+        ),
+        "orchestration_false_claim_scan_v2_suite_present": (
+            set(ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+            <= set(orchestration_false_claim_scan_v2_suite["scenario_names"])
+        ),
+        "orchestration_false_claim_scan_v2_suite_scenario_count_matches": (
+            orchestration_false_claim_scan_v2_suite["scenario_count"] == len(ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+        ),
+        "orchestration_false_claim_scan_v2_suite_axis_matches": (
+            orchestration_false_claim_scan_v2_suite["benchmark_axis"] == "orchestration_false_claim_scan_v2"
+        ),
+        "orchestration_false_claim_scan_v2_gate_required": (
+            ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME in gate_policy["required_benchmark_suites"]
         ),
         "live_replay_suite_present": "live_replay_fixture_contract_behavior" in live_replay_suite["scenario_names"],
         "live_replay_suite_scenario_count_matches": (

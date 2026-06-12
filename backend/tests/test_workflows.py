@@ -913,12 +913,20 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
         },
         "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
     }
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
 
     with (
         patch(
             "src.workflows.manager._load_workflow_checkpoint_payload",
             AsyncMock(return_value=checkpoint_payload),
         ),
+        patch("src.workflows.manager.workflow_state_repository", durable_repository),
         pytest.raises(RuntimeError, match="trust boundary"),
     ):
         workflow_tool(
@@ -927,6 +935,10 @@ def test_workflow_tool_resume_rejects_when_delegation_boundary_changes():
             _seraph_parent_run_identity=parent_run_identity,
             _seraph_root_run_identity=parent_run_identity,
         )
+    assert durable_repository.create_run.await_count == 1
+    assert durable_repository.record_step_started.await_count == 0
+    assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
+    assert durable_repository.finish_run.await_args.kwargs["last_completed_step_id"] is None
 
 
 def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surface():
@@ -968,12 +980,20 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         },
         "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
     }
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
 
     with (
         patch(
             "src.workflows.manager._load_workflow_checkpoint_payload",
             AsyncMock(return_value=checkpoint_payload),
         ),
+        patch("src.workflows.manager.workflow_state_repository", durable_repository),
         pytest.raises(RuntimeError, match="predates trust-boundary tracking"),
     ):
         workflow_tool(
@@ -982,6 +1002,10 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
             _seraph_parent_run_identity=parent_run_identity,
             _seraph_root_run_identity=parent_run_identity,
         )
+    assert durable_repository.create_run.await_count == 1
+    assert durable_repository.record_step_started.await_count == 0
+    assert durable_repository.finish_run.await_args.kwargs["status"] == "failed"
+    assert durable_repository.finish_run.await_args.kwargs["last_completed_step_id"] is None
 
     def test_workflow_tool_audit_call_payload_uses_normalized_control_inputs_for_fingerprint(self):
         workflow = Workflow(

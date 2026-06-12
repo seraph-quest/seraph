@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -64,8 +65,27 @@ _WORKFLOW_CONTROL_FIELD_NAMES = set(_WORKFLOW_CONTROL_INPUTS)
 
 
 def _run_async(coro):
-    return asyncio.run(coro)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
 
+    result: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    if "value" in result:
+        return result["value"]
+    return None
 
 def _run_durable_state_write(coro) -> Any | None:
     try:
@@ -862,6 +882,18 @@ class WorkflowTool(Tool):
         )
         parent_run_identity = control_inputs.get("_seraph_parent_run_identity")
         root_run_identity = control_inputs.get("_seraph_root_run_identity") or durable_run_identity
+        context: dict[str, Any] = {
+            "inputs": workflow_inputs,
+            "steps": {},
+            "last_result": "",
+        }
+        context.update(workflow_inputs)
+        continued_error_steps: list[str] = []
+        artifact_paths = _collect_artifact_paths(workflow_inputs)
+        step_records: list[dict[str, Any]] = []
+        canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
+        checkpoint_context: dict[str, dict[str, Any]] = {}
+        start_index = 0
         _run_required_durable_state_write(workflow_state_repository.create_run(
             run_identity=durable_run_identity,
             workflow_name=self.workflow.name,
@@ -875,24 +907,46 @@ class WorkflowTool(Tool):
             branch_kind=control_inputs.get("_seraph_branch_kind"),
             branch_depth=int(control_inputs.get("_seraph_branch_depth") or 0),
         ), phase="workflow_start")
-        context: dict[str, Any] = {
-            "inputs": workflow_inputs,
-            "steps": {},
-            "last_result": "",
-        }
-        context.update(workflow_inputs)
-        continued_error_steps: list[str] = []
-        artifact_paths = _collect_artifact_paths(workflow_inputs)
-        step_records: list[dict[str, Any]] = []
-        canonical_step_tools = [canonical_tool_name(step.tool) for step in self.workflow.steps]
-        checkpoint_context: dict[str, dict[str, Any]] = {}
-        start_index = 0
         if control_inputs.get("_seraph_resume_from_step"):
-            start_index, restored_step_records, restored_artifact_paths, restored_context = self._restore_checkpoint_context(
-                control_inputs=control_inputs,
-                canonical_step_tools=canonical_step_tools,
-                approval_context=approval_context,
-            )
+            try:
+                start_index, restored_step_records, restored_artifact_paths, restored_context = self._restore_checkpoint_context(
+                    control_inputs=control_inputs,
+                    canonical_step_tools=canonical_step_tools,
+                    approval_context=approval_context,
+                )
+            except Exception as exc:
+                safe_error_summary = _safe_workflow_error_summary(exc)
+                self._last_audit_failure_payload = self._build_audit_payload(
+                    status="failed",
+                    run_fingerprint=run_fingerprint,
+                    approval_context=approval_context,
+                    canonical_step_tools=canonical_step_tools,
+                    step_records=step_records,
+                    artifact_paths=artifact_paths,
+                    continued_error_steps=continued_error_steps,
+                    canvas_output=None,
+                    checkpoint_context=checkpoint_context,
+                    checkpoint_context_allowed=checkpoint_context_allowed,
+                    control_inputs=control_inputs,
+                    error=safe_error_summary,
+                    durable_run_identity=durable_run_identity,
+                )
+                durable_audit_receipt_id = _durable_audit_receipt_id(durable_run_identity, "failed")
+                _run_durable_state_write(workflow_state_repository.finish_run(
+                    run_identity=durable_run_identity,
+                    status="failed",
+                    checkpoint_context=checkpoint_context if checkpoint_context_allowed else {},
+                    artifact_paths=artifact_paths,
+                    continued_error_steps=continued_error_steps,
+                    last_completed_step_id=None,
+                    error=safe_error_summary,
+                    metadata={
+                        "summary": f"{self.name} failed before checkpoint resume",
+                        "durable_audit_receipt_id": durable_audit_receipt_id,
+                        "content_redacted": True,
+                    },
+                ))
+                raise
             for step_id, state in restored_context.items():
                 context["steps"][step_id] = state
                 context["last_result"] = state.get("result", "")

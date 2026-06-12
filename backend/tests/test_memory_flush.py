@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -238,9 +239,19 @@ def test_workflow_completion_triggers_memory_flush():
             return "Atlas workflow finished."
 
     tool = WorkflowTool(workflow, {"echo_tool": EchoTool()})
+    durable_repository = SimpleNamespace(
+        create_run=AsyncMock(),
+        record_step_started=AsyncMock(),
+        record_step_completed=AsyncMock(),
+        record_step_failed=AsyncMock(),
+        finish_run=AsyncMock(),
+    )
     tokens = set_runtime_context("workflow-session", "high_risk")
     try:
-        with patch("src.workflows.manager.flush_session_memory_sync", return_value=True) as mock_flush:
+        with (
+            patch("src.workflows.manager.workflow_state_repository", durable_repository),
+            patch("src.workflows.manager.flush_session_memory_sync", return_value=True) as mock_flush,
+        ):
             result = tool()
     finally:
         reset_runtime_context(tokens)

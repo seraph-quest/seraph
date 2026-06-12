@@ -500,6 +500,18 @@ from src.workflows.production_orchestration_hard_guarantees import (
     SCHEDULER_FAILOVER_SOAK_V1_SCENARIO_NAMES,
     SCHEDULER_FAILOVER_SOAK_V1_SUITE_NAME,
 )
+from src.workflows.post_dp_durable_orchestration import (
+    MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME,
+    SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES,
+    SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME,
+    SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -2099,6 +2111,84 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Clean false-claim scans do not themselves prove stronger orchestration behavior.",
         scenario_names=ORCHESTRATION_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DP_DURABLE_ORCHESTRATION_SUITE_NAME,
+        label="Post-DP durable orchestration gap closure",
+        description=(
+            "Pins Batch DQ post-DP recovery packets across persisted restart receipts, lease-guarded recovery "
+            "authority, redacted operator projection, and bounded claim posture."
+        ),
+        benchmark_axis="post_dp_durable_orchestration",
+        operator_summary=(
+            "DQ proof must show restart and recovery facts as operator-visible packets while preserving "
+            "approval, lease, replay, side-effect, and redaction boundaries."
+        ),
+        remaining_gap=(
+            "This closes post-DP orchestration gaps without claiming crash-proof workflows, unconditional "
+            "exactly-once scheduling, full parity, or reference-system exceedance."
+        ),
+        scenario_names=POST_DP_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MULTI_AGENT_HANDOFF_RECOVERY_SUITE_NAME,
+        label="Multi-agent handoff recovery v1",
+        description=(
+            "Pins DQ handoff recovery receipts for receiver authority, pending approval fail-closed behavior, "
+            "and revision-guarded ownership transfer."
+        ),
+        benchmark_axis="multi_agent_handoff_recovery_v1",
+        operator_summary=(
+            "Multi-agent recovery proof must expose who owns the lease, who may resume, and why unsafe "
+            "handoff attempts stay blocked."
+        ),
+        remaining_gap="Handoff receipts are scoped recovery authority, not general autonomous delegation approval.",
+        scenario_names=MULTI_AGENT_HANDOFF_RECOVERY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SCHEDULER_CRASH_RESTART_RECOVERY_SUITE_NAME,
+        label="Scheduler crash/restart recovery v1",
+        description=(
+            "Pins DQ scheduler restart receipts for trigger record-only semantics, duplicate trigger dedupe, "
+            "and stale-heartbeat recovery packets."
+        ),
+        benchmark_axis="scheduler_crash_restart_recovery_v1",
+        operator_summary=(
+            "Scheduler recovery proof must record restart triggers without authorizing external action until "
+            "recovery authority and side-effect boundaries are visible."
+        ),
+        remaining_gap="Recorded restart triggers are not a proof of crash-proof or exactly-once scheduling.",
+        scenario_names=SCHEDULER_CRASH_RESTART_RECOVERY_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME,
+        label="Side-effect reconciliation v5",
+        description=(
+            "Pins DQ v5 side-effect receipts for idempotency digests, duplicate owner replay blocks, "
+            "unknown acknowledgements, and manual repair state."
+        ),
+        benchmark_axis="side_effect_reconciliation_v5",
+        operator_summary=(
+            "Side-effect v5 proof must expose safe digests and reconciliation status before retry, repair, "
+            "or resume can proceed."
+        ),
+        remaining_gap="V5 side-effect receipts remain scoped to declared boundaries, not global exactly-once effects.",
+        scenario_names=SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+        label="Orchestration false-claim scan v2",
+        description=(
+            "Pins DQ false-claim scan receipts so exactly-once, crash-proof, full-parity, production-ready, "
+            "reference-system exceedance, and superiority claims remain blocked."
+        ),
+        benchmark_axis="orchestration_false_claim_scan_v2",
+        operator_summary=(
+            "False-claim v2 proof must keep DQ language tied to receipts and prevent accidental parity or "
+            "superiority claims."
+        ),
+        remaining_gap="Clean DQ wording does not itself prove stronger orchestration behavior.",
+        scenario_names=ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

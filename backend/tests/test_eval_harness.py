@@ -499,6 +499,26 @@ def test_benchmark_proof_surface_behavior_runtime_eval_details():
     assert details["side_effect_reconciliation_v2_suite_scenario_count_matches"] is True
     assert details["side_effect_reconciliation_v2_suite_axis_matches"] is True
     assert details["side_effect_reconciliation_v2_gate_required"] is True
+    assert details["post_dp_durable_orchestration_suite_present"] is True
+    assert details["post_dp_durable_orchestration_suite_scenario_count_matches"] is True
+    assert details["post_dp_durable_orchestration_suite_axis_matches"] is True
+    assert details["post_dp_durable_orchestration_gate_required"] is True
+    assert details["multi_agent_handoff_recovery_suite_present"] is True
+    assert details["multi_agent_handoff_recovery_suite_scenario_count_matches"] is True
+    assert details["multi_agent_handoff_recovery_suite_axis_matches"] is True
+    assert details["multi_agent_handoff_recovery_gate_required"] is True
+    assert details["scheduler_crash_restart_recovery_suite_present"] is True
+    assert details["scheduler_crash_restart_recovery_suite_scenario_count_matches"] is True
+    assert details["scheduler_crash_restart_recovery_suite_axis_matches"] is True
+    assert details["scheduler_crash_restart_recovery_gate_required"] is True
+    assert details["side_effect_reconciliation_v5_suite_present"] is True
+    assert details["side_effect_reconciliation_v5_suite_scenario_count_matches"] is True
+    assert details["side_effect_reconciliation_v5_suite_axis_matches"] is True
+    assert details["side_effect_reconciliation_v5_gate_required"] is True
+    assert details["orchestration_false_claim_scan_v2_suite_present"] is True
+    assert details["orchestration_false_claim_scan_v2_suite_scenario_count_matches"] is True
+    assert details["orchestration_false_claim_scan_v2_suite_axis_matches"] is True
+    assert details["orchestration_false_claim_scan_v2_gate_required"] is True
     assert details["live_replay_suite_present"] is True
     assert details["live_replay_suite_scenario_count_matches"] is True
     assert details["live_replay_suite_axis_matches"] is True
@@ -3444,6 +3464,11 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "external_side_effect_correctness_v4" in captured.out
     assert "scheduler_failover_soak_v1" in captured.out
     assert "orchestration_false_claim_scan_v1" in captured.out
+    assert "post_dp_durable_orchestration_v1" in captured.out
+    assert "multi_agent_handoff_recovery_v1" in captured.out
+    assert "scheduler_crash_restart_recovery_v1" in captured.out
+    assert "side_effect_reconciliation_v5" in captured.out
+    assert "orchestration_false_claim_scan_v2" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
@@ -3714,6 +3739,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "external_side_effect_correctness_v4",
         "scheduler_failover_soak_v1",
         "orchestration_false_claim_scan_v1",
+        "post_dp_durable_orchestration_v1",
+        "multi_agent_handoff_recovery_v1",
+        "scheduler_crash_restart_recovery_v1",
+        "side_effect_reconciliation_v5",
+        "orchestration_false_claim_scan_v2",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

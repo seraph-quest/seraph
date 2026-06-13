@@ -305,6 +305,15 @@ from src.security.production_grade_secure_host import (
     SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
     SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
 )
+from src.security.post_dx_formal_secure_runtime_isolation import (
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES,
+    HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES,
+    SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES,
+)
 
 
 def _runtime_eval_scenario_names() -> list[str]:
@@ -1266,6 +1275,39 @@ def test_run_post_dx_live_durable_orchestration_benchmark_suites_pass():
     assert all(result.details["operator_controls_visible"] for result in summary.results)
     assert all(result.details["false_claim_scan_visible"] for result in summary.results)
     assert all(result.details["stronger_claims_not_claimed"] for result in summary.results)
+
+
+def test_run_post_dx_formal_secure_runtime_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dx_formal_secure_runtime_isolation_v1",
+            "runtime_isolation_attestation_evidence_v2",
+            "credential_broker_egress_enforcement_v3",
+            "hostile_chain_containment_v4",
+            "external_security_review_certification_track_v2",
+            "secure_runtime_recovery_authority_v3",
+            "secure_runtime_false_claim_scan_v3",
+        ])
+    )
+
+    assert summary.total == (
+        len(POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES)
+        + len(RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES)
+        + len(CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES)
+        + len(HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES)
+        + len(EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES)
+        + len(SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES)
+        + len(SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES)
+    )
+    assert summary.failed == 0
+    assert all(result.details["post_dx_secure_runtime_suite_present"] for result in summary.results)
+    assert all(result.details["attestation_provenance_visible"] for result in summary.results)
+    assert all(result.details["unsupported_boundaries_marked"] for result in summary.results)
+    assert all(result.details["credential_egress_v3_denies_by_default"] for result in summary.results)
+    assert all(result.details["hostile_chains_contained"] for result in summary.results)
+    assert all(result.details["review_track_blocks_formal_certification"] for result in summary.results)
+    assert all(result.details["operator_recovery_authority_no_auto_expansion"] for result in summary.results)
+    assert all(result.details["false_claim_scan_command_backed"] for result in summary.results)
 
 
 def test_run_production_grade_secure_host_benchmark_suites_pass():
@@ -3782,6 +3824,13 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "hostile_capability_chain_quarantine_v2" in captured.out
     assert "secure_host_recovery_authority_v2" in captured.out
     assert "secure_host_false_claim_scan_v2" in captured.out
+    assert "post_dx_formal_secure_runtime_isolation_v1" in captured.out
+    assert "runtime_isolation_attestation_evidence_v2" in captured.out
+    assert "credential_broker_egress_enforcement_v3" in captured.out
+    assert "hostile_chain_containment_v4" in captured.out
+    assert "external_security_review_certification_track_v2" in captured.out
+    assert "secure_runtime_recovery_authority_v3" in captured.out
+    assert "secure_runtime_false_claim_scan_v3" in captured.out
     assert "computer_use_browser_desktop" in captured.out
     assert "channels_presence_device_pairing" in captured.out
     assert "one_excellent_reach_channel_canary" in captured.out
@@ -4120,6 +4169,13 @@ def test_main_lists_available_benchmark_suites(capsys):
         "hostile_capability_chain_quarantine_v2",
         "secure_host_recovery_authority_v2",
         "secure_host_false_claim_scan_v2",
+        "post_dx_formal_secure_runtime_isolation_v1",
+        "runtime_isolation_attestation_evidence_v2",
+        "credential_broker_egress_enforcement_v3",
+        "hostile_chain_containment_v4",
+        "external_security_review_certification_track_v2",
+        "secure_runtime_recovery_authority_v3",
+        "secure_runtime_false_claim_scan_v3",
         "computer_use_browser_desktop",
         "channels_presence_device_pairing",
         "one_excellent_reach_channel_canary",

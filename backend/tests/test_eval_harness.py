@@ -262,6 +262,15 @@ from src.workflows.continuous_orchestration_slo import (
     CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
     SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
 )
+from src.workflows.post_dx_live_durable_orchestration import (
+    CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES,
+)
 from src.workflows.production_workflow_guarantees import (
     CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
     EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
@@ -1222,6 +1231,41 @@ def test_run_production_orchestration_hard_guarantees_benchmark_suites_pass():
     assert all(result.details["side_effect_correctness_visible"] for result in summary.results)
     assert all(result.details["scheduler_soak_visible"] for result in summary.results)
     assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_post_dx_live_durable_orchestration_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites(
+            [
+                "post_dx_live_durable_orchestration_v1",
+                "recorded_live_orchestration_window_v1",
+                "crash_restart_failover_drill_v3",
+                "multi_agent_handoff_durability_v2",
+                "side_effect_reconciliation_v6",
+                "operator_recovery_control_v4",
+                "orchestration_false_claim_scan_v3",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == (
+        set(POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+        | set(RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES)
+        | set(CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES)
+        | set(MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES)
+        | set(SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES)
+        | set(OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES)
+        | set(ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES)
+    )
+    assert all(result.details["recorded_live_windows_visible"] for result in summary.results)
+    assert all(result.details["residual_risk_markers_visible"] for result in summary.results)
+    assert all(result.details["failover_drills_visible"] for result in summary.results)
+    assert all(result.details["handoff_durability_visible"] for result in summary.results)
+    assert all(result.details["side_effect_v6_visible"] for result in summary.results)
+    assert all(result.details["operator_controls_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+    assert all(result.details["stronger_claims_not_claimed"] for result in summary.results)
 
 
 def test_run_production_grade_secure_host_benchmark_suites_pass():
@@ -3704,6 +3748,13 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "scheduler_crash_restart_recovery_v1" in captured.out
     assert "side_effect_reconciliation_v5" in captured.out
     assert "orchestration_false_claim_scan_v2" in captured.out
+    assert "post_dx_live_durable_orchestration_v1" in captured.out
+    assert "recorded_live_orchestration_window_v1" in captured.out
+    assert "crash_restart_failover_drill_v3" in captured.out
+    assert "multi_agent_handoff_durability_v2" in captured.out
+    assert "side_effect_reconciliation_v6" in captured.out
+    assert "operator_recovery_control_v4" in captured.out
+    assert "orchestration_false_claim_scan_v3" in captured.out
     assert "m5_jobs_routines_workflows_delegation" in captured.out
     assert "trust_boundary_and_safety_receipts" in captured.out
     assert "secure_capability_host" in captured.out
@@ -4031,6 +4082,13 @@ def test_main_lists_available_benchmark_suites(capsys):
         "scheduler_crash_restart_recovery_v1",
         "side_effect_reconciliation_v5",
         "orchestration_false_claim_scan_v2",
+        "post_dx_live_durable_orchestration_v1",
+        "recorded_live_orchestration_window_v1",
+        "crash_restart_failover_drill_v3",
+        "multi_agent_handoff_durability_v2",
+        "side_effect_reconciliation_v6",
+        "operator_recovery_control_v4",
+        "orchestration_false_claim_scan_v3",
         "live_long_horizon_eval_replay_v1",
         "m5_jobs_routines_workflows_delegation",
         "trust_boundary_and_safety_receipts",

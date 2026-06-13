@@ -602,6 +602,22 @@ from src.workflows.post_dp_durable_orchestration import (
     SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES,
     SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME,
 )
+from src.workflows.post_dx_live_durable_orchestration import (
+    CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES,
+    CRASH_RESTART_FAILOVER_DRILL_V3_SUITE_NAME,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SUITE_NAME,
+    OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_CONTROL_V4_SUITE_NAME,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SUITE_NAME,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SUITE_NAME,
+    SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V6_SUITE_NAME,
+)
 
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SUITE_NAME = "channels_presence_device_pairing"
 CHANNELS_PRESENCE_DEVICE_PAIRING_BENCHMARK_SCENARIO_NAMES = (
@@ -2573,6 +2589,112 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="Clean DQ wording does not itself prove stronger orchestration behavior.",
         scenario_names=ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DX_LIVE_DURABLE_ORCHESTRATION_SUITE_NAME,
+        label="Post-DX live durable orchestration parity-proof",
+        description=(
+            "Pins Batch DY bounded parity-proof receipts for recorded-live windows, failover drills, "
+            "handoff durability, side-effect reconciliation, and claim boundaries."
+        ),
+        benchmark_axis="post_dx_live_durable_orchestration",
+        operator_summary=(
+            "DY proof must expose recorded-live orchestration windows and recovery receipts without "
+            "claiming solved durable workflows or exactly-once scheduling."
+        ),
+        remaining_gap=(
+            "Bounded parity-proof receipts do not prove crash-proof orchestration, LangGraph-class parity, "
+            "production readiness, full parity, or reference-system exceedance."
+        ),
+        scenario_names=POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SUITE_NAME,
+        label="Recorded-live orchestration window v1",
+        description=(
+            "Pins DY recorded-live and accelerated orchestration window receipts with provider identity, "
+            "duration, scheduler jitter, duplicate suppression, and residual-risk markers."
+        ),
+        benchmark_axis="recorded_live_orchestration_window_v1",
+        operator_summary=(
+            "Window proof must show observed fire counts, jitter budget, side-effect reconciliation, "
+            "operator recovery counts, and residual uncertainty."
+        ),
+        remaining_gap="Recorded-live windows are not unconditional provider SLAs or universal production proof.",
+        scenario_names=RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CRASH_RESTART_FAILOVER_DRILL_V3_SUITE_NAME,
+        label="Crash/restart failover drill v3",
+        description=(
+            "Pins DY failover drills for worker kill, scheduler restart, provider timeout, replay authority, "
+            "and operator recovery controls."
+        ),
+        benchmark_axis="crash_restart_failover_drill_v3",
+        operator_summary=(
+            "Failover proof must preserve checkpoints, stay within named budgets, and block unsafe replay "
+            "after unknown external acknowledgement."
+        ),
+        remaining_gap="Named drills are not proof of crash-proof orchestration across every failure mode.",
+        scenario_names=CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MULTI_AGENT_HANDOFF_DURABILITY_V2_SUITE_NAME,
+        label="Multi-agent handoff durability v2",
+        description=(
+            "Pins DY handoff durability receipts for persisted receiver acknowledgement, revision guards, "
+            "fail-closed cases, and operator visibility."
+        ),
+        benchmark_axis="multi_agent_handoff_durability_v2",
+        operator_summary=(
+            "Handoff proof must show durable acceptance, revision binding, and blocked stale-owner or "
+            "unauthorized receiver paths."
+        ),
+        remaining_gap="Handoff durability does not grant autonomous approval or solved delegation claims.",
+        scenario_names=MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SIDE_EFFECT_RECONCILIATION_V6_SUITE_NAME,
+        label="Side-effect reconciliation v6",
+        description=(
+            "Pins DY v6 side-effect receipts for idempotency digests, duplicate suppression, unknown ack "
+            "repair, compensation, and redacted handles."
+        ),
+        benchmark_axis="side_effect_reconciliation_v6",
+        operator_summary=(
+            "Side-effect v6 proof must bind each mutation to a declared idempotency scope, confirmation "
+            "state, and safe operator repair path."
+        ),
+        remaining_gap="V6 reconciliation remains boundary-scoped, not global exactly-once delivery.",
+        scenario_names=SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=OPERATOR_RECOVERY_CONTROL_V4_SUITE_NAME,
+        label="Operator recovery control v4",
+        description=(
+            "Pins DY operator recovery controls for inspect, resume, repair, quarantine, handoff, branch, "
+            "cancel, audit, and duplicate suppression actions."
+        ),
+        benchmark_axis="operator_recovery_control_v4",
+        operator_summary=(
+            "Recovery-control proof must leave a receipt after every high-risk recovery action."
+        ),
+        remaining_gap="Operator controls do not eliminate the need for review after unknown side effects.",
+        scenario_names=OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+        label="Orchestration false-claim scan v3",
+        description=(
+            "Pins DY false-claim receipts so exactly-once, crash-proof, solved workflow, LangGraph-class, "
+            "production-ready, full-parity, and exceedance wording remains blocked."
+        ),
+        benchmark_axis="orchestration_false_claim_scan_v3",
+        operator_summary=(
+            "False-claim v3 proof must keep DY wording tied to bounded parity-proof receipts."
+        ),
+        remaining_gap="Clean DY wording does not itself prove stronger orchestration behavior.",
+        scenario_names=ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=LIVE_REPLAY_BENCHMARK_SUITE_NAME,

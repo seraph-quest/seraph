@@ -744,6 +744,25 @@ from src.workflows.post_dp_durable_orchestration import (
     SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME,
     build_post_dp_durable_orchestration_contract,
 )
+from src.workflows.post_dx_live_durable_orchestration import (
+    CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES,
+    CRASH_RESTART_FAILOVER_DRILL_V3_SUITE_NAME,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SUITE_NAME,
+    OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_CONTROL_V4_SUITE_NAME,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_BLOCKED_CLAIMS,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SUITE_NAME,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SUITE_NAME,
+    SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V6_SUITE_NAME,
+    build_post_dx_live_durable_orchestration_contract,
+)
 from src.evolution.engine import evolution_benchmark_gate_policy
 from src.approval.exceptions import ApprovalRequired
 from src.approval.runtime import reset_runtime_context, set_runtime_context
@@ -23672,6 +23691,112 @@ async def _eval_post_dp_durable_orchestration_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_dx_live_durable_orchestration_behavior() -> dict[str, Any]:
+    suites = benchmark_suite_report()
+    live_suite = next(
+        item for item in suites if item["name"] == POST_DX_LIVE_DURABLE_ORCHESTRATION_SUITE_NAME
+    )
+    window_suite = next(
+        item for item in suites if item["name"] == RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SUITE_NAME
+    )
+    failover_suite = next(
+        item for item in suites if item["name"] == CRASH_RESTART_FAILOVER_DRILL_V3_SUITE_NAME
+    )
+    handoff_suite = next(
+        item for item in suites if item["name"] == MULTI_AGENT_HANDOFF_DURABILITY_V2_SUITE_NAME
+    )
+    side_effect_suite = next(item for item in suites if item["name"] == SIDE_EFFECT_RECONCILIATION_V6_SUITE_NAME)
+    control_suite = next(item for item in suites if item["name"] == OPERATOR_RECOVERY_CONTROL_V4_SUITE_NAME)
+    scan_suite = next(item for item in suites if item["name"] == ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SUITE_NAME)
+    contract = build_post_dx_live_durable_orchestration_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    windows = contract["recorded_live_window_receipts"]
+    failovers = contract["crash_restart_failover_receipts"]
+    handoffs = contract["multi_agent_handoff_durability_receipts"]
+    side_effects = contract["side_effect_reconciliation_v6_receipts"]
+    controls = contract["operator_recovery_control_receipts"]
+    scans = contract["false_claim_scan_receipts"]
+    required_controls = {
+        "inspect",
+        "resume",
+        "repair",
+        "suppress_duplicate",
+        "quarantine",
+        "handoff",
+        "branch",
+        "cancel",
+        "audit",
+    }
+    required_surfaces = {
+        "/api/operator/post-dx-live-durable-orchestration",
+        "/api/operator/post-dp-durable-orchestration",
+        "/api/operator/production-orchestration-hard-guarantees",
+        "/api/operator/benchmark-proof",
+    }
+    gate_policy = evolution_benchmark_gate_policy()["required_benchmark_suites"]
+    return {
+        "post_dx_suite_visible": live_suite["scenario_count"]
+        == len(POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES),
+        "window_suite_visible": window_suite["scenario_count"]
+        == len(RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES),
+        "failover_suite_visible": failover_suite["scenario_count"]
+        == len(CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES),
+        "handoff_suite_visible": handoff_suite["scenario_count"]
+        == len(MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES),
+        "side_effect_suite_visible": side_effect_suite["scenario_count"]
+        == len(SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES),
+        "control_suite_visible": control_suite["scenario_count"] == len(OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES),
+        "scan_suite_visible": scan_suite["scenario_count"] == len(ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES),
+        "post_dx_axis_visible": live_suite["benchmark_axis"] == "post_dx_live_durable_orchestration",
+        "operator_status_visible": summary["operator_status"] == "post_dx_live_durable_orchestration_visible",
+        "recorded_live_windows_visible": summary["recorded_live_window_count"] >= 2
+        and summary["total_window_hours"] >= 432
+        and all(item.get("raw_receipt_handle") for item in windows),
+        "residual_risk_markers_visible": summary["all_windows_with_residual_risk"] is True
+        and any(item["evidence_mode"] == "accelerated_fixture_window" for item in windows),
+        "failover_drills_visible": len(failovers) >= 3
+        and summary["all_failovers_within_budget"] is True
+        and summary["restart_preservation_count"] >= 3,
+        "replay_authority_visible": all(item.get("replay_authority") for item in failovers)
+        and any("blocked" in item["replay_authority"] for item in failovers),
+        "handoff_durability_visible": len(handoffs) >= 3
+        and summary["all_handoffs_revision_guarded"] is True
+        and summary["handoff_fail_closed_count"] >= 3
+        and all(item.get("operator_visible") is True for item in handoffs),
+        "side_effect_v6_visible": len(side_effects) >= 3
+        and summary["all_side_effects_have_idempotency"] is True
+        and summary["all_duplicate_attempts_suppressed"] is True
+        and summary["manual_repair_required_count"] >= 1,
+        "operator_controls_visible": summary["operator_control_count"] >= len(required_controls)
+        and required_controls <= {item["action"] for item in controls}
+        and all(item.get("receipt_after_action") for item in controls),
+        "false_claim_scan_visible": summary["false_claim_scan_count"] >= 3
+        and all(item["result"] in {"blocked_claims_remain_blocked", "bounded_wording_only", "claim_lift_not_requested"} for item in scans),
+        "predecessor_sources_are_context_only": summary["predecessor_source_count"] == 2
+        and bool(contract["receipt_index"]["predecessor_claim_boundaries"]),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DX_LIVE_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DX_LIVE_DURABLE_ORCHESTRATION_BLOCKED_CLAIMS)
+        <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["operator_surfaces"]),
+        "stronger_claims_not_claimed": {
+            "unconditional_exactly_once_scheduler",
+            "crash_proof_orchestration",
+            "solved_durable_workflows",
+            "langgraph_class_workflow_parity",
+            "full_parity_or_reference_system_exceedance",
+        }
+        <= set(policy["not_claimed"]),
+        "post_dx_gate_required": POST_DX_LIVE_DURABLE_ORCHESTRATION_SUITE_NAME in gate_policy,
+        "window_gate_required": RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SUITE_NAME in gate_policy,
+        "failover_gate_required": CRASH_RESTART_FAILOVER_DRILL_V3_SUITE_NAME in gate_policy,
+        "handoff_gate_required": MULTI_AGENT_HANDOFF_DURABILITY_V2_SUITE_NAME in gate_policy,
+        "side_effect_v6_gate_required": SIDE_EFFECT_RECONCILIATION_V6_SUITE_NAME in gate_policy,
+        "operator_control_v4_gate_required": OPERATOR_RECOVERY_CONTROL_V4_SUITE_NAME in gate_policy,
+        "scan_v3_gate_required": ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SUITE_NAME in gate_policy,
+    }
+
+
 def _eval_capability_preflight_behavior() -> dict[str, Any]:
     from src.api.capabilities import _build_capability_overview, _capability_preflight_payload
 
@@ -25656,6 +25781,91 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_post_dp_durable_orchestration_behavior,
         )
         for name in ORCHESTRATION_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records bounded post-DX live durable orchestration parity-proof receipts for "
+                "recorded-live windows, failover drills, handoff durability, side effects, controls, "
+                "and blocked claim posture."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records live and recorded-live orchestration windows with provider identity, "
+                "jitter budgets, duplicate suppression, and residual-risk markers."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records crash/restart/failover drills with checkpoint preservation, replay "
+                "authority, and operator recovery controls."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records multi-agent handoff durability with receiver acknowledgement, "
+                "revision guards, fail-closed cases, and operator visibility."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records side-effect reconciliation v6 with idempotency digests, duplicate "
+                "suppression, unknown-ack repair, compensation, and redacted handles."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records operator recovery controls that leave receipts after inspect, resume, "
+                "repair, quarantine, handoff, branch, cancel, audit, and duplicate-suppression actions."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="workflow",
+            description=(
+                "Batch DY records orchestration false-claim v3 scans so exactly-once, crash-proof, "
+                "LangGraph-class, full-parity, production-ready, and exceedance wording remains blocked."
+            ),
+            runner=_eval_post_dx_live_durable_orchestration_behavior,
+        )
+        for name in ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

@@ -197,6 +197,14 @@ from src.extensions.reach_voice_production_ops import (
     REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
     VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
 )
+from src.extensions.post_dx_reach_voice_media_parity import (
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+    REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+)
 from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
 from src.guardian.live_learning_quality import (
     CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
@@ -1827,6 +1835,38 @@ def test_run_reach_voice_production_ops_benchmark_suites_pass():
     assert summary.failed == 0
     assert {result.name for result in summary.results} == expected_names
     assert all(result.details["all_dk_suites_required_by_gate"] for result in summary.results)
+    assert all(result.details["safe_receipts_redacted_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_post_dx_reach_voice_media_benchmark_suites_pass():
+    suite_names = [
+        "post_dx_reach_voice_media_parity_proof_v1",
+        "multi_channel_reach_reliability_v3",
+        "voice_media_quality_latency_v3",
+        "reach_abuse_recovery_v3",
+        "cross_surface_reach_continuity_v3",
+        "reach_voice_media_false_claim_scan_v3",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected_names = {
+        *POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+        *MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+        *VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+        *REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+        *CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+        *REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    }
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["all_ea_suites_required_by_gate"] for result in summary.results)
+    assert all(result.details["multi_channel_reliability_visible"] for result in summary.results)
+    assert all(result.details["voice_media_quality_latency_visible"] for result in summary.results)
+    assert all(result.details["rate_abuse_recovery_visible"] for result in summary.results)
+    assert all(result.details["cross_surface_continuity_v3_visible"] for result in summary.results)
+    assert all(result.details["coverage_gaps_preserved"] for result in summary.results)
     assert all(result.details["safe_receipts_redacted_visible"] for result in summary.results)
     assert all(result.details["claim_boundary_visible"] for result in summary.results)
     assert all(result.details["blocked_claims_visible"] for result in summary.results)
@@ -3865,6 +3905,12 @@ def test_main_lists_available_benchmark_suites(capsys):
     assert "guardian_reach_continuity_v2" in captured.out
     assert "voice_media_privacy_fallback_v2" in captured.out
     assert "reach_channel_false_claim_scan_v2" in captured.out
+    assert "post_dx_reach_voice_media_parity_proof_v1" in captured.out
+    assert "multi_channel_reach_reliability_v3" in captured.out
+    assert "voice_media_quality_latency_v3" in captured.out
+    assert "reach_abuse_recovery_v3" in captured.out
+    assert "cross_surface_reach_continuity_v3" in captured.out
+    assert "reach_voice_media_false_claim_scan_v3" in captured.out
     assert "managed_browser_provider_attestation" in captured.out
     assert "live_multi_operator_usability_study" in captured.out
     assert "browser_computer_use_recovery_drill" in captured.out
@@ -4041,6 +4087,12 @@ def test_main_lists_available_benchmark_suites(capsys):
         "guardian_reach_continuity_v2",
         "voice_media_privacy_fallback_v2",
         "reach_channel_false_claim_scan_v2",
+        "post_dx_reach_voice_media_parity_proof_v1",
+        "multi_channel_reach_reliability_v3",
+        "voice_media_quality_latency_v3",
+        "reach_abuse_recovery_v3",
+        "cross_surface_reach_continuity_v3",
+        "reach_voice_media_false_claim_scan_v3",
         "managed_browser_provider_attestation",
         "live_multi_operator_usability_study",
         "browser_computer_use_recovery_drill",

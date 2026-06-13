@@ -270,6 +270,22 @@ from src.extensions.post_dp_reach_channel_gap_closure import (
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SCENARIO_NAMES,
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SUITE_NAME,
 )
+from src.extensions.post_dx_reach_voice_media_parity import (
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME,
+    POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME,
+    POST_DX_REACH_VOICE_MEDIA_SAFE_REDACTION_BOUNDARY,
+    REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+    REACH_ABUSE_RECOVERY_V3_SUITE_NAME,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME,
+)
 from src.guardian.post_dp_guardian_memory_gap_closure import (
     GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
@@ -3629,6 +3645,14 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
         "post_dp_reach_channel_gap_closure_visible"
     )
     assert (
+        payload["summary"]["post_dx_reach_voice_media_posture"]
+        == "bounded_post_dx_reach_voice_media_parity_proof"
+    )
+    assert payload["summary"]["post_dx_reach_voice_media_claim_boundary"] == POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY
+    assert payload["summary"]["post_dx_reach_voice_media_operator_status"] == (
+        "post_dx_reach_voice_media_parity_proof_visible"
+    )
+    assert (
         payload["summary"]["guardian_learning_arbitration_benchmark_posture"]
         == "guardian_learning_arbitration_ci_gated_operator_visible"
     )
@@ -5139,6 +5163,18 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["post_dp_reach_channel"]["summary"]["degraded_recovery_count"] >= 4
     assert payload["post_dp_reach_channel"]["summary"]["continuity_preserved_count"] >= 4
     assert payload["post_dp_reach_channel"]["policy"]["claim_boundary"] == POST_DP_REACH_CHANNEL_CLAIM_BOUNDARY
+    assert payload["post_dx_reach_voice_media"]["summary"]["operator_status"] == (
+        "post_dx_reach_voice_media_parity_proof_visible"
+    )
+    assert payload["post_dx_reach_voice_media"]["summary"]["reliability_surface_count"] >= 5
+    assert payload["post_dx_reach_voice_media"]["summary"]["candidate_surface_count"] >= 2
+    assert payload["post_dx_reach_voice_media"]["summary"]["voice_media_quality_pass_count"] >= 4
+    assert payload["post_dx_reach_voice_media"]["summary"]["abuse_recovery_count"] >= 4
+    assert payload["post_dx_reach_voice_media"]["summary"]["continuity_preserved_count"] >= 4
+    assert (
+        payload["post_dx_reach_voice_media"]["policy"]["claim_boundary"]
+        == POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY
+    )
     assert payload["guardian_learning_arbitration_benchmark"]["summary"]["suite_name"] == "guardian_learning_arbitration_v2"
     assert payload["guardian_learning_arbitration_benchmark"]["policy"]["guardian_value_policy"] == (
         "learning_must_improve_restraint_clarification_timing_approval_recovery_or_follow_through_not_intervention_volume"
@@ -7800,6 +7836,84 @@ async def test_operator_post_dp_reach_channel_surface_reports_batch_ds_receipts(
             "false_claim_scan_receipts",
         )
         for item in payload["contract"][group_name]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dx_reach_voice_media_surface_reports_batch_ea_receipts(client):
+    resp = await client.get("/api/operator/post-dx-reach-voice-media-parity-proof")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == "bounded_post_dx_reach_voice_media_parity_proof"
+    assert payload["summary"]["operator_status"] == "post_dx_reach_voice_media_parity_proof_visible"
+    assert payload["summary"]["suite_name"] == "post_dx_reach_voice_media_parity_proof"
+    assert payload["summary"]["reliability_surface_count"] >= 5
+    assert payload["summary"]["candidate_surface_count"] >= 2
+    assert payload["summary"]["paired_revocation_count"] >= 5
+    assert payload["summary"]["voice_media_quality_pass_count"] >= 4
+    assert payload["summary"]["voice_media_latency_pass_count"] >= 4
+    assert payload["summary"]["abuse_recovery_count"] >= 4
+    assert payload["summary"]["revocation_fail_closed_count"] >= 1
+    assert payload["summary"]["continuity_preserved_count"] >= 4
+    assert payload["summary"]["coverage_gap_count"] >= 4
+    assert payload["summary"]["false_claim_scan_count"] >= 3
+    assert payload["summary"]["claim_boundary"] == POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY
+    assert payload["scenario_names"][POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME] == list(
+        POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME] == list(
+        MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME] == list(
+        VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][REACH_ABUSE_RECOVERY_V3_SUITE_NAME] == list(
+        REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME] == list(
+        CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"][REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME] == list(
+        REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
+    )
+    assert "openclaw_class_reach" in payload["policy"]["blocked_claims"]
+    assert "always_available_operation" in payload["policy"]["blocked_claims"]
+    assert "voice_media_parity" in payload["policy"]["blocked_claims"]
+    assert payload["policy"]["safe_receipt_redaction_boundary"] == POST_DX_REACH_VOICE_MEDIA_SAFE_REDACTION_BOUNDARY
+    assert "/api/operator/post-dx-reach-voice-media-parity-proof" in payload["policy"]["receipt_surfaces"]
+    assert all(
+        item["safe_receipt"]["contains_contact_identifier"] is False
+        and item["safe_receipt"]["contains_message_body"] is False
+        and item["safe_receipt"]["contains_transcript"] is False
+        and item["safe_receipt"]["contains_audio_payload"] is False
+        and item["safe_receipt"]["contains_media_payload"] is False
+        for group_name in (
+            "multi_channel_reliability",
+            "voice_media_quality_latency",
+            "reach_abuse_recovery",
+            "cross_surface_reach_continuity",
+            "false_claim_scan_receipts",
+        )
+        for item in payload["contract"][group_name]
+    )
+    assert all(
+        item["runtime_fetch_performed"] is False
+        and item["candidate_or_non_live_marker"]
+        and item["residual_risk"]
+        for item in payload["contract"]["reach_abuse_recovery"]
+    )
+    assert all(
+        item["runtime_fetch_performed"] is False
+        and item["candidate_or_non_live_marker"]
+        and item["residual_risk"]
+        for item in payload["contract"]["cross_surface_reach_continuity"]
+    )
+    assert all(
+        "backend/src/api/operator.py" in item["scan_scope"]
+        and "backend/src/evals/benchmark_catalog.py" in item["scan_scope"]
+        and "backend/src/evals/harness.py" in item["scan_scope"]
+        for item in payload["contract"]["false_claim_scan_receipts"]
     )
 
 

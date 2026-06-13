@@ -2712,8 +2712,8 @@ def post_dq_dw_claim_readiness_policy_payload() -> dict[str, Any]:
             "is recorded with an access caveat and is not used as factual competitor evidence."
         ),
         "board_policy": (
-            "DX reconciles parent #475 and #573-#580 with live ProjectV2 field receipts; #573-#579 "
-            "must be Done/Merged/Passed and #580 remains the active release-gate issue until this PR merges."
+            "DX reconciles parent #475 and #573-#580 with ProjectV2 field receipts; #573-#580 "
+            "must be Done/Merged/Passed after PR #589 lands on develop."
         ),
         "claim_policy": (
             "only the exact post-DQ-DW bounded release-gate wording is allowed. Production readiness, "
@@ -2804,10 +2804,12 @@ def reference_system_source_refresh_v5_receipts() -> list[dict[str, Any]]:
         live = live_header_receipts.get(receipt["source_id"], {})
         receipt["checked_on"] = "2026-06-12"
         receipt["accessed_on"] = "2026-06-12"
-        receipt["verification_method"] = "live_http_header_check_and_manual_source_review_2026_06_12_post_dq_dw"
-        receipt["runtime_fetch_performed"] = True
-        receipt["runtime_fetch_scope"] = "http_header_only_no_content_claim_extraction"
-        receipt["source_refresh_kind"] = "live_header_plus_manual_current_source_review_receipt"
+        receipt["verification_method"] = (
+            "stored_http_header_receipt_and_manual_source_review_2026_06_12_post_dq_dw"
+        )
+        receipt["runtime_fetch_performed"] = False
+        receipt["runtime_fetch_scope"] = "stored_header_receipt_no_report_time_network_fetch"
+        receipt["source_refresh_kind"] = "stored_live_header_plus_manual_current_source_review_receipt"
         receipt["source_refresh_version"] = "v5_post_dq_dw_claim_readiness_gate"
         receipt["source_freshness_status"] = "live_headers_checked_on_2026_06_12"
         receipt["evidence_locator"] = live.get("evidence_locator", receipt.get("evidence_locator"))
@@ -2817,7 +2819,7 @@ def reference_system_source_refresh_v5_receipts() -> list[dict[str, Any]]:
         receipt["claim_lift_allowed"] = False
         receipt["claim_use"] = "current_source_pressure_only"
         receipt["access_caveat"] = (
-            "Source URL was live-header checked on 2026-06-12 and may have changed since manual review; "
+            "Source URL has a stored live-header receipt from 2026-06-12 and may have changed since manual review; "
             "use only for pressure mapping and stale-source guardrails, not as proof of Seraph parity or superiority."
         )
         receipt["competitor_claim_uncertainty"] = (
@@ -2833,9 +2835,9 @@ def reference_system_source_refresh_v5_receipts() -> list[dict[str, Any]]:
         "source_kind": "user_supplied_social_post",
         "live_http_status": 200,
         "live_content_type": "text/html; charset=UTF-8",
-        "verification_method": "live_http_header_check_only_content_not_verified",
-        "runtime_fetch_performed": True,
-        "runtime_fetch_scope": "http_header_only_no_social_post_content_claim_extraction",
+        "verification_method": "stored_http_header_receipt_only_content_not_verified",
+        "runtime_fetch_performed": False,
+        "runtime_fetch_scope": "stored_header_receipt_no_report_time_social_content_extraction",
         "source_refresh_kind": "access_caveat_receipt",
         "source_refresh_version": "v5_post_dq_dw_claim_readiness_gate",
         "source_freshness_status": "url_shell_reachable_content_not_used_as_evidence_on_2026_06_12",
@@ -2883,7 +2885,7 @@ def post_dq_dw_batch_reconciliation_receipts() -> list[dict[str, Any]]:
             "priority": "P0",
             "size": "L",
             "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
-            "live_project_verification": "verified_with_projectv2_graphql_on_2026_06_12_before_batch_dx_pr",
+            "live_project_verification": "verified_with_projectv2_graphql_on_2026_06_13_after_pr_589_merge",
             "operator_visible": True,
         }
         for batch, issue, suite, pr, surface, lane, closed_at in completed_batches
@@ -2893,20 +2895,22 @@ def post_dq_dw_batch_reconciliation_receipts() -> list[dict[str, Any]]:
         "issue": 580,
         "primary_suite": POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
         "operator_surface": "/api/operator/post-dq-dw-claim-readiness",
-        "merged_pr": None,
-        "issue_state": "OPEN",
-        "status": "in_progress_on_feature_branch",
-        "project_status": "In Progress",
-        "project_pr": "Not Ready",
-        "code_review": "Not Ready",
+        "merged_pr": 589,
+        "issue_state": "CLOSED",
+        "closed_at": "2026-06-13T05:39:42Z",
+        "status": "done",
+        "project_status": "Done",
+        "project_pr": "Merged",
+        "code_review": "Passed",
         "queue": "Now",
         "lane": "Docs / Meta",
         "priority": "P0",
         "size": "L",
         "active_branch": "feat/dx-final-claim-readiness-release-gate",
+        "merge_commit": "e18773a97d2fbaf8830728f2069b68e50713e776",
         "project_item_id": "PVTI_lADOD4qAvs4BS6n3zgvg_9I",
         "project_fields_required": ["Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"],
-        "live_project_verification": "verified_with_projectv2_graphql_on_2026_06_12_before_batch_dx_pr",
+        "live_project_verification": "verified_with_projectv2_graphql_on_2026_06_13_after_pr_589_merge",
         "operator_visible": True,
     })
     return receipts
@@ -3069,9 +3073,9 @@ def post_dq_dw_critic_contrarian_no_block_receipts() -> list[dict[str, Any]]:
             "role": "Docs/Board",
             "reviewer": "Harvey",
             "review_agent_id": "019ebd99-92a3-77c3-ad1b-da34e1604c1d",
-            "finding": "#573-#579 are Done/Merged/Passed with PRs #582-#588; #580 is Now/In Progress/Not Ready.",
+            "finding": "#573-#580 are Done/Merged/Passed with PRs #582-#589 after the DX merge.",
             "disposition": "accepted",
-            "resolution": "batch reconciliation receipts record the live ProjectV2 field values verified on 2026-06-12.",
+            "resolution": "batch reconciliation receipts record the post-merge ProjectV2 field values verified on 2026-06-13.",
             "operator_visible": True,
             "blocking": False,
         },
@@ -3082,7 +3086,7 @@ def post_dq_dw_critic_contrarian_no_block_receipts() -> list[dict[str, Any]]:
             "review_agent_id": "019ebd99-adad-75e0-946c-de8a3fd024f4",
             "finding": "stale DQ-DW/DX wording and conditional SCL-059 through SCL-065 rows risk implying unfinished or over-lifted claim state.",
             "disposition": "accepted",
-            "resolution": "docs and ledger rows are updated to show DQ-DW closed and DX as the active final gate while broad claims remain blocked.",
+            "resolution": "docs and ledger rows are updated to show DQ-DX closed while broad claims remain blocked.",
             "operator_visible": True,
             "blocking": False,
         },
@@ -3118,7 +3122,9 @@ def build_post_dq_dw_claim_readiness_contract() -> dict[str, Any]:
     scans = false_completion_scan_v5_receipts()
     critic = post_dq_dw_critic_contrarian_no_block_receipts()
     policy = post_dq_dw_claim_readiness_policy_payload()
-    completed_batches = [item for item in batches if item["status"] == "done"]
+    completed_dq_dw_batches = [
+        item for item in batches if item["status"] == "done" and item["batch"] != "DX"
+    ]
     local_scans = [item for item in scans if item.get("scan_mode") == "local_repository_file_scan"]
     false_completion_violation_count = sum(
         int(item["violations_found"])
@@ -3131,7 +3137,7 @@ def build_post_dq_dw_claim_readiness_contract() -> dict[str, Any]:
             "source_receipt_count": len(sources),
             "competitor_count": len({item["system"] for item in sources if item["system"] != "External Article"}),
             "current_source_date": "2026-06-12",
-            "completed_dq_dw_batch_count": len(completed_batches),
+            "completed_dq_dw_batch_count": len(completed_dq_dw_batches),
             "dx_batch_status": next(item["status"] for item in batches if item["batch"] == "DX"),
             "readiness_receipt_count": len(readiness),
             "readiness_receipts_are_reconciliation_only": all(
@@ -3172,12 +3178,12 @@ def build_post_dq_dw_claim_readiness_contract() -> dict[str, Any]:
                 item["project_status"] == "Done"
                 and item["project_pr"] == "Merged"
                 and item["code_review"] == "Passed"
-                for item in completed_batches
+                for item in completed_dq_dw_batches
             ),
-            "dx_project_fields_active": (
-                next(item for item in batches if item["batch"] == "DX")["project_status"] == "In Progress"
-                and next(item for item in batches if item["batch"] == "DX")["project_pr"] == "Not Ready"
-                and next(item for item in batches if item["batch"] == "DX")["code_review"] == "Not Ready"
+            "dx_project_fields_done": (
+                next(item for item in batches if item["batch"] == "DX")["project_status"] == "Done"
+                and next(item for item in batches if item["batch"] == "DX")["project_pr"] == "Merged"
+                and next(item for item in batches if item["batch"] == "DX")["code_review"] == "Passed"
             ),
             "bounded_post_dq_dw_claim_readiness_wording_allowed": True,
             "bounded_post_dq_dw_claim_readiness_allowed_wording": POST_DQ_DW_CLAIM_READINESS_ALLOWED_WORDING,

@@ -165,6 +165,91 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             ],
         ),
     ],
+    "tests/test_operator_api.py": [
+        (
+            "tests/test_operator_api.py::timeline_control_and_release_gates",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                (
+                    "timeline or control_plane or benchmark_proof or final_parity "
+                    "or final_production or full_parity or post_cq or post_dq_dw"
+                ),
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::marketplace_and_ecosystem",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                "marketplace or capability_pack or governed_ecosystem or governed_improvement",
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::browser_computer_use",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                "(browser or computer_use) and not (reach or voice or multimodal)",
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::workflow_orchestration",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                "orchestration or workflow or durable or sla",
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::operator_control",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                (
+                    "cockpit or operator_control or operator_debugging or dense_operator "
+                    "or control_population or control_certification"
+                ),
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::guardian_memory_learning",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                "guardian or memory or learning",
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::reach_voice_and_security",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                (
+                    "reach or voice or multimodal or trust_boundary or secure_capability "
+                    "or secure_host or isolation"
+                ),
+            ],
+        ),
+        (
+            "tests/test_operator_api.py::remaining",
+            [
+                "tests/test_operator_api.py",
+                "-k",
+                (
+                    "not (timeline or control_plane or benchmark_proof or final_parity "
+                    "or final_production or full_parity or post_cq or post_dq_dw "
+                    "or marketplace or capability_pack or governed_ecosystem "
+                    "or governed_improvement or browser or computer_use or orchestration "
+                    "or workflow or durable or sla or cockpit or operator_control "
+                    "or operator_debugging or dense_operator or control_population "
+                    "or control_certification or guardian or memory or learning "
+                    "or reach or voice or multimodal or trust_boundary or secure_capability "
+                    "or secure_host or isolation)"
+                ),
+            ],
+        ),
+    ],
     "tests/test_tools_api.py": [
         (
             "tests/test_tools_api.py::native_policy_modes",

@@ -357,6 +357,20 @@ from src.extensions.post_dp_reach_channel_gap_closure import (
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SCENARIO_NAMES,
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SUITE_NAME,
 )
+from src.extensions.post_dx_reach_voice_media_parity import (
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME,
+    REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+    REACH_ABUSE_RECOVERY_V3_SUITE_NAME,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME,
+)
 from src.guardian.benchmark import (
     GUARDIAN_USER_MODEL_BENCHMARK_SCENARIO_NAMES,
     GUARDIAN_USER_MODEL_BENCHMARK_SUITE_NAME,
@@ -1197,6 +1211,96 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         operator_summary="Reach/channel proof now exposes DS false-claim scan receipts.",
         remaining_gap="Claim lifting still requires stronger evidence and exact claim-ledger permission.",
         scenario_names=REACH_CHANNEL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME,
+        label="Post-DX reach/voice/media parity proof v1",
+        description=(
+            "Pins Batch EA aggregate reach/voice/media parity-proof receipts for DK/DS non-duplication, "
+            "multi-channel reliability, voice/media quality, coverage gaps, redaction, and blocked claims."
+        ),
+        benchmark_axis="post_dx_reach_voice_media_parity_proof",
+        operator_summary=(
+            "Reach proof now exposes bounded post-DX parity-proof receipts while keeping OpenClaw-class "
+            "reach, always-available operation, and voice/media parity wording blocked."
+        ),
+        remaining_gap=(
+            "Complete channel coverage, always-available operation, voice/media parity, production readiness, "
+            "full parity, and reach superiority remain blocked."
+        ),
+        scenario_names=POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME,
+        label="Multi-channel reach reliability v3",
+        description=(
+            "Pins Batch EA channel identity, consent, pairing, revocation, delivery metrics, provider outage "
+            "fallback, rate-limit policy, abuse handling, offline recovery, and candidate-surface markers."
+        ),
+        benchmark_axis="multi_channel_reach_reliability_v3",
+        operator_summary=(
+            "Reach reliability proof now exposes selected and candidate channel receipts without claiming "
+            "complete channel coverage."
+        ),
+        remaining_gap="Unpaired consumer messaging networks and always-available daily-life reach remain blocked.",
+        scenario_names=MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME,
+        label="Voice/media quality latency v3",
+        description=(
+            "Pins Batch EA STT, TTS, voice-command, and media-analysis quality, latency, correction, deletion, "
+            "revocation, memory-review, provider-regression fallback, and unsafe-action denial receipts."
+        ),
+        benchmark_axis="voice_media_quality_latency_v3",
+        operator_summary=(
+            "Voice/media proof now exposes quality and latency gates while keeping voice/media parity blocked."
+        ),
+        remaining_gap="Voice/media parity, multimodal parity, and production STT/TTS solved claims remain blocked.",
+        scenario_names=VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REACH_ABUSE_RECOVERY_V3_SUITE_NAME,
+        label="Reach abuse recovery v3",
+        description=(
+            "Pins Batch EA rate-limit, external-storm, revocation, provider-outage, fallback, quarantine, "
+            "operator repair, offline/degraded recovery, and unsafe-mutation blocking receipts."
+        ),
+        benchmark_axis="reach_abuse_recovery_v3",
+        operator_summary=(
+            "Reach proof now exposes abuse and degraded recovery receipts while keeping always-available "
+            "operation blocked."
+        ),
+        remaining_gap="Provider-wide incident SLAs and always-available reach remain blocked.",
+        scenario_names=REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME,
+        label="Cross-surface reach continuity v3",
+        description=(
+            "Pins Batch EA thread, memory, approval, notification, operator-handoff, voice-to-text, offline "
+            "resume, replay-authority, and unsafe-authority blocking receipts across reach surfaces."
+        ),
+        benchmark_axis="cross_surface_reach_continuity_v3",
+        operator_summary=(
+            "Cross-surface reach proof now exposes v3 continuity receipts without claiming generalized "
+            "daily-life reach superiority."
+        ),
+        remaining_gap="Generalized always-available reach and reach superiority remain blocked.",
+        scenario_names=CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+        label="Reach/voice/media false-claim scan v3",
+        description=(
+            "Pins Batch EA command-backed false-claim scan receipts that keep OpenClaw-class reach, complete "
+            "channel coverage, always-available operation, voice/media parity, production readiness, full parity, "
+            "and exceedance wording blocked."
+        ),
+        benchmark_axis="reach_voice_media_false_claim_scan_v3",
+        operator_summary="Reach/voice/media proof now exposes EA false-claim scan receipts.",
+        remaining_gap="Claim lifting still requires stronger evidence and exact claim-ledger permission.",
+        scenario_names=REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=MANAGED_BROWSER_PROVIDER_ATTESTATION_SUITE_NAME,

@@ -431,6 +431,24 @@ from src.extensions.post_dp_reach_channel_gap_closure import (
     VOICE_MEDIA_PRIVACY_FALLBACK_V2_SUITE_NAME,
     build_post_dp_reach_channel_contract,
 )
+from src.extensions.post_dx_reach_voice_media_parity import (
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME,
+    POST_DX_REACH_VOICE_MEDIA_BLOCKED_CLAIMS,
+    POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME,
+    POST_DX_REACH_VOICE_MEDIA_SAFE_REDACTION_BOUNDARY,
+    REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+    REACH_ABUSE_RECOVERY_V3_SUITE_NAME,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME,
+    build_post_dx_reach_voice_media_contract,
+)
 from src.cockpit.benchmark import (
     M7_OPERATOR_COCKPIT_BENCHMARK_SCENARIO_NAMES,
     M7_OPERATOR_COCKPIT_BENCHMARK_SUITE_NAME,
@@ -14649,6 +14667,177 @@ async def _eval_post_dp_reach_channel_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_dx_reach_voice_media_behavior() -> dict[str, Any]:
+    contract = build_post_dx_reach_voice_media_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    aggregate = contract["post_dx_reach_voice_media_receipts"]
+    reliability = contract["multi_channel_reliability"]
+    voice_media = contract["voice_media_quality_latency"]
+    recovery = contract["reach_abuse_recovery"]
+    continuity = contract["cross_surface_reach_continuity"]
+    false_claims = contract["false_claim_scan_receipts"]
+    suites = benchmark_suite_report()
+    required_suites = set(evolution_benchmark_gate_policy()["required_benchmark_suites"])
+    post_dx_suite = next(item for item in suites if item["name"] == POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME)
+    reliability_suite = next(item for item in suites if item["name"] == MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME)
+    voice_suite = next(item for item in suites if item["name"] == VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME)
+    recovery_suite = next(item for item in suites if item["name"] == REACH_ABUSE_RECOVERY_V3_SUITE_NAME)
+    continuity_suite = next(item for item in suites if item["name"] == CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME)
+    false_claim_suite = next(item for item in suites if item["name"] == REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME)
+    all_receipts = [*aggregate, *reliability, *voice_media, *recovery, *continuity, *false_claims]
+    blocked = set(policy["blocked_claims"])
+    not_claimed = set(policy["not_claimed"])
+    expected_receipt_scenarios = {
+        POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME: set(
+            POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES
+        ),
+        MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME: set(MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES),
+        VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME: set(VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES),
+        REACH_ABUSE_RECOVERY_V3_SUITE_NAME: set(REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES),
+        CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME: set(CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES),
+        REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME: set(
+            REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
+        ),
+    }
+    actual_receipt_scenarios = {suite_name: set() for suite_name in expected_receipt_scenarios}
+    for receipt in all_receipts:
+        suite_name = receipt.get("suite_name")
+        if suite_name in actual_receipt_scenarios:
+            actual_receipt_scenarios[suite_name].add(receipt.get("scenario_name"))
+
+    return {
+        "operator_status_visible": summary["operator_status"] == "post_dx_reach_voice_media_parity_proof_visible",
+        "post_dx_suite_visible": post_dx_suite["scenario_count"] == len(
+            POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES
+        ),
+        "multi_channel_reliability_suite_visible": reliability_suite["scenario_count"] == len(
+            MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES
+        ),
+        "voice_media_quality_suite_visible": voice_suite["scenario_count"] == len(
+            VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES
+        ),
+        "abuse_recovery_suite_visible": recovery_suite["scenario_count"] == len(
+            REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES
+        ),
+        "cross_surface_continuity_suite_visible": continuity_suite["scenario_count"] == len(
+            CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES
+        ),
+        "false_claim_scan_suite_visible": false_claim_suite["scenario_count"] == len(
+            REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
+        ),
+        "all_ea_suites_required_by_gate": {
+            POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SUITE_NAME,
+            MULTI_CHANNEL_REACH_RELIABILITY_V3_SUITE_NAME,
+            VOICE_MEDIA_QUALITY_LATENCY_V3_SUITE_NAME,
+            REACH_ABUSE_RECOVERY_V3_SUITE_NAME,
+            CROSS_SURFACE_REACH_CONTINUITY_V3_SUITE_NAME,
+            REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+        }
+        <= required_suites,
+        "registered_scenarios_have_operator_receipts": actual_receipt_scenarios == expected_receipt_scenarios,
+        "foundation_boundaries_visible": summary["upstream_dk_claim_boundary"] == REACH_VOICE_PRODUCTION_OPS_CLAIM_BOUNDARY
+        and summary["upstream_ds_claim_boundary"] == POST_DP_REACH_CHANNEL_CLAIM_BOUNDARY,
+        "multi_channel_reliability_visible": summary["reliability_surface_count"] >= 5
+        and summary["candidate_surface_count"] >= 2
+        and summary["paired_revocation_count"] >= 5
+        and summary["provider_identity_count"] >= 5
+        and all(
+            item["provider_identity_visible"] is True
+            and item["consent_current"] is True
+            and item["revocation_probe_blocks_delivery"] is True
+            and item["unsafe_action_authority_expanded"] is False
+            for item in reliability
+        ),
+        "rate_abuse_recovery_visible": summary["rate_abuse_policy_count"] >= 5
+        and summary["abuse_recovery_count"] >= 4
+        and summary["revocation_fail_closed_count"] >= 1
+        and all(
+            item["unsafe_mutation_blocked"] is True
+            and item.get("evidence_mode")
+            and item.get("runtime_fetch_performed") is False
+            and item.get("candidate_or_non_live_marker")
+            and item.get("residual_risk")
+            for item in recovery
+        ),
+        "false_and_missed_delivery_metrics_visible": "false_delivery_count" in summary
+        and "missed_delivery_count" in summary
+        and summary["missed_delivery_count"] >= 1,
+        "voice_media_quality_latency_visible": summary["voice_media_quality_pass_count"] >= 4
+        and summary["voice_media_latency_pass_count"] >= 4
+        and summary["voice_media_privacy_control_count"] >= 4
+        and all(
+            item["quality_gate"]["passed"] is True
+            and item["latency_gate"]["passed"] is True
+            and item["revocation_blocks_capture"] is True
+            and item["memory_import_requires_review"] is True
+            and item["unsafe_action_allowed"] is False
+            for item in voice_media
+        ),
+        "cross_surface_continuity_v3_visible": summary["continuity_preserved_count"] >= 4
+        and all(
+            item["thread_preserved"] is True
+            and item["memory_context_preserved"] is True
+            and item["approval_state_preserved"] is True
+            and item["operator_handoff_preserved"] is True
+            and item["replay_authority"] == "operator_review_required_before_replay"
+            and item["unsafe_action_authority_expanded"] is False
+            and item.get("evidence_mode")
+            and item.get("runtime_fetch_performed") is False
+            and item.get("candidate_or_non_live_marker")
+            and item.get("residual_risk")
+            for item in continuity
+        ),
+        "coverage_gaps_preserved": summary["coverage_gap_count"] >= 4
+        and all(item["duplicate_scope_blocked"] is True for item in aggregate),
+        "safe_receipts_redacted_visible": summary["safe_receipt_count"] >= len(all_receipts)
+        and all(
+            item["safe_receipt"]["redacted_receipt_handle"].startswith("seraph://receipts/batch-ea/")
+            and item["safe_receipt"]["redaction_boundary"] == POST_DX_REACH_VOICE_MEDIA_SAFE_REDACTION_BOUNDARY
+            and item["safe_receipt"]["contains_message_body"] is False
+            and item["safe_receipt"]["contains_contact_identifier"] is False
+            and item["safe_receipt"]["contains_secret"] is False
+            and item["safe_receipt"]["contains_transcript"] is False
+            and item["safe_receipt"]["contains_audio_payload"] is False
+            and item["safe_receipt"]["contains_media_payload"] is False
+            and item["safe_receipt"]["contains_location_payload"] is False
+            for item in all_receipts
+        ),
+        "proof_receipt_fields_visible": all(
+            item.get("suite_name")
+            and item.get("scenario_name")
+            and item.get("operator_surface") == "/api/operator/post-dx-reach-voice-media-parity-proof"
+            and item.get("claim_boundary") == POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY
+            for item in all_receipts
+        ),
+        "false_claim_scan_visible": summary["false_claim_scan_count"] == len(
+            REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
+        )
+        and all(
+            item["validation_command"] == "python3 scripts/check_strategy_claims.py"
+            and item["command_exit_code"] == 0
+            and item["forbidden_hit_count"] == 0
+            and item["blocked_claims_found"] == []
+            for item in false_claims
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DX_REACH_VOICE_MEDIA_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DX_REACH_VOICE_MEDIA_BLOCKED_CLAIMS) <= blocked,
+        "stronger_reach_claims_not_claimed": {
+            "openclaw_class_reach",
+            "complete_channel_coverage",
+            "always_available_operation",
+            "voice_or_multimodal_parity",
+            "production_mobile_execution_solved",
+            "production_ready_product",
+            "full_parity_achieved",
+        }
+        <= not_claimed,
+        "operator_surface_visible": "/api/operator/post-dx-reach-voice-media-parity-proof"
+        in policy["receipt_surfaces"],
+        "aggregate_surface_visible": "/api/operator/benchmark-proof" in policy["receipt_surfaces"],
+    }
+
+
 async def _eval_browser_provider_usability_behavior() -> dict[str, Any]:
     contract = build_browser_provider_usability_contract()
     summary = contract["summary"]
@@ -26423,6 +26612,79 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_post_dp_reach_channel_behavior,
         )
         for name in REACH_CHANNEL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch EA exposes bounded post-DX reach/voice/media parity-proof receipts for DK/DS "
+                "non-duplication, multi-channel reliability, voice/media quality, coverage gaps, and blocked claims."
+            ),
+            runner=_eval_post_dx_reach_voice_media_behavior,
+        )
+        for name in POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch EA exposes multi-channel reach reliability receipts with provider identity, consent, "
+                "pairing, revocation, delivery metrics, outage fallback, rate-limit policy, and candidate markers."
+            ),
+            runner=_eval_post_dx_reach_voice_media_behavior,
+        )
+        for name in MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch EA exposes voice/media quality and latency receipts with correction, deletion, "
+                "revocation, memory review, fallback, and unsafe-action denial."
+            ),
+            runner=_eval_post_dx_reach_voice_media_behavior,
+        )
+        for name in VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch EA exposes reach abuse and degraded-recovery receipts for rate limits, external storms, "
+                "revocation quarantine, provider outage fallback, operator repair, and unsafe-mutation blocking."
+            ),
+            runner=_eval_post_dx_reach_voice_media_behavior,
+        )
+        for name in REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch EA exposes cross-surface reach continuity v3 receipts for thread, memory, approval, "
+                "notification, voice-to-text confirmation, offline resume, handoff, and replay authority."
+            ),
+            runner=_eval_post_dx_reach_voice_media_behavior,
+        )
+        for name in CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="presence",
+            description=(
+                "Batch EA exposes command-backed reach/voice/media false-claim scan receipts that keep "
+                "OpenClaw-class reach, always-available operation, voice/media parity, production readiness, "
+                "full parity, and superiority blocked."
+            ),
+            runner=_eval_post_dx_reach_voice_media_behavior,
+        )
+        for name in REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
     ),
     *tuple(
         EvalScenario(

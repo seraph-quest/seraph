@@ -438,6 +438,17 @@ from src.security.post_dp_secure_host_gap_closure import (
     SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
     SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES,
 )
+from src.security.post_dx_formal_secure_runtime_isolation import (
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES,
+    HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_BLOCKED_CLAIMS,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_CLAIM_BOUNDARY,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES,
+    SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -3538,6 +3549,16 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["summary"]["post_dp_secure_host_operator_status"] == (
         "post_dp_secure_capability_host_gap_closure_visible"
     )
+    assert (
+        payload["summary"]["post_dx_formal_secure_runtime_posture"]
+        == "bounded_post_dx_formal_secure_runtime_isolation_proof"
+    )
+    assert payload["summary"]["post_dx_formal_secure_runtime_claim_boundary"] == (
+        POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["post_dx_formal_secure_runtime_operator_status"] == (
+        "post_dx_formal_secure_runtime_isolation_visible"
+    )
     assert payload["summary"]["computer_use_benchmark_posture"] == "ci_gated_operator_visible"
     assert payload["summary"]["one_reach_channel_canary_posture"] == "one_reach_channel_canary_ci_gated_operator_visible"
     assert payload["summary"]["m2_execution_benchmark_posture"] == "m2_completion_ci_gated_operator_visible"
@@ -4900,6 +4921,17 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     )
     assert payload["post_dp_secure_host"]["policy"]["claim_boundary"] == POST_DP_SECURE_HOST_CLAIM_BOUNDARY
     assert "ironclaw_class_secure_execution" in payload["post_dp_secure_host"]["policy"]["blocked_claims"]
+    assert (
+        payload["post_dx_formal_secure_runtime"]["summary"]["benchmark_posture"]
+        == "bounded_post_dx_formal_secure_runtime_isolation_proof"
+    )
+    assert payload["post_dx_formal_secure_runtime"]["policy"]["claim_boundary"] == (
+        POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_CLAIM_BOUNDARY
+    )
+    assert (
+        "formal_security_certification"
+        in payload["post_dx_formal_secure_runtime"]["policy"]["blocked_claims"]
+    )
     assert payload["governed_capability_pack_hardening"]["summary"]["suite_name"] == "governed_capability_pack_hardening"
     assert payload["governed_capability_pack_hardening"]["policy"]["ci_gate_mode"] == "required_benchmark_suite"
     assert payload["marketplace_lifecycle_maturity"]["summary"]["operator_status"] == (
@@ -8593,6 +8625,62 @@ async def test_operator_post_dp_secure_host_surface_reports_batch_dr_receipts(cl
     assert all(
         item["automatic_authority_expansion"] is False
         for item in payload["contract"]["recovery_authority"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dx_formal_secure_runtime_surface_reports_batch_dz_receipts(client):
+    resp = await client.get("/api/operator/post-dx-formal-secure-runtime-isolation")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["suite_name"] == "post_dx_formal_secure_runtime_isolation"
+    assert payload["summary"]["benchmark_posture"] == "bounded_post_dx_formal_secure_runtime_isolation_proof"
+    assert payload["summary"]["operator_status"] == "post_dx_formal_secure_runtime_isolation_visible"
+    assert payload["summary"]["implemented_attestation_count"] >= 5
+    assert payload["summary"]["unsupported_boundary_marker_count"] >= 2
+    assert payload["summary"]["all_attestations_have_provenance"] is True
+    assert payload["summary"]["credential_egress_block_count"] >= 5
+    assert payload["summary"]["credential_leak_count"] == 0
+    assert payload["summary"]["hostile_chain_fail_closed_count"] == payload["summary"]["hostile_chain_count"]
+    assert payload["summary"]["hostile_chain_quarantine_count"] == payload["summary"]["hostile_chain_count"]
+    assert payload["summary"]["formal_certification_granted_count"] == 0
+    assert payload["summary"]["operator_owned_recovery_count"] == payload["summary"]["operator_recovery_action_count"]
+    assert payload["summary"]["automatic_authority_expansion_count"] == 0
+    assert payload["summary"]["all_false_claim_scans_command_backed"] is True
+    assert payload["summary"]["all_gate_checks_passed"] is True
+    assert payload["summary"]["claim_boundary"] == POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_CLAIM_BOUNDARY
+    assert payload["scenario_names"]["post_dx_formal_secure_runtime_isolation_v1"] == list(
+        POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["runtime_isolation_attestation_evidence_v2"] == list(
+        RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["credential_broker_egress_enforcement_v3"] == list(
+        CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["hostile_chain_containment_v4"] == list(
+        HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["external_security_review_certification_track_v2"] == list(
+        EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_runtime_recovery_authority_v3"] == list(
+        SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["secure_runtime_false_claim_scan_v3"] == list(
+        SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
+    )
+    assert set(POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_BLOCKED_CLAIMS) <= set(
+        payload["policy"]["blocked_claims"]
+    )
+    assert "/api/operator/post-dx-formal-secure-runtime-isolation" in payload["policy"]["receipt_surfaces"]
+    assert all(item["runtime_fetch_performed"] is False for item in payload["contract"]["runtime_attestation_evidence_v2"])
+    assert all(item["raw_secret_leaked"] is False for item in payload["contract"]["credential_broker_egress_enforcement_v3"])
+    assert all(item["fail_closed"] is True for item in payload["contract"]["hostile_chain_containment_v4"])
+    assert all(
+        item["formal_certification_granted"] is False
+        for item in payload["contract"]["external_security_review_certification_track_v2"]
     )
 
 

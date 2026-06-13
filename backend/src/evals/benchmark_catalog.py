@@ -530,6 +530,22 @@ from src.security.post_dp_secure_host_gap_closure import (
     SECURE_HOST_RECOVERY_AUTHORITY_V2_SCENARIO_NAMES,
     SECURE_HOST_RECOVERY_AUTHORITY_V2_SUITE_NAME,
 )
+from src.security.post_dx_formal_secure_runtime_isolation import (
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES,
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SUITE_NAME,
+    EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SUITE_NAME,
+    HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES,
+    HOSTILE_CHAIN_CONTAINMENT_V4_SUITE_NAME,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SUITE_NAME,
+    RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SUITE_NAME,
+    SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+    SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES,
+    SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SUITE_NAME,
+)
 from src.workflows.benchmark import (
     M5_OPERATING_LAYER_BENCHMARK_SCENARIO_NAMES,
     M5_OPERATING_LAYER_BENCHMARK_SUITE_NAME,
@@ -3179,6 +3195,112 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         operator_summary="Secure-host v2 false-claim scans keep stronger security claims blocked.",
         remaining_gap="Static claim scans do not replace independent security review or external certification.",
         scenario_names=SECURE_HOST_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SUITE_NAME,
+        label="Post-DX formal secure runtime isolation proof",
+        description=(
+            "Pins Batch DZ secure runtime isolation proof receipts above DR for runtime attestation, "
+            "credential egress enforcement, hostile-chain containment, review-track records, recovery authority, "
+            "unsupported-boundary markers, and blocked security claims."
+        ),
+        benchmark_axis="post_dx_formal_secure_runtime_isolation",
+        operator_summary=(
+            "Post-DX secure-runtime receipts make stronger isolation and review-track evidence operator-visible "
+            "while keeping secure/private, IronClaw-class, hardware-backed, certification, production-ready, "
+            "and full-parity claims blocked."
+        ),
+        remaining_gap=(
+            "This is bounded proof and review-track evidence, not formal certification, hardware-backed isolation, "
+            "TEE/CVM/Wasm/container isolation, or solved production security."
+        ),
+        scenario_names=POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SUITE_NAME,
+        label="Runtime isolation attestation evidence v2",
+        description=(
+            "Pins DZ runtime-boundary attestation receipts for process, browser, connector, MCP, package, "
+            "and explicit unsupported hardware/TEE/CVM/Wasm/container markers."
+        ),
+        benchmark_axis="runtime_isolation_attestation_evidence_v2",
+        operator_summary=(
+            "Runtime attestation evidence separates implemented covered-path boundaries from unsupported "
+            "hardware-backed or formal-isolation claims."
+        ),
+        remaining_gap="This is stored attestation proof, not hardware-backed or externally certified isolation.",
+        scenario_names=RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SUITE_NAME,
+        label="Credential-broker egress enforcement v3",
+        description=(
+            "Pins DZ default-deny secret-bearing egress decisions for unknown endpoints, private networks, "
+            "DNS rebinding, raw-secret output, revoked epochs, and allowlisted field scopes."
+        ),
+        benchmark_axis="credential_broker_egress_enforcement_v3",
+        operator_summary=(
+            "Credential broker v3 receipts show destination digests, default denial, endpoint rechecks, "
+            "field/destination scope, and zero raw-secret leakage."
+        ),
+        remaining_gap="This is deterministic receipt proof, not continuous external security monitoring.",
+        scenario_names=CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=HOSTILE_CHAIN_CONTAINMENT_V4_SUITE_NAME,
+        label="Hostile chain containment v4",
+        description=(
+            "Pins DZ hostile cross-surface containment for browser-to-connector, MCP private-network, "
+            "package runtime, workflow replay secret, and provider fallback trust-expansion chains."
+        ),
+        benchmark_axis="hostile_chain_containment_v4",
+        operator_summary=(
+            "Hostile-chain v4 receipts show containment before runtime contribution, fail-closed quarantine, "
+            "and required operator reapproval."
+        ),
+        remaining_gap="This is covered-chain proof, not external penetration testing or solved security.",
+        scenario_names=HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SUITE_NAME,
+        label="External security review certification track v2",
+        description=(
+            "Pins DZ review-track scope, findings, retests, waiver expiry, artifact digests, and explicit "
+            "formal-certification blocking."
+        ),
+        benchmark_axis="external_security_review_certification_track_v2",
+        operator_summary=(
+            "Review-track receipts make findings, retests, waivers, and artifact digests visible without "
+            "claiming formal certification."
+        ),
+        remaining_gap="This is certification-track evidence, not formal certification or penetration-test completion.",
+        scenario_names=EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SUITE_NAME,
+        label="Secure runtime recovery authority v3",
+        description=(
+            "Pins DZ operator-owned revoke, rotate, quarantine, rollback, reentry-review, and audit receipts "
+            "for secure runtime incidents."
+        ),
+        benchmark_axis="secure_runtime_recovery_authority_v3",
+        operator_summary=(
+            "Secure runtime recovery v3 receipts keep remediation operator-owned and block automatic authority expansion."
+        ),
+        remaining_gap="This is recovery authority proof, not solved incident response or formal audit certification.",
+        scenario_names=SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SUITE_NAME,
+        label="Secure runtime false claim scan v3",
+        description=(
+            "Pins DZ false-claim scans for secure/private, IronClaw-class, hardware-backed, formal certification, "
+            "production-ready, full-parity, and superiority wording."
+        ),
+        benchmark_axis="secure_runtime_false_claim_scan_v3",
+        operator_summary="Secure runtime v3 false-claim scans keep stronger security claims blocked.",
+        remaining_gap="Repository claim scans do not replace external security review or formal certification.",
+        scenario_names=SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
         name=COMPUTER_USE_BENCHMARK_SUITE_NAME,

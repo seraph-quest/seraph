@@ -113,6 +113,9 @@ from src.security.container_grade_host import build_container_grade_secure_host_
 from src.security.independent_review import build_independent_secure_host_review_report
 from src.security.production_grade_secure_host import build_production_grade_secure_host_report
 from src.security.post_dp_secure_host_gap_closure import build_post_dp_secure_host_report
+from src.security.post_dx_formal_secure_runtime_isolation import (
+    build_post_dx_formal_secure_runtime_report,
+)
 from src.security.production_hardening import build_production_secure_host_hardening_report
 from src.security.production_isolation import build_production_isolation_security_report
 from src.security.secure_host_benchmark import build_secure_capability_host_benchmark_report
@@ -3490,6 +3493,7 @@ async def get_operator_benchmark_proof():
         certified_secure_host,
         production_grade_secure_host,
         post_dp_secure_host,
+        post_dx_formal_secure_runtime,
         production_reach_browser_voice,
         live_reach_media,
         production_reach_voice_mobile,
@@ -3567,6 +3571,7 @@ async def get_operator_benchmark_proof():
         build_certified_secure_host_report(),
         build_production_grade_secure_host_report(),
         build_post_dp_secure_host_report(),
+        build_post_dx_formal_secure_runtime_report(),
         build_production_reach_browser_voice_report(),
         build_live_reach_media_report(),
         build_production_reach_voice_mobile_report(),
@@ -3651,6 +3656,7 @@ async def get_operator_benchmark_proof():
         str(certified_secure_host["summary"]["benchmark_posture"]),
         str(production_grade_secure_host["summary"]["benchmark_posture"]),
         str(post_dp_secure_host["summary"]["benchmark_posture"]),
+        str(post_dx_formal_secure_runtime["summary"]["benchmark_posture"]),
         str(production_reach_browser_voice["summary"]["benchmark_posture"]),
         str(live_reach_media["summary"]["benchmark_posture"]),
         str(production_reach_voice_mobile["summary"]["benchmark_posture"]),
@@ -3825,6 +3831,15 @@ async def get_operator_benchmark_proof():
             "post_dp_secure_host_posture": post_dp_secure_host["summary"]["benchmark_posture"],
             "post_dp_secure_host_claim_boundary": post_dp_secure_host["policy"]["claim_boundary"],
             "post_dp_secure_host_operator_status": post_dp_secure_host["summary"]["operator_status"],
+            "post_dx_formal_secure_runtime_posture": post_dx_formal_secure_runtime["summary"][
+                "benchmark_posture"
+            ],
+            "post_dx_formal_secure_runtime_claim_boundary": post_dx_formal_secure_runtime["policy"][
+                "claim_boundary"
+            ],
+            "post_dx_formal_secure_runtime_operator_status": post_dx_formal_secure_runtime["summary"][
+                "operator_status"
+            ],
             "production_reach_browser_voice_posture": production_reach_browser_voice["summary"]["benchmark_posture"],
             "production_reach_browser_voice_claim_boundary": production_reach_browser_voice["policy"]["claim_boundary"],
             "live_reach_media_posture": live_reach_media["summary"]["benchmark_posture"],
@@ -3991,6 +4006,7 @@ async def get_operator_benchmark_proof():
         "certified_secure_host": certified_secure_host,
         "production_grade_secure_host": production_grade_secure_host,
         "post_dp_secure_host": post_dp_secure_host,
+        "post_dx_formal_secure_runtime": post_dx_formal_secure_runtime,
         "production_reach_browser_voice": production_reach_browser_voice,
         "live_reach_media": live_reach_media,
         "production_reach_voice_mobile": production_reach_voice_mobile,
@@ -4238,6 +4254,11 @@ async def get_operator_production_grade_secure_capability_host():
 @router.get("/operator/post-dp-secure-capability-host")
 async def get_operator_post_dp_secure_capability_host():
     return await build_post_dp_secure_host_report()
+
+
+@router.get("/operator/post-dx-formal-secure-runtime-isolation")
+async def get_operator_post_dx_formal_secure_runtime_isolation():
+    return await build_post_dx_formal_secure_runtime_report()
 
 
 @router.get("/operator/production-reach-browser-voice")

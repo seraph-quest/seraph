@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.workflows.durable_state import (
@@ -541,6 +543,82 @@ async def test_workflow_state_repository_v2_persists_dq_handoff_guardian_and_sid
     assert guardian["orchestration_v2"]["guardian_recovery_receipts"][-1]["restraint_posture"] == (
         "operator_audit_required"
     )
+
+
+@pytest.mark.asyncio
+async def test_workflow_state_repository_v2_persists_dy_live_failover_and_control_receipts(async_db):
+    await workflow_state_repository.create_run(
+        run_identity="session-v2:workflow_dy_receipts:abc",
+        workflow_name="dy-receipts-v2",
+        tool_name="workflow_dy_receipts_v2",
+        session_id="session-v2",
+        run_fingerprint="dy-receipts",
+        arguments={},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_filesystem"]},
+    )
+    live_window = await workflow_state_repository.record_v2_live_orchestration_window(
+        run_identity="session-v2:workflow_dy_receipts:abc",
+        provider="temporal-cloud-private-provider-id",
+        evidence_mode="recorded_live_window",
+        window_duration_hours=96,
+        expected_fire_count=192,
+        observed_fire_count=192,
+        max_jitter_ms=2000,
+        jitter_budget_ms=5000,
+        residual_risk="recorded window is not universal production proof",
+    )
+    failover = await workflow_state_repository.record_v2_failover_drill(
+        run_identity="session-v2:workflow_dy_receipts:abc",
+        failure_mode="worker_process_kill_before_external_write",
+        provider="temporal-cloud-private-provider-id",
+        failover_budget_ms=5000,
+        observed_failover_ms=1800,
+        replay_authority="safe_checkpoint_resume_before_external_effect",
+        operator_recovery_control="resume_after_receipt_inspection",
+    )
+    duplicate = await workflow_state_repository.record_v2_duplicate_suppression(
+        run_identity="session-v2:workflow_dy_receipts:abc",
+        side_effect_kind="repository_mutation",
+        idempotency_key="raw-idempotency-key",
+        duplicate_attempt_count=2,
+        suppressed_count=2,
+    )
+    control = await workflow_state_repository.record_v2_operator_recovery_control(
+        run_identity="session-v2:workflow_dy_receipts:abc",
+        action="repair",
+        target="unknown_ack_manual_reconciliation",
+        operator_context={"operator": "private-operator-id"},
+    )
+    unsafe_control = await workflow_state_repository.record_v2_operator_recovery_control(
+        run_identity="session-v2:workflow_dy_receipts:abc",
+        action="quarantine",
+        target="provider://private-resource/user-123",
+        operator_context={"operator": "private-operator-id"},
+    )
+
+    assert live_window is not None
+    assert live_window["receipt"]["within_budget"] is True
+    assert live_window["receipt"]["provider_digest"] != "temporal-cloud-private-provider-id"
+    assert live_window["orchestration_v2"]["live_window_receipts"][-1]["evidence_mode"] == (
+        "recorded_live_window"
+    )
+    assert failover is not None
+    assert failover["receipt"]["within_budget"] is True
+    assert failover["receipt"]["external_action_allowed"] is False
+    assert failover["orchestration_v2"]["failover_receipts"][-1]["restart_preserved_checkpoint"] is True
+    assert duplicate is not None
+    assert duplicate["receipt"]["all_duplicates_suppressed"] is True
+    assert duplicate["receipt"]["idempotency_key_digest"] != "raw-idempotency-key"
+    assert duplicate["orchestration_v2"]["duplicate_suppression_receipts"][-1]["suppressed_count"] == 2
+    assert control is not None
+    assert control["receipt"]["operator_context_digest"] != "private-operator-id"
+    assert control["receipt"]["external_action_allowed"] is False
+    assert control["orchestration_v2"]["operator_recovery_control_receipts"][-1]["action"] == "repair"
+    assert unsafe_control is not None
+    serialized_unsafe_control = json.dumps(unsafe_control["receipt"], sort_keys=True)
+    assert "provider://private-resource/user-123" not in serialized_unsafe_control
+    assert unsafe_control["receipt"]["target"] == "redacted_operator_recovery_target"
+    assert unsafe_control["receipt"]["target_digest"] != "provider://private-resource/user-123"
 
 
 @pytest.mark.asyncio

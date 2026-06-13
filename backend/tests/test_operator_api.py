@@ -371,6 +371,17 @@ from src.workflows.post_dp_durable_orchestration import (
     SIDE_EFFECT_RECONCILIATION_V5_SCENARIO_NAMES,
     SIDE_EFFECT_RECONCILIATION_V5_SUITE_NAME,
 )
+from src.workflows.post_dx_live_durable_orchestration import (
+    CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_BLOCKED_CLAIMS,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES,
+)
 from src.workflows.production_workflow_guarantees import (
     CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
     EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
@@ -4819,6 +4830,23 @@ async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_ga
     assert payload["post_dq_dw_claim_readiness"]["summary"]["dx_project_fields_done"] is True
     assert payload["post_dq_dw_claim_readiness"]["summary"]["full_parity_claim_allowed"] is False
     assert "fully_at_parity" in payload["post_dq_dw_claim_readiness"]["policy"]["blocked_claims"]
+    dy_suite = next(
+        item for item in payload["suites"] if item["name"] == "post_dx_live_durable_orchestration_v1"
+    )
+    assert "post_dx_live_window_receipts_behavior" in dy_suite["scenario_names"]
+    assert dy_suite["scenario_count"] == len(POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+    assert payload["summary"]["post_dx_live_durable_orchestration_posture"] == (
+        "bounded_post_dx_live_durable_orchestration_parity_proof"
+    )
+    assert payload["summary"]["post_dx_live_durable_orchestration_claim_boundary"] == (
+        POST_DX_LIVE_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY
+    )
+    assert payload["summary"]["post_dx_live_durable_orchestration_operator_status"] == (
+        "post_dx_live_durable_orchestration_visible"
+    )
+    assert payload["post_dx_live_durable_orchestration"]["summary"]["recorded_live_window_count"] >= 2
+    assert payload["post_dx_live_durable_orchestration"]["summary"]["all_failovers_within_budget"] is True
+    assert "crash_proof_orchestration" in payload["post_dx_live_durable_orchestration"]["policy"]["not_claimed"]
     assert "fully_at_parity" in payload["post_cq_claim_readiness"]["policy"]["blocked_claims"]
     assert payload["memory_benchmark"]["summary"]["suite_name"] == "guardian_memory_quality"
     assert payload["memory_benchmark"]["summary"]["active_failure_count"] >= 0
@@ -7616,6 +7644,67 @@ async def test_operator_post_dp_durable_orchestration_surface_reports_batch_dq_r
     assert all(handle.startswith("receipt://dq/") for handle in receipt_handles)
     assert all(packet["raw_payloads_redacted"] is True for packet in payload["active_contract"]["recovery_packets"])
     assert payload["latest_run"]["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dx_live_durable_orchestration_surface_reports_batch_dy_receipts(client):
+    resp = await client.get("/api/operator/post-dx-live-durable-orchestration")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["benchmark_posture"] == (
+        "bounded_post_dx_live_durable_orchestration_parity_proof"
+    )
+    assert payload["summary"]["operator_status"] == "post_dx_live_durable_orchestration_visible"
+    assert payload["summary"]["suite_count"] == 7
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+        + len(RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES)
+        + len(CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES)
+        + len(MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES)
+        + len(SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES)
+        + len(OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES)
+        + len(ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["recorded_live_window_count"] >= 2
+    assert payload["summary"]["accelerated_fixture_window_count"] >= 1
+    assert payload["summary"]["all_windows_with_residual_risk"] is True
+    assert payload["summary"]["all_failovers_within_budget"] is True
+    assert payload["summary"]["restart_preservation_count"] >= 3
+    assert payload["summary"]["all_handoffs_revision_guarded"] is True
+    assert payload["summary"]["handoff_fail_closed_count"] >= 3
+    assert payload["summary"]["all_side_effects_have_idempotency"] is True
+    assert payload["summary"]["all_duplicate_attempts_suppressed"] is True
+    assert payload["summary"]["manual_repair_required_count"] >= 1
+    assert payload["summary"]["operator_control_count"] >= 9
+    assert payload["summary"]["claim_boundary"] == POST_DX_LIVE_DURABLE_ORCHESTRATION_CLAIM_BOUNDARY
+    assert set(POST_DX_LIVE_DURABLE_ORCHESTRATION_BLOCKED_CLAIMS) <= set(
+        payload["policy"]["blocked_claims"]
+    )
+    assert "/api/operator/post-dx-live-durable-orchestration" in payload["policy"]["operator_surfaces"]
+    assert "unconditional_exactly_once_scheduler" in payload["policy"]["not_claimed"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["post_dx_live_durable_orchestration_v1"] == list(
+        POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["recorded_live_orchestration_window_v1"] == list(
+        RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["crash_restart_failover_drill_v3"] == list(
+        CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["multi_agent_handoff_durability_v2"] == list(
+        MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["side_effect_reconciliation_v6"] == list(
+        SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["operator_recovery_control_v4"] == list(
+        OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["orchestration_false_claim_scan_v3"] == list(
+        ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES
+    )
 
 
 @pytest.mark.asyncio

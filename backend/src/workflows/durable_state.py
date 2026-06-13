@@ -68,6 +68,17 @@ DURABLE_WORKFLOW_ENGINE_V2_BLOCKED_CLAIMS = (
     "ahead_of_devin_cursor_workflows",
     "full_workflow_parity",
 )
+OPERATOR_RECOVERY_TARGET_LABELS = {
+    "live_window_receipt_index",
+    "safe_checkpoint_before_external_effect",
+    "unknown_ack_manual_reconciliation",
+    "duplicate_side_effect_attempt",
+    "provider_write_unknown_ack",
+    "receiver_ack_after_heartbeat_expiry",
+    "unsafe_resume_boundary",
+    "operator_abort_before_irreversible_boundary",
+    "post_dx_orchestration_claim_boundary",
+}
 
 
 def _utc_now() -> datetime:
@@ -129,6 +140,10 @@ def _workflow_v2_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     v2.setdefault("guardian_recovery_receipts", [])
     v2.setdefault("side_effect_boundary_receipts", [])
     v2.setdefault("unsafe_recovery_refusal_receipts", [])
+    v2.setdefault("live_window_receipts", [])
+    v2.setdefault("failover_receipts", [])
+    v2.setdefault("duplicate_suppression_receipts", [])
+    v2.setdefault("operator_recovery_control_receipts", [])
     payload["orchestration_v2"] = v2
     return payload
 
@@ -145,6 +160,15 @@ def _stable_id(prefix: str, *parts: Any) -> str:
 
 def _stable_digest(value: Any) -> str:
     return hashlib.sha256(_dumps(value).encode("utf-8")).hexdigest()[:20]
+
+
+def _safe_operator_recovery_target(target: str) -> dict[str, str]:
+    if target in OPERATOR_RECOVERY_TARGET_LABELS:
+        return {"target": target, "target_digest": _stable_digest(target)}
+    return {
+        "target": "redacted_operator_recovery_target",
+        "target_digest": _stable_digest(target),
+    }
 
 
 def durable_workflow_snapshot_dict(run: dict[str, Any]) -> dict[str, Any]:
@@ -1038,6 +1062,205 @@ class WorkflowStateRepository:
             ]
             receipts.append(receipt)
             v2["side_effect_boundary_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_live_orchestration_window(
+        self,
+        *,
+        run_identity: str,
+        provider: str,
+        evidence_mode: str,
+        window_duration_hours: int,
+        expected_fire_count: int,
+        observed_fire_count: int,
+        max_jitter_ms: int,
+        jitter_budget_ms: int,
+        residual_risk: str,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            receipt = {
+                "kind": "live_orchestration_window",
+                "run_identity_digest": _stable_digest(run_identity),
+                "provider_digest": _stable_digest(provider),
+                "evidence_mode": evidence_mode,
+                "window_duration_hours": int(window_duration_hours),
+                "expected_fire_count": int(expected_fire_count),
+                "observed_fire_count": int(observed_fire_count),
+                "max_jitter_ms": int(max_jitter_ms),
+                "jitter_budget_ms": int(jitter_budget_ms),
+                "within_budget": int(observed_fire_count) >= int(expected_fire_count)
+                and int(max_jitter_ms) <= int(jitter_budget_ms),
+                "residual_risk": residual_risk,
+                "recorded_at": now.isoformat(),
+                "raw_receipt_handle": f"receipt://workflow/{_stable_id('live_window', run_identity, provider)}",
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("live_window_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["live_window_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_failover_drill(
+        self,
+        *,
+        run_identity: str,
+        failure_mode: str,
+        provider: str,
+        failover_budget_ms: int,
+        observed_failover_ms: int,
+        replay_authority: str,
+        operator_recovery_control: str,
+        restart_preserved_checkpoint: bool = True,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            receipt = {
+                "kind": "failover_drill",
+                "run_identity_digest": _stable_digest(run_identity),
+                "failure_mode": failure_mode,
+                "provider_digest": _stable_digest(provider),
+                "restart_preserved_checkpoint": bool(restart_preserved_checkpoint),
+                "failover_budget_ms": int(failover_budget_ms),
+                "observed_failover_ms": int(observed_failover_ms),
+                "within_budget": int(observed_failover_ms) <= int(failover_budget_ms),
+                "replay_authority": replay_authority,
+                "operator_recovery_control": operator_recovery_control,
+                "external_action_allowed": False,
+                "recorded_at": now.isoformat(),
+                "raw_receipt_handle": f"receipt://workflow/{_stable_id('failover', run_identity, failure_mode)}",
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("failover_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["failover_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_duplicate_suppression(
+        self,
+        *,
+        run_identity: str,
+        side_effect_kind: str,
+        idempotency_key: str,
+        duplicate_attempt_count: int,
+        suppressed_count: int,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            receipt = {
+                "kind": "duplicate_suppression",
+                "run_identity_digest": _stable_digest(run_identity),
+                "side_effect_kind": side_effect_kind,
+                "idempotency_key_digest": _stable_digest(idempotency_key),
+                "duplicate_attempt_count": int(duplicate_attempt_count),
+                "suppressed_count": int(suppressed_count),
+                "all_duplicates_suppressed": int(suppressed_count) >= int(duplicate_attempt_count),
+                "external_action_allowed": False,
+                "recorded_at": now.isoformat(),
+                "redacted_receipt_handle": (
+                    f"receipt://workflow/{_stable_id('duplicate_suppression', run_identity, side_effect_kind)}"
+                ),
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("duplicate_suppression_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["duplicate_suppression_receipts"] = receipts[-10:]
+            run.metadata_json = _dumps(metadata)
+            run.updated_at = now
+            await db.flush()
+            db.expunge(run)
+            return {"receipt": receipt, "run": self._serialize_run(run), "orchestration_v2": v2}
+
+    async def record_v2_operator_recovery_control(
+        self,
+        *,
+        run_identity: str,
+        action: str,
+        target: str,
+        operator_context: dict[str, Any] | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        async with get_session() as db:
+            run = (
+                await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == run_identity))
+            ).scalars().first()
+            if run is None:
+                return None
+            metadata = _workflow_v2_metadata(_loads(run.metadata_json, {}))
+            v2 = metadata["orchestration_v2"]
+            safe_target = _safe_operator_recovery_target(target)
+            receipt = {
+                "kind": "operator_recovery_control",
+                "run_identity_digest": _stable_digest(run_identity),
+                "action": action,
+                "target": safe_target["target"],
+                "target_digest": safe_target["target_digest"],
+                "enabled": bool(enabled),
+                "operator_context_digest": _stable_digest(_as_dict(operator_context)),
+                "receipt_after_action": (
+                    f"operator-control:{action}:{_stable_id('recovery_control', run_identity, target)}"
+                ),
+                "external_action_allowed": False,
+                "recorded_at": now.isoformat(),
+                "operator_visible": True,
+                "claim_boundary": DURABLE_WORKFLOW_ENGINE_V2_CLAIM_BOUNDARY,
+            }
+            receipts = [
+                _as_dict(item)
+                for item in _as_list(v2.get("operator_recovery_control_receipts"))
+                if isinstance(item, dict)
+            ]
+            receipts.append(receipt)
+            v2["operator_recovery_control_receipts"] = receipts[-10:]
             run.metadata_json = _dumps(metadata)
             run.updated_at = now
             await db.flush()

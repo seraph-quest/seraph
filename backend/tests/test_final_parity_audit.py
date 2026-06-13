@@ -11,19 +11,28 @@ from src.evals.final_parity_audit import (
     FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DQ_DW_CLAIM_READINESS_BLOCKED_CLAIMS,
+    POST_DQ_DW_CLAIM_READINESS_CLAIM_BOUNDARY,
+    POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
     POST_CQ_CLAIM_READINESS_CLAIM_BOUNDARY,
     PRODUCTION_READINESS_SOAK_V1_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
     build_final_parity_audit_contract,
     build_final_parity_readiness_report,
     build_final_production_parity_contract,
     build_final_production_parity_report,
     build_post_cq_claim_readiness_contract,
     build_post_cq_claim_readiness_report,
+    build_post_dq_dw_claim_readiness_contract,
+    build_post_dq_dw_claim_readiness_report,
 )
 
 
@@ -411,3 +420,96 @@ def test_final_production_parity_report_runs_all_batch_dh_suites():
     assert payload["summary"]["active_failure_count"] == 0
     assert payload["failure_report"] == []
     assert payload["policy"]["claim_boundary"] == FINAL_PRODUCTION_PARITY_CLAIM_BOUNDARY
+
+
+def test_post_dq_dw_claim_readiness_contract_reconciles_live_board_state():
+    contract = build_post_dq_dw_claim_readiness_contract()
+    summary = contract["summary"]
+    batches = contract["post_dq_dw_board_pr_issue_reconciliation_v1"]
+    completed = [item for item in batches if item["status"] == "done"]
+    dx = next(item for item in batches if item["batch"] == "DX")
+
+    assert summary["operator_status"] == "post_dq_dw_claim_readiness_release_gate_visible"
+    assert summary["completed_dq_dw_batch_count"] == 7
+    assert summary["all_completed_dq_dw_batches_done_merged_passed"] is True
+    assert {item["batch"] for item in completed} == {"DQ", "DR", "DS", "DT", "DU", "DV", "DW"}
+    assert {item["merged_pr"] for item in completed} == {582, 583, 584, 585, 586, 587, 588}
+    assert all(item["project_status"] == "Done" for item in completed)
+    assert all(item["project_pr"] == "Merged" for item in completed)
+    assert all(item["code_review"] == "Passed" for item in completed)
+    assert dx["issue"] == 580
+    assert dx["queue"] == "Now"
+    assert dx["project_status"] == "In Progress"
+    assert dx["project_pr"] == "Not Ready"
+    assert dx["code_review"] == "Not Ready"
+    assert dx["active_branch"] == "feat/dx-final-claim-readiness-release-gate"
+    assert summary["dx_project_fields_active"] is True
+
+
+def test_post_dq_dw_claim_readiness_contract_records_sources_claims_scans_and_critic():
+    contract = build_post_dq_dw_claim_readiness_contract()
+    summary = contract["summary"]
+    sources = contract["reference_system_source_refresh_v5"]
+    claims = contract["post_dq_dw_claim_ledger_reconciliation_v1"]
+    scans = contract["false_completion_scan_v5"]
+    critic = contract["post_dq_dw_critic_contrarian_no_block_v1"]
+    policy = contract["policy"]
+
+    assert summary["source_receipt_count"] == 8
+    assert summary["competitor_count"] == 3
+    assert summary["current_source_date"] == "2026-06-12"
+    assert summary["all_sources_have_live_header_receipts"] is True
+    assert summary["article_source_is_access_caveat_only"] is True
+    assert all(item["checked_on"] == "2026-06-12" for item in sources)
+    assert all(item["source_refresh_version"] == "v5_post_dq_dw_claim_readiness_gate" for item in sources)
+    assert all(item["claim_lift_allowed"] is False for item in sources)
+    article = next(item for item in sources if item["system"] == "External Article")
+    assert article["source_id"] == "ibuzovskyi-x-status-2063645563241844823"
+    assert article["claim_use"] == "access_caveat_only_not_competitor_evidence"
+    assert "content was not extracted" in article["access_caveat"]
+    assert {item["claim_id"] for item in claims} >= {
+        "SCL-059",
+        "SCL-060",
+        "SCL-061",
+        "SCL-062",
+        "SCL-063",
+        "SCL-064",
+        "SCL-065",
+        "SCL-066",
+    }
+    scl_066 = next(item for item in claims if item["claim_id"] == "SCL-066")
+    assert scl_066["operator_surface"] == "/api/operator/post-dq-dw-claim-readiness"
+    assert scl_066["claim_lift_allowed"] is True
+    assert scl_066["broad_claim_lift_allowed"] is False
+    assert "post-DQ-DW claim-readiness" in scl_066["allowed_wording"]
+    assert summary["false_completion_violation_count"] == 0
+    assert summary["all_local_false_completion_scans_clean"] is True
+    assert any(item["scan_mode"] == "github_project_issue_pr_state_receipt" for item in scans)
+    assert any(item["scan_mode"] == "claim_ledger_boundary_receipt" for item in scans)
+    assert summary["critic_no_block"] is True
+    assert summary["final_critic_review_pending"] is False
+    assert all(item["blocking"] is False for item in critic)
+    assert all(item["disposition"] == "accepted" for item in critic)
+    assert any(item["review_id"] == "dx-russell-final-critic-contrarian" for item in critic)
+    assert policy["claim_boundary"] == POST_DQ_DW_CLAIM_READINESS_CLAIM_BOUNDARY
+    assert set(POST_DQ_DW_CLAIM_READINESS_BLOCKED_CLAIMS) <= set(policy["blocked_claims"])
+    assert summary["full_parity_claim_allowed"] is False
+    assert summary["production_ready_claim_allowed"] is False
+    assert summary["reference_systems_exceeded_claim_allowed"] is False
+    assert summary["safe_browser_automation_claim_allowed"] is False
+
+
+def test_post_dq_dw_claim_readiness_report_runs_all_batch_dx_suites():
+    payload = asyncio.run(build_post_dq_dw_claim_readiness_report())
+
+    assert payload["summary"]["benchmark_posture"] == "post_dq_dw_claim_readiness_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        + len(POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES)
+        + len(FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES)
+        + len(POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["active_failure_count"] == 0
+    assert payload["failure_report"] == []
+    assert payload["policy"]["claim_boundary"] == POST_DQ_DW_CLAIM_READINESS_CLAIM_BOUNDARY

@@ -20317,7 +20317,9 @@ async def _eval_post_dq_dw_claim_readiness_behavior() -> dict[str, Any]:
     source_suite = next(item for item in suites if item["name"] == REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SUITE_NAME)
     scan_suite = next(item for item in suites if item["name"] == FALSE_COMPLETION_SCAN_V5_SUITE_NAME)
     critic_suite = next(item for item in suites if item["name"] == POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME)
-    completed_batches = [item for item in batches if item["status"] == "done"]
+    completed_batches = [
+        item for item in batches if item["status"] == "done" and item["batch"] != "DX"
+    ]
     required_batches = {"DQ", "DR", "DS", "DT", "DU", "DV", "DW"}
     required_prs = {582, 583, 584, 585, 586, 587, 588}
     required_claim_rows = {"SCL-059", "SCL-060", "SCL-061", "SCL-062", "SCL-063", "SCL-064", "SCL-065", "SCL-066"}
@@ -20358,7 +20360,12 @@ async def _eval_post_dq_dw_claim_readiness_behavior() -> dict[str, Any]:
         ),
         "source_refresh_v5_live_headers_visible": (
             summary["all_sources_have_live_header_receipts"] is True
-            and all(item.get("runtime_fetch_performed") is True for item in competitor_sources)
+            and all(item.get("runtime_fetch_performed") is False for item in competitor_sources)
+            and all(
+                item.get("runtime_fetch_scope")
+                == "stored_header_receipt_no_report_time_network_fetch"
+                for item in competitor_sources
+            )
             and all(item.get("live_http_status") == 200 for item in competitor_sources)
         ),
         "source_claim_use_bounded": all(
@@ -20380,11 +20387,12 @@ async def _eval_post_dq_dw_claim_readiness_behavior() -> dict[str, Any]:
             and summary["all_completed_dq_dw_batches_done_merged_passed"] is True
         ),
         "dq_dw_pr_train_visible": {item["merged_pr"] for item in completed_batches} == required_prs,
-        "dx_active_branch_visible": (
+        "dx_merged_branch_visible": (
             dx_batch["issue"] == 580
-            and dx_batch["status"] == "in_progress_on_feature_branch"
+            and dx_batch["status"] == "done"
+            and dx_batch["merged_pr"] == 589
             and dx_batch["active_branch"] == "feat/dx-final-claim-readiness-release-gate"
-            and summary["dx_project_fields_active"] is True
+            and summary["dx_project_fields_done"] is True
         ),
         "parent_program_state_visible": (
             dx_batch["project_item_id"] == "PVTI_lADOD4qAvs4BS6n3zgvg_9I"

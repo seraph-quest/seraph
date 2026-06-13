@@ -1542,6 +1542,7 @@ def test_run_post_dq_dw_claim_readiness_benchmark_suites_pass():
         | set(POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
     )
     assert all(result.details["completed_dq_dw_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["dx_merged_branch_visible"] for result in summary.results)
     assert all(result.details["bounded_dx_wording_allowed_only"] for result in summary.results)
     assert all(result.details["article_access_caveat_only"] for result in summary.results)
     assert all(result.details["false_completion_scans_visible"] for result in summary.results)

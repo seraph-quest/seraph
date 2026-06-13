@@ -4435,9 +4435,9 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         benchmark_axis="post_dq_dw_board_pr_issue_reconciliation_v1",
         operator_summary=(
-            "Operators can inspect DQ-DW Done/Merged/Passed receipts, DX active branch state, and no-duplicate tracking."
+            "Operators can inspect DQ-DX Done/Merged/Passed receipts, PR #589 merge state, and no-duplicate tracking."
         ),
-        remaining_gap="DX PR fields must move to Open/Running and then Merged/Passed when the PR opens and lands.",
+        remaining_gap="Parent #475 remains open until the next stronger-proof roadmap is created or completion is proven.",
         scenario_names=POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     ),
     BenchmarkSuiteDefinition(
@@ -4457,8 +4457,8 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         name=REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SUITE_NAME,
         label="Reference-system source refresh v5",
         description=(
-            "Pins June 12, 2026 Hermes, OpenClaw, IronClaw, and user-supplied article source-refresh receipts "
-            "with live header checks, access caveats, and pressure-only claim use."
+            "Pins stored June 12, 2026 Hermes, OpenClaw, IronClaw, and user-supplied article source-refresh "
+            "receipts with access caveats and pressure-only claim use."
         ),
         benchmark_axis="reference_system_source_refresh_v5",
         operator_summary=(

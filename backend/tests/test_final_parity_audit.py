@@ -426,7 +426,9 @@ def test_post_dq_dw_claim_readiness_contract_reconciles_live_board_state():
     contract = build_post_dq_dw_claim_readiness_contract()
     summary = contract["summary"]
     batches = contract["post_dq_dw_board_pr_issue_reconciliation_v1"]
-    completed = [item for item in batches if item["status"] == "done"]
+    completed = [
+        item for item in batches if item["status"] == "done" and item["batch"] != "DX"
+    ]
     dx = next(item for item in batches if item["batch"] == "DX")
 
     assert summary["operator_status"] == "post_dq_dw_claim_readiness_release_gate_visible"
@@ -439,11 +441,12 @@ def test_post_dq_dw_claim_readiness_contract_reconciles_live_board_state():
     assert all(item["code_review"] == "Passed" for item in completed)
     assert dx["issue"] == 580
     assert dx["queue"] == "Now"
-    assert dx["project_status"] == "In Progress"
-    assert dx["project_pr"] == "Not Ready"
-    assert dx["code_review"] == "Not Ready"
+    assert dx["project_status"] == "Done"
+    assert dx["project_pr"] == "Merged"
+    assert dx["code_review"] == "Passed"
+    assert dx["merged_pr"] == 589
     assert dx["active_branch"] == "feat/dx-final-claim-readiness-release-gate"
-    assert summary["dx_project_fields_active"] is True
+    assert summary["dx_project_fields_done"] is True
 
 
 def test_post_dq_dw_claim_readiness_contract_records_sources_claims_scans_and_critic():
@@ -462,6 +465,7 @@ def test_post_dq_dw_claim_readiness_contract_records_sources_claims_scans_and_cr
     assert summary["article_source_is_access_caveat_only"] is True
     assert all(item["checked_on"] == "2026-06-12" for item in sources)
     assert all(item["source_refresh_version"] == "v5_post_dq_dw_claim_readiness_gate" for item in sources)
+    assert all(item["runtime_fetch_performed"] is False for item in sources)
     assert all(item["claim_lift_allowed"] is False for item in sources)
     article = next(item for item in sources if item["system"] == "External Article")
     assert article["source_id"] == "ibuzovskyi-x-status-2063645563241844823"

@@ -8,6 +8,8 @@ title: 16. Agent Parity Execution Roadmap
 
 On an open feature branch, checked items below describe the intended post-merge `develop` state for that branch. Merged PR links remain the authoritative evidence for items that already landed.
 
+June 18, 2026 correction: the next parity train is feature-first. The BV-EF proof, receipt, and claim-readiness work is useful history, but it did not finish product parity. New work under parent [#475](https://github.com/seraph-quest/seraph/issues/475) must ship concrete user/operator capabilities before adding more proof wrappers, benchmark-only endpoints, or claim-lift gates. Keep claim guardrails, but defer broad receipts, claim-ledger updates, source refreshes, and false-completion scans to one separate claim-readiness phase after the feature train lands.
+
 - [x] The aggregate agent-parity proof train from [#468](https://github.com/seraph-quest/seraph/issues/468) landed on `develop` through merged PR [#473](https://github.com/seraph-quest/seraph/pull/473) on June 9, 2026.
 - [x] The strategy artifact in [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals) is complete as the target, proof-gate, and claim-boundary map.
 - [x] The proof train gives Seraph deterministic parity-floor coverage for the named Hermes/OpenClaw/IronClaw pressure areas: replay, cockpit operator efficiency, memory-provider quality, workflow endurance, durable workflow state v1, one reach canary, guardian learning arbitration, governed capability-pack hardening, and guardian-safe multimodal/voice proof.
@@ -87,7 +89,7 @@ This file is the implementation-side roadmap for research document 20.
 
 It answers how Seraph should implement the full parity and targeted exceedance goal without duplicating the closed M0-M9 milestone foundation, creating a second live queue, or drifting away from the guardian-workspace vision.
 
-Active execution state remains in the GitHub Project, issues, and PRs. This roadmap owns durable sequencing, dependency logic, proof gates, and claim boundaries.
+Active execution state remains in the GitHub Project, issues, and PRs. This roadmap owns durable feature sequencing, dependency logic, and claim boundaries. Proof gates are proportional safety and claim controls, not the workstream itself.
 
 ## Execution Boundary
 
@@ -303,7 +305,7 @@ Batch DW narrows the browser/computer-use residual beyond Batch DO without dupli
 
 Batch EE moves the browser/computer-use residual from receipt-only operator evidence into live reliability controls. It exposes owner-scoped browser sessions, provider degradation, no-silent-fallback replay acknowledgement, partition revisions and reset, boundary decisions, redacted artifact provenance, quarantine/recover/reset/replay/close controls, and cockpit inspection through `/api/browser/sessions`, `/api/browser/sessions/{session_id}/snapshot`, `/api/browser/sessions/{session_id}/control`, and `/api/operator/browser-computer-use-control`. It remains bounded live control, not safe browser automation, safe autonomous computer use, OpenClaw-class browser reach, full browser parity, arbitrary credentialed browsing safety, production readiness, full parity, or exceeded-reference-system wording unless the claim ledger permits exact wording.
 
-The post-DP implementation gap-closure train is represented in GitHub under parent [#475](https://github.com/seraph-quest/seraph/issues/475) by DQ-DX issues [#573](https://github.com/seraph-quest/seraph/issues/573)-[#580](https://github.com/seraph-quest/seraph/issues/580). Those issues and the Project board are the execution layer; this roadmap records the durable proof sequence and claim boundaries. DQ-DX are closed with `Status=Done`, `PR=Merged`, and `Code Review=Passed` in the Project, and DX remains bounded to exact SCL-066 release-gate wording. The post-DX train under [#590](https://github.com/seraph-quest/seraph/issues/590)-[#597](https://github.com/seraph-quest/seraph/issues/597) now has DY, DZ, EA, EB, EC, ED, and EE closed through PRs [#599](https://github.com/seraph-quest/seraph/pull/599)-[#605](https://github.com/seraph-quest/seraph/pull/605). Batch EF under [#594](https://github.com/seraph-quest/seraph/issues/594) is the final post-DX claim-lift gate and permits only exact SCL-072 bounded final-gate wording after merge.
+The post-DP implementation gap-closure train is represented in GitHub under parent [#475](https://github.com/seraph-quest/seraph/issues/475) by DQ-DX issues [#573](https://github.com/seraph-quest/seraph/issues/573)-[#580](https://github.com/seraph-quest/seraph/issues/580). Those issues and the Project board are the execution layer; this roadmap records the historical proof sequence and claim boundaries. DQ-DX are closed with `Status=Done`, `PR=Merged`, and `Code Review=Passed` in the Project, and DX remains bounded to exact SCL-066 release-gate wording. The post-DX train under [#590](https://github.com/seraph-quest/seraph/issues/590)-[#597](https://github.com/seraph-quest/seraph/issues/597) now has DY, DZ, EA, EB, EC, ED, and EE closed through PRs [#599](https://github.com/seraph-quest/seraph/pull/599)-[#605](https://github.com/seraph-quest/seraph/pull/605). Batch EF under [#594](https://github.com/seraph-quest/seraph/issues/594) is the final post-DX claim-lift gate and permits only exact SCL-072 bounded final-gate wording after merge. Post-EF work must not extend this proof sequence by default; it must rescope into feature-first batches unless it is the final claim-readiness pass after feature parity is implemented.
 
 Batch CQ closed by merged PR #521 and permits only this exact bounded wording: "Seraph has completed a board-backed parity proof train and final claim-lift audit with bounded receipts." Broad full parity, production readiness, secure/private-by-default, OpenClaw-class, IronClaw-class, safe-browser, full-browser-parity, marketplace, superiority, and reference-system-exceeded wording remains blocked.
 
@@ -340,33 +342,34 @@ The post-CQ train starts with Batch CR because code, tests, docs, and operator r
 | Ecosystem and marketplace | Phase 9 | Extensions must remain subordinate to Seraph's trust, review, compatibility, rollback, and guardian-governance model. | marketplace maturity, governed ecosystem superiority |
 | Multimodal and voice | Phase 10 | Voice/media must improve timing, accessibility, situational awareness, or intervention quality, and must show transcript/audit/privacy receipts. | multimodal parity, voice parity, guardian-safe voice |
 
-## Proof Template
+## Feature Batch Template
 
-Every batch that claims progress against research document 20 should include:
+Every post-EF batch that claims progress against research document 20 should include:
 
-- proof suite: deterministic test, benchmark, replay, or canary name
-- receipt surface: cockpit, Activity Ledger, operator API, audit payload, PR artifact, or issue comment
-- negative cases: prompt injection, stale evidence, credential drift, replay drift, provider downgrade, channel loss, revocation, ambiguity, or unsafe memory
-- operator-visible pass criteria: what a user can inspect without reading code
-- blocked claims: the words or claims that remain disallowed if the proof fails
+- user-facing capability: the screen, command, API, workflow, control, recovery path, channel, memory behavior, security behavior, marketplace flow, or browser action that improves
+- non-duplication statement: which closed proof/control batches it builds on and what it deliberately does not reimplement
+- implementation scope: concrete backend, frontend, runtime, memory, security, connector, marketplace, or browser modules owned by the batch
+- acceptance criteria: observable behavior a real operator can use, not just a new benchmark or claim receipt
+- local sanity: the focused checks needed to avoid shipping broken feature code
+- blocked claims: the words or claims that remain disallowed until the final claim-readiness phase
 - linked issue or PR: the GitHub object that owns acceptance and review
+
+Proof-only fields such as new benchmark suites, broad receipt surfaces, source refreshes, false-completion scans, and claim-ledger lift wording belong in the separate claim-readiness phase after the feature train has shipped.
 
 ## Strategic Order
 
-The durable order is:
+The durable post-EF order is:
 
-1. Normalize board, proof, and claim gates.
-2. Harden secure execution host boundaries.
-3. Land live long-horizon replay proof.
-4. Measure cockpit operator efficiency.
-5. Gate external memory-provider quality.
-6. Prove workflow endurance, then promote durable workflow state.
-7. Prove one excellent reach channel.
-8. Deepen guardian world-model learning quality.
-9. Harden governed ecosystem and marketplace foundations.
-10. Add guardian-safe multimodal and voice only after reach, trust, and guardian-value proof are ready.
+1. Durable orchestration features that make long-running work easier to resume, inspect, recover, and trust.
+2. Secure capability-host features that make risky tool, connector, browser, package, and credential paths visibly safer and recoverable.
+3. Reach and channel features that make selected channels genuinely usable for daily interruption, approval, recovery, and continuity.
+4. Guardian learning and memory features that visibly improve decisions, restraint, recall, correction, and provider conflict handling.
+5. Operator debugging and recovery-control features that make the cockpit a real control surface for serious work.
+6. Capability marketplace lifecycle features that make install, update, disable, rollback, quarantine, and diagnostics understandable and reversible.
+7. Browser/computer-use features that make runs more reliable, explainable, recoverable, and bounded when sites drift or credentials/sessions are involved.
+8. One final claim-readiness phase for receipts, focused tests, docs, board reconciliation, source refresh, false-completion scans, and exact claim-ledger wording.
 
-This order intentionally differs from raw competitor feature order. Seraph should expand capability breadth only when the guardian, trust, memory, workflow, and receipt layers can carry it.
+This order intentionally differs from raw competitor feature order. Seraph should expand capability breadth only when the guardian, trust, memory, workflow, and operator-control layers can carry it. During the feature phase, receipt work remains subordinate to shipping the capability.
 
 ## Critic / Contrarian Disposition
 
@@ -390,4 +393,4 @@ Accepted after follow-up:
 
 Post-merge disposition:
 
-- [PR #473](https://github.com/seraph-quest/seraph/pull/473) completed the original proof train, while the production train now carries bounded BV-EF receipts and feature-control batches under [#475](https://github.com/seraph-quest/seraph/issues/475). Batch DO added browser/computer-use production-safety receipts, Batch DP closed the bounded post-DI-DO release-gate audit, Batch DQ added post-DP durable orchestration recovery receipts, Batch DR added post-DP secure-host gap-closure receipts, Batch DS added selected reach/channel gap-closure receipts, Batch DT added guardian learning/memory gap-closure receipts, Batch DU added post-DP operator debugging/recovery-control receipts, Batch DV added post-DP marketplace lifecycle receipts, Batch DW added post-DP browser/computer-use reliability receipts, Batch DX closed the post-DQ-DW claim-readiness gate, Batch DY adds post-DX live durable orchestration parity-proof receipts, Batch DZ adds post-DX formal secure runtime isolation proof receipts, Batch EA adds post-DX reach/voice-media parity-proof receipts, Batch EB adds guardian learning/memory live controls, Batch EC adds live workflow controls, Batch ED adds marketplace lifecycle controls, Batch EE adds browser/computer-use live reliability and recovery controls, and Batch EF adds the post-DX final claim-lift gate. Production readiness, product-wide full parity, reference-system exceedance, secure/private-by-default, safe autonomous browser/computer-use, full browser parity, solved durable workflows, solved operator-control, guardian-superiority, memory-superiority, marketplace superiority, and ecosystem-superiority wording still requires exact claim-ledger permission plus stronger underlying evidence.
+- [PR #473](https://github.com/seraph-quest/seraph/pull/473) completed the original proof train, while the production train now carries bounded BV-EF receipts and feature-control batches under [#475](https://github.com/seraph-quest/seraph/issues/475). That work improved the evidence layer, but it did not finish product parity. The accepted June 18 correction is that post-EF work must pursue user-facing feature parity first and defer new proof wrappers or claim-lift gates until one final claim-readiness phase. Production readiness, product-wide full parity, reference-system exceedance, secure/private-by-default, safe autonomous browser/computer-use, full browser parity, solved durable workflows, solved operator-control, guardian-superiority, memory-superiority, marketplace superiority, and ecosystem-superiority wording still requires exact claim-ledger permission after the feature train and final claim-readiness pass.

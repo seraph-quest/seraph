@@ -443,9 +443,93 @@ describe("CockpitView", () => {
     expect(consoleRegion).toHaveTextContent(/error: Device connector is revoked/i);
     expect(consoleRegion).toHaveTextContent(/missing network, 1 tool, 1 boundary/i);
     expect(within(consoleRegion).getByRole("button", { name: "rollback unavailable" })).toBeDisabled();
-    expect(within(consoleRegion).getByRole("button", { name: "draft review" })).toBeEnabled();
+    expect(within(consoleRegion).getByRole("button", { name: "review" })).toBeEnabled();
     expect(within(consoleRegion).queryByRole("button", { name: "disable via studio" })).not.toBeInTheDocument();
     expect(within(consoleRegion).queryByRole("button", { name: "remove via studio" })).not.toBeInTheDocument();
+  });
+
+  it("runs governed extension console quarantine as a live backend action", async () => {
+    const extensionsPayload = {
+      extensions: [
+        {
+          id: "seraph.live-pack",
+          display_name: "Live Pack",
+          version: "1.0.0",
+          kind: "capability-pack",
+          trust: "local",
+          source: "workspace",
+          location: "workspace",
+          status: "ready",
+          publisher: { name: "Seraph" },
+          compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+          diagnostics_summary: {
+            issue_count: 0,
+            error_issue_count: 0,
+            warning_issue_count: 0,
+            load_error_count: 0,
+            degraded_contribution_count: 0,
+            degraded_connector_count: 0,
+            state_counts: { ready: 1 },
+            highlighted_messages: [],
+          },
+          issues: [],
+          load_errors: [],
+          permission_summary: { status: "granted", ok: true, required: {}, missing: {}, risk_level: "low" },
+          connector_summary: { total: 0, ready: 0, states: {} },
+          disable_supported: true,
+          removable: true,
+          enable_supported: true,
+          enabled_scope: "extension",
+          configurable: false,
+          metadata_supported: true,
+          config_scope: "metadata_only",
+          enabled: true,
+          contributions: [],
+          studio_files: [],
+        },
+      ],
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/extensions/seraph.live-pack/quarantine")) {
+        return Promise.resolve(mockResponse({
+          status: "quarantined",
+          receipt: { id: "extension-lifecycle:seraph.live-pack:quarantine:1" },
+          extension: { display_name: "Live Pack" },
+        }));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ version: "test", build_id: "test", provider: "test", model: "test", model_label: "test" }));
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) return Promise.resolve(mockResponse({ daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" }, notifications: [], queued_insights: [], queued_insight_count: 0, recent_interventions: [], reach: { route_statuses: [] } }));
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse(extensionsPayload));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    fireEvent.click(within(consoleRegion).getByRole("button", { name: "quarantine" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.live-pack/quarantine"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining("cockpit operator quarantine"),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/Live Pack quarantine complete/i)).toBeInTheDocument();
   });
 
   it("surfaces workflow runs in the cockpit inspector", async () => {

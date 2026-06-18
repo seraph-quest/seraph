@@ -1798,6 +1798,26 @@ interface ExtensionDiagnosticsSummary {
   highlighted_messages: string[];
 }
 
+interface ExtensionRollbackSnapshotInfo {
+  id: string;
+  path?: string | null;
+  version?: string | null;
+  digest?: string | null;
+  reason?: string | null;
+  created_at?: string | null;
+}
+
+interface ExtensionLifecycleInfo {
+  rollback_snapshots?: ExtensionRollbackSnapshotInfo[];
+  quarantine?: {
+    active?: boolean;
+    state?: string | null;
+    reason?: string | null;
+    updated_at?: string | null;
+  } | null;
+  last_event?: Record<string, unknown> | null;
+}
+
 interface ExtensionPackageInfo {
   id: string;
   display_name: string;
@@ -1830,6 +1850,7 @@ interface ExtensionPackageInfo {
   permission_summary?: ExtensionPermissionSummary | null;
   approval_profile?: ExtensionApprovalProfile | null;
   connector_summary?: ExtensionConnectorSummary | null;
+  lifecycle?: ExtensionLifecycleInfo | null;
   lifecycle_receipt_id?: string | null;
   rollback_receipt_id?: string | null;
   rollback_receipt_path?: string | null;
@@ -2129,6 +2150,7 @@ interface GovernedExtensionConsoleRow {
   actionReady: boolean;
   rollback: string;
   rollbackReceipt: string | null;
+  rollbackSnapshotId: string | null;
   reasons: string[];
   alternatives: string[];
   extensionPackage?: ExtensionPackageInfo;
@@ -2485,10 +2507,20 @@ function issueMessageFromUnknown(value: unknown): string | null {
 }
 
 function extensionPackageReceipt(extensionPackage: ExtensionPackageInfo): string | null {
-  return extensionPackage.rollback_receipt_id
+  return extensionPackage.lifecycle?.rollback_snapshots?.[0]?.id
+    ?? extensionPackage.rollback_receipt_id
     ?? extensionPackage.rollback_receipt_path
     ?? extensionPackage.lifecycle_receipt_id
     ?? null;
+}
+
+function extensionPackageRollbackSnapshotId(extensionPackage: ExtensionPackageInfo): string | null {
+  return extensionPackage.lifecycle?.rollback_snapshots?.[0]?.id ?? null;
+}
+
+function extensionPackageQuarantined(extensionPackage: ExtensionPackageInfo): boolean {
+  return extensionPackage.status === "quarantined"
+    || Boolean(extensionPackage.lifecycle?.quarantine?.active);
 }
 
 function extensionPackageRevoked(extensionPackage: ExtensionPackageInfo): boolean {
@@ -2501,7 +2533,9 @@ function buildInstalledExtensionConsoleRow(
   catalogItem: CatalogItemInfo | null,
 ): GovernedExtensionConsoleRow {
   const receipt = extensionPackageReceipt(extensionPackage);
+  const rollbackSnapshotId = extensionPackageRollbackSnapshotId(extensionPackage);
   const revoked = extensionPackageRevoked(extensionPackage);
+  const quarantined = extensionPackageQuarantined(extensionPackage);
   const issueReasons = [
     ...extensionPackage.issues.map((issue) => `${issue.severity}: ${issue.message}`),
     ...extensionPackage.load_errors.map((error) => `load ${error.phase}: ${error.message}`),
@@ -2511,13 +2545,16 @@ function buildInstalledExtensionConsoleRow(
     extensionPackage.approval_profile?.requires_lifecycle_approval ? "lifecycle review required before privileged change" : null,
     extensionPackage.approval_profile?.requires_runtime_approval ? `runtime approval ${extensionPackage.approval_profile.runtime_behavior}` : null,
     revoked ? `revocation ${extensionPackage.revocation_state ?? extensionPackage.status}` : null,
+    quarantined ? `quarantine ${extensionPackage.lifecycle?.quarantine?.reason ?? "active"}` : null,
   ].filter((reason): reason is string => Boolean(reason));
   const updateReady = Boolean(catalogItem?.update_available);
-  const actionReady = !revoked && extensionPackage.compatibility?.compatible !== false && extensionPackage.status === "ready";
+  const actionReady = !revoked && !quarantined && extensionPackage.compatibility?.compatible !== false && extensionPackage.status === "ready";
   const alternatives = [
-    extensionPackage.disable_supported && !revoked ? "disable via studio" : null,
-    extensionPackage.removable && !revoked ? "remove via studio" : null,
-    "draft review",
+    extensionPackage.disable_supported && !revoked && !quarantined ? "disable live" : null,
+    extensionPackage.removable && !revoked ? "remove live" : null,
+    !revoked && !quarantined ? "quarantine live" : null,
+    quarantined ? "re-entry review" : null,
+    "review live",
   ].filter((item): item is string => Boolean(item));
   return {
     id: `installed:${extensionPackage.id}`,
@@ -2550,10 +2587,12 @@ function buildInstalledExtensionConsoleRow(
     contributionFamilies: summarizeExtensionContributionFamilies(extensionPackage.contributions),
     actionReadiness: revoked
       ? "revoked · lifecycle actions blocked"
-      : updateReady
+      : quarantined
+        ? "quarantined · re-entry required"
+        : updateReady
         ? "update ready"
         : actionReady
-          ? "studio ready"
+          ? "live controls ready"
           : issueReasons.length
             ? "guarded · review required"
             : "action readiness unknown",
@@ -2562,6 +2601,7 @@ function buildInstalledExtensionConsoleRow(
       ? `rollback ready · receipt ${shortIdentifier(receipt, 18)}`
       : "rollback unavailable · no backend receipt",
     rollbackReceipt: receipt,
+    rollbackSnapshotId,
     reasons: issueReasons.length ? issueReasons : ["no blocking reasons reported"],
     alternatives,
     extensionPackage,
@@ -2633,6 +2673,7 @@ function buildCatalogExtensionConsoleRow(
     actionReady,
     rollback: "rollback unavailable · package not installed with receipt",
     rollbackReceipt: null,
+    rollbackSnapshotId: null,
     reasons: issueReasons.length ? issueReasons : ["no blocking reasons reported"],
     alternatives: ["draft review", ...(item.recommended_actions?.length ? ["repair action available"] : [])],
     catalogItem: item,
@@ -4920,6 +4961,45 @@ function normalizeExtensionContribution(value: Record<string, unknown>): Extensi
   };
 }
 
+function normalizeExtensionLifecycle(value: unknown): ExtensionLifecycleInfo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const rollbackSnapshots = Array.isArray(record.rollback_snapshots)
+    ? record.rollback_snapshots.flatMap((entry): ExtensionRollbackSnapshotInfo[] => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const snapshot = entry as Record<string, unknown>;
+      if (typeof snapshot.id !== "string" || !snapshot.id.trim()) return [];
+      return [{
+        id: snapshot.id,
+        path: typeof snapshot.path === "string" ? snapshot.path : null,
+        version: typeof snapshot.version === "string" ? snapshot.version : null,
+        digest: typeof snapshot.digest === "string" ? snapshot.digest : null,
+        reason: typeof snapshot.reason === "string" ? snapshot.reason : null,
+        created_at: typeof snapshot.created_at === "string" ? snapshot.created_at : null,
+      }];
+    })
+    : [];
+  const quarantineRecord = (
+    record.quarantine && typeof record.quarantine === "object" && !Array.isArray(record.quarantine)
+      ? record.quarantine as Record<string, unknown>
+      : null
+  );
+  return {
+    rollback_snapshots: rollbackSnapshots,
+    quarantine: quarantineRecord
+      ? {
+        active: typeof quarantineRecord.active === "boolean" ? quarantineRecord.active : false,
+        state: typeof quarantineRecord.state === "string" ? quarantineRecord.state : null,
+        reason: typeof quarantineRecord.reason === "string" ? quarantineRecord.reason : null,
+        updated_at: typeof quarantineRecord.updated_at === "string" ? quarantineRecord.updated_at : null,
+      }
+      : null,
+    last_event: record.last_event && typeof record.last_event === "object" && !Array.isArray(record.last_event)
+      ? record.last_event as Record<string, unknown>
+      : null,
+  };
+}
+
 function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPackageInfo | null {
   if (
     typeof value.id !== "string"
@@ -5024,6 +5104,7 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
     permission_summary: normalizeExtensionPermissionSummary(value.permission_summary),
     approval_profile: normalizeExtensionApprovalProfile(value.approval_profile),
     connector_summary: normalizeExtensionConnectorSummary(value.connector_summary),
+    lifecycle: normalizeExtensionLifecycle(value.lifecycle),
     lifecycle_receipt_id: typeof value.lifecycle_receipt_id === "string" ? value.lifecycle_receipt_id : null,
     rollback_receipt_id: typeof value.rollback_receipt_id === "string" ? value.rollback_receipt_id : null,
     rollback_receipt_path: typeof value.rollback_receipt_path === "string" ? value.rollback_receipt_path : null,
@@ -9842,6 +9923,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function runExtensionConsoleLifecycleAction(
+    extensionPackage: ExtensionPackageInfo,
+    action: "enable" | "disable" | "remove" | "review" | "quarantine" | "reentry" | "rollback",
+    snapshotId?: string | null,
+  ) {
+    const label = extensionPackage.display_name;
+    const actionLabel = action === "reentry" ? "re-entry" : action;
+    setOperatorStatus(`${actionLabel} ${label}...`);
+    const encodedId = encodeURIComponent(extensionPackage.id);
+    const body = action === "review"
+      ? { reason: "cockpit lifecycle review" }
+      : action === "quarantine"
+        ? { reason: "cockpit operator quarantine" }
+        : action === "reentry"
+          ? { reason: "cockpit re-entry review" }
+          : action === "rollback"
+            ? { snapshot_id: snapshotId ?? null }
+            : null;
+    const endpoint = action === "remove"
+      ? `${API_URL}/api/extensions/${encodedId}`
+      : `${API_URL}/api/extensions/${encodedId}/${action}`;
+    try {
+      const response = await fetch(endpoint, {
+        method: action === "remove" ? "DELETE" : "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const handled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to ${actionLabel} ${label}`,
+          setOperatorStatus,
+        );
+        if (!handled) appendOperatorFeed(`Failed to ${actionLabel} ${label}`, "failed");
+        return;
+      }
+      await refreshCockpit();
+      const nextLabel = typeof payload?.extension?.display_name === "string"
+        ? payload.extension.display_name
+        : label;
+      const receiptId = typeof payload?.receipt?.id === "string" ? ` · ${shortIdentifier(payload.receipt.id, 18)}` : "";
+      setOperatorStatus(`${nextLabel} ${actionLabel} complete${receiptId}`);
+      appendOperatorFeed(`${nextLabel} ${actionLabel} complete${receiptId}`, "success");
+    } catch {
+      setOperatorStatus(`Failed to ${actionLabel} ${label}`);
+      appendOperatorFeed(`Failed to ${actionLabel} ${label}`, "failed");
+    }
+  }
+
   function saveRunbookMacro(runbook: RunbookInfo) {
     setSavedRunbooks((current) => {
       if (current.some((item) => item.id === runbook.id)) return current;
@@ -14307,49 +14438,63 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             <button
                               type="button"
                               className="cockpit-operator-button"
-                              onClick={() => openExtensionStudio(
-                                studioEntries.find((entry) => entry.id === `extension:${row.extensionPackage?.id}`) ?? null,
-                              )}
+                              disabled={extensionPackageQuarantined(row.extensionPackage)}
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "disable")}
                             >
-                              disable via studio
+                              disable
                             </button>
                           ) : null}
                           {row.extensionPackage?.removable && !extensionPackageRevoked(row.extensionPackage) ? (
                             <button
                               type="button"
                               className="cockpit-operator-button"
-                              onClick={() => openExtensionStudio(
-                                studioEntries.find((entry) => entry.id === `extension:${row.extensionPackage?.id}`) ?? null,
-                              )}
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "remove")}
                             >
-                              remove via studio
+                              remove
+                            </button>
+                          ) : null}
+                          {row.extensionPackage && !extensionPackageRevoked(row.extensionPackage) && !extensionPackageQuarantined(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "quarantine")}
+                            >
+                              quarantine
+                            </button>
+                          ) : null}
+                          {row.extensionPackage && extensionPackageQuarantined(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "reentry")}
+                            >
+                              re-entry
                             </button>
                           ) : null}
                           <button
                             type="button"
                             className="cockpit-operator-button"
-                            disabled={!row.rollbackReceipt}
+                            disabled={!row.extensionPackage || !row.rollbackSnapshotId}
                             title={row.rollback}
                             onClick={() => {
-                              if (row.rollbackReceipt) {
-                                queueComposerDraft(
-                                  `Review rollback readiness for extension "${row.label}" using receipt ${row.rollbackReceipt}. Confirm impact, compatibility, and revocation posture before any lifecycle action.`,
-                                );
+                              if (row.extensionPackage && row.rollbackSnapshotId) {
+                                void runExtensionConsoleLifecycleAction(row.extensionPackage, "rollback", row.rollbackSnapshotId);
                               }
                             }}
                           >
-                            {row.rollbackReceipt ? "rollback receipt" : "rollback unavailable"}
+                            {row.rollbackSnapshotId ? "rollback" : "rollback unavailable"}
                           </button>
                           <button
                             type="button"
                             className="cockpit-operator-button"
-                            onClick={() => queueComposerDraft(
-                              row.extensionPackage
-                                ? buildExtensionPackageReviewDraft(row.extensionPackage, row.catalogItem ?? null)
-                                : `Review install readiness for extension pack "${row.label}". State: ${row.status}. Reasons: ${row.reasons.join("; ")}. Do not install until blocked, degraded, review-required, revoked, compatibility, permission, and rollback-readiness states are resolved or accepted.`,
-                            )}
+                            disabled={!row.extensionPackage}
+                            onClick={() => {
+                              if (row.extensionPackage) {
+                                void runExtensionConsoleLifecycleAction(row.extensionPackage, "review");
+                              }
+                            }}
                           >
-                            draft review
+                            review
                           </button>
                         </div>
                       </div>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from config.settings import settings
@@ -142,6 +143,124 @@ def revoke_extension_governance(
     if reason:
         governance["revocation_reason"] = reason
     return governance
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def extension_lifecycle_entry(
+    state_entry: dict[str, Any] | None,
+    *,
+    create: bool = False,
+) -> dict[str, Any] | None:
+    if not isinstance(state_entry, dict):
+        return None
+    lifecycle = state_entry.get("lifecycle")
+    if isinstance(lifecycle, dict):
+        return lifecycle
+    if not create:
+        return None
+    lifecycle = {}
+    state_entry["lifecycle"] = lifecycle
+    return lifecycle
+
+
+def append_extension_lifecycle_event(
+    payload: dict[str, Any],
+    extension_id: str,
+    *,
+    action: str,
+    status: str,
+    actor: str = "operator",
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    lifecycle = extension_lifecycle_entry(state_entry, create=True)
+    assert lifecycle is not None
+    events = lifecycle.get("events")
+    if not isinstance(events, list):
+        events = []
+        lifecycle["events"] = events
+    event = {
+        "id": f"extension-lifecycle:{extension_id}:{action}:{len(events) + 1}",
+        "action": action,
+        "status": status,
+        "actor": actor,
+        "created_at": _utc_now(),
+        "details": details or {},
+    }
+    events.append(event)
+    lifecycle["last_event"] = event
+    return event
+
+
+def add_extension_rollback_snapshot(
+    payload: dict[str, Any],
+    extension_id: str,
+    *,
+    snapshot_id: str,
+    snapshot_path: str,
+    version: str | None,
+    digest: str | None,
+    reason: str,
+    created_by: str = "system",
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    lifecycle = extension_lifecycle_entry(state_entry, create=True)
+    assert lifecycle is not None
+    snapshots = lifecycle.get("rollback_snapshots")
+    if not isinstance(snapshots, list):
+        snapshots = []
+        lifecycle["rollback_snapshots"] = snapshots
+    snapshot = {
+        "id": snapshot_id,
+        "path": snapshot_path,
+        "version": version,
+        "digest": digest,
+        "reason": reason,
+        "created_by": created_by,
+        "created_at": _utc_now(),
+    }
+    snapshots.insert(0, snapshot)
+    lifecycle["rollback_snapshots"] = snapshots[:10]
+    lifecycle["last_rollback_snapshot"] = snapshot
+    return snapshot
+
+
+def set_extension_quarantine(
+    payload: dict[str, Any],
+    extension_id: str,
+    *,
+    active: bool,
+    reason: str,
+    actor: str = "operator",
+    digest: str | None = None,
+    version: str | None = None,
+) -> dict[str, Any]:
+    state_entry = extension_state_entry(payload, extension_id, create=True)
+    assert state_entry is not None
+    lifecycle = extension_lifecycle_entry(state_entry, create=True)
+    assert lifecycle is not None
+    quarantine = {
+        "active": active,
+        "state": "quarantined" if active else "cleared",
+        "reason": reason,
+        "actor": actor,
+        "digest": digest,
+        "version": version,
+        "updated_at": _utc_now(),
+    }
+    lifecycle["quarantine"] = quarantine
+    return quarantine
+
+
+def extension_quarantine_active(state_entry: dict[str, Any] | None) -> bool:
+    lifecycle = extension_lifecycle_entry(state_entry, create=False)
+    quarantine = lifecycle.get("quarantine") if isinstance(lifecycle, dict) else None
+    return isinstance(quarantine, dict) and bool(quarantine.get("active"))
 
 
 def connector_state_entry(

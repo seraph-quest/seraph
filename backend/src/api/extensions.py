@@ -26,13 +26,18 @@ from src.extensions.lifecycle import (
     configure_extension,
     disable_extension,
     enable_extension,
+    extension_lifecycle_status,
     get_extension,
     get_extension_connector,
     get_extension_source,
     install_extension_path,
     list_extension_connectors,
     list_extensions,
+    quarantine_extension,
+    record_extension_review,
+    reenter_extension,
     remove_extension,
+    rollback_extension,
     save_extension_source,
     set_extension_connector_enabled,
     update_extension_path,
@@ -141,6 +146,14 @@ class ExtensionScaffoldRequest(BaseModel):
 
 class ExtensionConfigRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtensionLifecycleReasonRequest(BaseModel):
+    reason: str = ""
+
+
+class ExtensionRollbackRequest(BaseModel):
+    snapshot_id: str | None = None
 
 
 class ExtensionSourceSaveRequest(BaseModel):
@@ -543,6 +556,14 @@ def _approval_scope_summary(
             "requested_line_count": fingerprint_context.get("requested_line_count"),
             "draft_valid": fingerprint_context.get("draft_valid"),
         }
+    snapshot_id = fingerprint_context.get("snapshot_id")
+    if isinstance(snapshot_id, str) and snapshot_id.strip():
+        scope["rollback_scope"] = {
+            "snapshot_id": snapshot_id,
+            "restored_version": fingerprint_context.get("restored_version"),
+            "restored_digest": fingerprint_context.get("restored_digest"),
+            "snapshot_path_hash": fingerprint_context.get("snapshot_path_hash"),
+        }
     return scope
 
 
@@ -905,6 +926,188 @@ async def get_extension_package(extension_id: str):
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
 
+@router.get("/extensions/{extension_id}/lifecycle")
+async def get_extension_package_lifecycle(extension_id: str):
+    try:
+        return extension_lifecycle_status(extension_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+
+
+@router.post("/extensions/{extension_id}/review")
+async def review_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("review", preview)
+        result = record_extension_review(
+            extension_id,
+            reviewed_by="cockpit",
+            reason=req.reason,
+        )
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="review",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="review",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="review",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
+@router.post("/extensions/{extension_id}/quarantine")
+async def quarantine_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("quarantine", preview)
+        result = quarantine_extension(
+            extension_id,
+            reason=req.reason or "operator quarantine",
+            actor="cockpit",
+        )
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="quarantine",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="quarantine",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="quarantine",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
+@router.post("/extensions/{extension_id}/reentry")
+async def reenter_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("reentry", preview)
+        result = reenter_extension(
+            extension_id,
+            reviewed_by="cockpit",
+            reason=req.reason,
+        )
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="reentry",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="reentry",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="reentry",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
+@router.post("/extensions/{extension_id}/rollback")
+async def rollback_extension_package(extension_id: str, req: ExtensionRollbackRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        lifecycle = extension_lifecycle_status(extension_id)
+        snapshots = lifecycle.get("rollback", {}).get("snapshots")
+        snapshot = next(
+            (
+                item for item in snapshots
+                if isinstance(item, dict)
+                and (not req.snapshot_id or item.get("id") == req.snapshot_id)
+            ),
+            None,
+        ) if isinstance(snapshots, list) else None
+        if not isinstance(snapshot, dict):
+            raise ValueError(f"extension '{extension_id}' has no rollback snapshot")
+        await _require_extension_lifecycle_approval(
+            "rollback",
+            {
+                **preview,
+                "target_reference": str(snapshot.get("id") or ""),
+                "target_name": str(snapshot.get("version") or "rollback snapshot"),
+                "target_type": "rollback_snapshot",
+            },
+            fingerprint_context={
+                "snapshot_id": snapshot.get("id"),
+                "restored_version": snapshot.get("version"),
+                "restored_digest": snapshot.get("digest"),
+                "snapshot_path_hash": _content_hash(str(snapshot.get("path") or "")),
+            },
+        )
+        result = rollback_extension(extension_id, snapshot_id=req.snapshot_id)
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="rollback",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="rollback",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="rollback",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
 @router.get("/extensions/{extension_id}/connectors")
 async def list_extension_package_connectors(extension_id: str):
     try:
@@ -1187,6 +1390,11 @@ async def update_extension_package(req: ExtensionPathRequest):
             raise ValueError(
                 f"extension '{extension_id}' is not updateable from this package path"
             )
+        if lifecycle_plan.get("version_relation") == "downgrade":
+            extension_id = preview.get("extension_id") or preview.get("id") or "extension"
+            raise ValueError(
+                f"extension '{extension_id}' downgrade requires explicit downgrade lifecycle control"
+            )
         await _require_extension_lifecycle_approval("update", preview)
         extension = update_extension_path(req.path)
     except KeyError as exc:
@@ -1226,6 +1434,10 @@ async def enable_extension_package(extension_id: str):
     try:
         preview = get_extension(extension_id)
         if preview.get("status") != "ready":
+            if preview.get("status") == "quarantined":
+                raise ValueError(
+                    f"extension '{extension_id}' is quarantined and requires re-entry review before enable"
+                )
             raise ValueError(
                 f"extension '{extension_id}' is degraded and cannot be enabled until validation issues are fixed"
             )

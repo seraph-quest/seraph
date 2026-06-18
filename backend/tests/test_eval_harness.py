@@ -16,16 +16,21 @@ from src.evals.final_parity_audit import (
     FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES,
 )
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
@@ -1638,6 +1643,32 @@ def test_run_post_dq_dw_claim_readiness_benchmark_suites_pass():
     assert all(result.details["completed_dq_dw_batches_done_merged_passed"] for result in summary.results)
     assert all(result.details["dx_merged_branch_visible"] for result in summary.results)
     assert all(result.details["bounded_dx_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["article_access_caveat_only"] for result in summary.results)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
+
+
+def test_run_post_dx_final_claim_lift_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dx_final_board_pr_issue_reconciliation_v1",
+            "post_dx_final_claim_ledger_reconciliation_v1",
+            "reference_system_source_refresh_v6",
+            "false_completion_scan_v6",
+            "post_dx_final_critic_contrarian_no_block_v1",
+        ])
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == (
+        set(POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES)
+        | set(FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES)
+        | set(POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert all(result.details["completed_post_dx_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["ef_active_branch_visible"] for result in summary.results)
+    assert all(result.details["bounded_ef_wording_allowed_only"] for result in summary.results)
     assert all(result.details["article_access_caveat_only"] for result in summary.results)
     assert all(result.details["false_completion_scans_visible"] for result in summary.results)
 

@@ -72,12 +72,18 @@ from src.evals.final_parity_audit import (
     FALSE_COMPLETION_SCAN_V3_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_DQ_DW_CLAIM_READINESS_BLOCKED_CLAIMS,
     POST_DQ_DW_CLAIM_READINESS_CLAIM_BOUNDARY,
     POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CLAIM_LIFT_BLOCKED_CLAIMS,
+    POST_DX_FINAL_CLAIM_LIFT_CLAIM_BOUNDARY,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
     POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
     POST_CQ_CLAIM_READINESS_BLOCKED_CLAIMS,
@@ -88,6 +94,7 @@ from src.evals.final_parity_audit import (
     REFERENCE_SYSTEM_SOURCE_REFRESH_V3_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES,
 )
 from src.extensions.marketplace_lifecycle import (
     CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
@@ -6498,6 +6505,84 @@ async def test_operator_post_dq_dw_claim_readiness_surface_reports_batch_dx_rece
         and item["broad_claim_lift_allowed"] is False
         for item in payload["contract"]["post_dq_dw_claim_ledger_reconciliation_v1"]
     )
+
+
+@pytest.mark.asyncio
+async def test_operator_post_dx_final_claim_lift_surface_reports_batch_ef_receipts(client):
+    resp = await client.get("/api/operator/post-dx-final-parity-claim-lift")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "post_dx_final_claim_lift_gate_visible"
+    assert payload["summary"]["benchmark_posture"] == "post_dx_final_claim_lift_ci_gated_operator_visible"
+    assert payload["summary"]["scenario_count"] == (
+        len(POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        + len(POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        + len(REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES)
+        + len(FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES)
+        + len(POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert payload["summary"]["completed_post_dx_batch_count"] == 7
+    assert payload["summary"]["ef_batch_status"] == "in_progress"
+    assert payload["summary"]["ef_project_fields_started"] is True
+    assert payload["summary"]["all_completed_post_dx_batches_done_merged_passed"] is True
+    assert payload["summary"]["article_source_is_access_caveat_only"] is True
+    assert all(
+        item["runtime_fetch_performed"] is False
+        for item in payload["contract"]["reference_system_source_refresh_v6"]
+    )
+    assert payload["summary"]["false_completion_violation_count"] == 0
+    assert payload["summary"]["full_parity_claim_allowed"] is False
+    assert payload["summary"]["production_ready_claim_allowed"] is False
+    assert payload["summary"]["safe_browser_automation_claim_allowed"] is False
+    assert payload["policy"]["claim_boundary"] == POST_DX_FINAL_CLAIM_LIFT_CLAIM_BOUNDARY
+    assert set(POST_DX_FINAL_CLAIM_LIFT_BLOCKED_CLAIMS) <= set(payload["policy"]["blocked_claims"])
+    assert "/api/operator/post-dx-final-parity-claim-lift" in payload["policy"]["receipt_surfaces"]
+    assert payload["latest_run"]["failed"] == 0
+    assert payload["scenario_names"]["post_dx_final_board_pr_issue_reconciliation_v1"] == list(
+        POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["post_dx_final_claim_ledger_reconciliation_v1"] == list(
+        POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["reference_system_source_refresh_v6"] == list(
+        REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES
+    )
+    assert payload["scenario_names"]["false_completion_scan_v6"] == list(FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES)
+    assert payload["scenario_names"]["post_dx_final_critic_contrarian_no_block_v1"] == list(
+        POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES
+    )
+    assert {item["batch"] for item in payload["contract"]["post_dx_final_board_pr_issue_reconciliation_v1"]} == {
+        "DY",
+        "DZ",
+        "EA",
+        "EB",
+        "EC",
+        "ED",
+        "EE",
+        "EF",
+    }
+    assert {
+        item["merged_pr"]
+        for item in payload["contract"]["post_dx_final_board_pr_issue_reconciliation_v1"]
+        if item["batch"] != "EF"
+    } == {599, 600, 601, 602, 603, 604, 605}
+    article = next(
+        item
+        for item in payload["contract"]["reference_system_source_refresh_v6"]
+        if item["system"] == "External Article"
+    )
+    assert article["claim_use"] == "access_caveat_only_not_competitor_evidence"
+    assert article["claim_lift_allowed"] is False
+    assert any(
+        item["claim_id"] == "SCL-072"
+        and item["operator_surface"] == "/api/operator/post-dx-final-parity-claim-lift"
+        and item["broad_claim_lift_allowed"] is False
+        for item in payload["contract"]["post_dx_final_claim_ledger_reconciliation_v1"]
+    )
+    assert {"SCL-067", "SCL-068", "SCL-069", "SCL-070", "SCL-071", "SCL-072"} <= {
+        item["claim_id"] for item in payload["contract"]["post_dx_final_claim_ledger_reconciliation_v1"]
+    }
 
 
 @pytest.mark.asyncio

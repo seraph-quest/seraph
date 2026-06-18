@@ -68,6 +68,14 @@ from src.evals.final_parity_audit import (
     POST_DQ_DW_CLAIM_READINESS_CLAIM_BOUNDARY,
     POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SUITE_NAME,
+    POST_DX_FINAL_CLAIM_LIFT_BLOCKED_CLAIMS,
+    POST_DX_FINAL_CLAIM_LIFT_CLAIM_BOUNDARY,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
     FINAL_PRODUCTION_PARITY_BLOCKED_CLAIMS,
@@ -88,6 +96,8 @@ from src.evals.final_parity_audit import (
     FALSE_COMPLETION_SCAN_V4_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V5_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V6_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
     POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
@@ -108,10 +118,13 @@ from src.evals.final_parity_audit import (
     REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SUITE_NAME,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SUITE_NAME,
     build_final_parity_audit_contract,
     build_final_production_parity_contract,
     build_full_parity_release_gate_contract,
     build_post_dq_dw_claim_readiness_contract,
+    build_post_dx_final_claim_lift_contract,
     build_post_cq_claim_readiness_contract,
 )
 from src.extensions.benchmark import (
@@ -20827,6 +20840,175 @@ async def _eval_post_dq_dw_claim_readiness_behavior() -> dict[str, Any]:
     }
 
 
+async def _eval_post_dx_final_claim_lift_behavior() -> dict[str, Any]:
+    contract = build_post_dx_final_claim_lift_contract()
+    summary = contract["summary"]
+    policy = contract["policy"]
+    sources = contract["reference_system_source_refresh_v6"]
+    batches = contract["post_dx_final_board_pr_issue_reconciliation_v1"]
+    readiness = contract["post_dx_final_reconciliation"]
+    claims = contract["post_dx_final_claim_ledger_reconciliation_v1"]
+    scans = contract["false_completion_scan_v6"]
+    critic = contract["post_dx_final_critic_contrarian_no_block_v1"]
+    suites = benchmark_suite_report()
+    board_suite = next(
+        item for item in suites if item["name"] == POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME
+    )
+    claim_suite = next(
+        item for item in suites if item["name"] == POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SUITE_NAME
+    )
+    source_suite = next(item for item in suites if item["name"] == REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SUITE_NAME)
+    scan_suite = next(item for item in suites if item["name"] == FALSE_COMPLETION_SCAN_V6_SUITE_NAME)
+    critic_suite = next(
+        item for item in suites if item["name"] == POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME
+    )
+    completed_batches = [
+        item for item in batches if item["status"] == "done" and item["batch"] != "EF"
+    ]
+    required_batches = {"DY", "DZ", "EA", "EB", "EC", "ED", "EE"}
+    required_prs = {599, 600, 601, 602, 603, 604, 605}
+    required_claim_rows = {"SCL-067", "SCL-068", "SCL-069", "SCL-070", "SCL-071", "SCL-072"}
+    required_surfaces = {
+        "/api/operator/post-dx-final-parity-claim-lift",
+        "/api/operator/benchmark-proof",
+        "/api/operator/post-dx-live-durable-orchestration",
+        "/api/operator/post-dx-formal-secure-runtime-isolation",
+        "/api/operator/post-dx-reach-voice-media-parity-proof",
+        "/api/operator/guardian-memory-live-control",
+        "/api/workflows/runs/{run_identity}/control",
+        "/api/extensions/{extension_id}/review",
+        "/api/extensions/{extension_id}/quarantine",
+        "/api/extensions/{extension_id}/reentry",
+        "/api/extensions/{extension_id}/rollback",
+        "/api/extensions/install",
+        "/api/extensions/update",
+        "/api/operator/browser-computer-use-control",
+    }
+    ef_batch = next(item for item in batches if item["batch"] == "EF")
+    article_sources = [item for item in sources if item["system"] == "External Article"]
+    competitor_sources = [item for item in sources if item["system"] != "External Article"]
+    return {
+        "operator_status_visible": summary["operator_status"] == "post_dx_final_claim_lift_gate_visible",
+        "post_dx_final_board_reconciliation_suite_visible": (
+            board_suite["scenario_count"] == len(POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        ),
+        "post_dx_final_claim_ledger_suite_visible": (
+            claim_suite["scenario_count"] == len(POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        ),
+        "reference_system_source_refresh_v6_suite_visible": (
+            source_suite["scenario_count"] == len(REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES)
+        ),
+        "false_completion_scan_v6_suite_visible": (
+            scan_suite["scenario_count"] == len(FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES)
+        ),
+        "post_dx_final_critic_no_block_suite_visible": (
+            critic_suite["scenario_count"] == len(POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+        ),
+        "all_sources_checked_today": {item["checked_on"] for item in sources} == {"2026-06-18"},
+        "source_refresh_v6_visible": all(
+            item.get("source_refresh_version") == "v6_post_dx_final_claim_lift_gate" for item in sources
+        ),
+        "source_refresh_v6_current_review_visible": (
+            all(item.get("runtime_fetch_performed") is False for item in competitor_sources)
+            and all(
+                item.get("runtime_fetch_scope")
+                == "stored_current_review_receipt_no_report_time_network_fetch"
+                for item in competitor_sources
+            )
+            and all(item.get("current_source_observation") for item in competitor_sources)
+        ),
+        "source_claim_use_bounded": all(
+            item["claim_use"] in {"current_source_pressure_only", "access_caveat_only_not_competitor_evidence"}
+            for item in sources
+        ),
+        "source_claim_lift_blocked": all(item.get("claim_lift_allowed") is False for item in sources),
+        "competitor_systems_visible": {"Hermes", "OpenClaw", "IronClaw"} <= {item["system"] for item in sources},
+        "article_access_caveat_only": (
+            summary["article_source_is_access_caveat_only"] is True
+            and len(article_sources) == 1
+            and article_sources[0]["source_id"] == "ibuzovskyi-x-status-2063645563241844823"
+            and article_sources[0]["claim_use"] == "access_caveat_only_not_competitor_evidence"
+        ),
+        "current_sources_have_access_caveats": summary["all_sources_reachable_with_caveats"] is True,
+        "completed_post_dx_batches_done_merged_passed": (
+            len(completed_batches) == 7
+            and {item["batch"] for item in completed_batches} == required_batches
+            and summary["all_completed_post_dx_batches_done_merged_passed"] is True
+        ),
+        "post_dx_pr_train_visible": {item["merged_pr"] for item in completed_batches} == required_prs,
+        "ef_active_branch_visible": (
+            ef_batch["issue"] == 594
+            and ef_batch["status"] == "in_progress"
+            and ef_batch["active_branch"] == "feat/post-dx-final-parity-gate"
+            and summary["ef_project_fields_started"] is True
+        ),
+        "parent_program_state_visible": (
+            ef_batch["project_item_id"] == "PVTI_lADOD4qAvs4BS6n3zgvoi2c"
+            and ef_batch["queue"] == "Now"
+            and ef_batch["lane"] == "Docs / Meta"
+        ),
+        "project_fields_required_visible": all(
+            {"Queue", "Lane", "Priority", "Size", "Status", "Code Review", "PR"}
+            <= set(item["project_fields_required"])
+            for item in batches
+        ),
+        "no_duplicate_tracking": (
+            {item["issue"] for item in batches} == {590, 591, 592, 593, 594, 595, 596, 597}
+            and {item["batch"] for item in batches} == {*required_batches, "EF"}
+        ),
+        "readiness_covers_required_areas": {
+            "runtime_reliability",
+            "trust_boundaries",
+            "presence_and_reach",
+            "guardian_intelligence",
+            "operator_control",
+            "ecosystem_and_marketplace",
+            "browser_computer_use",
+        }
+        <= {item["area"] for item in readiness},
+        "readiness_receipts_have_raw_handles": all(
+            item.get("raw_receipt_handle")
+            and item.get("raw_receipt_digest")
+            and item.get("residual_risk")
+            and item.get("claim_lift_allowed") is False
+            for item in readiness
+        ),
+        "readiness_is_reconciliation_only": (
+            summary["readiness_receipts_are_reconciliation_only"] is True
+            and all(item.get("actual_runtime_soak_performed") is False for item in readiness)
+            and all(item.get("operational_window") == "not_a_live_soak_window" for item in readiness)
+        ),
+        "claim_boundary_visible": policy["claim_boundary"] == POST_DX_FINAL_CLAIM_LIFT_CLAIM_BOUNDARY,
+        "blocked_claims_visible": set(POST_DX_FINAL_CLAIM_LIFT_BLOCKED_CLAIMS) <= set(policy["blocked_claims"]),
+        "operator_surfaces_visible": required_surfaces <= set(policy["receipt_surfaces"]),
+        "claim_ledger_rows_visible": required_claim_rows <= {item["claim_id"] for item in claims},
+        "claim_lift_rows_keep_broad_claims_blocked": all(
+            item.get("blocked_claims") and item.get("broad_claim_lift_allowed") is False for item in claims
+        ),
+        "bounded_ef_wording_allowed_only": (
+            summary["bounded_post_dx_final_claim_lift_wording_allowed"] is True
+            and summary["full_parity_claim_allowed"] is False
+            and summary["reference_systems_exceeded_claim_allowed"] is False
+            and summary["production_ready_claim_allowed"] is False
+            and summary["secure_private_by_default_claim_allowed"] is False
+            and summary["safe_browser_automation_claim_allowed"] is False
+        ),
+        "false_completion_scans_visible": (
+            summary["false_completion_scan_count"] >= 4
+            and summary["false_completion_violation_count"] == 0
+            and summary["all_local_false_completion_scans_clean"] is True
+            and any(item.get("scan_mode") == "github_project_issue_pr_state_receipt" for item in scans)
+            and any(item.get("scan_mode") == "claim_ledger_boundary_receipt" for item in scans)
+        ),
+        "critic_no_block_visible": (
+            summary["critic_disposition_count"] >= 5
+            and summary["critic_no_block"] is True
+            and summary["final_critic_review_pending"] is False
+            and all(item["disposition"] == "accepted" for item in critic)
+        ),
+    }
+
+
 def _eval_benchmark_proof_surface_behavior() -> dict[str, Any]:
     suites = benchmark_suite_report()
     gate_policy = evolution_benchmark_gate_policy()
@@ -29053,6 +29235,66 @@ _SCENARIOS: tuple[EvalScenario, ...] = (
             runner=_eval_post_dq_dw_claim_readiness_behavior,
         )
         for name in POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch EF reconciles #475, #590-#597, and merged PRs #599-#605 with ProjectV2 fields "
+                "before the final post-DX claim-lift gate."
+            ),
+            runner=_eval_post_dx_final_claim_lift_behavior,
+        )
+        for name in POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch EF reconciles SCL-067 through SCL-072 and permits only exact bounded post-DX "
+                "final-gate wording while broad claims remain blocked."
+            ),
+            runner=_eval_post_dx_final_claim_lift_behavior,
+        )
+        for name in POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch EF records June 18, 2026 Hermes, OpenClaw, IronClaw, and article source-refresh "
+                "receipts as pressure evidence or access caveats only."
+            ),
+            runner=_eval_post_dx_final_claim_lift_behavior,
+        )
+        for name in REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch EF scans docs, code, operator surfaces, GitHub tracking, and claim-ledger wording "
+                "for false completion or unsupported broad parity claims."
+            ),
+            runner=_eval_post_dx_final_claim_lift_behavior,
+        )
+        for name in FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES
+    ),
+    *tuple(
+        EvalScenario(
+            name=name,
+            category="observability",
+            description=(
+                "Batch EF records independent review receipts for non-duplication, board state, source "
+                "caveats, claim boundaries, and security/privacy caveats."
+            ),
+            runner=_eval_post_dx_final_claim_lift_behavior,
+        )
+        for name in POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES
     ),
     EvalScenario(
         name="guardian_feedback_loop",

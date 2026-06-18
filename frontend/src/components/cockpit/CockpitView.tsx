@@ -5337,6 +5337,7 @@ interface WorkflowCheckpointHistoryEntry {
   key: string;
   createdAt: string;
   stepId: string;
+  kind: string;
   actionLabel: string;
   sourceWorkflow: WorkflowRunRecord;
   scopeLabel: string;
@@ -5356,11 +5357,11 @@ interface WorkflowLineageEventEntry {
 
 function workflowCheckpointActions(
   workflow: WorkflowRunRecord,
-): Array<{ stepId: string; draft: string; label: string }> {
+): Array<{ stepId: string; draft: string; label: string; kind: string }> {
   if (!Array.isArray(workflow.checkpointCandidates)) {
     return [];
   }
-  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string }>>((actions, candidate) => {
+  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string; kind: string }>>((actions, candidate) => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return actions;
     const record = candidate as Record<string, unknown>;
     const stepId = typeof record.step_id === "string" ? record.step_id : "";
@@ -5370,6 +5371,7 @@ function workflowCheckpointActions(
     actions.push({
       stepId,
       draft,
+      kind,
       label: kind === "retry_failed_step" ? `Retry ${stepId}` : `Branch ${stepId}`,
     });
     return actions;
@@ -7113,6 +7115,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           key,
           createdAt: entry.updatedAt,
           stepId: action.stepId,
+          kind: action.kind,
           actionLabel: action.label,
           sourceWorkflow: entry,
           scopeLabel,
@@ -7129,6 +7132,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             key,
             createdAt: entry.updatedAt,
             stepId,
+            kind: "retry_failed_step",
             actionLabel: "Retry Step",
             sourceWorkflow: entry,
             scopeLabel,
@@ -7245,28 +7249,116 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (!workflow) return;
     setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
   }
+  function resumePlanFallbackDraft(workflow: WorkflowRunRecord): string | null {
+    const checkpointAction = workflowCheckpointActions(workflow)[0];
+    if (checkpointAction?.draft) return checkpointAction.draft;
+    if (workflow.retryFromStepDraft) return workflow.retryFromStepDraft;
+    if (workflow.replayAllowed !== false) return workflow.replayDraft ?? buildWorkflowReplayDraft(workflow);
+    return null;
+  }
+  async function queueLiveWorkflowResumePlan(
+    workflow: WorkflowRunRecord | null | undefined,
+    options: {
+      action?: string;
+      stepId?: string | null;
+      fallbackDraft?: string | null;
+      fallbackThreadId?: string | null;
+      label?: string;
+    } = {},
+  ) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const fallbackDraft = options.fallbackDraft ?? resumePlanFallbackDraft(resolved);
+    const queueFallbackDraft = async () => {
+      if (!fallbackDraft) return;
+      if (options.fallbackThreadId) {
+        await queueThreadDraft(fallbackDraft, options.fallbackThreadId);
+        return;
+      }
+      queueComposerDraft(fallbackDraft);
+    };
+    if (!resolved.runIdentity) {
+      await queueFallbackDraft();
+      return;
+    }
+    const label = options.label ?? resolved.workflowName;
+    setOperatorStatus(`Checking live recovery plan for ${label}...`);
+    try {
+      const action = options.action ?? "resume";
+      const response = await fetch(
+        `${API_URL}/api/workflows/runs/${encodeURIComponent(resolved.runIdentity)}/control`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action,
+            step_id: options.stepId ?? undefined,
+            target: options.stepId ?? resolved.workflowName,
+            owner: "cockpit",
+            operator_context: {
+              source: "cockpit",
+              workflow_name: resolved.workflowName,
+              status: resolved.status,
+              thread_id: resolved.threadId,
+            },
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" && "detail" in payload
+          ? String((payload as { detail?: unknown }).detail)
+          : `Could not build a live recovery plan for ${label}`;
+        setOperatorStatus(`Live recovery control refused ${label}: ${detail}`);
+        return;
+      }
+      const plan = payload && typeof payload === "object"
+        ? (payload as { resume_plan?: unknown }).resume_plan
+        : null;
+      const planRecord = plan && typeof plan === "object" && !Array.isArray(plan)
+        ? plan as Record<string, unknown>
+        : null;
+      const draft = typeof planRecord?.draft === "string" && planRecord.draft.trim()
+        ? planRecord.draft
+        : (
+          typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
+            ? planRecord.continue_message
+            : fallbackDraft
+        );
+      if (!draft) {
+        setOperatorStatus(`No recovery draft is available for ${label}`);
+        return;
+      }
+      const threadId = options.fallbackThreadId ?? resolved.threadId ?? resolved.sessionId;
+      if (typeof planRecord?.continue_message === "string" && planRecord.continue_message === draft && threadId) {
+        await queueThreadDraft(draft, threadId);
+      } else {
+        queueComposerDraft(draft);
+      }
+      const checkpointLabel = typeof planRecord?.resume_checkpoint_label === "string"
+        ? planRecord.resume_checkpoint_label
+        : null;
+      setOperatorStatus(
+        checkpointLabel
+          ? `Loaded live recovery plan for ${label}: ${checkpointLabel}`
+          : `Loaded live recovery plan for ${label}`,
+      );
+    } catch {
+      setOperatorStatus(`Could not reach workflow recovery controls for ${label}; no fallback draft was queued.`);
+    }
+  }
   function continueWorkflowRun(workflow: WorkflowRunRecord | null | undefined) {
     if (!workflow) return;
     const resolved = resolveWorkflowRun(workflow);
     const approval = approvalForWorkflow(resolved);
     const continueMessage = approval?.resume_message ?? resolved.threadContinueMessage;
     const threadId = approval?.thread_id ?? approval?.session_id ?? resolved.threadId ?? resolved.sessionId;
-    if (continueMessage && threadId) {
-      void queueThreadDraft(continueMessage, threadId);
-      return;
-    }
-    const checkpointAction = workflowCheckpointActions(resolved)[0];
-    if (checkpointAction?.draft) {
-      queueComposerDraft(checkpointAction.draft);
-      return;
-    }
-    if (resolved.retryFromStepDraft) {
-      queueComposerDraft(resolved.retryFromStepDraft);
-      return;
-    }
-    if (resolved.replayAllowed !== false) {
-      queueComposerDraft(resolved.replayDraft ?? buildWorkflowReplayDraft(resolved));
-    }
+    void queueLiveWorkflowResumePlan(resolved, {
+      action: "resume",
+      fallbackDraft: continueMessage ?? undefined,
+      fallbackThreadId: threadId,
+      label: resolved.workflowName,
+    });
   }
   function renderWorkflowCheckpointControls(
     workflow: WorkflowRunRecord,
@@ -7278,7 +7370,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         key={`${keyPrefix}:${action.stepId}:${action.label}`}
         className="cockpit-feedback-button"
         aria-label={`${action.label} from ${scopeLabel} ${workflow.workflowName}`}
-        onClick={() => queueComposerDraft(action.draft)}
+        onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+          action: action.kind === "retry_failed_step" ? "retry" : "branch",
+          stepId: action.stepId,
+          fallbackDraft: action.draft,
+          label: `${scopeLabel} ${workflow.workflowName}`,
+        })}
       >
         {action.label}
       </button>
@@ -7297,7 +7394,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           key={`${keyPrefix}:retry-step`}
           className="cockpit-feedback-button"
           aria-label={`Retry step for ${scopeLabel} ${workflow.workflowName}`}
-          onClick={() => queueComposerDraft(workflow.retryFromStepDraft ?? "")}
+          onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+            action: "retry",
+            stepId: failedStep?.id ?? workflow.resumeFromStep,
+            fallbackDraft: workflow.retryFromStepDraft,
+            label: `${scopeLabel} ${workflow.workflowName}`,
+          })}
         >
           Retry Step
         </button>,
@@ -8183,12 +8285,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
   function continueOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
     if (!entry) return;
-    if (entry.continueMessage) {
-      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
-      return;
-    }
     if (entry.workflow) {
       continueWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
     }
   }
   function draftOperatorTriageRepair(entry: OperatorTriageEntry | null | undefined) {
@@ -8249,12 +8351,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
   function continueOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
     if (!entry) return;
-    if (entry.continueMessage) {
-      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
-      return;
-    }
     if (entry.workflow) {
       continueWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
     }
   }
   function openOperatorWorkflowOrchestrationThread(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
@@ -8287,12 +8389,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }
   function continueOperatorBackgroundSupervisionEntry(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
     if (!entry) return;
-    if (entry.continueMessage) {
-      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
-      return;
-    }
     if (entry.workflow) {
       continueWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
     }
   }
   function openOperatorBackgroundSupervisionThread(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
@@ -10390,12 +10492,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   function queueWorkflowRecoveryDraft(workflow: WorkflowRunRecord | null | undefined) {
     if (!workflow) return;
     const resolved = resolveWorkflowRun(workflow);
+    const failedStep = failedWorkflowStep(resolved);
     if (resolved.retryFromStepDraft) {
-      queueComposerDraft(resolved.retryFromStepDraft);
+      void queueLiveWorkflowResumePlan(resolved, {
+        action: "retry",
+        stepId: failedStep?.id ?? resolved.resumeFromStep,
+        fallbackDraft: resolved.retryFromStepDraft,
+        label: resolved.workflowName,
+      });
       return;
     }
-    if (resolved.replayAllowed === false) return;
-    queueComposerDraft(resolved.replayDraft ?? buildWorkflowReplayDraft(resolved));
+    if (resolved.replayAllowed !== false) {
+      void queueLiveWorkflowResumePlan(resolved, {
+        action: "replay",
+        fallbackDraft: resolved.replayDraft ?? buildWorkflowReplayDraft(resolved),
+        label: resolved.workflowName,
+      });
+    }
   }
 
   function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
@@ -10942,19 +11055,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <div className="cockpit-feedback-row">
             {selectedWorkflow.replayAllowed !== false ? (
               <>
-                <button
-                  className="cockpit-feedback-button"
-                  onClick={() =>
-                    queueComposerDraft(
-                      selectedWorkflow.replayDraft
-                        ?? buildWorkflowReplayDraft(selectedWorkflow),
-                    )
-                  }
-                >
-                  {selectedWorkflow.executionBoundaries?.length
-                    ? "Draft Boundary-Aware Rerun"
-                    : "Draft Rerun"}
-                </button>
+	                <button
+	                  className="cockpit-feedback-button"
+	                  onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                    action: "replay",
+	                    fallbackDraft: selectedWorkflow.replayDraft ?? buildWorkflowReplayDraft(selectedWorkflow),
+	                    label: selectedWorkflow.workflowName,
+	                  })}
+	                >
+	                  {selectedWorkflow.executionBoundaries?.length
+	                    ? "Plan Boundary-Aware Rerun"
+	                    : "Plan Rerun"}
+	                </button>
                 {(() => {
                   const checkpointActions = selectedWorkflowCheckpointActions.slice(0, 2);
                   if (checkpointActions.length > 0) {
@@ -10962,7 +11074,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <button
                         key={`${selectedWorkflow.id}:${action.stepId}`}
                         className="cockpit-feedback-button"
-                        onClick={() => queueComposerDraft(action.draft)}
+                        onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+                          action: action.kind === "retry_failed_step" ? "retry" : "branch",
+                          stepId: action.stepId,
+                          fallbackDraft: action.draft,
+                          label: selectedWorkflow.workflowName,
+                        })}
                       >
                         {action.label}
                       </button>
@@ -10974,12 +11091,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   return (
                     <button
                       className="cockpit-feedback-button"
-                      onClick={() =>
-                        queueComposerDraft(
-                          selectedWorkflow.retryFromStepDraft
-                          ?? buildWorkflowReplayDraft(selectedWorkflow),
-                        )
-                      }
+                      onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+                        action: "retry",
+                        stepId: selectedWorkflow.resumeFromStep,
+                        fallbackDraft: selectedWorkflow.retryFromStepDraft ?? buildWorkflowReplayDraft(selectedWorkflow),
+                        label: selectedWorkflow.workflowName,
+                      })}
                     >
                       Retry From Step
                     </button>
@@ -11149,19 +11266,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     : ""}
                 {` · ${selectedWorkflowApproval.risk_level} risk`}
               </div>
-              {selectedWorkflowApproval.resume_message && (
-                <button
-                  className="cockpit-feedback-button"
-                  aria-label={`Continue approval context for ${selectedWorkflowName}`}
-                  onClick={() =>
-                    void queueThreadDraft(
-                      selectedWorkflowApproval.resume_message ?? "",
-                      selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id,
-                    )
-                  }
-                >
-                  Continue
-                </button>
+	              {selectedWorkflowApproval.resume_message && (
+	                <button
+	                  className="cockpit-feedback-button"
+	                  aria-label={`Continue approval context for ${selectedWorkflowName}`}
+	                  onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                    action: "resume",
+	                    fallbackDraft: selectedWorkflowApproval.resume_message,
+	                    fallbackThreadId: selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id,
+	                    label: selectedWorkflowName,
+	                  })}
+	                >
+	                  Continue
+	                </button>
               )}
               {(() => {
                 const threadTarget = selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id;
@@ -11273,15 +11390,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   >
                     Use Context
                   </button>
-                  {checkpointDraft && (
-                    <button
-                      className="cockpit-feedback-button"
-                      aria-label={`Draft retry for step ${step.id} in ${selectedWorkflowName}`}
-                      onClick={() => queueComposerDraft(checkpointDraft)}
-                    >
-                      Draft Retry
-                    </button>
-                  )}
+	                  {checkpointDraft && (
+	                    <button
+	                      className="cockpit-feedback-button"
+	                      aria-label={`Plan retry for step ${step.id} in ${selectedWorkflowName}`}
+	                      onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                        action: "retry",
+	                        stepId: step.id,
+	                        fallbackDraft: checkpointDraft,
+	                        label: selectedWorkflowName,
+	                      })}
+	                    >
+	                      Plan Retry
+	                    </button>
+	                  )}
                   {step.recoveryActions?.length ? (
                     <button
                       className="cockpit-feedback-button"
@@ -11716,15 +11838,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       {entry.stepId ? ` · ${entry.stepId}` : ""}
                       {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
                     </div>
-                    {checkpointDraft && (
-                      <button
-                        className="cockpit-feedback-button"
-                        aria-label={`Draft retry from ${checkpointStepId} for ${selectedWorkflowName}`}
-                        onClick={() => queueComposerDraft(checkpointDraft)}
-                      >
-                        Draft Retry
-                      </button>
-                    )}
+	                    {checkpointDraft && (
+	                      <button
+	                        className="cockpit-feedback-button"
+	                        aria-label={`Plan retry from ${checkpointStepId} for ${selectedWorkflowName}`}
+	                        onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                          action: "retry",
+	                          stepId: checkpointStepId,
+	                          fallbackDraft: checkpointDraft,
+	                          label: selectedWorkflowName,
+	                        })}
+	                      >
+	                        Plan Retry
+	                      </button>
+	                    )}
                   </div>
                 );
               })()
@@ -11825,13 +11952,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Continue
                     </button>
                   )}
-                  <button
-                    className="cockpit-feedback-button"
-                    aria-label={`${entry.actionLabel} from ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
-                    onClick={() => queueComposerDraft(entry.draft)}
-                  >
-                    {entry.actionLabel}
-                  </button>
+	                  <button
+	                    className="cockpit-feedback-button"
+	                    aria-label={`${entry.actionLabel} from ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+	                    onClick={() => void queueLiveWorkflowResumePlan(entry.sourceWorkflow, {
+	                      action: entry.kind === "retry_failed_step" ? "retry" : "branch",
+	                      stepId: entry.stepId,
+	                      fallbackDraft: entry.draft,
+	                      label: `${entry.scopeLabel} ${entry.sourceWorkflow.workflowName}`,
+	                    })}
+	                  >
+	                    {entry.actionLabel}
+	                  </button>
                 </div>
               ))}
               {lineageEvents.map((entry, index) => (
@@ -11873,15 +12005,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       Use Failure
                     </button>
                   )}
-                  {entry.checkpointDraft && (
-                    <button
-                      className="cockpit-feedback-button"
-                      aria-label={`Draft retry from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
-                      onClick={() => queueComposerDraft(entry.checkpointDraft ?? "")}
-                    >
-                      Draft Retry
-                    </button>
-                  )}
+	                  {entry.checkpointDraft && (
+	                    <button
+	                      className="cockpit-feedback-button"
+	                      aria-label={`Plan retry from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+	                      onClick={() => void queueLiveWorkflowResumePlan(entry.sourceWorkflow, {
+	                        action: "retry",
+	                        stepId: entry.timelineEntry.stepId,
+	                        fallbackDraft: entry.checkpointDraft,
+	                        label: `${entry.scopeLabel} ${entry.sourceWorkflow.workflowName}`,
+	                      })}
+	                    >
+	                      Plan Retry
+	                    </button>
+	                  )}
                   {entry.failureStep?.recoveryActions?.length ? (
                     <button
                       className="cockpit-feedback-button"
@@ -13092,9 +13229,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
               </div>
               <div className="cockpit-list">
-                {visibleActivityGroups.map((group) => {
-                  const actionTarget = activityGroupActionTarget(group);
-                  return (
+	                {visibleActivityGroups.map((group) => {
+	                  const actionTarget = activityGroupActionTarget(group);
+	                  const actionTargetWorkflow = workflowRuns.find((item) => item.threadId === actionTarget.thread_id);
+	                  return (
                     <div key={group.key} className="cockpit-row cockpit-ledger-group">
                       <button
                         className="cockpit-row-button cockpit-ledger-parent"
@@ -13150,15 +13288,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           ) : null}
                         </div>
                       )}
-                      <div className="cockpit-feedback-row">
-                        {actionTarget.continue_message && (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() => void queueThreadDraft(actionTarget.continue_message ?? "", actionTarget.thread_id)}
-                          >
-                            Continue
-                          </button>
-                        )}
+	                      <div className="cockpit-feedback-row">
+	                        {actionTarget.continue_message && (
+	                          <button
+	                            className="cockpit-feedback-button"
+	                            onClick={() => {
+	                              if (actionTargetWorkflow) {
+	                                continueWorkflowRun(actionTargetWorkflow);
+	                                return;
+	                              }
+	                              void queueThreadDraft(actionTarget.continue_message ?? "", actionTarget.thread_id);
+	                            }}
+	                          >
+	                            Continue
+	                          </button>
+	                        )}
                         {canOpenLedgerThread(actionTarget.thread_id, sessionId, knownSessionIds) && (
                           <button
                             className="cockpit-feedback-button"
@@ -13167,12 +13311,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             Open Thread
                           </button>
                         )}
-                        {actionTarget.replay_draft && actionTarget.replay_allowed !== false && (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() => queueComposerDraft(actionTarget.replay_draft ?? "")}
-                          >
-                            Replay
+	                        {actionTarget.replay_draft && actionTarget.replay_allowed !== false && actionTargetWorkflow && (
+	                          <button
+	                            className="cockpit-feedback-button"
+	                            onClick={() => void queueLiveWorkflowResumePlan(actionTargetWorkflow, {
+	                              action: "replay",
+	                              fallbackDraft: actionTarget.replay_draft,
+	                              label: actionTargetWorkflow.workflowName,
+	                            })}
+	                          >
+	                            Replay
                           </button>
                         )}
                         {actionTarget.recommended_actions?.length ? (
@@ -13281,18 +13429,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         ) : null}
                       </button>
                       <div className="cockpit-feedback-row">
-                        {(approval?.resume_message || workflow.threadContinueMessage) && (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() =>
-                              void queueThreadDraft(
-                                approval?.resume_message ?? workflow.threadContinueMessage ?? "",
-                                approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId,
-                              )
-                            }
-                          >
-                            Continue
-                          </button>
+	                        {(approval?.resume_message || workflow.threadContinueMessage) && (
+	                          <button
+	                            className="cockpit-feedback-button"
+	                            onClick={() => continueWorkflowRun(workflow)}
+	                          >
+	                            Continue
+	                          </button>
                         )}
                         {approval && (
                           <>
@@ -13322,14 +13465,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <>
                             <button
                               className="cockpit-feedback-button"
-                              onClick={() => queueComposerDraft(workflow.replayDraft ?? buildWorkflowReplayDraft(workflow))}
+                              onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+                                action: "replay",
+                                fallbackDraft: workflow.replayDraft ?? buildWorkflowReplayDraft(workflow),
+                                label: workflow.workflowName,
+                              })}
                             >
-                              Draft rerun
+                              Plan rerun
                             </button>
                             {workflow.retryFromStepDraft && (
                               <button
                                 className="cockpit-feedback-button"
-                                onClick={() => queueComposerDraft(workflow.retryFromStepDraft ?? buildWorkflowReplayDraft(workflow))}
+                                onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+                                  action: "retry",
+                                  stepId: workflow.resumeFromStep,
+                                  fallbackDraft: workflow.retryFromStepDraft ?? buildWorkflowReplayDraft(workflow),
+                                  label: workflow.workflowName,
+                                })}
                               >
                                 Retry step
                               </button>
@@ -14275,7 +14427,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         aria-label="Retry primary M7 workflow"
                         disabled={!m7PrimaryWorkflow?.retryFromStepDraft || !m7ControlEnabled("retry", Boolean(m7PrimaryWorkflow?.retryFromStepDraft))}
                         onClick={() => {
-                          if (m7PrimaryWorkflow?.retryFromStepDraft) queueComposerDraft(m7PrimaryWorkflow.retryFromStepDraft);
+                          if (m7PrimaryWorkflow?.retryFromStepDraft) void queueLiveWorkflowResumePlan(m7PrimaryWorkflow, {
+                            action: "retry",
+                            stepId: m7PrimaryWorkflow.resumeFromStep,
+                            fallbackDraft: m7PrimaryWorkflow.retryFromStepDraft,
+                            label: m7PrimaryWorkflow.workflowName,
+                          });
                         }}
                       >
                         retry
@@ -15046,7 +15203,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               type="button"
                               className="cockpit-operator-button"
                               aria-label={`Retry step for ${entry.label}`}
-                              onClick={() => queueComposerDraft(triageWorkflow.retryFromStepDraft ?? "")}
+                              onClick={() => void queueLiveWorkflowResumePlan(triageWorkflow, {
+                                action: "retry",
+                                stepId: triageWorkflow.resumeFromStep,
+                                fallbackDraft: triageWorkflow.retryFromStepDraft,
+                                label: entry.label,
+                              })}
                             >
                               retry step
                             </button>
@@ -15550,7 +15712,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                     type="button"
                                     className="cockpit-operator-button"
                                     aria-label={`Retry step for workflow orchestration ${entry.threadLabel}`}
-                                    onClick={() => queueComposerDraft(entry.workflow?.retryFromStepDraft ?? "")}
+                                    onClick={() => void queueLiveWorkflowResumePlan(entry.workflow, {
+                                      action: "retry",
+                                      stepId: entry.workflow?.resumeFromStep,
+                                      fallbackDraft: entry.workflow?.retryFromStepDraft,
+                                      label: `workflow orchestration ${entry.threadLabel}`,
+                                    })}
                                   >
                                     retry step
                                   </button>
@@ -15866,7 +16033,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 type="button"
                                 className="cockpit-operator-button"
                                 aria-label={`Retry step for workflow supervision ${entry.workflow.workflowName}`}
-                                onClick={() => queueComposerDraft(entry.workflow.retryFromStepDraft ?? "")}
+                                onClick={() => void queueLiveWorkflowResumePlan(entry.workflow, {
+                                  action: "retry",
+                                  stepId: entry.workflow.resumeFromStep,
+                                  fallbackDraft: entry.workflow.retryFromStepDraft,
+                                  label: `workflow supervision ${entry.workflow.workflowName}`,
+                                })}
                               >
                                 retry step
                               </button>

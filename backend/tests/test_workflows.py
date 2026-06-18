@@ -28,6 +28,7 @@ from src.agent.factory import get_tools
 from src.agent.session import SessionManager
 from src.audit.repository import audit_repository
 from src.tools.approval import ApprovalTool
+from src.workflows.durable_state import workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity
 
 
@@ -2221,6 +2222,154 @@ async def test_workflow_resume_plan_endpoint_returns_structured_branch_metadata(
     assert payload["resume_plan"]["checkpoint_candidates"][1]["step_id"] == "save"
     assert '_seraph_resume_from_step="save"' in payload["resume_plan"]["draft"]
     assert "_seraph_parent_run_identity=" in payload["resume_plan"]["draft"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_control_records_live_operator_recovery_control(client, async_db):
+    run_identity = "session-live:workflow_web_brief_to_file:control"
+    await workflow_state_repository.create_run(
+        run_identity=run_identity,
+        workflow_name="web-brief-to-file",
+        tool_name="workflow_web_brief_to_file",
+        session_id="session-live",
+        run_fingerprint="control",
+        arguments={"query": "seraph", "file_path": "notes/brief.md"},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+    )
+    await workflow_state_repository.record_step_started(
+        run_identity=run_identity,
+        workflow_name="web-brief-to-file",
+        step_id="write_file",
+        step_index=1,
+        tool_name="write_file",
+        arguments={"file_path": "notes/brief.md"},
+    )
+    await workflow_state_repository.record_step_failed(
+        run_identity=run_identity,
+        step_id="write_file",
+        result_summary="write_file blocked",
+        error_kind="policy_boundary",
+        error_summary="write_file blocked by policy",
+        checkpoint={"arguments": {"file_path": "notes/brief.md"}},
+    )
+    await workflow_state_repository.finish_run(
+        run_identity=run_identity,
+        status="failed",
+        checkpoint_context={"write_file": {"arguments": {"file_path": "notes/brief.md"}}},
+        continued_error_steps=["write_file"],
+        last_completed_step_id="write_file",
+        error="write_file blocked by policy",
+    )
+
+    with (
+        patch("src.api.workflows.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch("src.api.workflows.session_manager.list_sessions", return_value=[{"id": "session-live", "title": "Live work"}]),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.post(
+            f"/api/workflows/runs/{run_identity}/control",
+            json={
+                "action": "retry",
+                "step_id": "write_file",
+                "target": "write_file",
+                "owner": "cockpit",
+                "operator_context": {"source": "cockpit"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "recorded"
+    assert payload["action"] == "retry"
+    assert payload["external_action_allowed"] is False
+    assert payload["control_receipt"]["action"] == "retry"
+    assert payload["lease_receipt"]["status"] == "acquired"
+    assert payload["recovery_receipt"]["status"] == "ready"
+    assert payload["transition_receipt"]["status"] == "recorded"
+    assert payload["resume_plan"]["branch_kind"] == "retry_failed_step"
+    assert payload["resume_plan"]["resume_from_step"] == "write_file"
+    assert payload["run"]["run_identity"] == run_identity
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_control_refuses_blocked_live_lease_without_resume_plan(client, async_db):
+    run_identity = "session-live:workflow_web_brief_to_file:lease-blocked"
+    await workflow_state_repository.create_run(
+        run_identity=run_identity,
+        workflow_name="web-brief-to-file",
+        tool_name="workflow_web_brief_to_file",
+        session_id="session-live",
+        run_fingerprint="lease-blocked",
+        arguments={"query": "seraph", "file_path": "notes/brief.md"},
+        approval_context={"risk_level": "medium", "execution_boundaries": ["workspace_write"]},
+    )
+    await workflow_state_repository.record_step_started(
+        run_identity=run_identity,
+        workflow_name="web-brief-to-file",
+        step_id="write_file",
+        step_index=1,
+        tool_name="write_file",
+        arguments={"file_path": "notes/brief.md"},
+    )
+    await workflow_state_repository.record_step_failed(
+        run_identity=run_identity,
+        step_id="write_file",
+        result_summary="write_file blocked",
+        error_kind="policy_boundary",
+        error_summary="write_file blocked by policy",
+        checkpoint={"arguments": {"file_path": "notes/brief.md"}},
+    )
+    await workflow_state_repository.finish_run(
+        run_identity=run_identity,
+        status="failed",
+        checkpoint_context={"write_file": {"arguments": {"file_path": "notes/brief.md"}}},
+        continued_error_steps=["write_file"],
+        last_completed_step_id="write_file",
+        error="write_file blocked by policy",
+    )
+    await workflow_state_repository.acquire_or_renew_v2_lease(
+        run_identity=run_identity,
+        owner="another-worker",
+    )
+
+    with (
+        patch("src.api.workflows.audit_repository.list_events", return_value=[]),
+        patch(
+            "src.api.workflows.workflow_manager.get_tool_metadata",
+            return_value={
+                "risk_level": "medium",
+                "execution_boundaries": ["workspace_write"],
+                "accepts_secret_refs": False,
+            },
+        ),
+        patch("src.api.workflows.session_manager.list_sessions", return_value=[{"id": "session-live", "title": "Live work"}]),
+        patch("src.api.workflows.get_current_tool_policy_mode", return_value="balanced"),
+    ):
+        response = await client.post(
+            f"/api/workflows/runs/{run_identity}/control",
+            json={
+                "action": "retry",
+                "step_id": "write_file",
+                "target": "write_file",
+                "owner": "spoofed-worker",
+                "operator_context": {"source": "cockpit"},
+            },
+        )
+
+    assert response.status_code == 423
+    payload = response.json()
+    assert payload["detail"] == "active_lease_owned_by_another_worker"
+    assert "resume_plan" not in payload
+    events = await audit_repository.list_events(limit=10, session_id="session-live")
+    assert any(event["event_type"] == "workflow_control_refused" for event in events)
 
 
 @pytest.mark.asyncio

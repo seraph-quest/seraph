@@ -208,6 +208,127 @@ describe("CockpitView", () => {
     expect(within(consoleRegion).getByRole("button", { name: "install" })).toBeEnabled();
   });
 
+  it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        return Promise.resolve(mockResponse({ detail: "approval_context_changed" }, false, 409));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "test",
+          build_id: "test",
+          provider: "test",
+          model: "test",
+          model_label: "test",
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/brief.md"],
+                  error_summary: "write_file blocked by approval",
+                  is_recoverable: true,
+                },
+              ],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: ["write_file"],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              checkpoint_context_available: true,
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    useCockpitLayoutStore.setState({
+      paneVisibility: {
+        ...getDefaultPaneVisibility("default"),
+        workflows_pane: true,
+      },
+      savedPaneVisibility: {
+        default: {
+          ...getDefaultPaneVisibility("default"),
+          workflows_pane: true,
+        },
+      },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const timelineTitle = await screen.findByText("Workflow timeline");
+    const timeline = timelineTitle.closest(".cockpit-window");
+    expect(timeline).not.toBeNull();
+    const workflowRow = await within(timeline as HTMLElement).findByText("web-brief-to-file");
+    const row = workflowRow.closest(".cockpit-row");
+    expect(row).not.toBeNull();
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Retry step" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/workflows/runs/root-1/control"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"action":"retry"'),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Live recovery control refused web-brief-to-file: approval_context_changed")).toBeInTheDocument(),
+    );
+    expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
+  });
+
   it("renders degraded revoked extension state with rollback unavailable and guarded alternatives", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       extensions: {
@@ -829,7 +950,7 @@ describe("CockpitView", () => {
     );
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
-    expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
+    expect(screen.getByText("Plan Boundary-Aware Rerun")).toBeInTheDocument();
     expect(screen.getAllByText(/web_search succeeded · 2 web results/)).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Branch web_search" })).toBeInTheDocument();
@@ -861,7 +982,7 @@ describe("CockpitView", () => {
   }, 30000);
 
   it("surfaces active triage for approvals, workflows, queued guardian items, and reach failures", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/sessions")) {
         return Promise.resolve(mockResponse([
@@ -1292,6 +1413,32 @@ describe("CockpitView", () => {
           extension_packages: [],
         }));
       }
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        const body = typeof init?.body === "string" ? init.body : "";
+        if (body.includes('"action":"resume"')) {
+          const continueMessage = url.includes("branch-1")
+            ? "Continue Atlas branch"
+            : "Continue Atlas workflow";
+          return Promise.resolve(mockResponse({
+            status: "recorded",
+            action: "resume",
+            external_action_allowed: false,
+            resume_plan: {
+              continue_message: continueMessage,
+              resume_checkpoint_label: "approval gate",
+            },
+          }));
+        }
+        return Promise.resolve(mockResponse({
+          status: "recorded",
+          action: "retry",
+          external_action_allowed: false,
+          resume_plan: {
+            draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+            resume_checkpoint_label: "write_file",
+          },
+        }));
+      }
       if (url.includes("/api/workflows/runs")) {
         return Promise.resolve(mockResponse({
           runs: [
@@ -1627,6 +1774,15 @@ describe("CockpitView", () => {
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Retry step for workflow degraded: web-brief-to-file" }));
     await waitFor(() =>
       expect(screen.getByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/workflows/runs/root-1/control"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"action":"retry"'),
+        }),
+      ),
     );
 
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Repair step for workflow degraded: web-brief-to-file" }));
@@ -7066,7 +7222,7 @@ describe("CockpitView", () => {
     expect(within(inspector).getByRole("button", { name: "Branch review_checkpoint from current run for checkpoint history review_checkpoint" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use output from current run lineage event workflow_succeeded" })).toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: "Use failure from best continuation lineage event workflow_degraded" })).toBeInTheDocument();
-    expect(within(inspector).getByRole("button", { name: "Draft retry from best continuation lineage event workflow_degraded" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Plan retry from best continuation lineage event workflow_degraded" })).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: "Use failure from current run lineage event workflow_succeeded" })).not.toBeInTheDocument();
     expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
 
@@ -7094,7 +7250,7 @@ describe("CockpitView", () => {
     await waitFor(() =>
       expect(screen.getByDisplayValue(/Review workflow "resume-review" step "review_checkpoint" \(read_file\)\./)).toBeInTheDocument(),
     );
-    fireEvent.click(within(inspector).getByRole("button", { name: "Draft retry from best continuation lineage event workflow_degraded" }));
+    fireEvent.click(within(inspector).getByRole("button", { name: "Plan retry from best continuation lineage event workflow_degraded" }));
     await waitFor(() =>
       expect(
         screen.getByDisplayValue(
@@ -8372,7 +8528,7 @@ describe("CockpitView", () => {
     expect(within(artifactRow as HTMLElement).getByRole("button", { name: "Run summarize-file from artifact output notes/brief.md" })).toBeInTheDocument();
 
     const traceRetryButton = within(inspectorWindow as HTMLElement).getByRole("button", {
-      name: "Draft retry from write_file for atlas-brief",
+      name: "Plan retry from write_file for atlas-brief",
     });
     const traceRow = traceRetryButton.closest(".cockpit-inspector-stack-row");
     expect(traceRow).not.toBeNull();

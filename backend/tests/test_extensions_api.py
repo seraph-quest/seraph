@@ -103,8 +103,8 @@ def _write_installable_extension(
     return package_dir
 
 
-def _write_high_risk_extension(root: Path) -> Path:
-    package_dir = root / "high-risk-pack"
+def _write_high_risk_extension(root: Path, *, package_name: str = "high-risk-pack") -> Path:
+    package_dir = root / package_name
     (package_dir / "workflows").mkdir(parents=True)
     (package_dir / "manifest.yaml").write_text(
         "id: seraph.high-risk-pack\n"
@@ -1361,6 +1361,195 @@ async def test_install_rejects_workspace_replacement_and_update_replaces_package
         )
         assert source_response.status_code == 200
         assert "Updated local installable workflow" in source_response.json()["content"]
+
+
+@pytest.mark.asyncio
+async def test_update_records_lifecycle_snapshot_and_rollback_restores_previous_package(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+    updated_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-update",
+        version="2026.4.01",
+        workflow_description="Updated local installable workflow",
+        workflow_content="Use the updated local workflow.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+        assert update_response.json()["extension"]["version"] == "2026.4.01"
+
+        lifecycle_response = await client.get("/api/extensions/seraph.test-installable/lifecycle")
+        assert lifecycle_response.status_code == 200
+        lifecycle = lifecycle_response.json()
+        assert lifecycle["rollback"]["available"] is True
+        snapshot = lifecycle["rollback"]["snapshots"][0]
+        assert snapshot["version"] == "2026.3.21"
+        assert Path(snapshot["path"]).is_dir()
+        assert lifecycle["diagnostics"]["vulnerability_state"] == "unknown"
+        assert lifecycle["diagnostics"]["sbom_state"] == "unknown"
+
+        rollback_response = await client.post(
+            "/api/extensions/seraph.test-installable/rollback",
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert rollback_response.status_code == 200
+        payload = rollback_response.json()
+        assert payload["status"] == "rolled_back"
+        assert payload["extension"]["version"] == "2026.3.21"
+        assert payload["receipt"]["action"] == "rollback"
+
+        source_response = await client.get(
+            "/api/extensions/seraph.test-installable/source",
+            params={"reference": "workflows/local-workflow.md"},
+        )
+        assert source_response.status_code == 200
+        assert "Local installable workflow" in source_response.json()["content"]
+        assert "Updated local installable workflow" not in source_response.json()["content"]
+
+
+@pytest.mark.asyncio
+async def test_generic_update_rejects_downgrade_without_explicit_control(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path, version="2026.4.01")
+    downgrade_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-downgrade",
+        version="2026.3.21",
+        workflow_description="Older local installable workflow",
+        workflow_content="Use the older local workflow.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(downgrade_package_dir)})
+        assert update_response.status_code == 422
+        assert "downgrade requires explicit downgrade lifecycle control" in update_response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_rollback_approval_scope_is_bound_to_snapshot_target(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+    updated_package_dir = _write_high_risk_extension(tmp_path, package_name="high-risk-pack-update")
+    (updated_package_dir / "manifest.yaml").write_text(
+        (updated_package_dir / "manifest.yaml").read_text(encoding="utf-8").replace(
+            "version: 2026.3.21",
+            "version: 2026.4.01",
+        ),
+        encoding="utf-8",
+    )
+    (updated_package_dir / "workflows" / "write-note.md").write_text(
+        "---\n"
+        "name: write-note\n"
+        "description: Updated high risk workflow\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/high-risk-updated.md\n"
+        "      content: approved-updated\n"
+        "---\n\n"
+        "Write an updated note.\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+        assert (await client.post(f"/api/approvals/{install_approval_id}/approve")).status_code == 200
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 409
+        update_approval_id = update_response.json()["detail"]["approval_id"]
+        assert (await client.post(f"/api/approvals/{update_approval_id}/approve")).status_code == 200
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+
+        lifecycle_response = await client.get("/api/extensions/seraph.high-risk-pack/lifecycle")
+        snapshot = lifecycle_response.json()["rollback"]["snapshots"][0]
+        rollback_response = await client.post(
+            "/api/extensions/seraph.high-risk-pack/rollback",
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert rollback_response.status_code == 409
+        detail = rollback_response.json()["detail"]
+        assert detail["type"] == "approval_required"
+        assert detail["approval_scope"]["target"]["type"] == "rollback_snapshot"
+        assert detail["approval_scope"]["target"]["reference"] == snapshot["id"]
+        assert detail["approval_scope"]["rollback_scope"]["snapshot_id"] == snapshot["id"]
+        assert detail["approval_scope"]["rollback_scope"]["restored_digest"] == snapshot["digest"]
+
+
+@pytest.mark.asyncio
+async def test_quarantine_blocks_enable_until_reentry_review_clears_state(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        quarantine_response = await client.post(
+            "/api/extensions/seraph.test-installable/quarantine",
+            json={"reason": "suspicious update", "actor": "cockpit"},
+        )
+        assert quarantine_response.status_code == 200
+        quarantine_payload = quarantine_response.json()
+        assert quarantine_payload["status"] == "quarantined"
+        assert quarantine_payload["extension"]["status"] == "quarantined"
+        assert quarantine_payload["quarantine"]["active"] is True
+        assert skill_manager.get_skill("local-skill").enabled is False
+        assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+        enable_response = await client.post("/api/extensions/seraph.test-installable/enable")
+        assert enable_response.status_code == 422
+        assert "requires re-entry review" in enable_response.json()["detail"]
+
+        reentry_response = await client.post(
+            "/api/extensions/seraph.test-installable/reentry",
+            json={"reason": "manual review passed", "actor": "cockpit"},
+        )
+        assert reentry_response.status_code == 200
+        reentry_payload = reentry_response.json()
+        assert reentry_payload["status"] == "reentry_cleared"
+        assert reentry_payload["quarantine"]["active"] is False
+        assert reentry_payload["extension"]["status"] == "ready"
+
+        enable_response = await client.post("/api/extensions/seraph.test-installable/enable")
+        assert enable_response.status_code == 200
+        assert enable_response.json()["extension"]["enabled"] is True
 
 
 @pytest.mark.asyncio

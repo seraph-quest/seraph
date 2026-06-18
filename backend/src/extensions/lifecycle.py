@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -31,6 +32,7 @@ from src.extensions.governance import (
     assert_governance_allows_lifecycle,
     build_capability_pack_hardening_receipt,
     build_governance_status,
+    extension_permission_fingerprint,
 )
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import (
@@ -57,12 +59,18 @@ from src.extensions.registry import (
 )
 from src.extensions.scaffold import validate_extension_package
 from src.extensions.state import (
+    add_extension_rollback_snapshot,
+    append_extension_lifecycle_event,
     connector_enabled_override,
     connector_enabled_overrides,
+    extension_lifecycle_entry,
+    extension_quarantine_active,
     extension_state_entries,
     load_extension_state_payload,
+    mark_extension_governance_reviewed,
     save_extension_state_payload,
     set_connector_enabled_override,
+    set_extension_quarantine,
     state_path,
 )
 from src.runbooks.loader import scan_runbook_paths
@@ -185,6 +193,10 @@ def _extension_package_digest(root_path: str | None) -> str | None:
     if not root.exists() or not root.is_dir():
         return None
     return _hash_extension_directory(root)
+
+
+def _utc_now_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
 
 
 def _extension_governance_status(
@@ -2038,6 +2050,7 @@ def _extension_payload(
     extension_load_errors = _extension_load_errors_for_extension(extension, load_errors)
     toggles = _toggle_targets(extension)
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+    lifecycle_state = extension_lifecycle_entry(state_entry, create=False) or {}
     location = _location_for_extension(extension)
     package_digest = _extension_package_digest(extension.root_path)
     governance = _extension_governance_status(extension, state_entry)
@@ -2110,6 +2123,8 @@ def _extension_payload(
     status = "ready" if not issues and not extension_load_errors else "degraded"
     if governance.get("fail_closed"):
         status = "blocked"
+    if extension_quarantine_active(state_entry):
+        status = "quarantined"
     return {
         "id": extension.id,
         "display_name": extension.display_name,
@@ -2123,6 +2138,7 @@ def _extension_payload(
         "package_digest": package_digest,
         "manifest_path": extension.manifest_path,
         "governance": governance,
+        "lifecycle": lifecycle_state,
         "summary": extension.manifest.summary if extension.manifest is not None else None,
         "description": extension.manifest.description if extension.manifest is not None else None,
         "compatibility": compatibility,
@@ -2766,6 +2782,19 @@ def install_extension_path(path: str) -> dict[str, Any]:
         shutil.rmtree(target_root, ignore_errors=True)
         _refresh_runtime()
         raise
+    payload = _state_payload()
+    append_extension_lifecycle_event(
+        payload,
+        manifest.id,
+        action="install",
+        status="installed",
+        details={
+            "version": manifest.version,
+            "digest": _extension_package_digest(str(target_root)),
+            "path": str(target_root),
+        },
+    )
+    _save_state(payload)
     return get_extension(manifest.id)
 
 
@@ -2803,6 +2832,10 @@ def update_extension_path(path: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="seraph-extension-update-") as temp_root:
         staging_root = Path(temp_root) / "package"
         backup_root = Path(temp_root) / "backup"
+        snapshot_id = f"{_slugify(manifest.id)}-{_utc_now_compact()}"
+        persistent_snapshot_root = (
+            Path(_workspace_root()) / ".seraph-extension-snapshots" / _slugify(manifest.id) / snapshot_id
+        )
         shutil.copytree(package_root, staging_root)
         shutil.move(target_root, backup_root)
         shutil.move(staging_root, target_root)
@@ -2812,12 +2845,39 @@ def update_extension_path(path: str) -> dict[str, Any]:
             if updated_extension is None:
                 raise ValueError(f"extension '{manifest.id}' did not load after update")
             _sync_mcp_servers_for_updated_extension(existing, updated_extension)
+            persistent_snapshot_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(backup_root, persistent_snapshot_root)
         except Exception:
             if target_root.exists():
                 shutil.rmtree(target_root, ignore_errors=True)
             shutil.move(backup_root, target_root)
             _refresh_runtime()
             raise
+    payload = _state_payload()
+    previous_version = existing.manifest.version if existing.manifest is not None else None
+    snapshot = add_extension_rollback_snapshot(
+        payload,
+        manifest.id,
+        snapshot_id=snapshot_id,
+        snapshot_path=str(persistent_snapshot_root),
+        version=previous_version,
+        digest=current_digest,
+        reason="pre_update",
+    )
+    append_extension_lifecycle_event(
+        payload,
+        manifest.id,
+        action="update" if _version_relation(manifest.version, previous_version) != "downgrade" else "downgrade",
+        status="updated",
+        details={
+            "previous_version": previous_version,
+            "previous_digest": current_digest,
+            "candidate_version": manifest.version,
+            "candidate_digest": candidate_digest,
+            "rollback_snapshot": snapshot,
+        },
+    )
+    _save_state(payload)
     return get_extension(manifest.id)
 
 
@@ -2829,6 +2889,10 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     if enabled:
         state_by_id = _state_payload()["extensions"]
         state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+        if extension_quarantine_active(state_entry):
+            raise ValueError(
+                f"extension '{extension_id}' is quarantined and requires re-entry review before enable"
+            )
         _raise_if_governance_blocks_lifecycle(
             extension,
             action="enable",
@@ -3037,6 +3101,290 @@ def enable_extension(extension_id: str) -> dict[str, Any]:
 
 def disable_extension(extension_id: str) -> dict[str, Any]:
     return _set_enabled(extension_id, False)
+
+
+def extension_lifecycle_status(extension_id: str) -> dict[str, Any]:
+    extension = get_extension(extension_id)
+    lifecycle = extension.get("lifecycle") if isinstance(extension.get("lifecycle"), dict) else {}
+    rollback_snapshots = lifecycle.get("rollback_snapshots")
+    quarantine = lifecycle.get("quarantine")
+    return {
+        "extension": extension,
+        "lifecycle": lifecycle,
+        "rollback": {
+            "available": bool(rollback_snapshots),
+            "snapshots": rollback_snapshots if isinstance(rollback_snapshots, list) else [],
+        },
+        "quarantine": (
+            quarantine
+            if isinstance(quarantine, dict)
+            else {"active": False, "state": "clear"}
+        ),
+        "diagnostics": {
+            "status": extension.get("status"),
+            "compatibility": extension.get("compatibility"),
+            "diagnostics_summary": extension.get("diagnostics_summary"),
+            "permission_summary": extension.get("permission_summary"),
+            "governance": extension.get("governance"),
+            "vulnerability_state": "unknown",
+            "sbom_state": "unknown",
+        },
+    }
+
+
+def record_extension_review(
+    extension_id: str,
+    *,
+    reviewed_by: str = "operator",
+    reason: str = "",
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    if extension.manifest is None:
+        raise ValueError(f"extension '{extension_id}' does not expose a manifest")
+    digest = _extension_package_digest(extension.root_path)
+    if not digest:
+        raise ValueError(f"extension '{extension_id}' does not expose a package digest")
+    governance = _extension_governance_status(
+        extension,
+        _state_payload().get("extensions", {}).get(extension.id, {}),
+    )
+    key_id = str(governance.get("signing_key_id") or "local-manual-review")
+    permission_fingerprint = extension_permission_fingerprint(extension.manifest)
+    payload = _state_payload()
+    review = mark_extension_governance_reviewed(
+        payload,
+        extension.id,
+        digest=digest,
+        key_id=key_id,
+        permission_fingerprint=permission_fingerprint,
+        reviewed_by=reviewed_by,
+        reviewed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="review",
+        status="reviewed",
+        actor=reviewed_by,
+        details={
+            "reason": reason,
+            "digest": digest,
+            "key_id": key_id,
+            "permission_fingerprint": permission_fingerprint,
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "reviewed",
+        "review": review,
+        "receipt": event,
+        **extension_lifecycle_status(extension.id),
+    }
+
+
+def quarantine_extension(
+    extension_id: str,
+    *,
+    reason: str,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    digest = _extension_package_digest(extension.root_path)
+    version = extension.manifest.version if extension.manifest is not None else None
+    runtime_result = disable_extension(extension.id)
+    payload = _state_payload()
+    quarantine = set_extension_quarantine(
+        payload,
+        extension.id,
+        active=True,
+        reason=reason,
+        actor=actor,
+        digest=digest,
+        version=version,
+    )
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="quarantine",
+        status="quarantined",
+        actor=actor,
+        details={
+            "reason": reason,
+            "digest": digest,
+            "version": version,
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "quarantined",
+        "quarantine": quarantine,
+        "receipt": event,
+        "runtime_effects": runtime_result.get("changed", []),
+        **extension_lifecycle_status(extension.id),
+    }
+
+
+def reenter_extension(
+    extension_id: str,
+    *,
+    reviewed_by: str = "operator",
+    reason: str = "",
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    state_payload = _state_payload()
+    state_by_id = state_payload.get("extensions")
+    state_entry = (
+        state_by_id.get(extension.id)
+        if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+        else {}
+    )
+    governance = _extension_governance_status(extension, state_entry)
+    if governance.get("fail_closed"):
+        raise ValueError(
+            f"extension '{extension_id}' cannot re-enter while governance blocks runtime access: "
+            f"{governance.get('fail_closed_reason') or 'blocked'}"
+        )
+    doctor_report = doctor_snapshot(snapshot)
+    doctor_result = next(
+        (result for result in doctor_report.results if result.extension_id == extension_id),
+        None,
+    )
+    load_errors = _extension_load_errors_for_extension(extension, snapshot.load_errors)
+    if (doctor_result is not None and doctor_result.issues) or load_errors:
+        raise ValueError(f"extension '{extension_id}' cannot re-enter until diagnostics are clean")
+    review_result = record_extension_review(extension.id, reviewed_by=reviewed_by, reason=reason or "re-entry review")
+    payload = _state_payload()
+    digest = _extension_package_digest(extension.root_path)
+    version = extension.manifest.version if extension.manifest is not None else None
+    quarantine = set_extension_quarantine(
+        payload,
+        extension.id,
+        active=False,
+        reason=reason or "re-entry review accepted",
+        actor=reviewed_by,
+        digest=digest,
+        version=version,
+    )
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="reentry",
+        status="cleared",
+        actor=reviewed_by,
+        details={
+            "reason": reason,
+            "digest": digest,
+            "version": version,
+            "review_receipt": review_result.get("receipt", {}).get("id"),
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "reentry_cleared",
+        "quarantine": quarantine,
+        "receipt": event,
+        **extension_lifecycle_status(extension.id),
+    }
+
+
+def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    if _location_for_extension(extension) != "workspace" or not extension.root_path:
+        raise ValueError(f"extension '{extension_id}' does not support rollback")
+    state_payload = _state_payload()
+    state_by_id = state_payload.get("extensions")
+    state_entry = (
+        state_by_id.get(extension.id)
+        if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+        else {}
+    )
+    lifecycle = extension_lifecycle_entry(state_entry, create=False) or {}
+    snapshots = lifecycle.get("rollback_snapshots")
+    snapshot_record = None
+    if isinstance(snapshots, list):
+        snapshot_record = next(
+            (
+                item
+                for item in snapshots
+                if isinstance(item, dict)
+                and (not snapshot_id or item.get("id") == snapshot_id)
+            ),
+            None,
+        )
+    if not isinstance(snapshot_record, dict):
+        raise ValueError(f"extension '{extension_id}' has no rollback snapshot")
+    snapshot_path = Path(str(snapshot_record.get("path") or "")).resolve()
+    workspace_root = Path(_workspace_root()).resolve()
+    if not snapshot_path.exists() or not snapshot_path.is_dir() or workspace_root not in snapshot_path.parents:
+        raise ValueError(f"rollback snapshot for extension '{extension_id}' is unavailable")
+    rollback_manifest = load_extension_manifest(str(snapshot_path / "manifest.yaml"))
+    if rollback_manifest.id != extension.id:
+        raise ValueError("rollback snapshot does not match extension id")
+    snapshot_digest = _hash_extension_directory(snapshot_path)
+    recorded_digest = snapshot_record.get("digest")
+    if isinstance(recorded_digest, str) and recorded_digest and recorded_digest != snapshot_digest:
+        raise ValueError("rollback snapshot digest does not match recorded restore point")
+    assert_governance_allows_lifecycle(
+        rollback_manifest,
+        root_path=snapshot_path,
+        state_entry=state_entry,
+        action="rollback",
+    )
+    target_root = Path(extension.root_path)
+    current_digest = _extension_package_digest(extension.root_path)
+    current_version = extension.manifest.version if extension.manifest is not None else None
+    with tempfile.TemporaryDirectory(prefix="seraph-extension-rollback-") as temp_root:
+        current_backup = Path(temp_root) / "current"
+        candidate = Path(temp_root) / "candidate"
+        shutil.copytree(target_root, current_backup)
+        shutil.copytree(snapshot_path, candidate)
+        if target_root.exists():
+            shutil.rmtree(target_root)
+        shutil.move(candidate, target_root)
+        try:
+            _refresh_runtime()
+            rolled_back = _registry().snapshot().get_extension(extension.id)
+            if rolled_back is None:
+                raise ValueError(f"extension '{extension_id}' did not load after rollback")
+            _sync_mcp_servers_for_updated_extension(extension, rolled_back)
+        except Exception:
+            if target_root.exists():
+                shutil.rmtree(target_root, ignore_errors=True)
+            shutil.move(current_backup, target_root)
+            _refresh_runtime()
+            raise
+    payload = _state_payload()
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="rollback",
+        status="rolled_back",
+        details={
+            "snapshot_id": snapshot_record.get("id"),
+            "previous_version": current_version,
+            "previous_digest": current_digest,
+            "restored_version": snapshot_record.get("version"),
+            "restored_digest": snapshot_record.get("digest"),
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "rolled_back",
+        "receipt": event,
+        **extension_lifecycle_status(extension.id),
+    }
 
 
 def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, Any]:

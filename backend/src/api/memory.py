@@ -4,9 +4,11 @@ from pydantic import BaseModel, Field
 
 from src.memory.benchmark import build_guardian_memory_benchmark_report
 from src.memory.control import (
+    apply_memory_live_control_action,
     audit_memory,
     correct_memory,
     forget_memory,
+    get_memory_live_controls_snapshot,
     list_memory_audit_receipts,
     memory_operator_policy_payload,
     pin_memory,
@@ -49,6 +51,25 @@ class MemoryAuditRequest(BaseModel):
     reason: str | None = None
 
 
+class MemoryLiveControlActionRequest(BaseModel):
+    action: str
+    acknowledged: bool = False
+    acknowledge_rollback_boundary: bool = False
+    owner_session_id: str | None = None
+    actor: str = "operator"
+    reason: str | None = None
+    memory_id: str | None = None
+    provider_name: str | None = None
+    outcome: str | None = None
+    privacy_boundary: str | None = None
+
+
+def _live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bool:
+    if str(request.action or "").strip().lower() == "rollback_memory":
+        return request.acknowledge_rollback_boundary
+    return request.acknowledged or request.acknowledge_rollback_boundary
+
+
 @router.get("/memory/providers")
 async def list_memory_providers():
     payload = list_memory_provider_inventory()
@@ -64,6 +85,39 @@ async def list_memory_providers():
 @router.get("/memory/operator-policy")
 async def get_memory_operator_policy():
     return memory_operator_policy_payload()
+
+
+@router.get("/memory/live-controls")
+async def get_memory_live_controls(limit: int = 8, owner_session_id: str | None = None):
+    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+
+
+@router.get("/memory/guardian-memory-live-control")
+async def get_guardian_memory_live_control(limit: int = 8, owner_session_id: str | None = None):
+    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+
+
+@router.post("/memory/live-controls/actions")
+async def post_memory_live_control_action(request: MemoryLiveControlActionRequest):
+    try:
+        return await apply_memory_live_control_action(
+            action=request.action,
+            acknowledged=_live_control_acknowledgement(request),
+            actor=request.actor,
+            reason=request.reason,
+            owner_session_id=request.owner_session_id,
+            memory_id=request.memory_id,
+            provider_name=request.provider_name,
+            outcome=request.outcome,
+            privacy_boundary=request.privacy_boundary,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/memory/guardian-memory-live-control/actions")
+async def post_guardian_memory_live_control_action(request: MemoryLiveControlActionRequest):
+    return await post_memory_live_control_action(request)
 
 
 @router.post("/memory/corrections")

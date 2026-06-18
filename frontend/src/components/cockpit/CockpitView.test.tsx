@@ -2997,7 +2997,7 @@ describe("CockpitView", () => {
     );
   }, 30000);
 
-  it("surfaces M6 memory decisions, controls, privacy, and behavior-change proof", async () => {
+  it("surfaces guardian memory live controls, provider triage, and bounded evidence", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) {
@@ -3049,6 +3049,65 @@ describe("CockpitView", () => {
           recommendations: [],
           runbooks: [],
           extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/operator/guardian-memory-live-control")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            operator_status: "guardian_memory_controls_live",
+            memory_candidate_count: 2,
+            provider_count: 1,
+            quarantined_provider_count: 0,
+            stale_candidate_count: 1,
+            rollback_available_count: 1,
+            delete_export_pending_count: 1,
+            action_receipt_count: 2,
+            claim_boundary: "bounded_live_controls_not_solved_learning_or_memory_superiority",
+          },
+          memory_candidates: [
+            {
+              id: "mem-pin",
+              kind: "preference",
+              status: "active",
+              summary: "Prefer short operator-ready release notes.",
+              content: "Prefer short operator-ready release notes.",
+              confidence: 0.91,
+              privacy_boundary: "private",
+              learning_outcome: "unreviewed",
+              stale_evidence: false,
+              rollback_available: true,
+              delete_export_state: "pending_review",
+              recommended_actions: ["review_outcome", "rollback_memory"],
+            },
+          ],
+          provider_controls: [
+            {
+              name: "workspace-vector",
+              runtime_state: "degraded",
+              control_state: "watch",
+              retrieval_allowed: true,
+              writeback_allowed: false,
+              advisory_only: true,
+              notes: ["Canonical guardian memory remains authoritative."],
+              recommended_actions: ["quarantine_provider"],
+            },
+          ],
+          action_receipts: [
+            {
+              id: "live-review",
+              action: "review_outcome",
+              target_kind: "memory",
+              target_id: "mem-pin",
+              summary: "Operator reviewed memory learning outcome.",
+              outcome: "helpful",
+              changed_memory: true,
+              changed_provider_state: false,
+              risk_level: "low",
+              created_at: "2026-05-05T08:03:00Z",
+            },
+          ],
+          blocked_claims: ["memory_superiority", "full_parity"],
+          policy: {},
         }));
       }
       if (url.includes("/api/operator/m6-memory-superiority")) {
@@ -3178,13 +3237,20 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
-    const memorySurface = await screen.findByLabelText("M6 memory superiority");
+    const memorySurface = await screen.findByLabelText("Guardian memory controls");
     await waitFor(() => {
-      expect(memorySurface).toHaveTextContent(/m6 memory superiority visible · 4 active · 3 control receipts · 1 behavior receipts · 1 provider-blocked/i);
+      expect(memorySurface).toHaveTextContent(/guardian memory controls live · 2 memories · 1 providers · 0 quarantined · 1 rollback-ready · 1 delete\/export pending/i);
+      expect(memorySurface).toHaveTextContent(/1 stale evidence · 2 live receipts · bounded live controls not solved learning or memory superiority/i);
+      expect(memorySurface).toHaveTextContent(/Prefer short operator-ready release notes/i);
+      expect(memorySurface).toHaveTextContent(/preference · active · outcome unreviewed · fresh enough · rollback available · delete\/export pending review · privacy private/i);
+      expect(memorySurface).toHaveTextContent(/Helpful/i);
+      expect(memorySurface).toHaveTextContent(/Harmful/i);
+      expect(memorySurface).toHaveTextContent(/workspace-vector/i);
+      expect(memorySurface).toHaveTextContent(/degraded · watch · retrieval allowed · writeback blocked · advisory only · runtime-local control/i);
+      expect(memorySurface).toHaveTextContent(/review outcome/i);
       expect(memorySurface).toHaveTextContent(/confidence grounded · posture clarify first · 1 corrected\/superseded · 1 forgotten\/archived · 6 source receipts · 2 privacy boundaries/i);
       expect(memorySurface).toHaveTextContent(/Memory changed behavior/i);
       expect(memorySurface).toHaveTextContent(/recall context, action posture · intent clarify · confidence grounded/i);
-      expect(memorySurface).toHaveTextContent(/Prefer short operator-ready release notes/i);
       expect(memorySurface).toHaveTextContent(/preference · active · pinned · privacy private · provider writeback blocked/i);
       expect(memorySurface).toHaveTextContent(/project · archived · forgotten · conflict operator_correction · stale operator_forget/i);
       expect(memorySurface).toHaveTextContent(/memory pin/i);

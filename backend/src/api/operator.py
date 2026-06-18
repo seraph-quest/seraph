@@ -103,7 +103,11 @@ from src.guardian.live_learning_quality import build_live_guardian_learning_qual
 from src.guardian.multimodal_voice import build_guardian_safe_multimodal_voice_report
 from src.guardian.state import build_guardian_state
 from src.memory.benchmark import build_guardian_memory_benchmark_report
-from src.memory.control import apply_memory_operator_control
+from src.memory.control import (
+    apply_memory_live_control_action,
+    apply_memory_operator_control,
+    get_memory_live_controls_snapshot,
+)
 from src.memory.provider_quality_gate import build_memory_provider_quality_gate_report
 from src.memory.superiority import build_m6_memory_superiority_payload
 from src.memory.superiority_benchmark import build_m6_memory_superiority_benchmark_report
@@ -150,6 +154,25 @@ class MemoryOperatorControlRequest(BaseModel):
     summary: str | None = None
     privacy_boundary: str | None = None
     session_id: str | None = None
+
+
+class MemoryLiveControlActionRequest(BaseModel):
+    action: str
+    acknowledged: bool = False
+    acknowledge_rollback_boundary: bool = False
+    owner_session_id: str | None = None
+    actor: str = "operator"
+    reason: str | None = None
+    memory_id: str | None = None
+    provider_name: str | None = None
+    outcome: str | None = None
+    privacy_boundary: str | None = None
+
+
+def _memory_live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bool:
+    if str(request.action or "").strip().lower() == "rollback_memory":
+        return request.acknowledge_rollback_boundary
+    return request.acknowledged or request.acknowledge_rollback_boundary
 
 
 _ENGINEERING_PULL_REQUEST_RE = re.compile(
@@ -4168,6 +4191,45 @@ async def get_operator_generalized_guardian_outcomes():
 @router.get("/operator/live-guardian-memory-field-program")
 async def get_operator_live_guardian_memory_field_program():
     return await build_live_guardian_memory_field_program_report()
+
+
+@router.get("/operator/memory-live-controls")
+async def get_operator_memory_live_controls(
+    limit: int = 8,
+    owner_session_id: str | None = Query(default=None),
+):
+    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+
+
+@router.get("/operator/guardian-memory-live-control")
+async def get_operator_guardian_memory_live_control(
+    limit: int = 8,
+    owner_session_id: str | None = Query(default=None),
+):
+    return await get_memory_live_controls_snapshot(limit=limit, owner_session_id=owner_session_id)
+
+
+@router.post("/operator/memory-live-controls/actions")
+async def post_operator_memory_live_control_action(request: MemoryLiveControlActionRequest):
+    try:
+        return await apply_memory_live_control_action(
+            action=request.action,
+            acknowledged=_memory_live_control_acknowledgement(request),
+            actor=request.actor,
+            reason=request.reason,
+            owner_session_id=request.owner_session_id,
+            memory_id=request.memory_id,
+            provider_name=request.provider_name,
+            outcome=request.outcome,
+            privacy_boundary=request.privacy_boundary,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/operator/guardian-memory-live-control/actions")
+async def post_operator_guardian_memory_live_control_action(request: MemoryLiveControlActionRequest):
+    return await post_operator_memory_live_control_action(request)
 
 
 @router.get("/operator/post-dp-guardian-learning-memory-gap-closure")

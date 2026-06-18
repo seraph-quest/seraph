@@ -1018,6 +1018,64 @@ interface OperatorM6MemorySuperiority {
   policy: Record<string, unknown>;
 }
 
+interface GuardianMemoryLiveCandidate {
+  id: string;
+  kind: string;
+  status: string;
+  summary: string;
+  content: string;
+  confidence: number;
+  privacy_boundary: string;
+  learning_outcome: string;
+  stale_evidence: boolean;
+  rollback_available: boolean;
+  delete_export_state: string;
+  recommended_actions: string[];
+}
+
+interface GuardianMemoryProviderControl {
+  name: string;
+  runtime_state: string;
+  control_state: string;
+  retrieval_allowed: boolean;
+  writeback_allowed: boolean;
+  advisory_only: boolean;
+  notes: string[];
+  recommended_actions: string[];
+}
+
+interface GuardianMemoryControlReceipt {
+  id: string;
+  action: string;
+  target_kind: string;
+  target_id: string;
+  summary: string;
+  outcome: string;
+  changed_memory: boolean;
+  changed_provider_state: boolean;
+  risk_level: string;
+  created_at: string;
+}
+
+interface GuardianMemoryLiveControl {
+  summary: {
+    operator_status: string;
+    memory_candidate_count: number;
+    provider_count: number;
+    quarantined_provider_count: number;
+    stale_candidate_count: number;
+    rollback_available_count: number;
+    delete_export_pending_count: number;
+    action_receipt_count: number;
+    claim_boundary: string;
+  };
+  memory_candidates: GuardianMemoryLiveCandidate[];
+  provider_controls: GuardianMemoryProviderControl[];
+  action_receipts: GuardianMemoryControlReceipt[];
+  blocked_claims: string[];
+  policy: Record<string, unknown>;
+}
+
 interface OperatorM7Control {
   action: string;
   enabled: boolean;
@@ -4677,6 +4735,99 @@ function normalizeOperatorM6MemorySuperiority(value: unknown): OperatorM6MemoryS
   };
 }
 
+function normalizeGuardianMemoryLiveControl(value: unknown): GuardianMemoryLiveControl | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      memory_candidate_count: numberValue(summaryRecord.memory_candidate_count),
+      provider_count: numberValue(summaryRecord.provider_count),
+      quarantined_provider_count: numberValue(summaryRecord.quarantined_provider_count),
+      stale_candidate_count: numberValue(summaryRecord.stale_candidate_count),
+      rollback_available_count: numberValue(summaryRecord.rollback_available_count),
+      delete_export_pending_count: numberValue(summaryRecord.delete_export_pending_count),
+      action_receipt_count: numberValue(summaryRecord.action_receipt_count),
+      claim_boundary: typeof summaryRecord.claim_boundary === "string" ? summaryRecord.claim_boundary : "bounded_live_controls_not_superiority",
+    },
+    memory_candidates: Array.isArray(record.memory_candidates)
+      ? record.memory_candidates.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          kind: typeof item.kind === "string" ? item.kind : "memory",
+          status: typeof item.status === "string" ? item.status : "unknown",
+          summary: typeof item.summary === "string" ? item.summary : "",
+          content: typeof item.content === "string" ? item.content : "",
+          confidence: numberValue(item.confidence),
+          privacy_boundary: typeof item.privacy_boundary === "string" ? item.privacy_boundary : "operator_visible",
+          learning_outcome: typeof item.learning_outcome === "string" ? item.learning_outcome : "unreviewed",
+          stale_evidence: Boolean(item.stale_evidence),
+          rollback_available: Boolean(item.rollback_available),
+          delete_export_state: typeof item.delete_export_state === "string" ? item.delete_export_state : "not_requested",
+          recommended_actions: stringList(item.recommended_actions),
+        }];
+      })
+      : [],
+    provider_controls: Array.isArray(record.provider_controls)
+      ? record.provider_controls.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const name = typeof item.name === "string" ? item.name : "";
+        if (!name) return [];
+        return [{
+          name,
+          runtime_state: typeof item.runtime_state === "string" ? item.runtime_state : "unknown",
+          control_state: typeof item.control_state === "string" ? item.control_state : "watch",
+          retrieval_allowed: Boolean(item.retrieval_allowed),
+          writeback_allowed: Boolean(item.writeback_allowed),
+          advisory_only: item.advisory_only !== false,
+          notes: stringList(item.notes),
+          recommended_actions: stringList(item.recommended_actions),
+        }];
+      })
+      : [],
+    action_receipts: Array.isArray(record.action_receipts)
+      ? record.action_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          action: typeof item.action === "string" ? item.action : "audit",
+          target_kind: typeof item.target_kind === "string" ? item.target_kind : "memory",
+          target_id: typeof item.target_id === "string" ? item.target_id : "",
+          summary: typeof item.summary === "string" ? item.summary : "",
+          outcome: typeof item.outcome === "string" ? item.outcome : "recorded",
+          changed_memory: Boolean(item.changed_memory),
+          changed_provider_state: Boolean(item.changed_provider_state),
+          risk_level: typeof item.risk_level === "string" ? item.risk_level : "low",
+          created_at: typeof item.created_at === "string" ? item.created_at : "",
+        }];
+      })
+      : [],
+    blocked_claims: stringList(record.blocked_claims),
+    policy: record.policy && typeof record.policy === "object" && !Array.isArray(record.policy)
+      ? record.policy as Record<string, unknown>
+      : {},
+  };
+}
+
 function normalizeOperatorM7Cockpit(value: unknown): OperatorM7Cockpit | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -6470,6 +6621,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
   const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
+  const [guardianMemoryLiveControl, setGuardianMemoryLiveControl] = useState<GuardianMemoryLiveControl | null>(null);
   const [operatorM6MemorySuperiority, setOperatorM6MemorySuperiority] = useState<OperatorM6MemorySuperiority | null>(null);
   const [operatorM7Cockpit, setOperatorM7Cockpit] = useState<OperatorM7Cockpit | null>(null);
   const [operatorM8GuardianBrain, setOperatorM8GuardianBrain] = useState<OperatorM8GuardianBrain | null>(null);
@@ -6657,6 +6809,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       workflowOrchestrationResult,
       backgroundSessionsResult,
       m5OperatingLayerResult,
+      guardianMemoryLiveControlResult,
       m6MemorySuperiorityResult,
       m7CockpitResult,
       m8GuardianBrainResult,
@@ -6684,6 +6837,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       fetchJson(`${API_URL}/api/operator/background-sessions`),
       fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
+      fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
@@ -6756,6 +6910,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
     setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
     setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
+    setGuardianMemoryLiveControl(normalizeGuardianMemoryLiveControl(guardianMemoryLiveControlResult.payload));
     setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
     setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
     setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
@@ -6948,6 +7103,57 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       await refreshCockpit();
     } catch (error) {
       setOperatorStatus(`Browser control failed ${session.session_id}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [refreshCockpit, sessionId]);
+
+  const runGuardianMemoryControl = useCallback(async (
+    action: string,
+    target: { memoryId?: string; providerName?: string },
+    outcome?: string,
+  ) => {
+    if (!sessionId) {
+      setOperatorStatus("Guardian memory control unavailable: no active session");
+      return;
+    }
+    const acknowledgeRollback = action === "rollback_memory";
+    if (acknowledgeRollback) {
+      const confirmed = window.confirm("Rollback this guardian memory control state?");
+      if (!confirmed) {
+        setOperatorStatus("Guardian memory rollback cancelled: boundary not acknowledged");
+        return;
+      }
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/operator/guardian-memory-live-control/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          action,
+          acknowledged: true,
+          memory_id: target.memoryId,
+          provider_name: target.providerName,
+          outcome,
+          reason: "cockpit_operator_control",
+          privacy_boundary: "operator_visible",
+          acknowledge_rollback_boundary: acknowledgeRollback,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        const reason = detail && typeof detail === "object"
+          ? String((detail as Record<string, unknown>).error ?? "refused")
+          : String(detail ?? response.status);
+        setOperatorStatus(`Guardian memory control refused: ${reason}`);
+        await refreshCockpit();
+        return;
+      }
+      const label = target.memoryId ?? target.providerName ?? "guardian memory";
+      setOperatorStatus(`Guardian memory ${action.replace(/_/g, " ")} applied to ${label}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Guardian memory control failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   }, [refreshCockpit, sessionId]);
 
@@ -7854,6 +8060,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       `${operatorM6MemorySuperiority.summary.provider_writeback_blocked_count} provider-blocked`,
     ].join(" · ")
     : null;
+  const guardianMemoryControlSummary = guardianMemoryLiveControl
+    ? [
+      guardianMemoryLiveControl.summary.operator_status.replace(/_/g, " "),
+      `${guardianMemoryLiveControl.summary.memory_candidate_count} memories`,
+      `${guardianMemoryLiveControl.summary.provider_count} providers`,
+      `${guardianMemoryLiveControl.summary.quarantined_provider_count} quarantined`,
+      `${guardianMemoryLiveControl.summary.rollback_available_count} rollback-ready`,
+      `${guardianMemoryLiveControl.summary.delete_export_pending_count} delete/export pending`,
+    ].join(" · ")
+    : m6MemorySummary;
   const backgroundContinuitySummary = (
     operatorBackgroundSessions
     && operatorEngineeringMemory
@@ -15541,11 +15757,118 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     )}
                   </section>
 
-                  <section className="cockpit-operator-section" aria-label="M6 memory superiority">
+                  <section className="cockpit-operator-section" aria-label="Guardian memory controls">
                     <div className="cockpit-operator-row">
-                      <span className="cockpit-key">M6 memory superiority</span>
-                      <span className="cockpit-operator-link">{m6MemorySummary ?? "summary unavailable"}</span>
+                      <span className="cockpit-key">guardian memory controls</span>
+                      <span className="cockpit-operator-link">{guardianMemoryControlSummary ?? "summary unavailable"}</span>
                     </div>
+                    {guardianMemoryLiveControl ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${guardianMemoryLiveControl.summary.stale_candidate_count} stale evidence`,
+                            `${guardianMemoryLiveControl.summary.action_receipt_count} live receipts`,
+                            guardianMemoryLiveControl.summary.claim_boundary.replace(/_/g, " "),
+                          ].join(" · ")}
+                        </div>
+                        {guardianMemoryLiveControl.memory_candidates.slice(0, 4).map((memory) => (
+                          <div key={memory.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{memory.summary || memory.content || memory.kind}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  memory.kind.replace(/_/g, " "),
+                                  memory.status.replace(/_/g, " "),
+                                  `outcome ${memory.learning_outcome.replace(/_/g, " ")}`,
+                                  memory.stale_evidence ? "stale evidence" : "fresh enough",
+                                  memory.rollback_available ? "rollback available" : "rollback gated",
+                                  `delete/export ${memory.delete_export_state.replace(/_/g, " ")}`,
+                                  `privacy ${memory.privacy_boundary.replace(/_/g, " ")}`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-feedback-row">
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("review_outcome", { memoryId: memory.id }, "helpful")}
+                                >
+                                  Helpful
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("review_outcome", { memoryId: memory.id }, "harmful")}
+                                >
+                                  Harmful
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("decay_stale_evidence", { memoryId: memory.id })}
+                                >
+                                  Decay
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  disabled={!memory.rollback_available}
+                                  onClick={() => void runGuardianMemoryControl("rollback_memory", { memoryId: memory.id })}
+                                >
+                                  Rollback
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {guardianMemoryLiveControl.provider_controls.slice(0, 4).map((provider) => (
+                          <div key={provider.name} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{provider.name}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  provider.runtime_state.replace(/_/g, " "),
+                                  provider.control_state.replace(/_/g, " "),
+                                  provider.retrieval_allowed ? "retrieval allowed" : "retrieval blocked",
+                                  provider.writeback_allowed ? "writeback allowed" : "writeback blocked",
+                                  provider.advisory_only ? "advisory only" : "canonical risk",
+                                  "runtime-local control",
+                                ].join(" · ")}
+                              </div>
+                              {provider.notes.length ? (
+                                <div className="cockpit-operator-note">{provider.notes.slice(0, 2).join(" · ")}</div>
+                              ) : null}
+                              <div className="cockpit-feedback-row">
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("quarantine_provider", { providerName: provider.name })}
+                                >
+                                  Quarantine
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("reinstate_provider", { providerName: provider.name })}
+                                >
+                                  Reinstate
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {guardianMemoryLiveControl.action_receipts.slice(0, 3).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{receipt.action.replace(/_/g, " ")}</div>
+                              <div className="cockpit-operator-note">
+                                {[receipt.target_kind, receipt.outcome.replace(/_/g, " "), receipt.risk_level, receipt.created_at ? formatAge(receipt.created_at) : null].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{receipt.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    ) : null}
                     {operatorM6MemorySuperiority ? (
                       <>
                         <div className="cockpit-sublist-item">
@@ -15623,11 +15946,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           </div>
                         ))}
                         {operatorM6MemorySuperiority.memory_records.length === 0 && operatorM6MemorySuperiority.control_receipts.length === 0 ? (
-                          <div className="cockpit-empty">No M6 memory decisions or control receipts are available yet.</div>
+                          <div className="cockpit-empty">No guardian memory decisions or control receipts are available yet.</div>
                         ) : null}
                       </>
                     ) : (
-                      <div className="cockpit-empty">M6 memory superiority summary unavailable.</div>
+                      <div className="cockpit-empty">Guardian memory controls unavailable.</div>
                     )}
                   </section>
 

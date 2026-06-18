@@ -1499,6 +1499,7 @@ interface OperatorEntity {
     | "starter_pack"
     | "workflow_definition"
     | "extension_manifest"
+    | "browser_session"
     | "activity_item";
   name: string;
   meta: string;
@@ -1773,6 +1774,69 @@ interface ExtensionContributionInfo {
   requires_daemon: boolean;
   approval_behavior?: string | null;
   requires_approval?: boolean;
+}
+
+interface BrowserProviderControlInfo {
+  extension_id: string;
+  name: string;
+  provider_kind: string;
+  description: string;
+  enabled: boolean;
+  configured: boolean;
+  selected: boolean;
+  execution_mode: string;
+  runtime_state: string;
+  requires_network: boolean;
+  requires_daemon: boolean;
+  capabilities: string[];
+  credential_surface?: string | null;
+  cookie_scope?: string | null;
+  profile_persistence?: string | null;
+  owner_scope?: string | null;
+  remote_transport?: string | null;
+  fallback_policy?: string | null;
+}
+
+interface BrowserSessionBoundaryDecision {
+  state: string;
+  enforced: boolean;
+  operator_visible: boolean;
+}
+
+interface BrowserSessionArtifactProvenance {
+  artifact_handle?: string;
+  handle?: string;
+  artifact_body_digest?: string;
+  raw_artifact_body_exposed?: boolean;
+  safe_receipt?: Record<string, unknown>;
+}
+
+interface BrowserSessionControlInfo {
+  session_id: string;
+  owner_session_id: string;
+  url: string;
+  provider_name: string;
+  provider_kind: string;
+  execution_mode: string;
+  status: string;
+  risk_state: string;
+  recovery_state: string;
+  partition_id: string;
+  partition_revision: number;
+  boundary_decisions: Record<string, BrowserSessionBoundaryDecision>;
+  provider_degradation: {
+    degraded?: boolean;
+    fallback_labeled?: boolean;
+    fallback_reason?: string;
+    silent_fallback_allowed?: boolean;
+  };
+  snapshot_count: number;
+  latest_ref?: string | null;
+  latest_capture?: string | null;
+  latest_summary?: string | null;
+  latest_artifact_provenance?: BrowserSessionArtifactProvenance | null;
+  control_events: Array<Record<string, unknown>>;
+  updated_at: string;
 }
 
 interface ExtensionConnectorSummary {
@@ -6275,6 +6339,94 @@ function CockpitWorkspaceWindow({
   );
 }
 
+function normalizeBrowserProviders(payload: unknown): BrowserProviderControlInfo[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const providers = (payload as Record<string, unknown>).providers;
+  if (!Array.isArray(providers)) return [];
+  return providers.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.name !== "string" || typeof record.provider_kind !== "string") return [];
+    return [{
+      extension_id: typeof record.extension_id === "string" ? record.extension_id : "",
+      name: record.name,
+      provider_kind: record.provider_kind,
+      description: typeof record.description === "string" ? record.description : "",
+      enabled: Boolean(record.enabled),
+      configured: Boolean(record.configured),
+      selected: Boolean(record.selected),
+      execution_mode: typeof record.execution_mode === "string" ? record.execution_mode : "unknown",
+      runtime_state: typeof record.runtime_state === "string" ? record.runtime_state : "unknown",
+      requires_network: Boolean(record.requires_network),
+      requires_daemon: Boolean(record.requires_daemon),
+      capabilities: Array.isArray(record.capabilities)
+        ? record.capabilities.filter((item): item is string => typeof item === "string")
+        : [],
+      credential_surface: typeof record.credential_surface === "string" ? record.credential_surface : null,
+      cookie_scope: typeof record.cookie_scope === "string" ? record.cookie_scope : null,
+      profile_persistence: typeof record.profile_persistence === "string" ? record.profile_persistence : null,
+      owner_scope: typeof record.owner_scope === "string" ? record.owner_scope : null,
+      remote_transport: typeof record.remote_transport === "string" ? record.remote_transport : null,
+      fallback_policy: typeof record.fallback_policy === "string" ? record.fallback_policy : null,
+    }];
+  });
+}
+
+function normalizeBrowserSessions(payload: unknown): BrowserSessionControlInfo[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const sessionsValue = (payload as Record<string, unknown>).sessions;
+  if (!Array.isArray(sessionsValue)) return [];
+  return sessionsValue.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.session_id !== "string" || typeof record.owner_session_id !== "string") return [];
+    const boundaryRecord = record.boundary_decisions && typeof record.boundary_decisions === "object" && !Array.isArray(record.boundary_decisions)
+      ? record.boundary_decisions as Record<string, unknown>
+      : {};
+    const boundaryDecisions = Object.fromEntries(
+      Object.entries(boundaryRecord).flatMap(([key, value]) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+        const boundary = value as Record<string, unknown>;
+        return [[key, {
+          state: typeof boundary.state === "string" ? boundary.state : "unknown",
+          enforced: Boolean(boundary.enforced),
+          operator_visible: Boolean(boundary.operator_visible),
+        }]];
+      }),
+    );
+    const providerDegradation = record.provider_degradation && typeof record.provider_degradation === "object" && !Array.isArray(record.provider_degradation)
+      ? record.provider_degradation as BrowserSessionControlInfo["provider_degradation"]
+      : {};
+    const provenance = record.latest_artifact_provenance && typeof record.latest_artifact_provenance === "object" && !Array.isArray(record.latest_artifact_provenance)
+      ? record.latest_artifact_provenance as BrowserSessionArtifactProvenance
+      : null;
+    return [{
+      session_id: record.session_id,
+      owner_session_id: record.owner_session_id,
+      url: typeof record.url === "string" ? record.url : "",
+      provider_name: typeof record.provider_name === "string" ? record.provider_name : "unknown",
+      provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "unknown",
+      execution_mode: typeof record.execution_mode === "string" ? record.execution_mode : "unknown",
+      status: typeof record.status === "string" ? record.status : "unknown",
+      risk_state: typeof record.risk_state === "string" ? record.risk_state : "unknown",
+      recovery_state: typeof record.recovery_state === "string" ? record.recovery_state : "unknown",
+      partition_id: typeof record.partition_id === "string" ? record.partition_id : "",
+      partition_revision: typeof record.partition_revision === "number" ? record.partition_revision : 0,
+      boundary_decisions: boundaryDecisions,
+      provider_degradation: providerDegradation,
+      snapshot_count: typeof record.snapshot_count === "number" ? record.snapshot_count : 0,
+      latest_ref: typeof record.latest_ref === "string" ? record.latest_ref : null,
+      latest_capture: typeof record.latest_capture === "string" ? record.latest_capture : null,
+      latest_summary: typeof record.latest_summary === "string" ? record.latest_summary : null,
+      latest_artifact_provenance: provenance,
+      control_events: Array.isArray(record.control_events)
+        ? record.control_events.filter((item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item))
+        : [],
+      updated_at: typeof record.updated_at === "string" ? record.updated_at : "",
+    }];
+  });
+}
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
@@ -6323,6 +6475,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorM8GuardianBrain, setOperatorM8GuardianBrain] = useState<OperatorM8GuardianBrain | null>(null);
   const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
+  const [browserProviders, setBrowserProviders] = useState<BrowserProviderControlInfo[]>([]);
+  const [browserSessions, setBrowserSessions] = useState<BrowserSessionControlInfo[]>([]);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
@@ -6510,6 +6664,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       continuityGraphResult,
       workflowRunsResult,
       artifactLineageRunsResult,
+      browserProvidersResult,
+      browserSessionsResult,
       toolModeResult,
       mcpModeResult,
       approvalModeResult,
@@ -6535,6 +6691,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
+      fetchJson(`${API_URL}/api/browser/providers`),
+      sessionId
+        ? fetchJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`)
+        : Promise.resolve({ ok: true, payload: { sessions: [] } }),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
       fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
       fetchJson(`${API_URL}/api/settings/approval-mode`),
@@ -6601,6 +6761,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
     setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
+    setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
+    setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
@@ -6742,8 +6904,66 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     syncCockpitPaneStack(paneVisibility);
   }, [paneVisibility, syncCockpitPaneStack]);
 
+  const runBrowserSessionControl = useCallback(async (
+    session: BrowserSessionControlInfo,
+    action: "quarantine" | "recover" | "reset_partition" | "replay_snapshot" | "close",
+  ) => {
+    if (!sessionId) {
+      setOperatorStatus("Browser control unavailable: no active session");
+      return;
+    }
+    const acknowledgeDegradedFallback = action === "replay_snapshot" && session.provider_degradation.degraded === true;
+    if (acknowledgeDegradedFallback) {
+      const confirmed = window.confirm(
+        "Replay this degraded local-fallback browser session?",
+      );
+      if (!confirmed) {
+        setOperatorStatus(`Browser replay cancelled ${session.session_id}: degraded fallback not acknowledged`);
+        return;
+      }
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/operator/browser-computer-use-control/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          session_id: session.session_id,
+          action,
+          reason: "cockpit_operator_control",
+          acknowledge_degraded_fallback: acknowledgeDegradedFallback,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        const reason = detail && typeof detail === "object"
+          ? String((detail as Record<string, unknown>).error ?? "refused")
+          : String(detail ?? response.status);
+        setOperatorStatus(`Browser control refused ${session.session_id}: ${reason}`);
+        await refreshCockpit();
+        return;
+      }
+      setOperatorStatus(`Browser control ${action.replace(/_/g, " ")} applied to ${session.session_id}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Browser control failed ${session.session_id}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [refreshCockpit, sessionId]);
+
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
+  const selectedBrowserProvider = browserProviders.find((provider) => provider.selected) ?? browserProviders[0] ?? null;
+  const degradedBrowserProviderCount = browserProviders.filter(
+    (provider) => provider.runtime_state.includes("fallback") || provider.runtime_state.includes("degraded"),
+  ).length;
+  const quarantinedBrowserSessionCount = browserSessions.filter((session) => session.status === "quarantined").length;
+  const browserControlSummary = [
+    `${browserProviders.length} providers`,
+    `${browserSessions.length} sessions`,
+    degradedBrowserProviderCount ? `${degradedBrowserProviderCount} degraded` : "no degraded fallback",
+    quarantinedBrowserSessionCount ? `${quarantinedBrowserSessionCount} quarantined` : "no quarantine",
+  ].join(" · ");
   const visibleSections = useMemo(
     () => ({
       rail:
@@ -14654,6 +14874,143 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span>{`repair ${m7ControlModeLabel("repair", "routed_or_policy_gated_control")}`}</span>
                       <span>{`branch ${m7ControlModeLabel("branch", "operator_draft_control")}`}</span>
                     </div>
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Browser computer-use live controls">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">browser control</span>
+                      <span className="cockpit-operator-link">{browserControlSummary}</span>
+                    </div>
+                    {selectedBrowserProvider ? (
+                      <div className="cockpit-sublist-item">
+                        {[
+                          selectedBrowserProvider.name,
+                          selectedBrowserProvider.provider_kind.replace(/_/g, " "),
+                          selectedBrowserProvider.runtime_state.replace(/_/g, " "),
+                          selectedBrowserProvider.execution_mode.replace(/_/g, " "),
+                          selectedBrowserProvider.fallback_policy ? `fallback ${selectedBrowserProvider.fallback_policy.replace(/_/g, " ")}` : null,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    ) : (
+                      <div className="cockpit-sublist-item">No browser provider inventory loaded.</div>
+                    )}
+                    {browserSessions.slice(0, 4).map((browserSession) => {
+                      const boundaryNames = Object.entries(browserSession.boundary_decisions)
+                        .filter(([, decision]) => decision.operator_visible)
+                        .slice(0, 6)
+                        .map(([name]) => name.replace(/_/g, " "));
+                      const artifactHandle = browserSession.latest_artifact_provenance?.artifact_handle
+                        ?? browserSession.latest_artifact_provenance?.handle
+                        ?? "receipt pending";
+                      const degraded = browserSession.provider_degradation.degraded === true;
+                      const quarantined = browserSession.status === "quarantined";
+                      return (
+                        <div key={browserSession.session_id} className="cockpit-operator-row cockpit-operator-row--entry">
+                          <button
+                            type="button"
+                            className="cockpit-operator-details cockpit-operator-details--button"
+                            onClick={() =>
+                              setSelectedInspector({
+                                kind: "operator",
+                                entity: {
+                                  entityType: "browser_session",
+                                  name: browserSession.session_id,
+                                  meta: `${browserSession.provider_name} · ${browserSession.status}`,
+                                  summary: browserSession.latest_summary || browserSession.url,
+                                  details: {
+                                    owner_session_id: browserSession.owner_session_id,
+                                    url: browserSession.url,
+                                    provider: browserSession.provider_name,
+                                    provider_kind: browserSession.provider_kind,
+                                    execution_mode: browserSession.execution_mode,
+                                    status: browserSession.status,
+                                    risk_state: browserSession.risk_state,
+                                    recovery_state: browserSession.recovery_state,
+                                    partition_id: browserSession.partition_id,
+                                    partition_revision: browserSession.partition_revision,
+                                    provider_degradation: browserSession.provider_degradation,
+                                    boundary_decisions: browserSession.boundary_decisions,
+                                    latest_artifact_provenance: browserSession.latest_artifact_provenance,
+                                    control_events: browserSession.control_events,
+                                  },
+                                },
+                              })
+                            }
+                          >
+                            <div className="cockpit-value">
+                              {browserSession.provider_name} · {browserSession.url}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              {[
+                                browserSession.status.replace(/_/g, " "),
+                                browserSession.risk_state.replace(/_/g, " "),
+                                browserSession.recovery_state.replace(/_/g, " "),
+                                `partition r${browserSession.partition_revision}`,
+                                `${browserSession.snapshot_count} snapshots`,
+                              ].join(" · ")}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              {[
+                                browserSession.provider_kind.replace(/_/g, " "),
+                                browserSession.execution_mode.replace(/_/g, " "),
+                                degraded ? "degraded fallback labeled" : "no silent fallback",
+                                browserSession.provider_degradation.silent_fallback_allowed === false ? "silent fallback blocked" : null,
+                              ].filter(Boolean).join(" · ")}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              boundaries: {boundaryNames.join(" · ") || "none visible"}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              receipt: {artifactHandle}
+                            </div>
+                          </button>
+                          <div className="cockpit-operator-actions">
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={quarantined}
+                              onClick={() => void runBrowserSessionControl(browserSession, "quarantine")}
+                            >
+                              quarantine
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={!quarantined && browserSession.recovery_state !== "needs_fresh_snapshot"}
+                              onClick={() => void runBrowserSessionControl(browserSession, "recover")}
+                            >
+                              recover
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runBrowserSessionControl(browserSession, "reset_partition")}
+                            >
+                              reset
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={quarantined}
+                              title={degraded ? "replay acknowledges labeled local fallback" : "replay latest capture"}
+                              onClick={() => void runBrowserSessionControl(browserSession, "replay_snapshot")}
+                            >
+                              replay
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runBrowserSessionControl(browserSession, "close")}
+                            >
+                              close
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {browserSessions.length === 0 ? (
+                      <div className="cockpit-empty">No browser/computer-use sessions for this thread yet.</div>
+                    ) : null}
                   </section>
 
                   <section className="cockpit-operator-section" aria-label="Team control plane">

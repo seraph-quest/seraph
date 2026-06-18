@@ -51,6 +51,8 @@ function mockCockpitBaselineFetch(
   options: {
     capabilities?: Record<string, unknown>;
     extensions?: Record<string, unknown>;
+    browserProviders?: Record<string, unknown>;
+    browserSessions?: Record<string, unknown>;
   },
 ) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
@@ -84,6 +86,18 @@ function mockCockpitBaselineFetch(
     }
     if (url.includes("/api/capabilities/overview")) {
       return Promise.resolve(mockResponse(options.capabilities ?? emptyCapabilityOverview()));
+    }
+    if (url.includes("/api/browser/providers")) {
+      return Promise.resolve(mockResponse(options.browserProviders ?? { providers: [] }));
+    }
+    if (url.includes("/api/operator/browser-computer-use-control")) {
+      return Promise.resolve(mockResponse({
+        ...(options.browserProviders ?? { providers: [] }),
+        ...(options.browserSessions ?? { sessions: [] }),
+      }));
+    }
+    if (url.includes("/api/browser/sessions")) {
+      return Promise.resolve(mockResponse(options.browserSessions ?? { sessions: [] }));
     }
     if (url.includes("/api/extensions")) return Promise.resolve(mockResponse(options.extensions ?? { extensions: [] }));
     if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
@@ -206,6 +220,103 @@ describe("CockpitView", () => {
     expect(consoleRegion).toHaveTextContent(/compatible · Seraph >=0.9.0 · current 0.9.1/i);
     expect(consoleRegion).toHaveTextContent(/toolset presets · messaging connectors · install ready · rollback unavailable/i);
     expect(within(consoleRegion).getByRole("button", { name: "install" })).toBeEnabled();
+  });
+
+  it("renders live browser session controls with degraded fallback and redacted provenance", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      browserProviders: {
+        providers: [
+          {
+            extension_id: "seraph.openclaw-remote-cdp",
+            name: "remote-cdp",
+            provider_kind: "remote_cdp",
+            description: "Remote CDP provider",
+            enabled: true,
+            configured: true,
+            selected: true,
+            execution_mode: "local_fallback",
+            runtime_state: "staged_local_fallback",
+            requires_network: true,
+            requires_daemon: false,
+            capabilities: ["snapshot", "replay"],
+            fallback_policy: "local_extract_only",
+          },
+        ],
+      },
+      browserSessions: {
+        sessions: [
+          {
+            session_id: "bs-live-1",
+            owner_session_id: "session-1",
+            url: "https://example.test/research",
+            provider_name: "remote-cdp",
+            provider_kind: "remote_cdp",
+            execution_mode: "local_fallback",
+            status: "degraded",
+            risk_state: "provider_degraded_labeled",
+            recovery_state: "operator_acknowledgement_required",
+            partition_id: "bp-123",
+            partition_revision: 2,
+            boundary_decisions: {
+              profile: { state: "local_fallback_ephemeral", enforced: false, operator_visible: true },
+              cookie: { state: "session_scoped_no_export", enforced: false, operator_visible: true },
+              credential: { state: "scoped_refs_only", enforced: true, operator_visible: true },
+              download: { state: "quarantine_required_before_adoption", enforced: false, operator_visible: true },
+              upload: { state: "operator_review_required", enforced: false, operator_visible: true },
+              network: { state: "site_policy_guarded", enforced: true, operator_visible: true },
+            },
+            provider_degradation: {
+              degraded: true,
+              fallback_labeled: true,
+              fallback_reason: "remote_provider_staged_local_runtime_used",
+              silent_fallback_allowed: false,
+            },
+            snapshot_count: 1,
+            latest_ref: "bs-live-1:1",
+            latest_capture: "extract",
+            latest_summary: "Example page body",
+            latest_artifact_provenance: {
+              artifact_handle: "seraph://browser-sessions/bs-live-1/bs-live-1:1/abc123",
+              artifact_body_digest: "abc123",
+              raw_artifact_body_exposed: false,
+            },
+            control_events: [],
+            updated_at: "2026-06-18T12:00:00Z",
+          },
+        ],
+      },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
+    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 degraded · no quarantine/i);
+    expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
+    expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
+    expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);
+    expect(browserControls).toHaveTextContent(/seraph:\/\/browser-sessions\/bs-live-1/i);
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(within(browserControls).getByRole("button", { name: "replay" }));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("degraded local-fallback"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/operator/browser-computer-use-control/actions"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"session_id":"bs-live-1"'),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/operator/browser-computer-use-control/actions"),
+        expect.objectContaining({
+          body: expect.stringContaining('"acknowledge_degraded_fallback":true'),
+        }),
+      ),
+    );
   });
 
   it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
@@ -11970,7 +12081,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(24));
+    await waitFor(() => expect(cockpitFetchCount).toBe(26));
     view.unmount();
 
     await act(async () => {

@@ -96,6 +96,12 @@ from src.evals.final_parity_audit import (
     POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SUITE_NAME,
     POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SUITE_NAME,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SCENARIO_NAMES,
     FINAL_FULL_PARITY_CLAIM_LIFT_V1_SUITE_NAME,
     FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
@@ -110,6 +116,8 @@ from src.evals.final_parity_audit import (
     FALSE_COMPLETION_SCAN_V4_SUITE_NAME,
     FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
     FALSE_COMPLETION_SCAN_V5_SUITE_NAME,
+    FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V6_SUITE_NAME,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
     OPERATOR_FINAL_PARITY_READINESS_REPORT_SUITE_NAME,
     POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
@@ -128,6 +136,8 @@ from src.evals.final_parity_audit import (
     REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SUITE_NAME,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
     REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SUITE_NAME,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SUITE_NAME,
 )
 from src.extensions.benchmark import (
     GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
@@ -4843,6 +4853,75 @@ _BENCHMARK_SUITES: tuple[BenchmarkSuiteDefinition, ...] = (
         ),
         remaining_gap="The PR body must record the final critic disposition before merge.",
         scenario_names=POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SUITE_NAME,
+        label="Post-DX final board PR issue reconciliation v1",
+        description=(
+            "Pins #475 and #590-#597 issue, PR, and ProjectV2 receipts for the final post-DX claim-lift gate."
+        ),
+        benchmark_axis="post_dx_final_board_pr_issue_reconciliation_v1",
+        operator_summary=(
+            "Operators can inspect DY-EE Done/Merged/Passed receipts, feature-first batch closure, and #594 final-gate state."
+        ),
+        remaining_gap="Parent #475 can only close after EF merges and the final completion audit stays no-block.",
+        scenario_names=POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SUITE_NAME,
+        label="Post-DX final claim ledger reconciliation v1",
+        description=(
+            "Reconciles SCL-067 through SCL-072, exact bounded EF wording, and continued blocked broad claims."
+        ),
+        benchmark_axis="post_dx_final_claim_ledger_reconciliation_v1",
+        operator_summary=(
+            "EF permits only the exact bounded post-DX final-gate wording while full parity and superiority claims remain blocked."
+        ),
+        remaining_gap="Any stronger public wording still requires exact claim-ledger permission and stronger underlying evidence.",
+        scenario_names=POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SUITE_NAME,
+        label="Reference-system source refresh v6",
+        description=(
+            "Pins June 18, 2026 Hermes, OpenClaw, IronClaw, and user-supplied article source-refresh receipts "
+            "with access caveats and pressure-only claim use."
+        ),
+        benchmark_axis="reference_system_source_refresh_v6",
+        operator_summary=(
+            "Current sources remain pressure evidence only; the user-supplied X URL is still an access caveat, not factual claim evidence."
+        ),
+        remaining_gap="Source refresh is not a substitute for implementation, tests, board state, or claim-ledger permission.",
+        scenario_names=REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=FALSE_COMPLETION_SCAN_V6_SUITE_NAME,
+        label="False completion scan v6",
+        description=(
+            "Extends the false-completion scan through Batch EF, including docs/code/operator scans, GitHub "
+            "tracking receipts, and claim-ledger boundaries."
+        ),
+        benchmark_axis="false_completion_scan_v6",
+        operator_summary=(
+            "False-completion v6 keeps EF bounded wording separate from full parity, production-ready, "
+            "security, browser, marketplace, operator-control, learning, memory, and superiority claims."
+        ),
+        remaining_gap="External PR and issue wording must still be reviewed before merge.",
+        scenario_names=FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES,
+    ),
+    BenchmarkSuiteDefinition(
+        name=POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SUITE_NAME,
+        label="Post-DX final Critic/Contrarian no-block v1",
+        description=(
+            "Records independent review receipts for non-duplication, board state, source caveats, claim boundaries, "
+            "security/privacy, and public wording."
+        ),
+        benchmark_axis="post_dx_final_critic_contrarian_no_block_v1",
+        operator_summary=(
+            "EF is healthy only when independent critique is visible and no blocking finding remains."
+        ),
+        remaining_gap="The PR body must record the final critic disposition before merge.",
+        scenario_names=POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
     ),
 )
 

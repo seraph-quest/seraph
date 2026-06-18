@@ -12122,7 +12122,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 22 }, () => {
+    const deferredResponses = Array.from({ length: 27 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -12147,7 +12147,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(26));
+    await waitFor(() => expect(cockpitFetchCount).toBe(27));
     view.unmount();
 
     await act(async () => {

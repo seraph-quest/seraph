@@ -48,6 +48,14 @@ def _capture_or_raise(url: str, capture: str) -> str:
     return content
 
 
+def _metadata_only_session_payload(payload: dict[str, object] | None) -> dict[str, object] | None:
+    if payload is None:
+        return None
+    metadata = dict(payload)
+    metadata.pop("content", None)
+    return metadata
+
+
 @router.get("/browser/providers")
 async def list_browser_providers():
     state_payload = load_extension_state_payload()
@@ -119,7 +127,7 @@ async def open_browser_session(request: BrowserSessionOpenRequest):
         capture=request.capture,
         content=content,
     )
-    return {"session": payload}
+    return {"session": _metadata_only_session_payload(payload)}
 
 
 @router.get("/browser/sessions/{session_id}")
@@ -127,7 +135,7 @@ async def get_browser_session(session_id: str, owner_session_id: str = Query(...
     payload = browser_session_runtime.get_session(session_id, owner_session_id=owner_session_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="browser_session_not_found")
-    return {"session": payload}
+    return {"session": _metadata_only_session_payload(payload)}
 
 
 @router.post("/browser/sessions/{session_id}/snapshot")

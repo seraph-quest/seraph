@@ -1,0 +1,7 @@
+name: openprose
+engine_kind: openprose
+description: Narrative composition flow for drafting a structured brief from recalled context.
+delegation_mode: inline
+checkpoint_policy: step
+structured_output: true
+default_output_surface: guardian-board

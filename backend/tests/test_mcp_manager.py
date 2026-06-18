@@ -1,7 +1,7 @@
 """Tests for MCP manager (src/tools/mcp_manager.py)."""
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -19,13 +19,56 @@ class TestMCPManager:
     @patch("src.tools.mcp_manager.MCPClient")
     def test_connect_success(self, MockMCPClient):
         mock_client = MagicMock()
-        mock_client.get_tools.return_value = [MagicMock(name="tool1")]
+        tool = MagicMock()
+        tool.name = "mcp_fetch_repo"
+        mock_client.get_tools.return_value = [tool]
         MockMCPClient.return_value = mock_client
 
         mgr = MCPManager()
-        mgr.connect("things", "http://localhost:9000/mcp")
+        mgr.connect("things", "http://things.example/mcp")
         assert len(mgr.get_tools()) == 1
         assert "things" in mgr._clients
+        connected_tool = mgr.get_tools()[0]
+        assert connected_tool.seraph_source_context["server_name"] == "things"
+        assert connected_tool.seraph_source_context["authenticated_source"] is False
+        approval_context = connected_tool.get_approval_context({})
+        assert approval_context["execution_boundaries"] == ["external_mcp"]
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_authenticated_server_instruments_tool_context(self, MockMCPClient):
+        mock_client = MagicMock()
+        tool = MagicMock()
+        tool.name = "mcp_list_issues"
+        mock_client.get_tools.return_value = [tool]
+        MockMCPClient.return_value = mock_client
+
+        mgr = MCPManager()
+        mgr._config["github"] = {
+            "auth_hint": "OAuth required",
+            "source": "extension",
+            "extension_id": "seraph.github-pack",
+            "extension_reference": "mcp/github.json",
+            "extension_display_name": "GitHub Pack",
+        }
+        mgr.connect(
+            "github",
+            "https://api.github.com/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+
+        connected_tool = mgr.get_tools()[0]
+        assert connected_tool.seraph_source_context["server_name"] == "github"
+        assert connected_tool.seraph_source_context["authenticated_source"] is True
+        assert connected_tool.seraph_source_context["source"] == "extension"
+        approval_context = connected_tool.get_approval_context({})
+        assert approval_context["authenticated_source"] is True
+        assert approval_context["execution_boundaries"] == [
+            "external_mcp",
+            "authenticated_external_source",
+        ]
+        call_summary, call_details = connected_tool.get_audit_call_payload({"query": "issues"})
+        assert "github" in call_summary
+        assert call_details["source_context"]["authenticated_source"] is True
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_connect_failure(self, MockMCPClient):
@@ -160,11 +203,23 @@ class TestMCPManager:
         MockMCPClient.return_value = mock_client
 
         mgr = MCPManager()
-        mgr.connect("http-request", "http://localhost:9200/mcp")
+        mgr.connect("http-request", "http://http-request.example/mcp")
 
         call_args = MockMCPClient.call_args
         params = call_args[0][0]
         assert "headers" not in params
+
+    @patch("src.tools.mcp_manager.MCPClient")
+    def test_connect_blocks_private_network_endpoint(self, MockMCPClient):
+        mgr = MCPManager()
+
+        mgr.connect("local", "http://127.0.0.1:9200/mcp")
+
+        assert mgr.get_tools() == []
+        assert "local" not in mgr._clients
+        assert mgr._status["local"]["status"] == "blocked"
+        assert "internal_private" in mgr._status["local"]["error"]
+        MockMCPClient.assert_not_called()
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_load_config_passes_headers(self, MockMCPClient, tmp_path):
@@ -201,6 +256,25 @@ class TestMCPManager:
         call_args = MockMCPClient.call_args
         params = call_args[0][0]
         assert params["headers"]["X-Key"] == "val"
+
+    def test_add_server_blocks_private_network_endpoint(self, tmp_path):
+        mgr = MCPManager()
+        mgr._config_path = str(tmp_path / "mcp-servers.json")
+
+        with pytest.raises(ValueError, match="internal_private"):
+            mgr.add_server("local", "http://localhost:9200/mcp", enabled=True)
+
+        assert "local" not in mgr._config
+
+    def test_update_server_blocks_private_network_endpoint(self, tmp_path):
+        mgr = MCPManager()
+        mgr._config_path = str(tmp_path / "mcp-servers.json")
+        mgr._config["gh"] = {"url": "https://example.com/mcp", "enabled": True}
+
+        with pytest.raises(ValueError, match="internal_private"):
+            mgr.update_server("gh", url="http://169.254.169.254/latest/meta-data")
+
+        assert mgr._config["gh"]["url"] == "https://example.com/mcp"
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_get_config_includes_has_headers(self, MockMCPClient):
@@ -252,12 +326,103 @@ class TestMCPManager:
         mgr = MCPManager()
         assert mgr._check_unresolved_vars(None) == []
 
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    def test_check_missing_vault_secrets_returns_missing(self, mock_exists):
+        mock_exists.return_value = False
+
+        mgr = MCPManager()
+        missing = mgr._check_missing_vault_secrets({"Authorization": "Bearer ${vault:mcp.server.gh.bearer_token}"})
+
+        assert missing == ["mcp.server.gh.bearer_token"]
+
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    def test_check_missing_vault_secrets_resolves_env_backed_vault_placeholders(self, mock_exists):
+        mock_exists.return_value = False
+
+        import os
+
+        os.environ["MCP_TOKEN_REF"] = "${vault:mcp.server.gh.bearer_token}"
+        try:
+            mgr = MCPManager()
+            missing = mgr._check_missing_vault_secrets({"Authorization": "Bearer ${MCP_TOKEN_REF}"})
+        finally:
+            del os.environ["MCP_TOKEN_REF"]
+
+        assert missing == ["mcp.server.gh.bearer_token"]
+
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    def test_inspect_headers_reports_env_backed_missing_vault_secrets(self, mock_exists):
+        mock_exists.return_value = False
+
+        import os
+
+        os.environ["MCP_TOKEN_REF"] = "${vault:mcp.server.gh.bearer_token}"
+        try:
+            missing_env, missing_vault, credential_sources = MCPManager.inspect_headers(
+                {"Authorization": "Bearer ${MCP_TOKEN_REF}"}
+            )
+        finally:
+            del os.environ["MCP_TOKEN_REF"]
+
+        assert missing_env == []
+        assert missing_vault == ["mcp.server.gh.bearer_token"]
+        assert credential_sources == ["env", "vault"]
+
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    def test_resolve_headers_reports_env_backed_missing_vault_secrets(self, mock_exists):
+        mock_exists.return_value = False
+
+        import os
+
+        os.environ["MCP_TOKEN_REF"] = "${vault:mcp.server.gh.bearer_token}"
+        try:
+            resolved, missing_env, missing_vault, credential_sources = MCPManager.resolve_headers(
+                {"Authorization": "Bearer ${MCP_TOKEN_REF}"}
+            )
+        finally:
+            del os.environ["MCP_TOKEN_REF"]
+
+        assert resolved == {"Authorization": "Bearer ${MCP_TOKEN_REF}"}
+        assert missing_env == []
+        assert missing_vault == ["mcp.server.gh.bearer_token"]
+        assert credential_sources == ["env", "vault"]
+
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    @patch("src.tools.mcp_manager.vault_repository.get", new_callable=AsyncMock)
+    def test_resolve_headers_resolves_vault_backed_credentials(self, mock_get, mock_exists):
+        mock_exists.return_value = True
+        mock_get.return_value = "ghp_secret"
+
+        resolved, missing_env, missing_vault, credential_sources = MCPManager.resolve_headers(
+            {"Authorization": "Bearer ${vault:mcp.server.gh.1041179cbd.bearer_token}"}
+        )
+
+        assert resolved == {"Authorization": "Bearer ghp_secret"}
+        assert missing_env == []
+        assert missing_vault == []
+        assert credential_sources == ["vault"]
+
     def test_connect_unresolved_headers_sets_auth_required(self):
         mgr = MCPManager()
         mgr.connect("gh", "http://gh/mcp", headers={"Authorization": "Bearer ${MISSING_TOKEN_XYZ}"})
         assert "gh" not in mgr._clients
         assert mgr._status["gh"]["status"] == "auth_required"
         assert "MISSING_TOKEN_XYZ" in mgr._status["gh"]["error"]
+
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    def test_connect_missing_vault_secret_sets_auth_required(self, mock_exists):
+        mock_exists.return_value = False
+
+        mgr = MCPManager()
+        mgr.connect(
+            "gh",
+            "http://gh/mcp",
+            headers={"Authorization": "Bearer ${vault:mcp.server.gh.1041179cbd.bearer_token}"},
+        )
+
+        assert "gh" not in mgr._clients
+        assert mgr._status["gh"]["status"] == "auth_required"
+        assert "mcp.server.gh.1041179cbd.bearer_token" in mgr._status["gh"]["error"]
 
     @patch("src.tools.mcp_manager.MCPClient")
     def test_connect_401_in_exception_group_sets_auth_required(self, MockMCPClient):
@@ -359,11 +524,23 @@ class TestMCPManager:
             for event in events
         )
 
+    @patch("src.tools.mcp_manager.vault_repository.exists", new_callable=AsyncMock)
+    @patch("src.tools.mcp_manager.vault_repository.get", new_callable=AsyncMock)
+    @patch("src.tools.mcp_manager.vault_repository.store", new_callable=AsyncMock)
     @patch("src.tools.mcp_manager.MCPClient")
-    def test_set_token_stores_and_reconnects(self, MockMCPClient, tmp_path):
+    def test_set_token_stores_in_vault_and_reconnects(
+        self,
+        MockMCPClient,
+        mock_store,
+        mock_get,
+        mock_exists,
+        tmp_path,
+    ):
         mock_client = MagicMock()
         mock_client.get_tools.return_value = [MagicMock(name="t1")]
         MockMCPClient.return_value = mock_client
+        mock_get.return_value = "ghp_mytoken123"
+        mock_exists.return_value = True
 
         mgr = MCPManager()
         mgr._config_path = str(tmp_path / "mcp.json")
@@ -375,8 +552,16 @@ class TestMCPManager:
 
         result = mgr.set_token("gh", "ghp_mytoken123")
         assert result is True
-        assert mgr._config["gh"]["headers"]["Authorization"] == "Bearer ghp_mytoken123"
+        assert (
+            mgr._config["gh"]["headers"]["Authorization"]
+            == "Bearer ${vault:mcp.server.gh.1041179cbd.bearer_token}"
+        )
         assert mgr._status["gh"]["status"] == "connected"
+        mock_store.assert_awaited_once_with(
+            "mcp.server.gh.1041179cbd.bearer_token",
+            "ghp_mytoken123",
+            description="MCP bearer token for server 'gh'",
+        )
 
     def test_set_token_unknown_server_returns_false(self):
         mgr = MCPManager()

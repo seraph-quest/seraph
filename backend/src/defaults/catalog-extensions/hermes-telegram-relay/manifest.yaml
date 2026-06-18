@@ -1,0 +1,33 @@
+id: seraph.hermes-telegram-relay
+version: 2026.3.23
+display_name: Hermes Telegram Relay
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: bundled
+summary: Telegram messaging connector definition for future Seraph reach beyond the browser workspace.
+description: Packages Telegram relay metadata and configuration so Seraph can stage guarded delivery into Telegram as the messaging runtime matures.
+permissions:
+  execution_boundaries:
+    - external_read
+    - connector_mutation
+    - secret_management
+  network: true
+  data_access:
+    - operator_messages
+    - delivery_threads
+    - messaging_credentials
+  mutation_rights:
+    - send_operator_message
+    - update_delivery_thread
+  audit_events:
+    - connector_configured
+    - connector_enabled
+    - message_delivery_attempted
+  secrets:
+    - telegram_bot_token
+contributes:
+  messaging_connectors:
+    - connectors/messaging/telegram.yaml

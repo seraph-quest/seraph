@@ -11,6 +11,25 @@ def _iso_offset(*, hours: int = 0, minutes: int = 0, seconds: int = 0) -> str:
     return (NOW + timedelta(hours=hours, minutes=minutes, seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
+@pytest.fixture(autouse=True)
+def _default_empty_continuity_snapshot():
+    with patch(
+        "src.api.activity.build_observer_continuity_snapshot",
+        AsyncMock(
+            return_value={
+                "daemon": {},
+                "summary": {
+                    "continuity_health": "ready",
+                    "primary_surface": "browser",
+                    "recommended_focus": None,
+                },
+                "recovery_actions": [],
+            }
+        ),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(client):
     with (
@@ -64,6 +83,31 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
                         "thread_label": "Research thread",
                         "resume_message": "Resume after approval.",
                         "risk_level": "high",
+                        "extension_id": "seraph.wave2-contribution",
+                        "extension_display_name": "Wave2 contribution",
+                        "action": "configure",
+                        "package_path": "/tmp/extensions/wave2-contribution",
+                        "permissions": {"tool_names": ["write_file"]},
+                        "approval_profile": {
+                            "requires_lifecycle_approval": True,
+                            "lifecycle_boundaries": ["workspace_write"],
+                        },
+                        "approval_scope": {
+                            "action": "configure",
+                            "target": {
+                                "type": "extension_package",
+                                "name": "Wave2 contribution",
+                                "reference": "manifest.yaml",
+                            },
+                            "config_scope": {
+                                "config_types": ["node_adapters"],
+                                "changed_target_count": 1,
+                            },
+                        },
+                        "approval_context": {
+                            "risk_level": "high",
+                            "execution_boundaries": ["workspace_write"],
+                        },
                     }
                 ]
             ),
@@ -134,6 +178,24 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
     assert payload["summary"]["user_triggered_llm_calls"] == 1
     assert payload["summary"]["categories"]["workflow"] == 1
     assert payload["summary"]["categories"]["approval"] == 1
+    assert payload["summary"]["llm_cost_by_runtime_path"] == [
+        {
+            "key": "chat_agent",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.0123),
+            "input_tokens": 1000,
+            "output_tokens": 250,
+        }
+    ]
+    assert payload["summary"]["llm_cost_by_capability_family"] == [
+        {
+            "key": "conversation",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.0123),
+            "input_tokens": 1000,
+            "output_tokens": 250,
+        }
+    ]
 
     llm_item = next(item for item in items if item["kind"] == "llm_call")
     assert llm_item["thread_label"] == "Research thread"
@@ -141,9 +203,114 @@ async def test_activity_ledger_aggregates_llm_calls_budget_and_threaded_actions(
     assert llm_item["prompt_tokens"] == 1000
     assert llm_item["completion_tokens"] == 250
     assert llm_item["cost_usd"] == pytest.approx(0.0123)
+    assert llm_item["metadata"]["runtime_path"] == "chat_agent"
+    assert llm_item["metadata"]["capability_family"] == "conversation"
+    assert llm_item["metadata"]["max_budget_class"] is None
 
     workflow_item = next(item for item in items if item["kind"] == "workflow_run")
     assert workflow_item["continue_message"] == "Continue from this workflow run."
+    approval_item = next(item for item in items if item["kind"] == "approval")
+    assert approval_item["metadata"]["approval_id"] == "approval-1"
+    assert approval_item["metadata"]["extension_id"] == "seraph.wave2-contribution"
+    assert approval_item["metadata"]["extension_action"] == "configure"
+    assert approval_item["metadata"]["approval_scope"]["target"]["reference"] == "manifest.yaml"
+    assert approval_item["metadata"]["approval_scope"]["config_scope"]["config_types"] == [
+        "node_adapters"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_hides_stale_resume_surface_when_workflow_boundary_is_blocked(client):
+    with (
+        patch(
+            "src.api.activity._list_workflow_runs",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "run-2",
+                        "workflow_name": "authenticated-brief",
+                        "summary": "Authenticated workflow boundary drifted.",
+                        "status": "failed",
+                        "started_at": _iso_offset(minutes=-8),
+                        "updated_at": _iso_offset(minutes=-6),
+                        "thread_id": "session-1",
+                        "thread_label": "Research thread",
+                        "thread_continue_message": "Continue from stale approval.",
+                        "approval_recovery_message": (
+                            "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+                            "Start a fresh run instead of replaying or resuming."
+                        ),
+                        "retry_from_step_draft": "Retry workflow \"authenticated-brief\" from step \"save\".",
+                        "replay_draft": "Replay authenticated workflow",
+                        "replay_allowed": True,
+                        "replay_block_reason": "approval_context_changed",
+                        "replay_recommended_actions": [
+                            {"type": "set_tool_policy", "label": "Allow write_file", "mode": "full"}
+                        ],
+                        "trust_boundary": {
+                            "status": "changed",
+                            "blocked": True,
+                            "reason": "approval_context_changed",
+                            "message": (
+                                "Workflow 'authenticated-brief' changed its trust boundary after this run. "
+                                "Start a fresh run instead of replaying or resuming."
+                            ),
+                            "changed_fields": ["authenticated_source", "source_systems"],
+                        },
+                        "risk_level": "medium",
+                        "execution_boundaries": ["authenticated_external_source", "workspace_write"],
+                        "pending_approval_count": 0,
+                        "resume_from_step": "save",
+                        "resume_checkpoint_label": "Save step",
+                        "run_identity": "session-1:workflow_authenticated_brief:run-2",
+                        "run_fingerprint": "authenticated-brief",
+                        "continued_error_steps": ["save"],
+                        "failed_step_tool": "write_file",
+                        "checkpoint_candidates": [
+                            {
+                                "step_id": "save",
+                                "label": "save (write_file)",
+                                "kind": "retry_failed_step",
+                                "status": "continued_error",
+                            },
+                        ],
+                        "branch_kind": "retry_failed_step",
+                        "resume_plan": {
+                            "resume_from_step": "save",
+                            "draft": "Retry workflow \"authenticated-brief\" from step \"save\".",
+                        },
+                        "availability": "ready",
+                        "step_records": [{"id": "save", "tool": "write_file", "status": "continued_error"}],
+                    }
+                ]
+            ),
+        ),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    workflow_item = next(item for item in payload["items"] if item["kind"] == "workflow_run")
+    assert workflow_item["continue_message"].startswith("Workflow 'authenticated-brief' changed its trust boundary")
+    assert workflow_item["replay_draft"] is None
+    assert workflow_item["replay_allowed"] is False
+    assert workflow_item["recommended_actions"] == []
+    assert workflow_item["metadata"]["resume_from_step"] is None
+    assert workflow_item["metadata"]["resume_checkpoint_label"] is None
+    assert workflow_item["metadata"]["checkpoint_candidates"] == []
+    assert workflow_item["metadata"]["resume_plan"] is None
+    assert workflow_item["metadata"]["trust_boundary"]["status"] == "changed"
+    assert workflow_item["metadata"]["trust_boundary"]["reason"] == "approval_context_changed"
 
 
 @pytest.mark.asyncio
@@ -244,6 +411,126 @@ async def test_activity_ledger_summary_counts_full_window_beyond_visible_limit(c
     assert payload["summary"]["llm_call_count"] == 6
     assert payload["summary"]["llm_cost_usd"] == pytest.approx(0.006)
     assert payload["summary"]["user_triggered_llm_calls"] == 6
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_surfaces_observer_recovery_actions(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch(
+            "src.api.activity.build_observer_continuity_snapshot",
+            AsyncMock(
+                return_value={
+                    "daemon": {"last_post": NOW.timestamp()},
+                    "summary": {
+                        "continuity_health": "attention",
+                        "primary_surface": "source_adapter",
+                        "recommended_focus": "github-managed",
+                        "presence_surface_count": 2,
+                        "attention_presence_surface_count": 1,
+                    },
+                    "recovery_actions": [
+                        {
+                            "id": "adapter:github-managed",
+                            "kind": "source_adapter_repair",
+                            "label": "Restore source adapter github-managed",
+                            "detail": "Reconnect the authenticated source adapter runtime.",
+                            "status": "degraded",
+                            "surface": "source_adapter",
+                            "route": None,
+                            "repair_hint": "Inspect the typed source adapter inventory and runtime bridge.",
+                            "thread_id": None,
+                            "continue_message": "Draft a repair plan for github-managed.",
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "presence:messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                            "kind": "presence_repair",
+                            "label": "Review presence surface Telegram relay",
+                            "detail": "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                            "status": "requires_config",
+                            "surface": "presence",
+                            "route": "messaging_connector",
+                            "repair_hint": "Finish connector configuration in the operator surface before routing follow-through here.",
+                            "thread_id": None,
+                            "continue_message": None,
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "presence:channel_adapters:seraph.native:channels/native.yaml",
+                            "kind": "presence_follow_up",
+                            "label": "Plan follow-up via native notification channel",
+                            "detail": "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                            "status": "ready",
+                            "surface": "presence",
+                            "route": "channel_adapter",
+                            "repair_hint": None,
+                            "thread_id": None,
+                            "continue_message": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+                            "open_thread_available": False,
+                        },
+                        {
+                            "id": "imported:messaging",
+                            "kind": "imported_reach_attention",
+                            "label": "Inspect imported reach family messaging",
+                            "detail": "Messaging capability packages need operator attention.",
+                            "status": "attention",
+                            "surface": "imported_reach",
+                            "route": None,
+                            "repair_hint": "Inspect imported reach coverage before planning outreach.",
+                            "thread_id": None,
+                            "continue_message": None,
+                            "open_thread_available": True,
+                        },
+                    ],
+                }
+            ),
+        ),
+        patch("src.api.activity.session_manager.list_sessions", AsyncMock(return_value=[])),
+    ):
+        response = await client.get("/api/activity/ledger", params={"limit": 20, "window_hours": 24})
+
+    assert response.status_code == 200
+    payload = response.json()
+    adapter_item = next(item for item in payload["items"] if item["id"] == "continuity:adapter:github-managed")
+    assert adapter_item["kind"] == "reach_recovery"
+    assert adapter_item["category"] == "system"
+    assert adapter_item["source"] == "continuity"
+    assert adapter_item["continue_message"] == "Draft a repair plan for github-managed."
+    assert adapter_item["metadata"]["kind"] == "source_adapter_repair"
+    assert adapter_item["metadata"]["recommended_focus"] == "github-managed"
+    assert adapter_item["metadata"]["presence_surface_count"] == 2
+    assert adapter_item["metadata"]["attention_presence_surface_count"] == 1
+
+    presence_item = next(
+        item
+        for item in payload["items"]
+        if item["id"] == "continuity:presence:messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml"
+    )
+    assert presence_item["metadata"]["kind"] == "presence_repair"
+    assert presence_item["metadata"]["surface"] == "presence"
+
+    follow_up_item = next(
+        item
+        for item in payload["items"]
+        if item["id"] == "continuity:presence:channel_adapters:seraph.native:channels/native.yaml"
+    )
+    assert follow_up_item["metadata"]["kind"] == "presence_follow_up"
+    assert follow_up_item["metadata"]["surface"] == "presence"
+    assert follow_up_item["continue_message"] == (
+        "Plan guarded follow-through for native notification channel. Confirm the audience, "
+        "target reference, channel scope, and approval boundaries before acting."
+    )
+
+    imported_item = next(item for item in payload["items"] if item["id"] == "continuity:imported:messaging")
+    assert imported_item["metadata"]["kind"] == "imported_reach_attention"
+    assert imported_item["metadata"]["surface"] == "imported_reach"
 
 
 @pytest.mark.asyncio
@@ -417,6 +704,256 @@ async def test_activity_ledger_groups_request_scoped_tool_and_llm_events(client)
     assert group_keys["llm_call"] == "request:agent-ws:session-1:123"
     assert group_keys["tool_call"] == "request:agent-ws:session-1:123"
     assert group_keys["tool_result"] == "request:agent-ws:session-1:123"
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_attributes_llm_cost_to_runtime_and_capability_family(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-routing-chat-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Initial routing candidate",
+                        "created_at": _iso_offset(minutes=-7),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:chat",
+                            "runtime_path": "session_runtime",
+                            "selected_source": "primary",
+                            "max_budget_class": "low",
+                        },
+                    },
+                    {
+                        "id": "audit-routing-chat-2",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Selected claude-sonnet-4 for websocket chat",
+                        "created_at": _iso_offset(minutes=-6),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:chat",
+                            "runtime_path": "chat_agent",
+                            "selected_source": "primary",
+                            "max_budget_class": "medium",
+                            "budget_steering_mode": "prefer_lower_budget",
+                            "selected_preference_score": 3.5,
+                            "selected_capability_gap_count": 0,
+                            "selected_live_feedback_penalty": 2.5,
+                            "selected_route_score": 9.5,
+                            "selected_failure_risk_score": 2.5,
+                            "selected_production_readiness": "guarded",
+                            "selected_budget_preference_score": 1.0,
+                            "selected_live_feedback": {
+                                "feedback_state": "recovering",
+                                "recent_failure_count": 1,
+                            },
+                            "selection_policy_mode": "highest_ranked_attemptable",
+                            "planning_winner_model": "claude-sonnet-4",
+                            "planning_winner_profile": "balanced",
+                            "planning_winner_source": "primary",
+                            "planning_winner_selected": True,
+                            "best_alternate_model": "openai/gpt-4.1-mini",
+                            "best_alternate_profile": "balanced",
+                            "best_alternate_source": "fallback_chain",
+                            "best_alternate_route_score": 5.0,
+                            "selected_vs_best_alternate_margin": 4.5,
+                            "route_explanation": "selected claude-sonnet-4; readiness=guarded; failure_risk=2.5; rejected=1",
+                            "route_comparison_summary": "selected claude-sonnet-4 over openai/gpt-4.1-mini by planning_score margin 4.5",
+                            "rejected_target_summaries": [
+                                {
+                                    "model_id": "openai/gpt-4.1-mini",
+                                    "source": "fallback_chain",
+                                    "decision": "deferred",
+                                    "production_readiness": "ready",
+                                    "failure_risk_score": 0.0,
+                                    "reason_codes": ["kept_as_standby"],
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "audit-routing-browser-1",
+                        "event_type": "llm_routing_decision",
+                        "tool_name": "llm_runtime",
+                        "summary": "Selected grok-4.1-fast for browser tool",
+                        "created_at": _iso_offset(minutes=-5),
+                        "session_id": "session-1",
+                        "details": {
+                            "request_id": "agent-ws:session-1:browser",
+                            "runtime_path": "browser_agent",
+                            "selected_source": "browser_provider",
+                            "max_budget_class": "high",
+                        },
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": _iso_offset(minutes=-6, seconds=10).replace("Z", "+00:00"),
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 500, "output": 150, "total": 650},
+                    "cost_usd": 0.01,
+                    "latency_ms": 610.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:chat",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+                {
+                    "timestamp": _iso_offset(minutes=-5, seconds=10).replace("Z", "+00:00"),
+                    "status": "success",
+                    "model": "openrouter/x-ai/grok-4.1-fast",
+                    "provider": "openrouter",
+                    "tokens": {"input": 250, "output": 60, "total": 310},
+                    "cost_usd": 0.025,
+                    "latency_ms": 880.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:browser",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                },
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    summary = payload["summary"]
+    llm_items = [item for item in payload["items"] if item["kind"] == "llm_call"]
+    by_request = {
+        item["metadata"]["request_id"]: item["metadata"]
+        for item in llm_items
+    }
+
+    assert summary["llm_cost_by_runtime_path"] == [
+        {
+            "key": "browser_agent",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.025),
+            "input_tokens": 250,
+            "output_tokens": 60,
+        },
+        {
+            "key": "chat_agent",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.01),
+            "input_tokens": 500,
+            "output_tokens": 150,
+        },
+    ]
+    assert summary["llm_cost_by_capability_family"] == [
+        {
+            "key": "browser",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.025),
+            "input_tokens": 250,
+            "output_tokens": 60,
+        },
+        {
+            "key": "conversation",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.01),
+            "input_tokens": 500,
+            "output_tokens": 150,
+        },
+    ]
+    assert by_request["agent-ws:session-1:chat"]["capability_family"] == "conversation"
+    assert by_request["agent-ws:session-1:chat"]["max_budget_class"] == "medium"
+    assert by_request["agent-ws:session-1:chat"]["budget_steering_mode"] == "prefer_lower_budget"
+    assert by_request["agent-ws:session-1:chat"]["selected_preference_score"] == 3.5
+    assert by_request["agent-ws:session-1:chat"]["selected_capability_gap_count"] == 0
+    assert by_request["agent-ws:session-1:chat"]["selected_live_feedback_penalty"] == 2.5
+    assert by_request["agent-ws:session-1:chat"]["selected_route_score"] == 9.5
+    assert by_request["agent-ws:session-1:chat"]["selected_failure_risk_score"] == 2.5
+    assert by_request["agent-ws:session-1:chat"]["selected_production_readiness"] == "guarded"
+    assert by_request["agent-ws:session-1:chat"]["selected_live_feedback"]["feedback_state"] == "recovering"
+    assert by_request["agent-ws:session-1:chat"]["selection_policy_mode"] == "highest_ranked_attemptable"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_model"] == "claude-sonnet-4"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_profile"] == "balanced"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_source"] == "primary"
+    assert by_request["agent-ws:session-1:chat"]["planning_winner_selected"] is True
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_model"] == "openai/gpt-4.1-mini"
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_profile"] == "balanced"
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_source"] == "fallback_chain"
+    assert by_request["agent-ws:session-1:chat"]["best_alternate_route_score"] == 5.0
+    assert by_request["agent-ws:session-1:chat"]["selected_vs_best_alternate_margin"] == 4.5
+    assert by_request["agent-ws:session-1:chat"]["route_explanation"].startswith("selected claude-sonnet-4")
+    assert by_request["agent-ws:session-1:chat"]["route_comparison_summary"].startswith(
+        "selected claude-sonnet-4 over openai/gpt-4.1-mini"
+    )
+    assert by_request["agent-ws:session-1:chat"]["rejected_target_summaries"][0]["model_id"] == "openai/gpt-4.1-mini"
+    assert by_request["agent-ws:session-1:browser"]["capability_family"] == "browser"
+    assert by_request["agent-ws:session-1:browser"]["selected_source"] == "browser_provider"
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_marks_missing_routing_metadata_as_unattributed(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch("src.api.activity.audit_repository.list_events", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.list_recent_llm_calls",
+            return_value=[
+                {
+                    "timestamp": _iso_offset(minutes=-6).replace("Z", "+00:00"),
+                    "status": "success",
+                    "model": "openrouter/anthropic/claude-sonnet-4",
+                    "provider": "openrouter",
+                    "tokens": {"input": 120, "output": 30, "total": 150},
+                    "cost_usd": 0.0042,
+                    "latency_ms": 420.0,
+                    "session_id": "session-1",
+                    "request_id": "agent-ws:session-1:unknown",
+                    "actor": "user_request",
+                    "source": "websocket_chat",
+                }
+            ],
+        ),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Research thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    llm_item = next(item for item in payload["items"] if item["kind"] == "llm_call")
+
+    assert llm_item["metadata"]["runtime_path"] is None
+    assert llm_item["metadata"]["capability_family"] == "unattributed"
+    assert payload["summary"]["llm_cost_by_capability_family"] == [
+        {
+            "key": "unattributed",
+            "calls": 1,
+            "cost_usd": pytest.approx(0.0042),
+            "input_tokens": 120,
+            "output_tokens": 30,
+        }
+    ]
 
 
 @pytest.mark.asyncio

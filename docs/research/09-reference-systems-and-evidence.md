@@ -17,6 +17,8 @@ Use these in descending order of strength:
 
 If a claim cannot be supported by one of those, it should be marked `Unknown`.
 
+World-class and superiority claims need to use the competitor evidence in [18. Agent Competition Truth Table](./18-agent-competition-truth-table.md) and pass the allowed wording in [19. Strategy Claim Ledger](./19-strategy-claim-ledger.md). If the ledger marks a claim `Aspirational`, docs may describe it only as a target, not as shipped truth.
+
 ## Disallowed Shortcuts
 
 - social-media lore as product truth
@@ -98,4 +100,5 @@ The implementation tree should mirror that work explicitly:
 - research evidence rules should have an implementation-side docs contract mirror
 - benchmark logic in research should have a benchmark-status mirror in implementation
 - superiority-program logic in research should have a delivery mirror in implementation
-- the live PR queue should live only in implementation, not as a stale duplicate in research
+- active execution state should live in GitHub, not as a stale duplicate in research
+- strategic/world-class claims should pass through the M0 claim ledger before they enter research, implementation, README, issue, or PR language

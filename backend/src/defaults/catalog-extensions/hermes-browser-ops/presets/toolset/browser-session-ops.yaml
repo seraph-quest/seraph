@@ -1,0 +1,11 @@
+name: browser-session-ops
+description: Structured browsing preset with browser sessions, snapshots, and direct page reads.
+include_tools:
+  - browse_webpage
+  - browser_session
+capabilities:
+  - page_refs
+  - snapshots
+  - structured_browsing
+execution_boundaries:
+  - external_read

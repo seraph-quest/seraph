@@ -33,6 +33,8 @@ def get_base_tools_and_active_skills() -> tuple[list, list[str], str]:
             wrap_tools_for_secret_refs(filter_tools(discover_tools(), tool_mode))
         )
     )
+    if not settings.use_delegation:
+        native_tools = [tool for tool in native_tools if tool.name != "delegate_task"]
     filtered_mcp_tools = filter_tools(
         mcp_manager.get_tools(),
         tool_mode,
@@ -169,8 +171,8 @@ def create_orchestrator(
     """Create an orchestrator agent that delegates to specialist sub-agents.
 
     The orchestrator has NO tools itself — it delegates all execution to
-    specialist managed_agents (memory_keeper, goal_planner, web_researcher,
-    file_worker, and one per MCP server).
+    specialist managed_agents (memory_keeper, vault_keeper, goal_planner,
+    web_researcher, file_worker, and one per MCP server).
     """
     from src.agent.specialists import build_all_specialists
 

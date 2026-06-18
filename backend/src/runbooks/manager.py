@@ -182,6 +182,11 @@ class RunbookManager:
     def get_runbook(self, runbook_id: str) -> Runbook | None:
         return next((runbook for runbook in self._runbooks if runbook.id == runbook_id), None)
 
+    def reload(self) -> list[dict[str, Any]]:
+        if self._registry is not None:
+            self._reload_from_registry()
+        return self.list_runbooks()
+
     def get_diagnostics(self) -> dict[str, Any]:
         return {
             "runbooks": self.list_runbooks(),

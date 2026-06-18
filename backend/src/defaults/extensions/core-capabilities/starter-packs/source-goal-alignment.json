@@ -1,0 +1,7 @@
+{
+  "name": "source-goal-alignment",
+  "label": "Source Goal Alignment",
+  "description": "Turn on a goal-alignment review grounded in external work evidence instead of one provider-specific pipeline.",
+  "skills": ["source-goal-alignment"],
+  "sample_prompt": "Compare my active goals to the external work evidence you can gather today."
+}

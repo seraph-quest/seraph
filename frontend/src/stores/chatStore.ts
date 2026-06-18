@@ -10,6 +10,8 @@ import type {
   ToolMeta,
 } from "../types";
 
+export type ThemePreference = "system" | "dark" | "light";
+
 interface ChatStore {
   messages: ChatMessage[];
   sessionId: string | null;
@@ -25,6 +27,7 @@ interface ChatStore {
   questPanelOpen: boolean;
   settingsPanelOpen: boolean;
   cockpitHintsEnabled: boolean;
+  themePreference: ThemePreference;
   onboardingCompleted: boolean | null;
   toolRegistry: ToolMeta[];
 
@@ -45,6 +48,7 @@ interface ChatStore {
   setQuestPanelOpen: (open: boolean) => void;
   setSettingsPanelOpen: (open: boolean) => void;
   setCockpitHintsEnabled: (enabled: boolean) => void;
+  setThemePreference: (theme: ThemePreference) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setToolRegistry: (tools: ToolMeta[]) => void;
   fetchToolRegistry: () => Promise<void>;
@@ -62,6 +66,7 @@ interface ChatStore {
 
 const LAST_SESSION_KEY = "seraph_last_session_id";
 const COCKPIT_HINTS_KEY = "seraph_cockpit_hints_enabled";
+const THEME_PREFERENCE_KEY = "seraph_theme_preference";
 const MAX_MESSAGES = 500;
 let restoreLastSessionPromise: Promise<void> | null = null;
 
@@ -106,6 +111,38 @@ function safeStorageBool(key: string, fallback: boolean): boolean {
   return value !== "0" && value.toLowerCase() !== "false";
 }
 
+function safeStorageTheme(): ThemePreference {
+  const value = safeStorageGet(THEME_PREFERENCE_KEY);
+  if (value === "dark" || value === "light" || value === "system") {
+    return value;
+  }
+  return "system";
+}
+
+function parseDisplayRole(message: Record<string, unknown>): {
+  role: ChatMessage["role"];
+  clarificationQuestion?: string;
+  clarificationReason?: string;
+  clarificationOptions?: string[];
+} {
+  const metadata = message.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { role: message.role === "assistant" ? "agent" : message.role as ChatMessage["role"] };
+  }
+  const record = metadata as Record<string, unknown>;
+  if (record.display_role !== "clarification") {
+    return { role: message.role === "assistant" ? "agent" : message.role as ChatMessage["role"] };
+  }
+  return {
+    role: "clarification",
+    clarificationQuestion: typeof record.question === "string" ? record.question : undefined,
+    clarificationReason: typeof record.reason === "string" ? record.reason : undefined,
+    clarificationOptions: Array.isArray(record.options)
+      ? record.options.filter((item): item is string => typeof item === "string")
+      : undefined,
+  };
+}
+
 const defaultVisual: AgentVisualState = {
   animationState: "idle",
   positionX: 50,
@@ -128,6 +165,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   questPanelOpen: false,
   settingsPanelOpen: false,
   cockpitHintsEnabled: safeStorageBool(COCKPIT_HINTS_KEY, true),
+  themePreference: safeStorageTheme(),
   onboardingCompleted: null,
   toolRegistry: [],
 
@@ -191,6 +229,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setCockpitHintsEnabled: (enabled) => {
     safeStorageSet(COCKPIT_HINTS_KEY, enabled ? "1" : "0");
     set({ cockpitHintsEnabled: enabled });
+  },
+
+  setThemePreference: (theme) => {
+    safeStorageSet(THEME_PREFERENCE_KEY, theme);
+    set({ themePreference: theme });
   },
 
   setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
@@ -305,15 +348,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const res = await fetch(`${API_URL}/api/sessions/${sessionId}/messages`);
       if (res.ok) {
         const msgs = await res.json();
-        const chatMessages: ChatMessage[] = msgs.map((m: Record<string, unknown>) => ({
-          id: m.id as string,
-          role: m.role === "assistant" ? "agent" : m.role as string,
-          content: m.content as string,
-          timestamp: new Date(m.created_at as string).getTime(),
-          sessionId,
-          stepNumber: m.step_number as number | undefined,
-          toolUsed: m.tool_used as string | undefined,
-        }));
+        const chatMessages: ChatMessage[] = msgs.map((m: Record<string, unknown>) => {
+          const display = parseDisplayRole(m);
+          return {
+            id: m.id as string,
+            role: display.role,
+            content: m.content as string,
+            timestamp: new Date(m.created_at as string).getTime(),
+            sessionId,
+            stepNumber: m.step_number as number | undefined,
+            toolUsed: m.tool_used as string | undefined,
+            clarificationQuestion: display.clarificationQuestion,
+            clarificationReason: display.clarificationReason,
+            clarificationOptions: display.clarificationOptions,
+          };
+        });
         safeStorageSet(LAST_SESSION_KEY, sessionId);
         set((state) => {
           const nextContinuity = { ...state.sessionContinuity };

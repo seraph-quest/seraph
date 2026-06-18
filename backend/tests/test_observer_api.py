@@ -1,9 +1,13 @@
 import time
+import types
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 
+from src.api.observer import _observer_presence_surface_payload
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
 from src.observer.context import CurrentContext
@@ -386,6 +390,11 @@ class TestObserverAPI:
             body="Desktop fallback is active.",
             intervention_type="alert",
             urgency=5,
+            session_id="session-1",
+            thread_id="session-1",
+            thread_source="session",
+            continuation_mode="resume_thread",
+            resume_message="Continue from this guardian intervention: Desktop fallback is active.",
         )
         await guardian_feedback_repository.update_outcome(
             native_intervention.id,
@@ -401,9 +410,21 @@ class TestObserverAPI:
             urgency=3,
             reasoning="high_interruption_cost",
             intervention_id=bundle_intervention.id,
+            session_id="session-2",
         )
 
-        with patch("src.api.observer.context_manager", mgr):
+        with (
+            patch("src.api.observer.context_manager", mgr),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(
+                    return_value=[
+                        {"id": "session-1", "title": "Native thread"},
+                        {"id": "session-2", "title": "Bundle thread"},
+                    ]
+                ),
+            ),
+        ):
             resp = await client.get("/api/observer/continuity")
 
         assert resp.status_code == 200
@@ -413,9 +434,35 @@ class TestObserverAPI:
         assert payload["daemon"]["pending_notification_count"] == 1
         assert payload["notifications"][0]["id"] == notification.id
         assert payload["notifications"][0]["intervention_id"] == native_intervention.id
+        assert payload["notifications"][0]["thread_id"] == "session-1"
+        assert payload["notifications"][0]["thread_label"] == "Native thread"
+        assert payload["notifications"][0]["continuation_mode"] == "resume_thread"
         assert payload["queued_insight_count"] == 1
         assert payload["queued_insights"][0]["intervention_id"] == bundle_intervention.id
         assert payload["queued_insights"][0]["content_excerpt"] == "Bundle this until the next browser check-in."
+        assert payload["queued_insights"][0]["session_id"] == "session-2"
+        assert payload["queued_insights"][0]["thread_id"] == "session-2"
+        assert payload["queued_insights"][0]["thread_label"] == "Bundle thread"
+        assert payload["queued_insights"][0]["thread_source"] == "session"
+        assert payload["queued_insights"][0]["continuation_mode"] == "resume_thread"
+        assert payload["summary"]["continuity_health"] == "attention"
+        assert payload["summary"]["recommended_focus"] == "Bundle delivery"
+        assert payload["summary"]["actionable_thread_count"] == 2
+        assert payload["summary"]["degraded_route_count"] >= 1
+        assert payload["threads"][0]["thread_id"] == "session-1"
+        assert payload["threads"][0]["pending_notification_count"] == 1
+        assert payload["threads"][0]["continue_message"] == "Continue from this guardian intervention: Desktop fallback is active."
+        assert any(
+            item["kind"] == "thread_follow_up"
+            and item["thread_id"] == "session-2"
+            and item["continue_message"] == "Follow up on this deferred guardian item: Bundle this until the next browser check-in."
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "reach_repair"
+            and item["route"] == "live_delivery"
+            for item in payload["recovery_actions"]
+        )
         assert {item["continuity_surface"] for item in payload["recent_interventions"]} >= {
             "native_notification",
             "bundle_queue",
@@ -424,8 +471,361 @@ class TestObserverAPI:
             item["id"] == native_intervention.id and item["notification_id"] == notification.id
             for item in payload["recent_interventions"]
         )
+        assert any(
+            item["id"] == native_intervention.id
+            and item["thread_id"] == "session-1"
+            and item["thread_label"] == "Native thread"
+            and item["continuation_mode"] == "resume_thread"
+            for item in payload["recent_interventions"]
+        )
+        live_route = next(item for item in payload["reach"]["route_statuses"] if item["route"] == "live_delivery")
+        assert live_route["status"] == "fallback_active"
+        assert live_route["selected_transport"] == "native_notification"
 
         await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
+    async def test_observer_continuity_recovers_queued_thread_from_intervention_outside_recent_window(self, async_db, client):
+        await native_notification_queue.clear()
+        target_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-fallback",
+            message_type="proactive",
+            intervention_type="advisory",
+            urgency=3,
+            content="Recover the older queued thread.",
+            reasoning="high_interruption_cost",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="deep_work",
+            interruption_mode="focus",
+            policy_action="bundle",
+            policy_reason="high_interruption_cost",
+            delivery_decision="queue",
+            latest_outcome="queued",
+        )
+        recent_intervention = await guardian_feedback_repository.create_intervention(
+            session_id="session-recent",
+            message_type="proactive",
+            intervention_type="alert",
+            urgency=5,
+            content="Newer intervention still in recent window.",
+            reasoning="available_capacity",
+            is_scheduled=False,
+            guardian_confidence="grounded",
+            data_quality="good",
+            user_state="available",
+            interruption_mode="balanced",
+            policy_action="act",
+            policy_reason="available_capacity",
+            delivery_decision="deliver",
+            latest_outcome="delivered",
+            transport="native_notification",
+        )
+        from src.observer.insight_queue import insight_queue
+
+        await insight_queue.enqueue(
+            content="Recover the older queued thread.",
+            intervention_type="advisory",
+            urgency=3,
+            reasoning="high_interruption_cost",
+            intervention_id=target_intervention.id,
+            session_id=None,
+        )
+
+        with (
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.list_recent",
+                AsyncMock(return_value=[recent_intervention]),
+            ),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(return_value=[{"id": "session-fallback", "title": "Fallback thread"}]),
+            ),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["queued_insights"][0]["intervention_id"] == target_intervention.id
+        assert payload["queued_insights"][0]["thread_id"] == "session-fallback"
+        assert payload["queued_insights"][0]["thread_label"] == "Fallback thread"
+        assert payload["queued_insights"][0]["thread_source"] == "intervention_session"
+        assert payload["queued_insights"][0]["continuation_mode"] == "resume_thread"
+
+        queued_ids = [item.id for item in await insight_queue.peek_all()]
+        if queued_ids:
+            await insight_queue.delete_many(queued_ids)
+        await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
+    async def test_observer_continuity_surfaces_imported_reach_and_source_adapter_attention(self, client):
+        await native_notification_queue.clear()
+        with (
+            patch(
+                "src.api.observer._observer_reach_payload",
+                return_value={
+                    "transport_statuses": [],
+                    "route_statuses": [
+                        {
+                            "route": "live_delivery",
+                            "label": "Live delivery",
+                            "status": "ready",
+                            "summary": "Browser and desktop delivery are available.",
+                            "selected_transport": "websocket",
+                            "repair_hint": None,
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer._observer_imported_reach_payload",
+                return_value={
+                    "summary": {
+                        "family_count": 1,
+                        "active_family_count": 1,
+                        "attention_family_count": 1,
+                        "approval_family_count": 0,
+                    },
+                    "families": [
+                        {
+                            "type": "messaging_connectors",
+                            "label": "messaging",
+                            "total": 1,
+                            "installed": 1,
+                            "ready": 0,
+                            "attention": 1,
+                            "approval": 0,
+                            "packages": ["Seraph Relay Pack"],
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer._observer_source_adapter_payload",
+                return_value={
+                    "summary": {
+                        "adapter_count": 1,
+                        "ready_adapter_count": 0,
+                        "degraded_adapter_count": 1,
+                        "authenticated_adapter_count": 1,
+                        "authenticated_ready_adapter_count": 0,
+                        "authenticated_degraded_adapter_count": 1,
+                    },
+                    "adapters": [
+                        {
+                            "name": "github-managed",
+                            "provider": "github",
+                            "source_kind": "managed_connector",
+                            "authenticated": True,
+                            "runtime_state": "requires_runtime",
+                            "adapter_state": "degraded",
+                            "contracts": ["work_items.read", "code_activity.read"],
+                            "degraded_reason": "runtime_adapter_missing",
+                            "next_best_sources": [{"name": "web_search", "reason": "fallback", "description": "Use public context."}],
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer._observer_presence_surface_payload",
+                return_value={
+                    "summary": {
+                        "surface_count": 3,
+                        "active_surface_count": 2,
+                        "ready_surface_count": 1,
+                        "attention_surface_count": 1,
+                        "paired_surface_count": 1,
+                        "unpaired_surface_count": 0,
+                        "revoked_surface_count": 1,
+                        "blocked_device_surface_count": 1,
+                    },
+                    "surfaces": [
+                        {
+                            "id": "messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                            "kind": "messaging_connector",
+                            "label": "Telegram relay",
+                            "package_label": "Seraph Relay Pack",
+                            "package_id": "seraph.relay",
+                            "status": "requires_config",
+                            "active": False,
+                            "ready": False,
+                            "attention": True,
+                            "detail": "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                            "repair_hint": "Finish connector configuration in the operator surface before routing follow-through here.",
+                            "follow_up_hint": None,
+                            "follow_up_prompt": None,
+                            "transport": None,
+                            "source_type": None,
+                        },
+                        {
+                            "id": "channel_adapters:seraph.native:channels/native.yaml",
+                            "kind": "channel_adapter",
+                            "label": "native notification channel",
+                            "package_label": "Seraph Native Pack",
+                            "package_id": "seraph.native",
+                            "status": "ready",
+                            "active": True,
+                            "ready": True,
+                            "attention": False,
+                            "detail": "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                            "repair_hint": None,
+                            "follow_up_hint": "Use operator review before routing external follow-through through this surface.",
+                            "follow_up_prompt": "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+                            "transport": "native_notification",
+                            "source_type": None,
+                            "boundary_posture": "channel_boundary",
+                            "boundary_scope": "native_notification",
+                            "trust_state": "local_daemon",
+                            "pairing_state": None,
+                            "revocation_state": None,
+                            "device_reach_allowed": None,
+                            "blocked_reason": None,
+                        },
+                        {
+                            "id": "node_adapters:seraph.device:connectors/nodes/revoked.yaml",
+                            "kind": "node_adapter",
+                            "label": "revoked companion bridge",
+                            "package_label": "Seraph Device Pack",
+                            "package_id": "seraph.device",
+                            "status": "staged_link",
+                            "active": True,
+                            "ready": True,
+                            "attention": False,
+                            "detail": "Seraph Device Pack adds revoked companion bridge for companion device or companion reach (staged link).",
+                            "repair_hint": None,
+                            "follow_up_hint": "Use operator review before routing companion or device follow-through through this surface.",
+                            "follow_up_prompt": "Plan guarded companion follow-through via revoked companion bridge.",
+                            "transport": None,
+                            "source_type": None,
+                            "boundary_posture": "device_boundary",
+                            "boundary_scope": "companion_device",
+                            "trust_state": "revoked",
+                            "pairing_state": "paired",
+                            "revocation_state": "revoked",
+                            "device_reach_allowed": False,
+                            "blocked_reason": "device pairing was revoked",
+                        },
+                    ],
+                },
+            ),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["imported_reach"]["summary"]["attention_family_count"] == 1
+        assert payload["source_adapters"]["summary"]["degraded_adapter_count"] == 1
+        assert payload["presence_surfaces"]["summary"]["surface_count"] == 3
+        assert payload["summary"]["presence_surface_count"] == 3
+        assert payload["summary"]["attention_presence_surface_count"] == 1
+        assert payload["summary"]["revoked_presence_surface_count"] == 1
+        assert payload["summary"]["blocked_device_surface_count"] == 1
+        assert payload["summary"]["continuity_health"] == "attention"
+        assert payload["summary"]["primary_surface"] == "source_adapter"
+        assert payload["summary"]["recommended_focus"] == "github-managed"
+        assert any(
+            item["kind"] == "source_adapter_repair"
+            and item["surface"] == "source_adapter"
+            and item["label"] == "Restore source adapter github-managed"
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "imported_reach_attention"
+            and item["surface"] == "imported_reach"
+            and item["label"] == "Review imported messaging"
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "presence_repair"
+            and item["surface"] == "presence"
+            and item["label"] == "Review presence surface Telegram relay"
+            for item in payload["recovery_actions"]
+        )
+        assert any(
+            item["kind"] == "presence_follow_up"
+            and item["surface"] == "presence"
+            and item["label"] == "Plan follow-up via native notification channel"
+            and item["boundary_posture"] == "channel_boundary"
+            for item in payload["recovery_actions"]
+        )
+        assert not any(
+            item["kind"] == "presence_follow_up"
+            and item["label"] == "Plan follow-up via revoked companion bridge"
+            for item in payload["recovery_actions"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_observer_continuity_tolerates_partial_namespace_items(self, client):
+        await native_notification_queue.clear()
+        created_at = datetime(2026, 4, 8, 12, 0, tzinfo=timezone.utc)
+        created_at_iso = created_at.isoformat()
+        with (
+            patch(
+                "src.observer.native_notification_queue.native_notification_queue.list",
+                AsyncMock(
+                    return_value=[
+                        types.SimpleNamespace(
+                            id="notification-1",
+                            intervention_id="intervention-1",
+                            title="Seraph alert",
+                            body="Pick up the saved brief draft.",
+                            session_id="thread-1",
+                            resume_message="Continue from native notification.",
+                            created_at=created_at_iso,
+                            intervention_type="advisory",
+                            urgency=3,
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.observer.insight_queue.insight_queue.peek_all",
+                AsyncMock(
+                    return_value=[
+                        types.SimpleNamespace(
+                            id="queued-1",
+                            intervention_id="intervention-1",
+                            intervention_type="advisory",
+                            content="Bundle the research notes for later.",
+                            urgency=2,
+                            reasoning="available_capacity",
+                            created_at=created_at_iso,
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.guardian.feedback.guardian_feedback_repository.list_recent",
+                AsyncMock(
+                    return_value=[
+                        types.SimpleNamespace(
+                            id="intervention-1",
+                            intervention_type="advisory",
+                            updated_at=created_at,
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.api.observer.session_manager.list_sessions",
+                AsyncMock(return_value=[{"id": "thread-1", "title": "Research thread"}]),
+            ),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["queued_insights"][0]["thread_id"] is None
+        assert payload["recent_interventions"][0]["thread_id"] is None
+        assert payload["recent_interventions"][0]["content_excerpt"] == ""
+        assert payload["recent_interventions"][0]["policy_action"] == ""
+        assert payload["recent_interventions"][0]["latest_outcome"] == ""
+        assert payload["recent_interventions"][0]["resume_message"] == "Continue from this guardian intervention."
 
     @pytest.mark.asyncio
     async def test_ack_native_notification(self, async_db, client):
@@ -655,3 +1055,276 @@ class TestObserverAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert "total_observations" in data
+
+    def test_observer_presence_surface_payload_keeps_disabled_and_planned_surfaces_visible(self):
+        with patch(
+            "src.extensions.lifecycle.list_extensions",
+            return_value={
+                "extensions": [
+                    {
+                        "id": "seraph.presence.pack",
+                        "display_name": "Presence Pack",
+                        "contributions": [
+                            {
+                                "type": "messaging_connectors",
+                                "name": "Telegram relay",
+                                "platform": "telegram",
+                                "reference": "connectors/messaging/telegram.yaml",
+                                "status": "disabled",
+                                "active": False,
+                            },
+                            {
+                                "type": "observer_definitions",
+                                "name": "Calendar observer",
+                                "source_type": "calendar",
+                                "reference": "observers/calendar.yaml",
+                                "status": "planned",
+                                "active": False,
+                            },
+                        ],
+                    }
+                ]
+            },
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["attention_surface_count"] == 2
+        assert any(
+            item["status"] == "disabled"
+            and item["repair_hint"] == "Re-enable this packaged contribution in extension lifecycle state."
+            for item in payload["surfaces"]
+        )
+        assert any(
+            item["status"] == "planned"
+            and item["repair_hint"] == "Enable the packaged contribution and confirm its runtime prerequisites in the operator surface."
+            for item in payload["surfaces"]
+        )
+
+    def test_observer_presence_surface_payload_adds_browser_provider_and_node_adapter_inventory(self):
+        registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])
+        registry_instance = SimpleNamespace(snapshot=lambda: registry_snapshot)
+        with (
+            patch(
+                "src.extensions.lifecycle.list_extensions",
+                return_value={
+                    "extensions": [
+                        {"id": "seraph.browserbase", "display_name": "Browserbase Pack", "contributions": []},
+                        {"id": "seraph.device", "display_name": "Device Pack", "contributions": []},
+                    ]
+                },
+            ),
+            patch("src.extensions.state.load_extension_state_payload", return_value={"extensions": {}}),
+            patch("src.extensions.state.connector_enabled_overrides", return_value={}),
+            patch("src.extensions.registry.default_manifest_roots_for_workspace", return_value=[]),
+            patch("src.extensions.registry.ExtensionRegistry", return_value=registry_instance),
+            patch(
+                "src.extensions.browser_providers.list_browser_provider_inventory",
+                return_value=[
+                    SimpleNamespace(
+                        extension_id="seraph.browserbase",
+                        name="browserbase",
+                        provider_kind="browserbase",
+                        description="Managed browser provider",
+                        default_enabled=True,
+                        enabled=True,
+                        reference="connectors/browser/browserbase.yaml",
+                        resolved_path=None,
+                        manifest_root_index=0,
+                        configured=True,
+                        config_keys=("api_key",),
+                        requires_network=True,
+                        requires_daemon=False,
+                        capabilities=("extract", "screenshot"),
+                        execution_mode="local_fallback",
+                        runtime_state="staged_local_fallback",
+                        selected=True,
+                    ),
+                ],
+            ),
+            patch(
+                "src.extensions.node_adapters.list_node_adapter_inventory",
+                return_value=[
+                    SimpleNamespace(
+                        extension_id="seraph.device",
+                        name="Atlas companion bridge",
+                        adapter_kind="companion",
+                        description="Companion node bridge",
+                        enabled=True,
+                        configured=True,
+                        config_keys=("endpoint",),
+                        capabilities=("observe", "handoff"),
+                        requires_network=True,
+                        requires_daemon=True,
+                        runtime_state="staged_link",
+                        reference="connectors/nodes/atlas-companion.yaml",
+                    ),
+                ],
+            ),
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["ready_surface_count"] == 0
+        assert payload["summary"]["attention_surface_count"] == 2
+        assert payload["summary"]["blocked_device_surface_count"] == 1
+
+        browser_follow_up = next(
+            item for item in payload["surfaces"] if item["id"] == "browser_providers:seraph.browserbase:connectors/browser/browserbase.yaml"
+        )
+        assert browser_follow_up["kind"] == "browser_provider"
+        assert browser_follow_up["selected"] is True
+        assert browser_follow_up["provider_kind"] == "browserbase"
+        assert browser_follow_up["execution_mode"] == "local_fallback"
+        assert browser_follow_up["attention"] is True
+        assert browser_follow_up["repair_hint"] == "Inspect remote browser transport prerequisites before relying on this packaged browser reach."
+        assert browser_follow_up["follow_up_prompt"].startswith("Plan guarded browser-assisted follow-through via browserbase")
+
+        node_follow_up = next(
+            item for item in payload["surfaces"] if item["id"] == "node_adapters:seraph.device:connectors/nodes/atlas-companion.yaml"
+        )
+        assert node_follow_up["kind"] == "node_adapter"
+        assert node_follow_up["adapter_kind"] == "companion"
+        assert node_follow_up["requires_network"] is True
+        assert node_follow_up["requires_daemon"] is True
+        assert node_follow_up["pairing_state"] == "unreported"
+        assert node_follow_up["device_reach_allowed"] is False
+        assert node_follow_up["blocked_reason"] == "live pairing is not confirmed"
+        assert node_follow_up["follow_up_prompt"] is None
+
+    def test_observer_presence_surface_payload_blocks_unpaired_and_revoked_device_follow_up(self):
+        registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])
+        registry_instance = SimpleNamespace(snapshot=lambda: registry_snapshot)
+        with (
+            patch(
+                "src.extensions.lifecycle.list_extensions",
+                return_value={
+                    "extensions": [
+                        {"id": "seraph.device", "display_name": "Device Pack", "contributions": []},
+                    ]
+                },
+            ),
+            patch("src.extensions.state.load_extension_state_payload", return_value={"extensions": {}}),
+            patch("src.extensions.state.connector_enabled_overrides", return_value={}),
+            patch("src.extensions.registry.default_manifest_roots_for_workspace", return_value=[]),
+            patch("src.extensions.registry.ExtensionRegistry", return_value=registry_instance),
+            patch("src.extensions.browser_providers.list_browser_provider_inventory", return_value=[]),
+            patch(
+                "src.extensions.node_adapters.list_node_adapter_inventory",
+                return_value=[
+                    SimpleNamespace(
+                        extension_id="seraph.device",
+                        name="Unpaired bridge",
+                        adapter_kind="device",
+                        enabled=True,
+                        requires_network=True,
+                        requires_daemon=True,
+                        runtime_state="staged_link",
+                        reference="connectors/nodes/unpaired.yaml",
+                        pairing_state="unpaired",
+                        revocation_state="none",
+                        boundary_posture="device_boundary",
+                        trust_state="not_trusted",
+                    ),
+                    SimpleNamespace(
+                        extension_id="seraph.device",
+                        name="Revoked bridge",
+                        adapter_kind="device",
+                        enabled=True,
+                        requires_network=True,
+                        requires_daemon=True,
+                        runtime_state="staged_link",
+                        reference="connectors/nodes/revoked.yaml",
+                        pairing_state="paired",
+                        revocation_state="revoked",
+                        boundary_posture="device_boundary",
+                        trust_state="revoked",
+                    ),
+                ],
+            ),
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["attention_surface_count"] == 2
+        assert payload["summary"]["blocked_device_surface_count"] == 2
+        assert payload["summary"]["unpaired_surface_count"] == 1
+        assert payload["summary"]["revoked_surface_count"] == 1
+        assert all(item["follow_up_prompt"] is None for item in payload["surfaces"])
+
+        unpaired = next(item for item in payload["surfaces"] if item["label"] == "Unpaired bridge")
+        assert unpaired["boundary_posture"] == "device_boundary"
+        assert unpaired["pairing_state"] == "unpaired"
+        assert unpaired["device_reach_allowed"] is False
+        assert unpaired["blocked_reason"] == "device is not paired"
+
+        revoked = next(item for item in payload["surfaces"] if item["label"] == "Revoked bridge")
+        assert revoked["revocation_state"] == "revoked"
+        assert revoked["revoked"] is True
+        assert revoked["device_reach_allowed"] is False
+        assert revoked["blocked_reason"] == "device pairing was revoked"
+
+    def test_observer_presence_surface_payload_keeps_browser_provider_and_node_adapter_fallback_attention(self):
+        registry_snapshot = SimpleNamespace(list_contributions=lambda contribution_type: [])
+        registry_instance = SimpleNamespace(snapshot=lambda: registry_snapshot)
+        with (
+            patch(
+                "src.extensions.lifecycle.list_extensions",
+                return_value={
+                    "extensions": [
+                        {
+                            "id": "seraph.browserbase",
+                            "display_name": "Browserbase Pack",
+                            "contributions": [
+                                {
+                                    "type": "browser_providers",
+                                    "name": "browserbase remote",
+                                    "provider_kind": "browserbase",
+                                    "reference": "connectors/browser/browserbase.yaml",
+                                    "status": "overridden",
+                                    "enabled": True,
+                                    "configured": True,
+                                },
+                            ],
+                        },
+                        {
+                            "id": "seraph.device",
+                            "display_name": "Device Pack",
+                            "contributions": [
+                                {
+                                    "type": "node_adapters",
+                                    "reference": "connectors/nodes/atlas-companion.yaml",
+                                    "status": "invalid",
+                                    "enabled": True,
+                                    "configured": False,
+                                },
+                            ],
+                        },
+                    ]
+                },
+            ),
+            patch("src.extensions.state.load_extension_state_payload", return_value={"extensions": {}}),
+            patch("src.extensions.state.connector_enabled_overrides", return_value={}),
+            patch("src.extensions.registry.default_manifest_roots_for_workspace", return_value=[]),
+            patch("src.extensions.registry.ExtensionRegistry", return_value=registry_instance),
+            patch("src.extensions.browser_providers.list_browser_provider_inventory", return_value=[]),
+            patch("src.extensions.node_adapters.list_node_adapter_inventory", return_value=[]),
+        ):
+            payload = _observer_presence_surface_payload()
+
+        assert payload["summary"]["surface_count"] == 2
+        assert payload["summary"]["attention_surface_count"] == 2
+
+        browser_attention = next(
+            item for item in payload["surfaces"] if item["id"] == "browser_providers:seraph.browserbase:connectors/browser/browserbase.yaml"
+        )
+        assert browser_attention["kind"] == "browser_provider"
+        assert browser_attention["status"] == "overridden"
+        assert browser_attention["repair_hint"] == "Inspect the competing packaged contribution that currently owns this surface."
+
+        node_attention = next(
+            item for item in payload["surfaces"] if item["id"] == "node_adapters:seraph.device:connectors/nodes/atlas-companion.yaml"
+        )
+        assert node_attention["kind"] == "node_adapter"
+        assert node_attention["status"] == "invalid"
+        assert node_attention["repair_hint"] == "Inspect node-adapter diagnostics and daemon prerequisites in the operator surface."

@@ -1,0 +1,4 @@
+id: runbook:source-progress-review
+title: Source Progress Review
+summary: Enable a provider-neutral progress review flow for repos, projects, or focus areas.
+starter_pack: source-progress-review

@@ -9,6 +9,8 @@ from src.observer.native_notification_queue import native_notification_queue
 
 logger = logging.getLogger(__name__)
 
+_BUILTIN_CHANNEL_TRANSPORTS = {"websocket", "native_notification"}
+
 
 def _transport_failure_reason(
     *,
@@ -23,6 +25,20 @@ def _transport_failure_reason(
     if failed_connections >= attempted_connections:
         return "all_connections_failed"
     return "unknown_transport_failure"
+
+
+def _prefer_delivery_error(current_error: str | None, next_error: str) -> str:
+    if not current_error or current_error in {"no_active_route_transport", "unknown_transport_failure"}:
+        return next_error
+    if next_error in {"daemon_unavailable", "no_active_route_transport"}:
+        return current_error
+    return next_error
+
+
+def _route_disabled_error(*, primary_transport: str | None) -> str:
+    if primary_transport == "websocket":
+        return "websocket_adapter_disabled"
+    return "no_active_route_transport"
 
 
 def _active_channel_adapters() -> set[str]:
@@ -44,11 +60,114 @@ def _active_channel_adapters() -> set[str]:
         contributions,
         enabled_overrides=connector_enabled_overrides(state_by_id),
     )
-    if active_adapters:
-        return {item.transport for item in active_adapters}
-    if contributions:
-        return set()
-    return {"websocket", "native_notification"}
+    active_transports = {item.transport for item in active_adapters}
+    return active_transports | (_BUILTIN_CHANNEL_TRANSPORTS - active_transports)
+
+
+def _delivery_route_name(*, message: WSResponse, is_scheduled: bool) -> str:
+    if is_scheduled:
+        return "scheduled_delivery"
+    if message.intervention_type == "alert":
+        return "alert_delivery"
+    return "live_delivery"
+
+
+def _route_transport_order(route_name: str, *, active_channel_adapters: set[str]) -> tuple[dict[str, str | None], list[str]]:
+    from src.extensions.channel_routing import route_runtime_status
+    from src.extensions.state import load_extension_state_payload
+    from src.observer.manager import context_manager
+    from src.scheduler.connection_manager import ws_manager
+
+    state_payload = load_extension_state_payload()
+    _, route_status = route_runtime_status(
+        state_payload,
+        route=route_name,
+        active_transports=active_channel_adapters,
+        websocket_connection_count=ws_manager.active_count,
+        daemon_connected=context_manager.is_daemon_connected(),
+    )
+    return route_status, list(route_status.get("delivery_order") or [])
+
+
+def _bundle_continuation_payload(items: list[object], *, bundle_content: str) -> dict[str, str | None]:
+    session_ids = []
+    for item in items:
+        raw_session_id = getattr(item, "session_id", None)
+        session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else None
+        if not session_id:
+            return {
+                "session_id": None,
+                "thread_id": None,
+                "thread_source": "ambient",
+                "continuation_mode": "open_thread",
+                "resume_message": "Review the queued guardian updates.",
+            }
+        session_ids.append(session_id)
+
+    common_session_id = session_ids[0] if session_ids else None
+    if common_session_id and all(session_id == common_session_id for session_id in session_ids):
+        return {
+            "session_id": common_session_id,
+            "thread_id": common_session_id,
+            "thread_source": "session",
+            "continuation_mode": "resume_thread",
+            "resume_message": f"Continue from these guardian updates: {bundle_content}",
+        }
+
+    return {
+        "session_id": None,
+        "thread_id": None,
+        "thread_source": "ambient",
+        "continuation_mode": "open_thread",
+        "resume_message": "Review the queued guardian updates.",
+    }
+
+
+def _bundle_content(items: list[object]) -> str:
+    parts = [f"- {item.content}" for item in items]
+    return f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
+
+
+def _group_native_bundle_items(items: list[object]) -> list[list[object]]:
+    session_groups: dict[str, list[object]] = {}
+    ambient_items: list[object] = []
+    for item in items:
+        raw_session_id = getattr(item, "session_id", None)
+        session_id = str(raw_session_id).strip() if isinstance(raw_session_id, str) else ""
+        if session_id:
+            session_groups.setdefault(session_id, []).append(item)
+            continue
+        ambient_items.append(item)
+
+    if len(session_groups) <= 1 and not ambient_items:
+        return [items]
+
+    grouped_items = list(session_groups.values())
+    if ambient_items:
+        grouped_items.append(ambient_items)
+    return grouped_items
+
+
+def _apply_native_channel_preference(
+    *,
+    transport_order: list[str],
+    message: WSResponse,
+    is_scheduled: bool,
+    channel_bias: str,
+) -> list[str]:
+    if (
+        channel_bias != "prefer_native_notification"
+        or "native_notification" not in transport_order
+        or not _should_offer_native_notification(
+            message,
+            is_scheduled=is_scheduled,
+            channel_bias=channel_bias,
+        )
+    ):
+        return transport_order
+    if transport_order[0] == "native_notification":
+        return transport_order
+    return ["native_notification", *[transport for transport in transport_order if transport != "native_notification"]]
 
 
 def _should_offer_native_notification(
@@ -87,6 +206,7 @@ async def _create_intervention_record(
     is_scheduled: bool,
     guardian_confidence: str | None,
     user_state: str,
+    active_project: str | None,
     interruption_mode: str,
     data_quality: str,
     policy_decision: InterventionDecision,
@@ -106,6 +226,7 @@ async def _create_intervention_record(
             guardian_confidence=guardian_confidence,
             data_quality=data_quality,
             user_state=user_state,
+            active_project=active_project,
             interruption_mode=interruption_mode,
             policy_action=policy_decision.action.value,
             policy_reason=policy_decision.reason,
@@ -160,6 +281,8 @@ async def deliver_or_queue(
     from src.observer.insight_queue import insight_queue
     from src.scheduler.connection_manager import ws_manager
     from src.guardian.feedback import GuardianLearningSignal, guardian_feedback_repository
+    from src.guardian.learning_arbitration import arbitrate_learning_signal
+    from src.memory.procedural_guidance import load_procedural_memory_guidance
 
     ctx = context_manager.get_context()
     active_channel_adapters = _active_channel_adapters()
@@ -167,15 +290,47 @@ async def deliver_or_queue(
     urgency = message.urgency or 0
     policy_decision: InterventionDecision | None = None
     learning_signal = GuardianLearningSignal.neutral(intervention_type)
+    effective_learning_signal = learning_signal
+    learning_signal_source = "heuristic_only"
+    live_learning_scope = "global"
+    live_learning_scope_axes: dict[str, str] = {}
+    procedural_lesson_types: tuple[str, ...] = ()
+    learning_arbitration_sources: dict[str, str] = {}
+    learning_arbitration_reasons: dict[str, str] = {}
+    learning_arbitration_weights: dict[str, float] = {}
 
     try:
         try:
-            learning_signal = await guardian_feedback_repository.get_learning_signal(
+            live_learning_resolution = await guardian_feedback_repository.resolve_learning_signal(
                 intervention_type=intervention_type,
                 limit=12,
+                session_id=session_id,
+                active_project=ctx.active_project,
             )
+            learning_signal = live_learning_resolution.effective_signal
+            live_learning_scope = live_learning_resolution.dominant_scope
+            live_learning_scope_axes = live_learning_resolution.selected_scopes()
         except Exception:
             logger.debug("Failed to compute guardian learning signal", exc_info=True)
+        try:
+            procedural_guidance = await load_procedural_memory_guidance(
+                intervention_type,
+                continuity_thread_id=session_id,
+                active_project=ctx.active_project,
+            )
+            arbitration = arbitrate_learning_signal(
+                live_signal=learning_signal,
+                procedural_guidance=procedural_guidance,
+            )
+            effective_learning_signal = arbitration.effective_signal
+            learning_signal_source = arbitration.source_label
+            procedural_lesson_types = procedural_guidance.lesson_types
+            learning_arbitration_sources = arbitration.selected_sources()
+            learning_arbitration_reasons = arbitration.selected_reasons()
+            learning_arbitration_weights = arbitration.selected_weights()
+        except Exception:
+            logger.debug("Failed to load procedural learning guidance", exc_info=True)
+            effective_learning_signal = learning_signal
 
         policy_decision = decide_intervention(
             message_type=message.type,
@@ -193,15 +348,19 @@ async def deliver_or_queue(
             salience_reason=ctx.salience_reason,
             interruption_cost=ctx.interruption_cost,
             requires_approval=bool(message.requires_approval),
-            recent_feedback_bias=learning_signal.bias,
-            learning_phrasing_bias=learning_signal.phrasing_bias,
-            learning_cadence_bias=learning_signal.cadence_bias,
-            learning_channel_bias=learning_signal.channel_bias,
-            learning_escalation_bias=learning_signal.escalation_bias,
-            learning_timing_bias=learning_signal.timing_bias,
-            learning_blocked_state_bias=learning_signal.blocked_state_bias,
-            learning_suppression_bias=learning_signal.suppression_bias,
-            learning_thread_preference_bias=learning_signal.thread_preference_bias,
+            recent_feedback_bias=effective_learning_signal.bias,
+            learning_phrasing_bias=effective_learning_signal.phrasing_bias,
+            learning_cadence_bias=effective_learning_signal.cadence_bias,
+            learning_channel_bias=effective_learning_signal.channel_bias,
+            learning_escalation_bias=effective_learning_signal.escalation_bias,
+            learning_timing_bias=effective_learning_signal.timing_bias,
+            learning_blocked_state_bias=effective_learning_signal.blocked_state_bias,
+            learning_suppression_bias=effective_learning_signal.suppression_bias,
+            learning_thread_preference_bias=effective_learning_signal.thread_preference_bias,
+            learning_multi_day_positive_days=effective_learning_signal.multi_day_positive_days,
+            learning_multi_day_negative_days=effective_learning_signal.multi_day_negative_days,
+            learning_scheduled_positive_days=effective_learning_signal.scheduled_positive_days,
+            learning_scheduled_negative_days=effective_learning_signal.scheduled_negative_days,
         )
 
         event_details = {
@@ -214,19 +373,30 @@ async def deliver_or_queue(
             "salience_reason": ctx.salience_reason,
             "interruption_cost": ctx.interruption_cost,
             "guardian_confidence": guardian_confidence,
-            "learning_bias": learning_signal.bias,
-            "learning_phrasing_bias": learning_signal.phrasing_bias,
-            "learning_cadence_bias": learning_signal.cadence_bias,
-            "learning_channel_bias": learning_signal.channel_bias,
-            "learning_escalation_bias": learning_signal.escalation_bias,
-            "learning_timing_bias": learning_signal.timing_bias,
-            "learning_blocked_state_bias": learning_signal.blocked_state_bias,
-            "learning_suppression_bias": learning_signal.suppression_bias,
-            "learning_thread_preference_bias": learning_signal.thread_preference_bias,
+            "learning_signal_source": learning_signal_source,
+            "live_learning_scope": live_learning_scope,
+            "live_learning_scope_axes": live_learning_scope_axes,
+            "learning_bias": effective_learning_signal.bias,
+            "learning_phrasing_bias": effective_learning_signal.phrasing_bias,
+            "learning_cadence_bias": effective_learning_signal.cadence_bias,
+            "learning_channel_bias": effective_learning_signal.channel_bias,
+            "learning_escalation_bias": effective_learning_signal.escalation_bias,
+            "learning_timing_bias": effective_learning_signal.timing_bias,
+            "learning_blocked_state_bias": effective_learning_signal.blocked_state_bias,
+            "learning_suppression_bias": effective_learning_signal.suppression_bias,
+            "learning_thread_preference_bias": effective_learning_signal.thread_preference_bias,
             "learning_helpful_count": learning_signal.helpful_count,
             "learning_not_helpful_count": learning_signal.not_helpful_count,
             "learning_acknowledged_count": learning_signal.acknowledged_count,
             "learning_failed_count": learning_signal.failed_count,
+            "learning_multi_day_positive_days": learning_signal.multi_day_positive_days,
+            "learning_multi_day_negative_days": learning_signal.multi_day_negative_days,
+            "learning_scheduled_positive_days": learning_signal.scheduled_positive_days,
+            "learning_scheduled_negative_days": learning_signal.scheduled_negative_days,
+            "learning_arbitration_mode": "evidence_weighted",
+            "learning_arbitration_sources": learning_arbitration_sources,
+            "learning_arbitration_reasons": learning_arbitration_reasons,
+            "learning_arbitration_weights": learning_arbitration_weights,
             "policy_action": policy_decision.action.value,
             "policy_reason": policy_decision.reason,
         }
@@ -236,6 +406,7 @@ async def deliver_or_queue(
             is_scheduled=is_scheduled,
             guardian_confidence=guardian_confidence,
             user_state=ctx.user_state,
+            active_project=ctx.active_project,
             interruption_mode=ctx.interruption_mode,
             data_quality=ctx.data_quality,
             policy_decision=policy_decision,
@@ -243,45 +414,108 @@ async def deliver_or_queue(
         message.intervention_id = intervention_id
         if intervention_id is not None:
             event_details["intervention_id"] = intervention_id
+        if procedural_lesson_types:
+            event_details["procedural_learning_lesson_types"] = list(procedural_lesson_types)
 
         if policy_decision.action.value == "act":
-            websocket_enabled = "websocket" in active_channel_adapters
-            if websocket_enabled:
-                broadcast_result = await ws_manager.broadcast(message)
-            else:
-                from src.scheduler.connection_manager import BroadcastResult
-
-                broadcast_result = BroadcastResult(
-                    attempted_connections=0,
-                    delivered_connections=0,
-                    failed_connections=0,
-                )
+            route_name = _delivery_route_name(message=message, is_scheduled=is_scheduled)
+            route_binding, transport_order = _route_transport_order(
+                route_name,
+                active_channel_adapters=active_channel_adapters,
+            )
+            adjusted_transport_order = _apply_native_channel_preference(
+                transport_order=transport_order,
+                message=message,
+                is_scheduled=is_scheduled,
+                channel_bias=effective_learning_signal.channel_bias,
+            )
             event_details.update(
                 {
-                    "attempted_connections": broadcast_result.attempted_connections,
-                    "delivered_connections": broadcast_result.delivered_connections,
-                    "failed_connections": broadcast_result.failed_connections,
                     "active_channel_adapters": sorted(active_channel_adapters),
+                    "channel_route": route_binding["route"],
+                    "primary_transport": route_binding["primary_transport"],
+                    "fallback_transport": route_binding["fallback_transport"],
+                    "configured_transport_order": route_binding.get("configured_order") or [],
+                    "route_status": route_binding.get("status"),
+                    "route_summary": route_binding.get("summary"),
+                    "route_failure_reason": route_binding.get("failure_reason"),
+                    "route_repair_hint": route_binding.get("repair_hint"),
+                    "transport_statuses": route_binding.get("transports") or [],
+                    "transport_order": adjusted_transport_order,
                 }
             )
-            if broadcast_result.delivered_connections <= 0:
-                if (
-                    "native_notification" in active_channel_adapters
-                    and
-                    context_manager.is_daemon_connected()
-                    and _should_offer_native_notification(
-                        message,
-                        is_scheduled=is_scheduled,
-                        channel_bias=learning_signal.channel_bias,
+            if adjusted_transport_order != transport_order:
+                event_details["transport_order_adjustment"] = "learned_native_channel_preference"
+            transport_order = adjusted_transport_order
+
+            last_error = (
+                str(route_binding.get("failure_reason"))
+                if isinstance(route_binding.get("failure_reason"), str) and route_binding.get("failure_reason")
+                else _route_disabled_error(primary_transport=route_binding["primary_transport"])
+            )
+            for transport in transport_order:
+                if transport == "websocket":
+                    websocket_enabled = "websocket" in active_channel_adapters
+                    if websocket_enabled:
+                        broadcast_result = await ws_manager.broadcast(message)
+                    else:
+                        from src.scheduler.connection_manager import BroadcastResult
+
+                        broadcast_result = BroadcastResult(
+                            attempted_connections=0,
+                            delivered_connections=0,
+                            failed_connections=0,
+                        )
+                    event_details.update(
+                        {
+                            "attempted_connections": broadcast_result.attempted_connections,
+                            "delivered_connections": broadcast_result.delivered_connections,
+                            "failed_connections": broadcast_result.failed_connections,
+                        }
                     )
-                ):
+                    if broadcast_result.delivered_connections > 0:
+                        if policy_decision.should_cost_budget:
+                            context_manager.decrement_attention_budget()
+                        logger.info("Delivered proactive message (type=%s)", message.type)
+                        await _update_intervention_outcome(
+                            intervention_id,
+                            latest_outcome="delivered",
+                            transport="websocket",
+                        )
+                        await log_observer_delivery_event(
+                            decision="delivered",
+                            message_type=message.type,
+                            intervention_type=intervention_type,
+                            urgency=urgency,
+                            is_scheduled=is_scheduled,
+                            details={**event_details, "transport": "websocket"},
+                        )
+                        return policy_decision
+                    last_error = _prefer_delivery_error(
+                        last_error,
+                        _transport_failure_reason(
+                        attempted_connections=broadcast_result.attempted_connections,
+                        failed_connections=broadcast_result.failed_connections,
+                        websocket_enabled=websocket_enabled,
+                        ),
+                    )
+                    continue
+
+                if transport == "native_notification":
+                    if not context_manager.is_daemon_connected():
+                        last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
+                        continue
                     notification = await native_notification_queue.enqueue(
                         intervention_id=intervention_id,
                         title=_native_notification_title(message, is_scheduled=is_scheduled),
                         body=message.content,
                         intervention_type=intervention_type,
                         urgency=urgency,
-                        surface="action_card" if learning_signal.escalation_bias == "prefer_async_native" else "notification",
+                        surface=(
+                            "action_card"
+                            if effective_learning_signal.escalation_bias == "prefer_async_native"
+                            else "notification"
+                        ),
                         session_id=session_id,
                         thread_id=session_id,
                         thread_source="session" if session_id else "ambient",
@@ -292,6 +526,13 @@ async def deliver_or_queue(
                         title=notification.title,
                         outcome="queued",
                     )
+                    event_details.update(
+                        {
+                            "attempted_connections": 1,
+                            "delivered_connections": 1,
+                            "failed_connections": 0,
+                        }
+                    )
                     if policy_decision.should_cost_budget:
                         context_manager.decrement_attention_budget()
                     await _update_intervention_outcome(
@@ -301,7 +542,7 @@ async def deliver_or_queue(
                         notification_id=notification.id,
                     )
                     logger.info(
-                        "Rerouted proactive message to native notification (type=%s, notification_id=%s)",
+                        "Delivered proactive message over native notification (type=%s, notification_id=%s)",
                         message.type,
                         notification.id,
                     )
@@ -322,53 +563,33 @@ async def deliver_or_queue(
                     )
                     return policy_decision
 
-                logger.warning(
-                    "Failed to deliver proactive message over WebSocket transport (attempted=%d failed=%d)",
-                    broadcast_result.attempted_connections,
-                    broadcast_result.failed_connections,
-                )
-                await _update_intervention_outcome(
-                    intervention_id,
-                    latest_outcome="failed",
-                    transport="websocket",
-                )
-                await log_observer_delivery_event(
-                    decision="failed",
-                    message_type=message.type,
-                    intervention_type=intervention_type,
-                    urgency=urgency,
-                    is_scheduled=is_scheduled,
-                    details={
-                        **event_details,
-                        "transport": "websocket",
-                        "delivery_decision": policy_decision.delivery_decision.value
-                        if policy_decision.delivery_decision is not None
-                        else None,
-                        "error": _transport_failure_reason(
-                            attempted_connections=broadcast_result.attempted_connections,
-                            failed_connections=broadcast_result.failed_connections,
-                            websocket_enabled=websocket_enabled,
-                        ),
-                    },
-                )
-                return policy_decision
-            # Decrement budget if this delivery costs budget
-            if policy_decision.should_cost_budget:
-                context_manager.decrement_attention_budget()
-            logger.info("Delivered proactive message (type=%s)", message.type)
+            logger.warning(
+                "Failed to deliver proactive message (type=%s, route=%s, error=%s)",
+                message.type,
+                route_name,
+                last_error,
+            )
             await _update_intervention_outcome(
                 intervention_id,
-                latest_outcome="delivered",
-                transport="websocket",
+                latest_outcome="failed",
+                transport=transport_order[0] if transport_order else None,
             )
             await log_observer_delivery_event(
-                decision="delivered",
+                decision="failed",
                 message_type=message.type,
                 intervention_type=intervention_type,
                 urgency=urgency,
                 is_scheduled=is_scheduled,
-                details={**event_details, "transport": "websocket"},
+                details={
+                    **event_details,
+                    "transport": transport_order[0] if transport_order else None,
+                    "delivery_decision": policy_decision.delivery_decision.value
+                    if policy_decision.delivery_decision is not None
+                    else None,
+                    "error": last_error,
+                },
             )
+            return policy_decision
 
         elif policy_decision.action.value == "bundle":
             await insight_queue.enqueue(
@@ -450,79 +671,38 @@ async def deliver_queued_bundle() -> int:
     if not items:
         return 0
     active_channel_adapters = _active_channel_adapters()
-    if "websocket" not in active_channel_adapters:
-        if (
-            "native_notification" in active_channel_adapters
-            and context_manager.is_daemon_connected()
-        ):
-            notification = await native_notification_queue.enqueue(
-                intervention_id=None,
-                title="Seraph update",
-                body=(
-                    f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n"
-                    + "\n".join(f"- {item.content}" for item in items)
-                ),
-                intervention_type="proactive_bundle",
-                urgency=3,
-                surface="action_card",
-                session_id=None,
-                thread_id=None,
-                thread_source="ambient",
-                continuation_mode="open_thread",
-                resume_message="Review the queued guardian updates.",
-            )
-            await insight_queue.delete_many(
-                [item.id for item in items if getattr(item, "id", None)]
-            )
-            for item in items:
-                await _update_intervention_outcome(
-                    item.intervention_id,
-                    latest_outcome="bundle_delivered",
-                    transport="native_notification_bundle",
-                    notification_id=notification.id,
-                )
-            await log_observer_delivery_event(
-                decision="delivered",
-                message_type="proactive",
-                intervention_type="proactive_bundle",
-                urgency=3,
-                is_scheduled=False,
-                details={
-                    "bundle_item_count": len(items),
-                    "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
-                    "delivery_decision": "deliver",
-                    "active_channel_adapters": sorted(active_channel_adapters),
-                    "transport": "native_notification",
-                    "notification_id": notification.id,
-                },
-            )
-            return len(items)
-        await log_observer_delivery_event(
-            decision="failed",
-            message_type="proactive",
-            intervention_type="proactive_bundle",
-            urgency=3,
-            is_scheduled=False,
-            details={
-                "bundle_item_count": len(items),
-                "queue_retained": True,
-                "delivery_decision": "deliver",
-                "active_channel_adapters": sorted(active_channel_adapters),
-                "error": _transport_failure_reason(
-                    attempted_connections=0,
-                    failed_connections=0,
-                    websocket_enabled=False,
-                ),
-            },
-        )
-        return 0
-
-    # Format as a single bundle message
-    parts = []
-    for item in items:
-        parts.append(f"- {item.content}")
-    bundle_content = f"While you were away ({len(items)} update{'s' if len(items) != 1 else ''}):\n" + "\n".join(parts)
-
+    route_binding, transport_order = _route_transport_order(
+        "bundle_delivery",
+        active_channel_adapters=active_channel_adapters,
+    )
+    bundle_content = _bundle_content(items)
+    native_bundle_groups = _group_native_bundle_items(items)
+    group_continuations = [
+        _bundle_continuation_payload(group, bundle_content=_bundle_content(group))
+        for group in native_bundle_groups
+    ]
+    details = {
+        "bundle_item_count": len(items),
+        "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
+        "delivery_decision": "deliver",
+        "active_channel_adapters": sorted(active_channel_adapters),
+        "channel_route": route_binding["route"],
+        "primary_transport": route_binding["primary_transport"],
+        "fallback_transport": route_binding["fallback_transport"],
+        "configured_transport_order": route_binding.get("configured_order") or [],
+        "route_status": route_binding.get("status"),
+        "route_summary": route_binding.get("summary"),
+        "route_failure_reason": route_binding.get("failure_reason"),
+        "route_repair_hint": route_binding.get("repair_hint"),
+        "transport_statuses": route_binding.get("transports") or [],
+        "transport_order": transport_order,
+        "bundle_group_count": len(native_bundle_groups),
+        "bundle_thread_ids": [item["thread_id"] for item in group_continuations if item.get("thread_id")],
+        "bundle_continuation_modes": [
+            str(item.get("continuation_mode") or "open_thread")
+            for item in group_continuations
+        ],
+    }
     message = WSResponse(
         type="proactive",
         content=bundle_content,
@@ -530,56 +710,121 @@ async def deliver_queued_bundle() -> int:
         urgency=3,
         reasoning=f"Bundle of {len(items)} queued insight(s) delivered on state transition",
     )
-    broadcast_result = await ws_manager.broadcast(message)
-    details = {
-        "bundle_item_count": len(items),
-        "intervention_ids": [item.intervention_id for item in items if item.intervention_id],
-        "attempted_connections": broadcast_result.attempted_connections,
-        "delivered_connections": broadcast_result.delivered_connections,
-        "failed_connections": broadcast_result.failed_connections,
-        "delivery_decision": "deliver",
-        "active_channel_adapters": sorted(active_channel_adapters),
-    }
-    if broadcast_result.delivered_connections <= 0:
-        logger.warning(
-            "Failed to deliver queued bundle over WebSocket transport (attempted=%d failed=%d)",
-            broadcast_result.attempted_connections,
-            broadcast_result.failed_connections,
-        )
-        await log_observer_delivery_event(
-            decision="failed",
-            message_type=message.type,
-            intervention_type=message.intervention_type,
-            urgency=message.urgency,
-            is_scheduled=False,
-            details={
-                **details,
-                "queue_retained": True,
-                "error": _transport_failure_reason(
-                    attempted_connections=broadcast_result.attempted_connections,
-                    failed_connections=broadcast_result.failed_connections,
-                    websocket_enabled=True,
-                ),
-            },
-        )
-        return 0
 
-    await insight_queue.delete_many(
-        [item.id for item in items if getattr(item, "id", None)]
+    last_error = (
+        str(route_binding.get("failure_reason"))
+        if isinstance(route_binding.get("failure_reason"), str) and route_binding.get("failure_reason")
+        else _route_disabled_error(primary_transport=route_binding["primary_transport"])
     )
-    for item in items:
-        await _update_intervention_outcome(
-            item.intervention_id,
-            latest_outcome="bundle_delivered",
-            transport="websocket_bundle",
-        )
-    logger.info("Delivered bundle of %d queued insight(s)", len(items))
+    for transport in transport_order:
+        if transport == "native_notification":
+            if not context_manager.is_daemon_connected():
+                last_error = _prefer_delivery_error(last_error, "daemon_unavailable")
+                continue
+            notifications = []
+            for group_items in native_bundle_groups:
+                group_content = _bundle_content(group_items)
+                group_continuation = _bundle_continuation_payload(group_items, bundle_content=group_content)
+                notification = await native_notification_queue.enqueue(
+                    intervention_id=None,
+                    title="Seraph update",
+                    body=group_content,
+                    intervention_type="proactive_bundle",
+                    urgency=3,
+                    surface="action_card",
+                    session_id=group_continuation["session_id"],
+                    thread_id=group_continuation["thread_id"],
+                    thread_source=str(group_continuation["thread_source"] or "ambient"),
+                    continuation_mode=str(group_continuation["continuation_mode"] or "open_thread"),
+                    resume_message=group_continuation["resume_message"],
+                )
+                context_manager.record_native_notification(
+                    title=notification.title,
+                    outcome="queued",
+                )
+                notifications.append((notification, group_items))
+            await insight_queue.delete_many(
+                [item.id for item in items if getattr(item, "id", None)]
+            )
+            for notification, group_items in notifications:
+                for item in group_items:
+                    await _update_intervention_outcome(
+                        item.intervention_id,
+                        latest_outcome="bundle_delivered",
+                        transport="native_notification_bundle",
+                        notification_id=notification.id,
+                    )
+            details.update(
+                {
+                    "attempted_connections": len(notifications),
+                    "delivered_connections": len(notifications),
+                    "failed_connections": 0,
+                }
+            )
+            await log_observer_delivery_event(
+                decision="delivered",
+                message_type="proactive",
+                intervention_type="proactive_bundle",
+                urgency=3,
+                is_scheduled=False,
+                details={
+                    **details,
+                    "transport": "native_notification",
+                    "notification_id": notifications[0][0].id if notifications else None,
+                    "notification_ids": [notification.id for notification, _ in notifications],
+                },
+            )
+            return len(items)
+
+        if transport == "websocket":
+            broadcast_result = await ws_manager.broadcast(message)
+            details.update(
+                {
+                    "attempted_connections": broadcast_result.attempted_connections,
+                    "delivered_connections": broadcast_result.delivered_connections,
+                    "failed_connections": broadcast_result.failed_connections,
+                }
+            )
+            if broadcast_result.delivered_connections > 0:
+                await insight_queue.delete_many(
+                    [item.id for item in items if getattr(item, "id", None)]
+                )
+                for item in items:
+                    await _update_intervention_outcome(
+                        item.intervention_id,
+                        latest_outcome="bundle_delivered",
+                        transport="websocket_bundle",
+                    )
+                logger.info("Delivered bundle of %d queued insight(s)", len(items))
+                await log_observer_delivery_event(
+                    decision="delivered",
+                    message_type=message.type,
+                    intervention_type=message.intervention_type,
+                    urgency=message.urgency,
+                    is_scheduled=False,
+                    details={**details, "transport": "websocket"},
+                )
+                return len(items)
+            last_error = _prefer_delivery_error(
+                last_error,
+                _transport_failure_reason(
+                attempted_connections=broadcast_result.attempted_connections,
+                failed_connections=broadcast_result.failed_connections,
+                websocket_enabled=True,
+                ),
+            )
+
     await log_observer_delivery_event(
-        decision="delivered",
+        decision="failed",
         message_type=message.type,
         intervention_type=message.intervention_type,
         urgency=message.urgency,
         is_scheduled=False,
-        details=details,
+        details={
+            **details,
+            "queue_retained": True,
+            "transport": transport_order[0] if transport_order else None,
+            "error": last_error,
+        },
     )
-    return len(items)
+    return 0

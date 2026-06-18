@@ -1,7 +1,7 @@
 """Memory consolidation reliability — deleted sessions, embedding failures, malformed LLM output."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,13 +23,13 @@ class TestConsolidationAfterSessionDelete:
         await sm.delete("s1")
 
         # Should not raise — history will be empty
-        with patch("litellm.completion") as mock_llm:
+        with patch("src.memory.consolidator.completion_with_fallback") as mock_llm:
             await consolidate_session("s1")
             mock_llm.assert_not_called()  # short/empty history → early return
 
     async def test_nonexistent_session_returns_silently(self, async_db, sm):
         """Consolidation on a session that never existed should not raise."""
-        with patch("litellm.completion") as mock_llm:
+        with patch("src.memory.consolidator.completion_with_fallback") as mock_llm:
             await consolidate_session("never-existed")
             mock_llm.assert_not_called()
 
@@ -52,8 +52,13 @@ class TestEmbeddingFailures:
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = llm_response
 
-        with patch("litellm.completion", return_value=mock_resp), \
-             patch("src.memory.consolidator.add_memory", side_effect=RuntimeError("Embedding crashed")):
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch(
+            "src.memory.consolidator.add_memory",
+            side_effect=RuntimeError("Embedding crashed"),
+        ):
             # Should not raise — consolidator catches all exceptions
             await consolidate_session("s1")
 
@@ -69,7 +74,10 @@ class TestMalformedLLMOutput:
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = "This is not JSON at all"
 
-        with patch("litellm.completion", return_value=mock_resp):
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ):
             await consolidate_session("s1")  # should not raise
 
     async def test_missing_fields_handled(self, async_db, sm):
@@ -83,8 +91,10 @@ class TestMalformedLLMOutput:
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = llm_response
 
-        with patch("litellm.completion", return_value=mock_resp), \
-             patch("src.memory.consolidator.add_memory") as mock_add:
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch("src.memory.consolidator.add_memory") as mock_add:
             await consolidate_session("s1")
             mock_add.assert_not_called()  # no valid categories → no memories stored
 
@@ -105,7 +115,9 @@ class TestMalformedLLMOutput:
         mock_resp.choices = [MagicMock()]
         mock_resp.choices[0].message.content = llm_response
 
-        with patch("litellm.completion", return_value=mock_resp), \
-             patch("src.memory.consolidator.add_memory") as mock_add:
+        with patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ), patch("src.memory.consolidator.add_memory") as mock_add:
             await consolidate_session("s1")
             mock_add.assert_not_called()

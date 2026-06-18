@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import logging
+from contextlib import suppress
 from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -11,6 +12,7 @@ from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.agent.exceptions import ClarificationRequired
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -63,7 +65,7 @@ async def _build_agent(session_id: str, message: str):
     profile = await get_or_create_profile()
 
     if not profile.onboarding_completed:
-        return create_onboarding_agent(), True, set()
+        return create_onboarding_agent(message), True, set()
 
     guardian_state = await build_guardian_state(
         session_id=session_id,
@@ -101,6 +103,7 @@ async def websocket_chat(websocket: WebSocket):
                         "Seraph online. Before I begin acting on your behalf, I need a clearer read on who you are, "
                         "what matters most, and how you want this workspace to operate. "
                         "I'll ask a few short onboarding questions to establish that baseline. "
+                        "During onboarding I'm using a limited setup focused on your guardian record and priorities. "
                         "If you want the full workspace immediately, just say the word and I'll skip ahead."
                     ),
                     intervention_type="advisory",
@@ -213,7 +216,18 @@ async def websocket_chat(websocket: WebSocket):
                         elif isinstance(step, FinalAnswerStep):
                             final_result = await redact_secrets_in_text(str(step.output))
 
-                await asyncio.wait_for(_drain_queue(), timeout=settings.agent_chat_timeout)
+                drain_task = asyncio.create_task(
+                    _drain_queue(),
+                    name=f"ws-drain:{session.id[:8]}",
+                )
+                try:
+                    await asyncio.wait_for(drain_task, timeout=settings.agent_chat_timeout)
+                except Exception:
+                    if not drain_task.done():
+                        drain_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await drain_task
+                    raise
 
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
@@ -262,6 +276,44 @@ async def websocket_chat(websocket: WebSocket):
                         approval_id=exc.approval_id,
                         tool_name=exc.tool_name,
                         risk_level=exc.risk_level,
+                    ).model_dump_json()
+                )
+                continue
+            except ClarificationRequired as exc:
+                rendered = await redact_secrets_in_text(exc.render_message())
+                await session_manager.add_message(
+                    session.id,
+                    "assistant",
+                    rendered,
+                    metadata_json=json.dumps({
+                        "display_role": "clarification",
+                        "question": exc.question,
+                        "reason": exc.reason,
+                        "options": exc.options,
+                    }),
+                )
+                await audit_repository.log_event(
+                    session_id=session.id,
+                    actor="agent",
+                    event_type="clarification_requested",
+                    tool_name="clarify",
+                    risk_level="low",
+                    policy_mode=get_current_tool_policy_mode(),
+                    summary=exc.question,
+                    details={
+                        "reason": exc.reason,
+                        "options": exc.options,
+                    },
+                )
+                await websocket.send_text(
+                    WSResponse(
+                        type="clarification_required",
+                        content=rendered,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                        question=exc.question,
+                        reason=exc.reason or None,
+                        options=exc.options or None,
                     ).model_dump_json()
                 )
                 continue
@@ -333,9 +385,12 @@ async def websocket_chat(websocket: WebSocket):
             # Trigger memory consolidation in background (only for assistant responses)
             if final_result:
                 try:
-                    from src.memory.consolidator import consolidate_session
+                    from src.memory.flush import flush_session_memory
                     from src.utils.background import track_task
-                    track_task(consolidate_session(session.id), name=f"consolidate-{session.id[:8]}")
+                    track_task(
+                        flush_session_memory(session.id, trigger="post_response"),
+                        name=f"consolidate-{session.id[:8]}",
+                    )
                 except Exception:
                     logger.debug("Failed to schedule memory consolidation", exc_info=True)
 

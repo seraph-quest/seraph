@@ -171,6 +171,14 @@ class ContextManager:
                     interruption_mode=old.interruption_mode,
                     attention_budget_remaining=budget,
                 )
+                try:
+                    from src.observer.screen_repository import screen_observation_repo
+
+                    recent_projects = await screen_observation_repo.get_recent_projects(limit=1)
+                    active_project = recent_projects[0] if recent_projects else None
+                except Exception:
+                    logger.debug("Failed to load active project during observer refresh", exc_info=True)
+                    active_project = old.active_project
 
                 self._context = CurrentContext(
                     time_of_day=time_data.get("time_of_day", "unknown"),
@@ -180,6 +188,7 @@ class ContextManager:
                     current_event=calendar_data.get("current_event"),
                     recent_git_activity=git_data.get("recent_git_activity"),
                     active_goals_summary=goal_data.get("active_goals_summary", ""),
+                    active_project=active_project,
                     # Preserve externally-managed fields from old context
                     last_interaction=old.last_interaction,
                     user_state=new_user_state,
@@ -204,6 +213,17 @@ class ContextManager:
                     salience_reason=assessment.salience_reason,
                     interruption_cost=assessment.interruption_cost,
                 )
+                observer_transition_count = 0
+                try:
+                    from src.memory.observer_episodes import record_observer_transition_episodes
+
+                    observer_transition_count = await record_observer_transition_episodes(
+                        old_context=old,
+                        new_context=self._context,
+                        active_project=active_project,
+                    )
+                except Exception:
+                    logger.debug("Failed to persist observer transition episodes", exc_info=True)
 
                 triggered_bundle_delivery = False
 
@@ -230,8 +250,10 @@ class ContextManager:
                         "salience_level": assessment.salience_level,
                         "salience_reason": assessment.salience_reason,
                         "interruption_cost": assessment.interruption_cost,
+                        "active_project": active_project,
                         "previous_user_state": old.user_state,
                         "new_user_state": new_user_state,
+                        "observer_transition_count": observer_transition_count,
                         "triggered_bundle_delivery": triggered_bundle_delivery,
                     },
                 )

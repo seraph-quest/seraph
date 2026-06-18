@@ -1,4 +1,4 @@
-"""Tests for shell_execute tool (src/tools/shell_tool.py)."""
+"""Tests for sandbox-backed execute_code and shell_execute tools."""
 
 import asyncio
 from unittest.mock import MagicMock, patch
@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from src.audit.repository import audit_repository
+from src.tools.execute_code_tool import execute_code
 from src.tools.shell_tool import shell_execute
 
 
@@ -20,6 +21,17 @@ class TestShellExecute:
         MockClient.return_value.__exit__ = MagicMock(return_value=False)
 
         result = shell_execute('print("hello")')
+        assert "hello" in result
+
+    @patch("src.tools.shell_tool.httpx.Client")
+    def test_execute_code_success(self, MockClient):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"stdout": "hello\n", "returncode": 0}
+        mock_resp.raise_for_status = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=MagicMock(post=MagicMock(return_value=mock_resp)))
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = execute_code('print("hello")')
         assert "hello" in result
 
     @patch("src.tools.shell_tool.httpx.Client")
@@ -47,6 +59,11 @@ class TestShellExecute:
 
     def test_wrong_language(self):
         result = shell_execute("echo hello", language="bash")
+        assert "Error" in result
+        assert "python" in result.lower()
+
+    def test_execute_code_wrong_language(self):
+        result = execute_code("echo hello", language="bash")
         assert "Error" in result
         assert "python" in result.lower()
 
@@ -86,6 +103,26 @@ class TestShellExecute:
 
         result = shell_execute('print("hello")')
         assert "hello" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "sandbox:snekbox"
+        assert events[0]["details"]["returncode"] == 0
+
+    @patch("src.tools.shell_tool.httpx.Client")
+    def test_execute_code_logs_runtime_audit(self, MockClient, async_db):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"stdout": "ok\n", "returncode": 0}
+        mock_resp.raise_for_status = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=MagicMock(post=MagicMock(return_value=mock_resp)))
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = execute_code('print("ok")')
+        assert "ok" in result
 
         async def _fetch():
             events = await audit_repository.list_events(limit=5)

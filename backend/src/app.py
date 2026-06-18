@@ -14,10 +14,11 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.memory.soul import ensure_soul_exists
 from src.runbooks.manager import runbook_manager
-from src.scheduler.engine import init_scheduler, shutdown_scheduler
+from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
+from src.utils.background import drain_tracked_tasks
 from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -69,13 +70,6 @@ async def lifespan(app: FastAPI):
     except Exception:
         import logging
         logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
-    init_scheduler()
-    try:
-        from src.observer.manager import context_manager
-        await context_manager.refresh()
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
     mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
     if not os.path.exists(mcp_config):
@@ -108,16 +102,32 @@ async def lifespan(app: FastAPI):
         os.path.join(settings.workspace_dir, "starter-packs.json"),
         manifest_roots=manifest_roots,
     )
+    init_scheduler()
+    await sync_scheduled_jobs()
+    try:
+        from src.observer.manager import context_manager
+        await context_manager.refresh()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
     yield
     shutdown_scheduler()
     mcp_manager.disconnect_all()
-    await close_db()
+    shutdown_error: Exception | None = None
+    try:
+        await drain_tracked_tasks(timeout_seconds=5.0)
+    except Exception as exc:
+        shutdown_error = exc
+    finally:
+        await close_db()
+    if shutdown_error is not None:
+        raise shutdown_error
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.3.19",
+        version="2026.4.10",
         debug=settings.debug,
         lifespan=lifespan,
     )

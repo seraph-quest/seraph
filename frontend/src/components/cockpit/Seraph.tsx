@@ -15,6 +15,8 @@ interface SeraphProps {
   detail?: string;
   telemetry?: SeraphTelemetryEntry[];
   statusLabel?: string;
+  dividerColor?: string;
+  edgeColor?: string;
 }
 
 const Seraph: React.FC<SeraphProps> = ({
@@ -22,6 +24,8 @@ const Seraph: React.FC<SeraphProps> = ({
   detail,
   telemetry,
   statusLabel,
+  dividerColor,
+  edgeColor,
 }) => {
   const [frame, setFrame] = useState(0);
 
@@ -236,6 +240,13 @@ const Seraph: React.FC<SeraphProps> = ({
         boxShadow: `inset 0 1px 0 rgba(255,255,255,0.02), 0 0 24px ${glow}`,
       }}
     >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-20"
+        style={{
+          boxShadow: `inset 1px 0 0 ${edgeColor ?? "rgba(141,226,255,0.12)"}, inset -1px 0 0 ${edgeColor ?? "rgba(141,226,255,0.12)"}, inset 0 -1px 0 ${edgeColor ?? "rgba(141,226,255,0.12)"}`,
+        }}
+      />
       <div className="scanline relative flex min-h-0 flex-1 items-center justify-center overflow-hidden px-3 pb-3 pt-3">
         <div className="absolute inset-0 opacity-30 pointer-events-none" style={{
           backgroundImage:
@@ -263,7 +274,10 @@ const Seraph: React.FC<SeraphProps> = ({
         </div>
       </div>
 
-      <div className="border-t border-[#173547] bg-[linear-gradient(180deg,rgba(7,19,29,0.9),rgba(6,16,25,0.97))] px-4 py-2.5 backdrop-blur-xl">
+      <div
+        className="border-t bg-[linear-gradient(180deg,rgba(7,19,29,0.9),rgba(6,16,25,0.97))] px-4 py-2.5 backdrop-blur-xl"
+        style={{ borderColor: dividerColor ?? 'rgba(141,226,255,0.12)' }}
+      >
         <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
           <div className="min-w-0 flex-1">
             <div className={`text-[18px] font-bold uppercase tracking-[-0.04em] glow-text ${colorMap[state]}`}>

@@ -4,14 +4,14 @@
       "name": "daily-standup",
       "description": "Generate a standup report from git and goals",
       "category": "productivity",
-      "requires_tools": ["shell_execute", "get_goals"],
+      "requires_tools": ["execute_code", "get_goals"],
       "bundled": true
     },
     {
       "name": "code-review",
       "description": "Review a file with structured feedback",
       "category": "development",
-      "requires_tools": ["shell_execute", "read_file"],
+      "requires_tools": ["execute_code", "read_file"],
       "bundled": true
     },
     {

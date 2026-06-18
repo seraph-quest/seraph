@@ -1,0 +1,11 @@
+name: research-ops
+description: Research-oriented operator preset for search, browsing, and note capture.
+mode: balanced
+include_tools:
+  - web_search
+  - browse_webpage
+  - write_file
+capabilities:
+  - research
+  - synthesis
+enabled: true

@@ -8,7 +8,12 @@ import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
 import type { ChatMessage, GoalInfo } from "../../types";
-import { buildWorkflowDraft, type WorkflowInfo } from "../settings/workflowDraft";
+import {
+  buildWorkflowDraft,
+  workflowAcceptsArtifact,
+  workflowArtifactInputs,
+  type WorkflowInfo,
+} from "../settings/workflowDraft";
 import { useDragResize } from "../../hooks/useDragResize";
 import { ResizeHandles } from "../ResizeHandles";
 import {
@@ -60,6 +65,1185 @@ interface RuntimeStatus {
   llm_logging_enabled?: boolean;
 }
 
+interface OperatorControlPlaneRole {
+  id: string;
+  label: string;
+  scope: string;
+  summary: string;
+  status: string;
+  permissions: string[];
+  boundaries: string[];
+}
+
+interface OperatorControlPlaneGovernance {
+  workspace_mode: string;
+  review_posture: string;
+  approval_mode: string;
+  tool_policy_mode: string;
+  mcp_policy_mode: string;
+  delegation_enabled: boolean;
+  workspace_dir?: string;
+  roles: OperatorControlPlaneRole[];
+}
+
+interface OperatorControlPlaneUsage {
+  window_hours: number;
+  llm_call_count: number;
+  llm_cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  user_triggered_llm_calls: number;
+  autonomous_llm_calls: number;
+  failure_count: number;
+  pending_approvals: number;
+  active_workflows: number;
+  blocked_workflows: number;
+}
+
+interface OperatorControlPlaneRuntimeExtensions {
+  total: number;
+  ready: number;
+  degraded: number;
+  governed: number;
+  issue_count: number;
+  degraded_connector_count: number;
+}
+
+interface OperatorControlPlaneRuntimeContinuity {
+  continuity_health: string;
+  primary_surface?: string | null;
+  recommended_focus?: string | null;
+  actionable_thread_count: number;
+  degraded_route_count: number;
+  degraded_source_adapter_count: number;
+  attention_presence_surface_count: number;
+}
+
+interface OperatorControlPlaneHandoffEntry {
+  id: string;
+  kind: string;
+  label: string;
+  detail: string;
+  status: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  continue_message?: string | null;
+}
+
+interface OperatorControlPlaneReviewReceipt {
+  id: string;
+  title: string;
+  summary: string;
+  status: string;
+  created_at: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+}
+
+interface OperatorControlPlane {
+  governance: OperatorControlPlaneGovernance;
+  usage: OperatorControlPlaneUsage;
+  runtime_posture: {
+    runtime: RuntimeStatus;
+    extensions: OperatorControlPlaneRuntimeExtensions;
+    continuity: OperatorControlPlaneRuntimeContinuity;
+  };
+  handoff: {
+    pending_approvals: OperatorControlPlaneHandoffEntry[];
+    blocked_workflows: OperatorControlPlaneHandoffEntry[];
+    follow_ups: OperatorControlPlaneHandoffEntry[];
+    review_receipts: OperatorControlPlaneReviewReceipt[];
+  };
+}
+
+interface OperatorBenchmarkProofSummary {
+  suite_count: number;
+  scenario_count: number;
+  benchmark_posture: string;
+  operator_status: string;
+  remaining_gap: string;
+  governed_improvement_status: string;
+  memory_benchmark_posture?: string;
+  user_model_benchmark_posture?: string;
+  workflow_endurance_benchmark_posture?: string;
+  live_workflow_endurance_canary_posture?: string;
+  one_reach_channel_canary_posture?: string;
+  trust_boundary_benchmark_posture?: string;
+  secure_capability_host_benchmark_posture?: string;
+  computer_use_benchmark_posture?: string;
+  governed_improvement_benchmark_posture?: string;
+}
+
+interface OperatorBenchmarkProofSuite {
+  name: string;
+  label: string;
+  description: string;
+  benchmark_axis: string;
+  operator_summary: string;
+  remaining_gap: string;
+  scenario_count: number;
+  scenario_names: string[];
+}
+
+interface OperatorMemoryBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorMemoryBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    contradiction_state: string;
+    selective_forgetting_state: string;
+  };
+  failure_report: OperatorMemoryBenchmarkFailure[];
+  policy: {
+    retrieval_ranking_policy: string;
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorGovernedImprovementBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorGovernedImprovementReceipt {
+  id: string;
+  candidate_name: string;
+  target_type: string;
+  quality_state: string;
+  score: number;
+  rollout_state: string;
+  acceptance_state: string;
+  diversity_guard_state: string;
+  rollback_ready: boolean;
+  blocked_constraints: string[];
+  saved_candidate_path: string;
+  receipt_path: string;
+  updated_at: string;
+}
+
+interface OperatorBenchmarkProof {
+  summary: OperatorBenchmarkProofSummary;
+  suites: OperatorBenchmarkProofSuite[];
+  memory_benchmark: OperatorMemoryBenchmark | null;
+  user_model_benchmark: OperatorUserModelBenchmark | null;
+  workflow_endurance_benchmark: OperatorWorkflowEnduranceBenchmark | null;
+  live_workflow_endurance_canary: OperatorLiveWorkflowEnduranceCanary | null;
+  one_reach_channel_canary: OperatorOneReachChannelCanary | null;
+  trust_boundary_benchmark: OperatorTrustBoundaryBenchmark | null;
+  secure_capability_host_benchmark: OperatorSecureCapabilityHostBenchmark | null;
+  computer_use_benchmark: OperatorComputerUseBenchmark | null;
+  governed_improvement: {
+    target_count: number;
+    target_types: string[];
+    required_suite_count: number;
+    gate_policy: {
+      min_review_ready_score: number;
+      min_strong_score: number;
+      requires_human_review: boolean;
+      blocks_on_constraint_failure: boolean;
+      required_benchmark_suites: string[];
+      proof_contract: string;
+    };
+    summary: {
+      suite_name: string;
+      benchmark_posture: string;
+      operator_status: string;
+      scenario_count: number;
+      dimension_count: number;
+      failure_mode_count: number;
+      active_failure_count: number;
+      anti_misevolution_state: string;
+      canary_rollout_state: string;
+      rollback_state: string;
+      operator_receipt_state: string;
+      recent_receipt_count: number;
+      held_receipt_count: number;
+    } | null;
+    failure_report: OperatorGovernedImprovementBenchmarkFailure[];
+    policy: {
+      preference_diversity_policy: string;
+      canary_rollout_policy: string;
+      rollback_policy: string;
+      acceptance_policy: string;
+      operator_visibility: string;
+      receipt_surfaces: string[];
+      ci_gate_mode: string;
+    } | null;
+    recent_receipts: OperatorGovernedImprovementReceipt[];
+  };
+}
+
+interface OperatorUserModelBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorUserModelBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    clarification_policy_state: string;
+    restraint_policy_state: string;
+  };
+  failure_report: OperatorUserModelBenchmarkFailure[];
+  policy: {
+    canonical_authority: string;
+    clarify_before_action_policy: string;
+    personalization_override_policy: string;
+    operator_visibility: string;
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorWorkflowEnduranceBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorTrustBoundaryBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorSecureCapabilityHostBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorWorkflowEnduranceBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    anticipatory_repair_state: string;
+    condensation_fidelity_state: string;
+    branch_continuity_state: string;
+  };
+  failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
+  policy: {
+    anticipatory_repair_policy: string;
+    backup_branch_policy: string;
+    condensation_fidelity_policy: string;
+    operator_visibility: string;
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorLiveWorkflowEnduranceCanary {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    session_count: number;
+    run_count: number;
+    branch_run_count: number;
+    checkpoint_count: number;
+    failure_injection_count: number;
+    recovery_action_count: number;
+    artifact_receipt_count: number;
+    approval_preservation_count: number;
+    trust_boundary_block_count: number;
+    audit_receipt_count: number;
+    active_failure_count: number;
+    claim_boundary: string;
+  };
+  protocol: {
+    replay_command: string;
+    time_anchor: string;
+    receipt_contract: string[];
+  };
+  policy: {
+    claim_boundary: string;
+    receipt_surfaces: string[];
+    not_claimed: string[];
+    required_receipts: string[];
+  };
+  sessions: Record<string, unknown>[];
+  runs: Record<string, unknown>[];
+  operator_story: Record<string, boolean>;
+  failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
+}
+
+interface OperatorOneReachChannelCanary {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    selected_channel: string;
+    scenario_count: number;
+    active_failure_count: number;
+    pairing_state: string;
+    revocation_state: string;
+    health_state: string;
+    degraded_state: string;
+    retry_state: string;
+    thread_continuity_state: string;
+    approval_handoff_state: string;
+    audit_receipt_count: number;
+    e2e_step_count: number;
+    channel_sprawl_state: string;
+    claim_boundary: string;
+  };
+  protocol: {
+    replay_command: string;
+    time_anchor: string;
+  };
+  policy: {
+    claim_boundary: string;
+    receipt_surfaces: string[];
+    not_claimed: string[];
+  };
+  receipt: Record<string, unknown>;
+  operator_story: Record<string, boolean>;
+  failure_report: OperatorWorkflowEnduranceBenchmarkFailure[];
+}
+
+interface OperatorTrustBoundaryBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    secret_egress_state: string;
+    delegation_partition_state: string;
+    workflow_replay_state: string;
+    operator_receipt_state: string;
+  };
+  failure_report: OperatorTrustBoundaryBenchmarkFailure[];
+  policy: {
+    secret_egress_policy: string;
+    delegation_partition_policy: string;
+    background_execution_policy: string;
+    workflow_replay_policy: string;
+    operator_visibility: string;
+    receipt_surfaces: string[];
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorSecureCapabilityHostBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    credential_egress_state: string;
+    workspace_secret_file_state: string;
+    process_environment_state: string;
+    prompt_surface_state: string;
+    delegation_provider_state: string;
+  };
+  failure_report: OperatorSecureCapabilityHostBenchmarkFailure[];
+  policy: {
+    credential_egress_policy: string;
+    workspace_secret_file_policy: string;
+    process_environment_policy: string;
+    prompt_surface_policy: string;
+    delegation_provider_policy: string;
+    operator_visibility: string;
+    claim_boundary: string;
+    receipt_surfaces: string[];
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorComputerUseBenchmarkFailure {
+  type: string;
+  summary: string;
+  reason: string;
+}
+
+interface OperatorComputerUseBenchmark {
+  summary: {
+    suite_name: string;
+    benchmark_posture: string;
+    operator_status: string;
+    scenario_count: number;
+    dimension_count: number;
+    failure_mode_count: number;
+    active_failure_count: number;
+    browser_replay_state: string;
+    desktop_action_state: string;
+    cross_surface_receipt_state: string;
+  };
+  failure_report: OperatorComputerUseBenchmarkFailure[];
+  policy: {
+    browser_task_replay_policy: string;
+    desktop_action_replay_policy: string;
+    cross_surface_continuity_policy: string;
+    operator_visibility: string;
+    receipt_surfaces: string[];
+    ci_gate_mode: string;
+  };
+}
+
+interface OperatorGuardianStateSummary {
+  session_id?: string | null;
+  overall_confidence: string;
+  observer_confidence: string;
+  world_model_confidence: string;
+  memory_confidence: string;
+  current_session_confidence: string;
+  recent_sessions_confidence: string;
+  intent_uncertainty_level: string;
+  intent_resolution: string;
+  action_posture: string;
+  current_focus: string;
+  focus_source: string;
+  focus_alignment: string;
+  intervention_receptivity: string;
+  dominant_thread: string;
+  user_model_confidence: string;
+}
+
+interface OperatorGuardianStateExplanation {
+  judgment_proof_lines: string[];
+  intent_uncertainty_diagnostics: string[];
+  judgment_risks: string[];
+  corroboration_sources: string[];
+  preference_inference_diagnostics: string[];
+  learning_diagnostics: string[];
+  restraint_reasons: string[];
+  user_model_benchmark_diagnostics: string[];
+  memory_provider_diagnostics: string[];
+  memory_reconciliation_diagnostics: string[];
+}
+
+interface OperatorGuardianUserModelFacet {
+  key: string;
+  label: string;
+  value: string;
+  confidence: string;
+  evidence_sources: string[];
+  evidence_lines: string[];
+}
+
+interface OperatorGuardianUserModelProfile {
+  confidence: string;
+  restraint_posture: string;
+  continuity_strategy: string;
+  clarification_watchpoints: string[];
+  restraint_reasons: string[];
+  evidence_store: string[];
+  facets: OperatorGuardianUserModelFacet[];
+}
+
+interface OperatorGuardianStateGuidance {
+  active_projects: string[];
+  active_commitments: string[];
+  active_blockers: string[];
+  next_up: string[];
+  learning_guidance: string | null;
+  recent_execution_summary: string | null;
+}
+
+interface OperatorGuardianStateObserver {
+  user_state?: string | null;
+  interruption_mode?: string | null;
+  active_window?: string | null;
+  active_project?: string | null;
+  active_goals_summary?: string | null;
+  screen_context?: string | null;
+  data_quality?: string | null;
+  is_working_hours?: boolean | null;
+}
+
+interface OperatorGuardianState {
+  summary: OperatorGuardianStateSummary;
+  explanation: OperatorGuardianStateExplanation;
+  user_model: OperatorGuardianUserModelProfile;
+  operator_guidance: OperatorGuardianStateGuidance;
+  observer: OperatorGuardianStateObserver;
+}
+
+interface WorkflowOrchestrationStepFocus {
+  kind: string;
+  step_id?: string | null;
+  tool?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  error_summary?: string | null;
+  recovery_hint?: string | null;
+  recovery_action_count: number;
+  is_recoverable: boolean;
+}
+
+interface WorkflowOrchestrationRecoveryDensity {
+  recommended_path: string;
+  approval_pending: boolean;
+  boundary_blocked: boolean;
+  retry_ready: boolean;
+  checkpoint_ready: boolean;
+  repair_ready: boolean;
+  branch_ready: boolean;
+  replay_ready: boolean;
+  stalled: boolean;
+  checkpoint_candidate_count: number;
+  recovery_action_count: number;
+  repair_action_types: string[];
+  repair_hint?: string | null;
+  failure_step_id?: string | null;
+  failure_step_tool?: string | null;
+}
+
+interface WorkflowOrchestrationOutputDebugger {
+  family_run_count: number;
+  branch_run_count: number;
+  history_output_count: number;
+  primary_output_path?: string | null;
+  related_output_paths: string[];
+  history_outputs: Array<{
+    path: string;
+    run_identity?: string | null;
+    summary?: string | null;
+    status?: string | null;
+    branch_kind?: string | null;
+    updated_at?: string | null;
+    is_primary: boolean;
+  }>;
+  latest_branch_run_identity?: string | null;
+  latest_branch_summary?: string | null;
+  latest_branch_status?: string | null;
+  latest_branch_output_path?: string | null;
+  comparison_ready: boolean;
+  checkpoint_labels: string[];
+}
+
+interface WorkflowOrchestrationCondensationFidelity {
+  state: string;
+  watch_required: boolean;
+  visible_step_count: number;
+  total_step_count: number;
+  preserved_path_count: number;
+  history_output_count: number;
+  branch_run_count: number;
+  summary?: string | null;
+}
+
+interface WorkflowOrchestrationAnticipatoryPlan {
+  risk_level: string;
+  anticipatory_ready: boolean;
+  signal_count: number;
+  signals: string[];
+  summary?: string | null;
+  backup_branch_ready: boolean;
+  backup_branch_step_id?: string | null;
+  backup_branch_label?: string | null;
+  backup_branch_draft?: string | null;
+  anticipatory_repair_draft?: string | null;
+  family_failure_count: number;
+}
+
+interface WorkflowOrchestrationSessionEntry {
+  thread_id?: string | null;
+  thread_label?: string | null;
+  workflow_count: number;
+  active_workflows: number;
+  blocked_workflows: number;
+  awaiting_approval_workflows: number;
+  recoverable_workflows: number;
+  latest_updated_at: string;
+  lead_run_identity?: string | null;
+  lead_workflow_name?: string | null;
+  lead_status?: string | null;
+  lead_summary?: string | null;
+  continue_message?: string | null;
+  lead_step_focus?: WorkflowOrchestrationStepFocus | null;
+  total_step_count: number;
+  compacted_step_count: number;
+  compacted_workflow_count: number;
+  long_running_workflow_count: number;
+  artifact_count: number;
+  lead_state_capsule?: string | null;
+  boundary_blocked_workflows: number;
+  repair_ready_workflows: number;
+  branch_ready_workflows: number;
+  anticipatory_ready_workflows: number;
+  backup_branch_ready_workflows: number;
+  fidelity_watch_workflows: number;
+  stalled_workflows: number;
+  output_debugger_ready_workflows: number;
+  queue_state?: string | null;
+  queue_position?: number;
+  queue_reason?: string | null;
+  attention_summary?: string | null;
+  queue_draft?: string | null;
+  handoff_draft?: string | null;
+  lead_recommended_recovery_path?: string | null;
+  lead_anticipatory_risk_level?: string | null;
+  lead_anticipatory_summary?: string | null;
+  lead_backup_branch_label?: string | null;
+  lead_backup_branch_draft?: string | null;
+  lead_anticipatory_repair_draft?: string | null;
+  lead_condensation_fidelity_state?: string | null;
+  lead_condensation_fidelity_summary?: string | null;
+  lead_output_path?: string | null;
+  lead_related_output_paths?: string[];
+  lead_output_history?: WorkflowOrchestrationOutputDebugger["history_outputs"];
+  lead_latest_branch_run_identity?: string | null;
+  lead_latest_branch_summary?: string | null;
+}
+
+interface WorkflowOrchestrationWorkflowEntry {
+  id?: string | null;
+  tool_name?: string | null;
+  run_identity?: string | null;
+  root_run_identity?: string | null;
+  parent_run_identity?: string | null;
+  workflow_name: string;
+  summary: string;
+  status: string;
+  availability?: string | null;
+  session_id?: string | null;
+  started_at?: string;
+  updated_at: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  continue_message?: string | null;
+  thread_continue_message?: string | null;
+  output_path?: string | null;
+  artifact_paths?: string[];
+  step_records?: Array<Record<string, unknown>>;
+  pending_approval_count: number;
+  pending_approval_ids?: string[];
+  checkpoint_candidate_count: number;
+  checkpoint_candidates?: Array<Record<string, unknown>>;
+  retry_from_step_available: boolean;
+  retry_from_step_draft?: string | null;
+  replay_allowed?: boolean;
+  replay_block_reason?: string | null;
+  replay_recommended_actions?: Array<Record<string, unknown>>;
+  step_focus?: WorkflowOrchestrationStepFocus | null;
+  is_long_running: boolean;
+  is_compacted: boolean;
+  duration_minutes: number;
+  step_count: number;
+  visible_step_count: number;
+  compacted_step_count: number;
+  artifact_count: number;
+  preserved_recovery_paths: string[];
+  recent_step_labels: string[];
+  state_capsule?: string | null;
+  recovery_density?: WorkflowOrchestrationRecoveryDensity | null;
+  output_debugger?: WorkflowOrchestrationOutputDebugger | null;
+  condensation_fidelity?: WorkflowOrchestrationCondensationFidelity | null;
+  anticipatory_plan?: WorkflowOrchestrationAnticipatoryPlan | null;
+}
+
+interface OperatorWorkflowOrchestration {
+  summary: {
+    tracked_sessions: number;
+    workflow_count: number;
+    active_workflows: number;
+    blocked_workflows: number;
+    awaiting_approval_workflows: number;
+    recoverable_workflows: number;
+    long_running_workflows: number;
+    compacted_workflows: number;
+    total_step_count: number;
+    compacted_step_count: number;
+    boundary_blocked_workflows: number;
+    repair_ready_workflows: number;
+    branch_ready_workflows: number;
+    anticipatory_ready_workflows: number;
+    backup_branch_ready_workflows: number;
+    fidelity_watch_workflows: number;
+    stalled_workflows: number;
+    output_debugger_ready_workflows: number;
+    attention_sessions: number;
+  };
+  sessions: WorkflowOrchestrationSessionEntry[];
+  workflows: WorkflowOrchestrationWorkflowEntry[];
+}
+
+interface OperatorBackgroundSessionHandoff {
+  available: boolean;
+  target_type: string;
+  continue_message?: string | null;
+  workflow_name?: string | null;
+  run_identity?: string | null;
+  branch_kind?: string | null;
+  branch_depth: number;
+  artifact_paths: string[];
+  resume_checkpoint_label?: string | null;
+  summary?: string | null;
+}
+
+interface OperatorBackgroundProcessEntry {
+  process_id: string;
+  pid?: number | null;
+  command?: string | null;
+  args: string[];
+  cwd?: string | null;
+  status?: string | null;
+  started_at?: string | null;
+  session_id?: string | null;
+}
+
+interface OperatorBackgroundSessionEntry {
+  session_id: string;
+  title: string;
+  latest_updated_at: string;
+  last_message?: string | null;
+  workflow_count: number;
+  active_workflows: number;
+  blocked_workflows: number;
+  background_process_count: number;
+  running_background_process_count: number;
+  lead_workflow_name?: string | null;
+  lead_workflow_status?: string | null;
+  continue_message?: string | null;
+  branch_handoff_available: boolean;
+  branch_handoff: OperatorBackgroundSessionHandoff;
+  lead_process?: OperatorBackgroundProcessEntry | null;
+  background_processes: OperatorBackgroundProcessEntry[];
+}
+
+interface OperatorBackgroundSessions {
+  summary: {
+    tracked_sessions: number;
+    background_process_count: number;
+    running_background_process_count: number;
+    sessions_with_branch_handoff: number;
+    sessions_with_active_workflows: number;
+  };
+  sessions: OperatorBackgroundSessionEntry[];
+}
+
+interface OperatorM5JobRunReceipt {
+  id: string;
+  status: string;
+  outcome?: string | null;
+  approval_id?: string | null;
+  workflow_run_identity?: string | null;
+  error?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  audit_event_id?: string | null;
+}
+
+interface OperatorM5JobEntry {
+  id: string;
+  name: string;
+  status: string;
+  enabled: boolean;
+  trigger_type: string;
+  trigger_label: string;
+  action_type: string;
+  action_label: string;
+  session_id?: string | null;
+  created_by_session_id?: string | null;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_outcome?: string | null;
+  last_error?: string | null;
+  last_approval_id?: string | null;
+  run_count: number;
+  run_history: OperatorM5JobRunReceipt[];
+  lifecycle_controls: string[];
+  audit_receipts: string[];
+}
+
+interface OperatorM5DelegationPartition {
+  id: string;
+  specialist: string;
+  owner: string;
+  status: string;
+  risk_level: string;
+  task_summary: string;
+  execution_boundaries: string[];
+  delegated_tool_names: string[];
+  artifact_count: number;
+  review_state: string;
+  trust_partition: {
+    mode: string;
+    background_capable: boolean;
+    authenticated_source: boolean;
+    credential_egress_policy_count: number;
+    blocked: boolean;
+  };
+}
+
+interface OperatorM5QueueEntry {
+  id: string;
+  kind: string;
+  label: string;
+  status: string;
+  detail: string;
+  priority: string;
+  thread_id?: string | null;
+  continue_message?: string | null;
+  checkpoint_ready: boolean;
+  repair_ready: boolean;
+  branch_ready: boolean;
+  delegation_ready: boolean;
+  approval_required: boolean;
+  actions: string[];
+}
+
+interface OperatorM5OperatingLayer {
+  summary: {
+    work_item_count: number;
+    scheduled_job_count: number;
+    routine_count: number;
+    workflow_run_count: number;
+    delegation_partition_count: number;
+    active_work_count: number;
+    paused_work_count: number;
+    awaiting_approval_count: number;
+    failed_work_count: number;
+    repair_ready_count: number;
+    checkpoint_ready_count: number;
+    branch_ready_count: number;
+    session_churn_risk_count: number;
+    durable_run_receipt_count: number;
+    operator_status: string;
+    claim_boundary: string;
+  };
+  jobs: OperatorM5JobEntry[];
+  routines: OperatorM5JobEntry[];
+  delegations: OperatorM5DelegationPartition[];
+  work_queue: OperatorM5QueueEntry[];
+  missing_trigger_classes: string[];
+  proof_receipts: string[];
+}
+
+interface OperatorM6BehaviorReceipt {
+  id: string;
+  changed: boolean;
+  changed_dimensions: string[];
+  action_posture: string;
+  intent_resolution: string;
+  memory_confidence: string;
+  evidence: string[];
+  diagnostics: string[];
+  receipt_contract: string;
+}
+
+interface OperatorM6MemoryRecord {
+  id: string;
+  kind: string;
+  status: string;
+  summary: string;
+  content: string;
+  confidence: number;
+  importance: number;
+  reinforcement: number;
+  last_confirmed_at?: string | null;
+  updated_at: string;
+  provenance: {
+    source_session_id?: string | null;
+    source_count: number;
+    source_types: string[];
+    has_source_receipt: boolean;
+  };
+  control: {
+    pinned: boolean;
+    corrected: boolean;
+    forgotten: boolean;
+    privacy_boundary: string;
+    provider_writeback_allowed: boolean;
+  };
+  conflict: {
+    superseded_by_memory_id?: string | null;
+    superseded_reason?: string | null;
+    archived_reason?: string | null;
+  };
+}
+
+interface OperatorM6ControlReceipt {
+  id: string;
+  action: string;
+  event_type: string;
+  memory_id?: string | null;
+  summary: string;
+  risk_level: string;
+  session_id?: string | null;
+  created_at: string;
+  details: Record<string, unknown>;
+}
+
+interface OperatorM6MemorySuperiority {
+  summary: {
+    operator_status: string;
+    active_memory_count: number;
+    superseded_memory_count: number;
+    archived_memory_count: number;
+    source_receipt_count: number;
+    control_receipt_count: number;
+    behavior_receipt_count: number;
+    privacy_boundary_count: number;
+    provider_writeback_blocked_count: number;
+    memory_confidence: string;
+    action_posture: string;
+    claim_boundary: string;
+  };
+  behavior_receipts: OperatorM6BehaviorReceipt[];
+  memory_records: OperatorM6MemoryRecord[];
+  control_receipts: OperatorM6ControlReceipt[];
+  privacy_boundaries: string[];
+  reconciliation: Record<string, unknown>;
+  benchmark: Record<string, unknown>;
+  policy: Record<string, unknown>;
+}
+
+interface GuardianMemoryLiveCandidate {
+  id: string;
+  kind: string;
+  status: string;
+  summary: string;
+  content: string;
+  confidence: number;
+  privacy_boundary: string;
+  learning_outcome: string;
+  stale_evidence: boolean;
+  rollback_available: boolean;
+  delete_export_state: string;
+  recommended_actions: string[];
+}
+
+interface GuardianMemoryProviderControl {
+  name: string;
+  runtime_state: string;
+  control_state: string;
+  retrieval_allowed: boolean;
+  writeback_allowed: boolean;
+  advisory_only: boolean;
+  notes: string[];
+  recommended_actions: string[];
+}
+
+interface GuardianMemoryControlReceipt {
+  id: string;
+  action: string;
+  target_kind: string;
+  target_id: string;
+  summary: string;
+  outcome: string;
+  changed_memory: boolean;
+  changed_provider_state: boolean;
+  risk_level: string;
+  created_at: string;
+}
+
+interface GuardianMemoryLiveControl {
+  summary: {
+    operator_status: string;
+    memory_candidate_count: number;
+    provider_count: number;
+    quarantined_provider_count: number;
+    stale_candidate_count: number;
+    rollback_available_count: number;
+    delete_export_pending_count: number;
+    action_receipt_count: number;
+    claim_boundary: string;
+  };
+  memory_candidates: GuardianMemoryLiveCandidate[];
+  provider_controls: GuardianMemoryProviderControl[];
+  action_receipts: GuardianMemoryControlReceipt[];
+  blocked_claims: string[];
+  policy: Record<string, unknown>;
+}
+
+interface OperatorM7Control {
+  action: string;
+  enabled: boolean;
+  label: string;
+  target_kind?: string | null;
+  control_mode: string;
+  receipt_required: boolean;
+}
+
+interface OperatorM7Cockpit {
+  summary: {
+    operator_status: string;
+    active_work_count: number;
+    pending_approval_count: number;
+    trust_boundary_count: number;
+    memory_evidence_count: number;
+    tool_call_count: number;
+    artifact_count: number;
+    job_count: number;
+    delegation_count: number;
+    background_session_count: number;
+    recovery_action_count: number;
+    fast_control_count: number;
+    claim_boundary: string;
+  };
+  fast_controls: OperatorM7Control[];
+  proof_receipts: string[];
+  claim_boundaries: {
+    source: string;
+    not_claimed: string[];
+  };
+}
+
+interface OperatorM8GuardianBrainReceipt {
+  scenario_id: string;
+  action: string;
+  reason: string;
+  signal: string;
+  selected_capability?: {
+    id: string;
+    label: string;
+    lane: string;
+    risk_level: string;
+    requires_approval: boolean;
+    trust_level?: string;
+    channel?: string;
+  } | null;
+  rejected_capabilities: Array<{
+    id: string;
+    label: string;
+    lane: string;
+    risk_level: string;
+  }>;
+  inputs: Record<string, unknown>;
+  scores: {
+    timing?: string;
+    usefulness?: string;
+    false_positive_risk?: string;
+    false_negative_risk?: string;
+    trust_preservation?: string;
+    recovery?: string;
+  };
+  operator_correction: {
+    can_correct_action: boolean;
+    can_correct_capability: boolean;
+    receipt_surface: string;
+  };
+  claim_boundary: string;
+}
+
+interface OperatorM8GuardianBrain {
+  summary: {
+    operator_status: string;
+    decision_count: number;
+    action_count: number;
+    restraint_count: number;
+    capability_choice_count: number;
+    approval_preservation_count: number;
+    score_dimensions: string[];
+    guardian_action_posture: string;
+    intent_resolution: string;
+    claim_boundary: string;
+    receipt_source?: string;
+  };
+  decision_receipts: OperatorM8GuardianBrainReceipt[];
+  capability_choices: NonNullable<OperatorM8GuardianBrainReceipt["selected_capability"]>[];
+  restraint_receipts: OperatorM8GuardianBrainReceipt[];
+  approval_receipts: OperatorM8GuardianBrainReceipt[];
+  proof_receipts: string[];
+}
+
+interface OperatorEngineeringMemorySessionMatch {
+  session_id?: string | null;
+  title?: string | null;
+  matched_at?: string | null;
+  snippet?: string | null;
+  source?: string | null;
+}
+
+interface OperatorEngineeringMemoryBundle {
+  reference: string;
+  target_kind: string;
+  repository_reference?: string | null;
+  latest_updated_at: string;
+  workflow_count: number;
+  approval_count: number;
+  audit_event_count: number;
+  session_match_count: number;
+  thread_ids: string[];
+  thread_labels: string[];
+  artifact_paths: string[];
+  continue_message?: string | null;
+  session_matches: OperatorEngineeringMemorySessionMatch[];
+}
+
+interface OperatorEngineeringMemory {
+  summary: {
+    query?: string | null;
+    tracked_bundles: number;
+    repository_bundle_count: number;
+    pull_request_bundle_count: number;
+    work_item_bundle_count: number;
+    search_match_count: number;
+  };
+  bundles: OperatorEngineeringMemoryBundle[];
+}
+
+interface OperatorContinuityGraphSessionEntry {
+  id: string;
+  kind: string;
+  title: string;
+  summary?: string | null;
+  updated_at: string;
+  thread_id?: string | null;
+  continue_message?: string | null;
+  metadata: {
+    pending_notification_count: number;
+    queued_insight_count: number;
+    recent_intervention_count: number;
+    item_count: number;
+    primary_surface?: string | null;
+    continuity_surface?: string | null;
+    workflow_count: number;
+    approval_count: number;
+    notification_count: number;
+    intervention_count: number;
+    artifact_count: number;
+    linked_item_count: number;
+  };
+}
+
+interface OperatorContinuityGraph {
+  summary: {
+    continuity_health?: string | null;
+    primary_surface?: string | null;
+    recommended_focus?: string | null;
+    tracked_sessions: number;
+    workflow_count: number;
+    approval_count: number;
+    notification_count: number;
+    queued_insight_count: number;
+    intervention_count: number;
+    artifact_count: number;
+    edge_count: number;
+  };
+  sessions: OperatorContinuityGraphSessionEntry[];
+}
+
 interface PendingApproval {
   id: string;
   session_id?: string | null;
@@ -91,6 +1275,7 @@ interface GuardianContinuityIntervention {
   session_id?: string | null;
   thread_id?: string | null;
   thread_label?: string | null;
+  thread_source?: string | null;
   intervention_type: string;
   content_excerpt: string;
   policy_action: string;
@@ -100,8 +1285,176 @@ interface GuardianContinuityIntervention {
   transport?: string | null;
   notification_id?: string | null;
   feedback_type?: string | null;
+  continuation_mode?: string | null;
+  resume_message?: string | null;
   updated_at: string;
   continuity_surface: string;
+}
+
+interface ObserverReachRouteStatus {
+  route: string;
+  label: string;
+  status: string;
+  summary: string;
+  selected_transport?: string | null;
+  selected_mode?: string | null;
+  repair_hint?: string | null;
+}
+
+interface ObserverImportedReachFamily {
+  type: string;
+  label: string;
+  total: number;
+  installed: number;
+  ready: number;
+  attention: number;
+  approval: number;
+  packages: string[];
+}
+
+interface ObserverImportedReachSummary {
+  family_count: number;
+  active_family_count: number;
+  attention_family_count: number;
+  approval_family_count: number;
+}
+
+interface ObserverImportedReachSnapshot {
+  summary: ObserverImportedReachSummary;
+  families: ObserverImportedReachFamily[];
+}
+
+interface ObserverSourceAdapterSummary {
+  adapter_count: number;
+  ready_adapter_count: number;
+  degraded_adapter_count: number;
+  authenticated_adapter_count: number;
+  authenticated_ready_adapter_count: number;
+  authenticated_degraded_adapter_count: number;
+}
+
+interface ObserverSourceAdapter {
+  name: string;
+  provider: string;
+  source_kind: string;
+  authenticated: boolean;
+  runtime_state: string;
+  adapter_state: string;
+  contracts: string[];
+  degraded_reason?: string | null;
+  next_best_sources: Array<{
+    name: string;
+    reason: string;
+    description: string;
+  }>;
+}
+
+interface ObserverSourceAdapterSnapshot {
+  summary: ObserverSourceAdapterSummary;
+  adapters: ObserverSourceAdapter[];
+}
+
+interface ObserverPresenceSurface {
+  id: string;
+  kind: string;
+  label: string;
+  package_label: string;
+  package_id?: string | null;
+  status: string;
+  active: boolean;
+  ready: boolean;
+  attention: boolean;
+  detail: string;
+  repair_hint?: string | null;
+  follow_up_hint?: string | null;
+  follow_up_prompt?: string | null;
+  transport?: string | null;
+  source_type?: string | null;
+  boundary_posture?: string | null;
+  boundary_scope?: string | null;
+  trust_state?: string | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  paired?: boolean | null;
+  revoked?: boolean;
+  requires_pairing?: boolean;
+  device_reach_allowed?: boolean | null;
+  blocked_reason?: string | null;
+}
+
+interface ObserverPresenceSurfaceSummary {
+  surface_count: number;
+  active_surface_count: number;
+  ready_surface_count: number;
+  attention_surface_count: number;
+  paired_surface_count?: number;
+  unpaired_surface_count?: number;
+  revoked_surface_count?: number;
+  blocked_device_surface_count?: number;
+}
+
+interface ObserverPresenceSurfaceSnapshot {
+  summary: ObserverPresenceSurfaceSummary;
+  surfaces: ObserverPresenceSurface[];
+}
+
+interface ObserverContinuitySummary {
+  continuity_health: string;
+  primary_surface: string;
+  recommended_focus?: string | null;
+  actionable_thread_count: number;
+  ambient_item_count: number;
+  pending_notification_count: number;
+  queued_insight_count: number;
+  recent_intervention_count: number;
+  degraded_route_count: number;
+  degraded_source_adapter_count: number;
+  attention_family_count: number;
+  presence_surface_count: number;
+  attention_presence_surface_count: number;
+  paired_presence_surface_count?: number;
+  unpaired_presence_surface_count?: number;
+  revoked_presence_surface_count?: number;
+  blocked_device_surface_count?: number;
+}
+
+interface ObserverContinuityThread {
+  id: string;
+  thread_id?: string | null;
+  thread_label?: string | null;
+  thread_source?: string | null;
+  continuation_mode?: string | null;
+  continue_message?: string | null;
+  item_count: number;
+  pending_notification_count: number;
+  queued_insight_count: number;
+  recent_intervention_count: number;
+  latest_updated_at?: string | null;
+  primary_surface: string;
+  surfaces: string[];
+  summary: string;
+  open_thread_available: boolean;
+}
+
+interface ObserverContinuityRecoveryAction {
+  id: string;
+  kind: string;
+  label: string;
+  detail: string;
+  status: string;
+  surface: string;
+  route?: string | null;
+  repair_hint?: string | null;
+  thread_id?: string | null;
+  continue_message?: string | null;
+  open_thread_available: boolean;
+  boundary_posture?: string | null;
+  boundary_scope?: string | null;
+  trust_state?: string | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  device_reach_allowed?: boolean | null;
+  blocked_reason?: string | null;
 }
 
 interface ObserverContinuitySnapshot {
@@ -129,12 +1482,25 @@ interface ObserverContinuitySnapshot {
     intervention_type: string;
     urgency: number;
     reasoning: string;
+    session_id?: string | null;
     thread_id?: string | null;
     thread_label?: string | null;
+    thread_source?: string | null;
+    continuation_mode?: string | null;
+    resume_message?: string | null;
     created_at: string;
   }>;
   queued_insight_count: number;
   recent_interventions: GuardianContinuityIntervention[];
+  reach?: {
+    route_statuses?: ObserverReachRouteStatus[];
+  };
+  imported_reach?: ObserverImportedReachSnapshot;
+  source_adapters?: ObserverSourceAdapterSnapshot;
+  presence_surfaces?: ObserverPresenceSurfaceSnapshot;
+  summary?: ObserverContinuitySummary;
+  threads?: ObserverContinuityThread[];
+  recovery_actions?: ObserverContinuityRecoveryAction[];
 }
 
 interface SkillInfo {
@@ -191,6 +1557,7 @@ interface OperatorEntity {
     | "starter_pack"
     | "workflow_definition"
     | "extension_manifest"
+    | "browser_session"
     | "activity_item";
   name: string;
   meta: string;
@@ -357,10 +1724,227 @@ interface ExtensionToggleTargetInfo {
   name: string;
 }
 
+interface ExtensionPermissionSummary {
+  status: string;
+  ok: boolean;
+  required: Record<string, unknown>;
+  missing: Record<string, unknown>;
+  risk_level: string;
+}
+
+interface ExtensionApprovalProfile {
+  requires_runtime_approval: boolean;
+  runtime_behavior: string;
+  requires_lifecycle_approval: boolean;
+  lifecycle_boundaries: string[];
+  risk_level: string;
+}
+
+interface ExtensionContributionPermissionProfile {
+  status: string;
+  requires_network: boolean;
+  missing_network: boolean;
+  requires_approval: boolean;
+  approval_behavior: string;
+  missing_tools: string[];
+  missing_execution_boundaries: string[];
+}
+
+interface ExtensionCapabilityContract {
+  schema_version?: string;
+  version?: string;
+  capability_id?: string;
+  family?: string;
+  trust_class?: string;
+  operator?: {
+    display_name?: string | null;
+    description?: string | null;
+  };
+  operator_description?: string | null;
+  provenance?: Record<string, unknown>;
+  permissions?: {
+    declared?: {
+      tools?: string[];
+      execution_boundaries?: string[];
+      network?: boolean | null;
+      data_access?: string[];
+      mutation_rights?: string[] | Record<string, boolean>;
+      audit_events?: string[];
+      secrets?: string[];
+      env?: string[];
+    };
+    required?: Record<string, unknown>;
+    missing?: Record<string, unknown>;
+  };
+  runtime?: Record<string, unknown>;
+  enforcement?: Record<string, unknown>;
+  mutation_rights?: Record<string, boolean>;
+  audit?: Record<string, unknown>;
+  quarantine?: Record<string, unknown>;
+}
+
+interface ExtensionContributionHealth {
+  state: string;
+  summary?: string | null;
+  ready?: boolean;
+  enabled?: boolean;
+  configured?: boolean;
+  connected?: boolean;
+  error?: string | null;
+}
+
+interface ExtensionContributionInfo {
+  type: string;
+  reference: string;
+  resolved_path?: string | null;
+  name?: string | null;
+  description?: string | null;
+  status?: string | null;
+  loaded: boolean;
+  enabled?: boolean | null;
+  configured?: boolean | null;
+  default_enabled?: boolean | null;
+  availability?: string | null;
+  source?: string | null;
+  platform?: string | null;
+  provider_kind?: string | null;
+  trigger_type?: string | null;
+  schedule?: string | null;
+  endpoint?: string | null;
+  topic?: string | null;
+  adapter_kind?: string | null;
+  transport?: string | null;
+  source_type?: string | null;
+  runtime_profile?: string | null;
+  surface_kind?: string | null;
+  preferred_panel?: string | null;
+  output_surface?: string | null;
+  effective_output_surface?: string | null;
+  health?: ExtensionContributionHealth | null;
+  permission_profile?: ExtensionContributionPermissionProfile | null;
+  capability_contract?: ExtensionCapabilityContract | null;
+  capability_enforcement?: Record<string, unknown> | null;
+  config_fields: Array<Record<string, unknown>>;
+  config_keys: string[];
+  capabilities: string[];
+  delivery_modes: string[];
+  requires_network: boolean;
+  requires_daemon: boolean;
+  approval_behavior?: string | null;
+  requires_approval?: boolean;
+}
+
+interface BrowserProviderControlInfo {
+  extension_id: string;
+  name: string;
+  provider_kind: string;
+  description: string;
+  enabled: boolean;
+  configured: boolean;
+  selected: boolean;
+  execution_mode: string;
+  runtime_state: string;
+  requires_network: boolean;
+  requires_daemon: boolean;
+  capabilities: string[];
+  credential_surface?: string | null;
+  cookie_scope?: string | null;
+  profile_persistence?: string | null;
+  owner_scope?: string | null;
+  remote_transport?: string | null;
+  fallback_policy?: string | null;
+}
+
+interface BrowserSessionBoundaryDecision {
+  state: string;
+  enforced: boolean;
+  operator_visible: boolean;
+}
+
+interface BrowserSessionArtifactProvenance {
+  artifact_handle?: string;
+  handle?: string;
+  artifact_body_digest?: string;
+  raw_artifact_body_exposed?: boolean;
+  safe_receipt?: Record<string, unknown>;
+}
+
+interface BrowserSessionControlInfo {
+  session_id: string;
+  owner_session_id: string;
+  url: string;
+  provider_name: string;
+  provider_kind: string;
+  execution_mode: string;
+  status: string;
+  risk_state: string;
+  recovery_state: string;
+  partition_id: string;
+  partition_revision: number;
+  boundary_decisions: Record<string, BrowserSessionBoundaryDecision>;
+  provider_degradation: {
+    degraded?: boolean;
+    fallback_labeled?: boolean;
+    fallback_reason?: string;
+    silent_fallback_allowed?: boolean;
+  };
+  snapshot_count: number;
+  latest_ref?: string | null;
+  latest_capture?: string | null;
+  latest_summary?: string | null;
+  latest_artifact_provenance?: BrowserSessionArtifactProvenance | null;
+  control_events: Array<Record<string, unknown>>;
+  updated_at: string;
+}
+
+interface ExtensionConnectorSummary {
+  total: number;
+  ready: number;
+  states: Record<string, number>;
+}
+
+interface ExtensionCompatibilityInfo {
+  seraph: string;
+  current_version?: string | null;
+  compatible?: boolean;
+}
+
+interface ExtensionDiagnosticsSummary {
+  issue_count: number;
+  error_issue_count: number;
+  warning_issue_count: number;
+  load_error_count: number;
+  degraded_contribution_count: number;
+  degraded_connector_count: number;
+  state_counts: Record<string, number>;
+  highlighted_messages: string[];
+}
+
+interface ExtensionRollbackSnapshotInfo {
+  id: string;
+  path?: string | null;
+  version?: string | null;
+  digest?: string | null;
+  reason?: string | null;
+  created_at?: string | null;
+}
+
+interface ExtensionLifecycleInfo {
+  rollback_snapshots?: ExtensionRollbackSnapshotInfo[];
+  quarantine?: {
+    active?: boolean;
+    state?: string | null;
+    reason?: string | null;
+    updated_at?: string | null;
+  } | null;
+  last_event?: Record<string, unknown> | null;
+}
+
 interface ExtensionPackageInfo {
   id: string;
   display_name: string;
   version?: string | null;
+  version_line?: string | null;
   kind: string;
   trust: string;
   source: string;
@@ -368,8 +1952,9 @@ interface ExtensionPackageInfo {
   status: string;
   summary?: string | null;
   description?: string | null;
-  compatibility?: { seraph: string } | null;
+  compatibility?: ExtensionCompatibilityInfo | null;
   publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
   issues: ExtensionIssueInfo[];
   load_errors: ExtensionLoadErrorInfo[];
   toggle_targets: ExtensionToggleTargetInfo[];
@@ -384,6 +1969,18 @@ interface ExtensionPackageInfo {
   config_scope: string;
   enabled?: boolean | null;
   config: Record<string, unknown>;
+  permission_summary?: ExtensionPermissionSummary | null;
+  approval_profile?: ExtensionApprovalProfile | null;
+  connector_summary?: ExtensionConnectorSummary | null;
+  lifecycle?: ExtensionLifecycleInfo | null;
+  lifecycle_receipt_id?: string | null;
+  rollback_receipt_id?: string | null;
+  rollback_receipt_path?: string | null;
+  rollback_ready?: boolean;
+  review_state?: string | null;
+  revocation_state?: string | null;
+  provenance?: Record<string, unknown> | null;
+  contributions: ExtensionContributionInfo[];
   studio_files: ExtensionStudioFileInfo[];
 }
 
@@ -405,10 +2002,20 @@ interface ExtensionPathPreview {
   extension_id: string;
   display_name: string;
   version?: string | null;
+  version_line?: string | null;
+  compatibility?: ExtensionCompatibilityInfo | null;
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
   ok: boolean;
   results: Array<{ issues?: unknown[] }>;
   load_errors?: Array<Record<string, unknown>>;
   lifecycle_plan?: ExtensionLifecyclePlan | null;
+}
+
+interface ExtensionScaffoldResponse {
+  status: string;
+  path: string;
+  created_files: string[];
+  preview: ExtensionPathPreview;
 }
 
 interface ExtensionLifecycleApprovalDetail {
@@ -423,12 +2030,31 @@ type LoggedOperatorError = Error & { operatorLogged?: boolean };
 
 interface CatalogItemInfo {
   name: string;
-  type: "skill" | "mcp_server";
+  catalog_id?: string;
+  type: "skill" | "mcp_server" | "extension_pack";
   description: string;
   category?: string;
   bundled?: boolean;
   installed: boolean;
   missing_tools?: string[];
+  contribution_types?: string[];
+  trust?: string;
+  version?: string | null;
+  version_line?: string | null;
+  installed_version?: string | null;
+  update_available?: boolean;
+  compatibility?: ExtensionCompatibilityInfo | null;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  status?: string;
+  doctor_ok?: boolean;
+  issues?: unknown[];
+  load_errors?: unknown[];
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
+  permission_summary?: ExtensionPermissionSummary | null;
+  approval_profile?: ExtensionApprovalProfile | null;
+  risk_level?: string | null;
+  source?: string | null;
+  blocking_reasons?: string[];
   recommended_actions?: CapabilityAction[];
 }
 
@@ -437,6 +2063,37 @@ interface CapabilityRecommendation {
   label: string;
   description: string;
   action?: CapabilityAction | null;
+}
+
+interface MarketplaceFlowInfo {
+  id: string;
+  label: string;
+  kind: "starter_pack" | "extension_pack";
+  availability: "ready" | "partial" | "blocked" | "attention" | "installed";
+  summary: string;
+  detail: string;
+  ready_count: number;
+  total_count: number;
+  primary_action?: CapabilityAction | null;
+  recommended_actions?: CapabilityAction[];
+  draft_command?: string | null;
+  blocking_reasons?: string[];
+  install_items?: string[];
+  skills?: string[];
+  workflows?: string[];
+  related_runbooks?: string[];
+  catalog_id?: string;
+  installed?: boolean;
+  update_available?: boolean;
+  version?: string | null;
+  version_line?: string | null;
+  installed_version?: string | null;
+  contribution_types?: string[];
+  trust?: string;
+  publisher?: { name: string; homepage?: string | null; support?: string | null } | null;
+  compatibility?: ExtensionCompatibilityInfo | null;
+  diagnostics_summary?: ExtensionDiagnosticsSummary | null;
+  status?: string;
 }
 
 interface RunbookInfo {
@@ -470,6 +2127,8 @@ interface CapabilityOverview {
     starter_packs_total: number;
     mcp_servers_ready: number;
     mcp_servers_total: number;
+    marketplace_flows_ready?: number;
+    marketplace_flows_total?: number;
   };
   native_tools: ToolInfo[];
   skills: SkillInfo[];
@@ -479,6 +2138,7 @@ interface CapabilityOverview {
   catalog_items: CatalogItemInfo[];
   recommendations: CapabilityRecommendation[];
   runbooks: RunbookInfo[];
+  marketplace_flows?: MarketplaceFlowInfo[];
 }
 
 interface ActivityLedgerSummary {
@@ -497,6 +2157,20 @@ interface ActivityLedgerSummary {
   output_tokens: number;
   user_triggered_llm_calls: number;
   autonomous_llm_calls: number;
+  llm_cost_by_runtime_path?: Array<{
+    key: string;
+    calls: number;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+  }>;
+  llm_cost_by_capability_family?: Array<{
+    key: string;
+    calls: number;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+  }>;
   categories: Record<string, number>;
 }
 
@@ -553,6 +2227,191 @@ interface ActivityLedgerGroup {
   children: ActivityLedgerGroupChild[];
 }
 
+interface ImportedCapabilityFamilySummary {
+  type: string;
+  label: string;
+  total: number;
+  installed: number;
+  ready: number;
+  attention: number;
+  approval: number;
+  contractCount: number;
+  packages: string[];
+  entries: Array<{
+    packageId: string;
+    packageLabel: string;
+    contribution: ExtensionContributionInfo;
+  }>;
+}
+
+interface ExtensionGovernanceSummary {
+  packageId: string;
+  label: string;
+  riskLevel: string;
+  status: string;
+  detail: string;
+  packageInfo: ExtensionPackageInfo;
+}
+
+interface GovernedExtensionConsoleRow {
+  id: string;
+  kind: "installed" | "marketplace";
+  label: string;
+  status: string;
+  source: string;
+  trust: string;
+  publisher: string;
+  version: string;
+  compatibility: string;
+  health: string;
+  permissions: string;
+  risk: string;
+  provenance: string;
+  contributionFamilies: string;
+  actionReadiness: string;
+  actionReady: boolean;
+  rollback: string;
+  rollbackReceipt: string | null;
+  rollbackSnapshotId: string | null;
+  reasons: string[];
+  alternatives: string[];
+  extensionPackage?: ExtensionPackageInfo;
+  catalogItem?: CatalogItemInfo;
+  marketplaceFlow?: MarketplaceFlowInfo;
+}
+
+interface OperatorTriageEntry {
+  id: string;
+  kind: "approval" | "workflow" | "queued" | "reach";
+  label: string;
+  detail: string;
+  meta: string;
+  priority: number;
+  threadId?: string | null;
+  continueMessage?: string | null;
+  repairDraft?: string | null;
+  draftActionLabel?: "repair" | "follow-up";
+  approval?: PendingApproval;
+  workflow?: WorkflowRunRecord;
+  route?: ObserverReachRouteStatus;
+  recoveryAction?: ObserverContinuityRecoveryAction;
+}
+
+interface OperatorEvidenceEntry {
+  id: string;
+  kind: "approval" | "artifact" | "trace";
+  label: string;
+  detail: string;
+  meta: string;
+  sortKey: number;
+  threadId?: string | null;
+  continueMessage?: string | null;
+  approval?: PendingApproval;
+  artifact?: ArtifactRecord;
+  workflow?: WorkflowRunRecord;
+  trace?: ChatMessage;
+  audit?: CockpitAuditEvent | null;
+}
+
+interface OperatorWorkflowEntry {
+  id: string;
+  label: string;
+  detail: string;
+  meta: string;
+  priority: number;
+  threadId?: string | null;
+  workflow: WorkflowRunRecord;
+  latestBranch: WorkflowRunRecord | null;
+  bestContinuation: WorkflowRunRecord | null;
+  latestFailure: { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null;
+  outputPath: string | null;
+  historySummary: string;
+  branchSummary: string;
+}
+
+interface OperatorWorkflowOrchestrationEntry {
+  id: string;
+  threadId: string | null;
+  threadLabel: string;
+  workflowCount: number;
+  activeWorkflows: number;
+  blockedWorkflows: number;
+  awaitingApprovalWorkflows: number;
+  recoverableWorkflows: number;
+  latestUpdatedAt: string;
+  continueMessage: string | null;
+  leadWorkflowName: string | null;
+  leadStatus: string | null;
+  leadSummary: string | null;
+  leadStepFocus: WorkflowOrchestrationStepFocus | null;
+  leadStateCapsule: string | null;
+  totalStepCount: number;
+  visibleStepCount: number;
+  compactedStepCount: number;
+  compactedWorkflowCount: number;
+  longRunningWorkflowCount: number;
+  artifactCount: number;
+  recentStepLabels: string[];
+  queueState: string | null;
+  attentionSummary: string | null;
+  queuePosition: number;
+  queueReason: string | null;
+  repairReadyWorkflows: number;
+  branchReadyWorkflows: number;
+  anticipatoryReadyWorkflows: number;
+  backupBranchReadyWorkflows: number;
+  fidelityWatchWorkflows: number;
+  stalledWorkflows: number;
+  outputDebuggerReadyWorkflows: number;
+  queueDraft: string | null;
+  handoffDraft: string | null;
+  backupBranchDraft: string | null;
+  backupBranchLabel: string | null;
+  anticipatoryRepairDraft: string | null;
+  anticipatoryRiskLevel: string | null;
+  anticipatorySummary: string | null;
+  condensationFidelityState: string | null;
+  condensationFidelitySummary: string | null;
+  leadRecommendedRecoveryPath: string | null;
+  leadRelatedOutputPaths: string[];
+  leadOutputHistory: WorkflowOrchestrationOutputDebugger["history_outputs"];
+  leadLatestBranchSummary: string | null;
+  workflow: WorkflowRunRecord | null;
+  latestBranchWorkflow: WorkflowRunRecord | null;
+  latestFailure: { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null;
+  outputPath: string | null;
+  compareOutputPath: string | null;
+}
+
+interface OperatorBackgroundSupervisionEntry {
+  id: string;
+  sessionId: string;
+  title: string;
+  detail: string;
+  meta: string;
+  threadId: string | null;
+  continueMessage: string | null;
+  workflow: WorkflowRunRecord | null;
+  latestBranch: WorkflowRunRecord | null;
+  outputPath: string | null;
+}
+
+interface OperatorEngineeringMemoryEntry {
+  id: string;
+  reference: string;
+  detail: string;
+  meta: string;
+  threadId: string | null;
+  continueMessage: string | null;
+}
+
+interface ArtifactLineageResolution {
+  sourceWorkflow: WorkflowRunRecord | null;
+  candidateWorkflows: WorkflowRunRecord[];
+  ambiguous: boolean;
+  unresolvedReason: "ambiguous" | "unavailable" | null;
+}
+
 type ToolPolicyMode = "safe" | "balanced" | "full";
 type McpPolicyMode = "disabled" | "approval" | "full";
 type ApprovalMode = "off" | "high_risk";
@@ -578,13 +2437,60 @@ function formatAge(value: number | string): string {
 
 function labelForRole(message: ChatMessage): string {
   if (message.role === "approval") return "approval";
+  if (message.role === "clarification") return "clarification";
   if (message.role === "proactive") return message.interventionType ?? "proactive";
   if (message.role === "step") return message.toolUsed ?? "step";
   return message.role;
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(
+    target.isContentEditable
+    || target.closest("input, textarea, select, [contenteditable=\"true\"]"),
+  );
+}
+
 function formatContinuityLabel(value: string | null | undefined): string {
   return (value || "unknown").replace(/_/g, " ");
+}
+
+function isPresenceReachBlocked(value: {
+  device_reach_allowed?: boolean | null;
+  revoked?: boolean | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  trust_state?: string | null;
+}): boolean {
+  const pairingState = (value.pairing_state ?? "").toLowerCase();
+  const revocationState = (value.revocation_state ?? "").toLowerCase();
+  const trustState = (value.trust_state ?? "").toLowerCase();
+  return value.device_reach_allowed === false
+    || value.revoked === true
+    || ["unpaired", "not_paired", "requires_pairing", "pairing_required", "revoked"].includes(pairingState)
+    || ["revoked", "revocation_active", "blocked_revoked"].includes(revocationState)
+    || ["untrusted", "not_trusted", "revoked", "staged"].includes(trustState);
+}
+
+function continuityBoundaryParts(value: {
+  boundary_posture?: string | null;
+  boundary_scope?: string | null;
+  trust_state?: string | null;
+  pairing_state?: string | null;
+  revocation_state?: string | null;
+  device_reach_allowed?: boolean | null;
+  blocked_reason?: string | null;
+}): string[] {
+  return [
+    value.boundary_posture ? `boundary ${formatContinuityLabel(value.boundary_posture)}` : null,
+    value.boundary_scope ? `scope ${formatContinuityLabel(value.boundary_scope)}` : null,
+    value.trust_state ? `trust ${formatContinuityLabel(value.trust_state)}` : null,
+    value.pairing_state ? `pairing ${formatContinuityLabel(value.pairing_state)}` : null,
+    value.revocation_state ? `revocation ${formatContinuityLabel(value.revocation_state)}` : null,
+    value.device_reach_allowed === false
+      ? `device reach blocked${value.blocked_reason ? `: ${value.blocked_reason}` : ""}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
 }
 
 function formatOperatorMode(value: string): string {
@@ -599,6 +2505,462 @@ function formatCapabilityAction(action: Record<string, unknown>): string {
   const detail = typeof action.detail === "string" ? action.detail : null;
   const target = (typeof action.target === "string" ? action.target : null) ?? name ?? mode ?? detail ?? "";
   return `${type.replace(/_/g, " ")}${target ? ` · ${target}` : ""}${status ? ` · ${status}` : ""}`;
+}
+
+function formatExtensionCompatibilityLabel(value: ExtensionCompatibilityInfo | null | undefined): string | null {
+  if (!value) return null;
+  const requirement = value.seraph.trim();
+  const current = value.current_version?.trim();
+  const status = value.compatible === false ? "incompatible" : value.compatible === true ? "compatible" : null;
+  return [status, requirement ? `Seraph ${requirement}` : null, current ? `current ${current}` : null]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function formatExtensionDiagnosticsSummary(value: ExtensionDiagnosticsSummary | null | undefined): string | null {
+  if (!value) return null;
+  const parts = [
+    value.issue_count > 0 ? `${value.issue_count} doctor ${value.issue_count === 1 ? "issue" : "issues"}` : null,
+    value.load_error_count > 0 ? `${value.load_error_count} load ${value.load_error_count === 1 ? "error" : "errors"}` : null,
+    value.degraded_contribution_count > 0
+      ? `${value.degraded_contribution_count} degraded ${value.degraded_contribution_count === 1 ? "surface" : "surfaces"}`
+      : null,
+    value.degraded_connector_count > 0
+      ? `${value.degraded_connector_count} degraded ${value.degraded_connector_count === 1 ? "connector" : "connectors"}`
+      : null,
+  ].filter(Boolean);
+  if (parts.length === 0) {
+    if ((value.state_counts.catalog ?? 0) > 0) return "catalog only · no doctor or load errors";
+    return "ready · no doctor or load errors";
+  }
+  return parts.join(" · ");
+}
+
+function formatExtensionPublisherLabel(
+  value: { name: string; homepage?: string | null; support?: string | null } | null | undefined,
+): string | null {
+  if (!value?.name?.trim()) return null;
+  return `publisher ${value.name.trim()}`;
+}
+
+function formatExtensionPermissionSummary(
+  summary: ExtensionPermissionSummary | null | undefined,
+  contributions: ExtensionContributionInfo[] = [],
+): string {
+  const parts: string[] = [];
+  if (summary) {
+    parts.push(summary.status.replace(/_/g, " "));
+    const missingPermissions = summarizeMissingPermissions(summary);
+    if (missingPermissions.length) {
+      parts.push(`missing ${missingPermissions.join(", ")}`);
+    }
+  }
+  const missingContributionTools = Array.from(new Set(
+    contributions.flatMap((item) => item.permission_profile?.missing_tools ?? []),
+  ));
+  const missingContributionBoundaries = Array.from(new Set(
+    contributions.flatMap((item) => item.permission_profile?.missing_execution_boundaries ?? []),
+  ));
+  if (missingContributionTools.length) {
+    parts.push(`tools ${missingContributionTools.slice(0, 3).join(", ")}`);
+  }
+  if (missingContributionBoundaries.length) {
+    parts.push(`boundaries ${missingContributionBoundaries.slice(0, 3).join(", ")}`);
+  }
+  const approvalCount = contributions.filter((item) => (
+    item.permission_profile?.requires_approval || item.requires_approval || item.approval_behavior === "always"
+  )).length;
+  if (approvalCount) {
+    parts.push(`${approvalCount} approval gated`);
+  }
+  return parts.length ? parts.join(" · ") : "permissions not declared";
+}
+
+function summarizeExtensionContributionFamilies(contributions: ExtensionContributionInfo[]): string {
+  if (!contributions.length) return "no contribution families";
+  const counts = contributions.reduce<Record<string, { total: number; ready: number; attention: number }>>((acc, contribution) => {
+    const key = contribution.type;
+    const current = acc[key] ?? { total: 0, ready: 0, attention: 0 };
+    current.total += 1;
+    if (isContributionActive(contribution)) {
+      current.ready += 1;
+    }
+    const state = (contribution.status ?? contribution.health?.state ?? "").toLowerCase();
+    if (
+      ["blocked", "degraded", "disabled", "invalid", "invalid_config", "requires_config", "revoked", "unloaded"].includes(state)
+      || contribution.loaded === false
+      || contribution.permission_profile?.status === "missing_permissions"
+    ) {
+      current.attention += 1;
+    }
+    acc[key] = current;
+    return acc;
+  }, {});
+  return Object.entries(counts)
+    .map(([type, count]) => {
+      const label = IMPORTED_CAPABILITY_FAMILY_DEFS.find((item) => item.type === type)?.label ?? type.replace(/_/g, " ");
+      return `${label} ${count.ready}/${count.total}${count.attention ? ` · ${count.attention} attention` : ""}`;
+    })
+    .slice(0, 4)
+    .join(" · ");
+}
+
+function summarizeCatalogContributionFamilies(item: CatalogItemInfo, flow: MarketplaceFlowInfo | null): string {
+  const families = item.contribution_types?.length
+    ? item.contribution_types
+    : flow?.contribution_types ?? [];
+  return families.length
+    ? families.slice(0, 4).map((family) => family.replace(/_/g, " ")).join(" · ")
+    : "families pending manifest";
+}
+
+function issueMessageFromUnknown(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const message = typeof record.message === "string"
+    ? record.message
+    : typeof record.detail === "string"
+      ? record.detail
+      : typeof record.code === "string"
+        ? record.code
+        : null;
+  return message?.trim() || null;
+}
+
+function extensionPackageReceipt(extensionPackage: ExtensionPackageInfo): string | null {
+  return extensionPackage.lifecycle?.rollback_snapshots?.[0]?.id
+    ?? extensionPackage.rollback_receipt_id
+    ?? extensionPackage.rollback_receipt_path
+    ?? extensionPackage.lifecycle_receipt_id
+    ?? null;
+}
+
+function extensionPackageRollbackSnapshotId(extensionPackage: ExtensionPackageInfo): string | null {
+  return extensionPackage.lifecycle?.rollback_snapshots?.[0]?.id ?? null;
+}
+
+function extensionPackageQuarantined(extensionPackage: ExtensionPackageInfo): boolean {
+  return extensionPackage.status === "quarantined"
+    || Boolean(extensionPackage.lifecycle?.quarantine?.active);
+}
+
+function extensionPackageRevoked(extensionPackage: ExtensionPackageInfo): boolean {
+  return ["revoked", "removed", "disabled_revoked"].includes(extensionPackage.status)
+    || ["revoked", "revocation_active", "blocked_revoked"].includes(extensionPackage.revocation_state ?? "");
+}
+
+function buildInstalledExtensionConsoleRow(
+  extensionPackage: ExtensionPackageInfo,
+  catalogItem: CatalogItemInfo | null,
+): GovernedExtensionConsoleRow {
+  const receipt = extensionPackageReceipt(extensionPackage);
+  const rollbackSnapshotId = extensionPackageRollbackSnapshotId(extensionPackage);
+  const revoked = extensionPackageRevoked(extensionPackage);
+  const quarantined = extensionPackageQuarantined(extensionPackage);
+  const issueReasons = [
+    ...extensionPackage.issues.map((issue) => `${issue.severity}: ${issue.message}`),
+    ...extensionPackage.load_errors.map((error) => `load ${error.phase}: ${error.message}`),
+    ...(extensionPackage.diagnostics_summary?.highlighted_messages ?? []),
+    extensionPackage.compatibility?.compatible === false ? "incompatible with current Seraph build" : null,
+    extensionPackage.permission_summary?.ok === false ? formatExtensionPermissionSummary(extensionPackage.permission_summary, extensionPackage.contributions) : null,
+    extensionPackage.approval_profile?.requires_lifecycle_approval ? "lifecycle review required before privileged change" : null,
+    extensionPackage.approval_profile?.requires_runtime_approval ? `runtime approval ${extensionPackage.approval_profile.runtime_behavior}` : null,
+    revoked ? `revocation ${extensionPackage.revocation_state ?? extensionPackage.status}` : null,
+    quarantined ? `quarantine ${extensionPackage.lifecycle?.quarantine?.reason ?? "active"}` : null,
+  ].filter((reason): reason is string => Boolean(reason));
+  const updateReady = Boolean(catalogItem?.update_available);
+  const actionReady = !revoked && !quarantined && extensionPackage.compatibility?.compatible !== false && extensionPackage.status === "ready";
+  const alternatives = [
+    extensionPackage.disable_supported && !revoked && !quarantined ? "disable live" : null,
+    extensionPackage.removable && !revoked ? "remove live" : null,
+    !revoked && !quarantined ? "quarantine live" : null,
+    quarantined ? "re-entry review" : null,
+    "review live",
+  ].filter((item): item is string => Boolean(item));
+  return {
+    id: `installed:${extensionPackage.id}`,
+    kind: "installed",
+    label: extensionPackage.display_name,
+    status: extensionPackage.review_state
+      ? `${extensionPackage.status} · review ${extensionPackage.review_state.replace(/_/g, " ")}`
+      : extensionPackage.status,
+    source: `${extensionPackage.location} · ${extensionPackage.source}`,
+    trust: extensionPackage.trust,
+    publisher: extensionPackage.publisher?.name ?? "publisher unknown",
+    version: catalogItem?.update_available && catalogItem.version
+      ? `${catalogItem.installed_version ?? extensionPackage.version ?? "installed"} -> ${catalogItem.version}`
+      : extensionPackage.version_line ?? extensionPackage.version ?? "version unknown",
+    compatibility: formatExtensionCompatibilityLabel(extensionPackage.compatibility) ?? "compatibility not declared",
+    health: [
+      formatExtensionDiagnosticsSummary(extensionPackage.diagnostics_summary),
+      extensionPackage.connector_summary
+        ? `connectors ${extensionPackage.connector_summary.ready}/${extensionPackage.connector_summary.total} ready`
+        : null,
+      extensionPackage.load_errors.length ? `${extensionPackage.load_errors.length} load errors` : null,
+    ].filter(Boolean).join(" · ") || `${extensionPackage.status} · diagnostics pending`,
+    permissions: formatExtensionPermissionSummary(extensionPackage.permission_summary, extensionPackage.contributions),
+    risk: extensionPackage.permission_summary?.risk_level ?? extensionPackage.approval_profile?.risk_level ?? "risk unknown",
+    provenance: [
+      `manifest ${extensionPackage.kind}`,
+      extensionPackage.location,
+      extensionPackage.provenance?.source ? `source ${String(extensionPackage.provenance.source)}` : null,
+    ].filter(Boolean).join(" · "),
+    contributionFamilies: summarizeExtensionContributionFamilies(extensionPackage.contributions),
+    actionReadiness: revoked
+      ? "revoked · lifecycle actions blocked"
+      : quarantined
+        ? "quarantined · re-entry required"
+        : updateReady
+        ? "update ready"
+        : actionReady
+          ? "live controls ready"
+          : issueReasons.length
+            ? "guarded · review required"
+            : "action readiness unknown",
+    actionReady: actionReady || updateReady,
+    rollback: receipt
+      ? `rollback ready · receipt ${shortIdentifier(receipt, 18)}`
+      : "rollback unavailable · no backend receipt",
+    rollbackReceipt: receipt,
+    rollbackSnapshotId,
+    reasons: issueReasons.length ? issueReasons : ["no blocking reasons reported"],
+    alternatives,
+    extensionPackage,
+    catalogItem: catalogItem ?? undefined,
+  };
+}
+
+function buildCatalogExtensionConsoleRow(
+  item: CatalogItemInfo,
+  flow: MarketplaceFlowInfo | null,
+): GovernedExtensionConsoleRow {
+  const issueReasons = [
+    ...(item.issues ?? []).map(issueMessageFromUnknown),
+    ...(item.load_errors ?? []).map(issueMessageFromUnknown).map((message) => (message ? `load error: ${message}` : null)),
+    ...(item.diagnostics_summary?.highlighted_messages ?? []),
+    ...(item.blocking_reasons ?? []),
+    ...(flow?.blocking_reasons ?? []),
+    item.compatibility?.compatible === false ? "incompatible with current Seraph build" : null,
+    item.status && item.status !== "ready" ? `catalog status ${item.status.replace(/_/g, " ")}` : null,
+    item.permission_summary?.ok === false ? formatExtensionPermissionSummary(item.permission_summary) : null,
+    item.approval_profile?.requires_lifecycle_approval ? "lifecycle approval required before install/update" : null,
+  ].filter((reason): reason is string => Boolean(reason));
+  const blocked = item.compatibility?.compatible === false
+    || item.status === "blocked"
+    || item.status === "revoked"
+    || flow?.availability === "blocked";
+  const needsReview = issueReasons.length > 0
+    || item.status === "attention"
+    || item.status === "degraded"
+    || flow?.availability === "attention"
+    || flow?.availability === "partial";
+  const actionReady = !blocked && !needsReview;
+  return {
+    id: `catalog:${item.catalog_id ?? item.name}`,
+    kind: "marketplace",
+    label: item.name,
+    status: [
+      item.installed && item.update_available ? "update" : item.installed ? "installed" : "installable",
+      flow?.availability ? `flow ${flow.availability}` : null,
+      item.status && item.status !== "ready" ? item.status.replace(/_/g, " ") : null,
+    ].filter(Boolean).join(" · "),
+    source: item.source ?? (item.bundled ? "bundled catalog" : "catalog marketplace"),
+    trust: item.trust ?? "trust not declared",
+    publisher: item.publisher?.name ?? "publisher unknown",
+    version: item.installed && item.update_available
+      ? `${item.installed_version ?? "installed"} -> ${item.version ?? "candidate"}`
+      : item.version_line ?? item.version ?? "version unknown",
+    compatibility: formatExtensionCompatibilityLabel(item.compatibility) ?? "compatibility not declared",
+    health: [
+      formatExtensionDiagnosticsSummary(item.diagnostics_summary),
+      item.doctor_ok === false ? "doctor blocked" : null,
+      item.load_errors?.length ? `${item.load_errors.length} load errors` : null,
+    ].filter(Boolean).join(" · ") || "catalog health pending manifest",
+    permissions: formatExtensionPermissionSummary(item.permission_summary),
+    risk: item.risk_level ?? item.permission_summary?.risk_level ?? item.approval_profile?.risk_level ?? "risk unknown",
+    provenance: [
+      item.catalog_id ? `catalog ${item.catalog_id}` : "catalog",
+      item.category ? `category ${item.category}` : null,
+      flow?.id ? `flow ${flow.id}` : null,
+    ].filter(Boolean).join(" · "),
+    contributionFamilies: summarizeCatalogContributionFamilies(item, flow),
+    actionReadiness: blocked
+      ? "blocked · install guarded"
+      : needsReview
+        ? "review required · install guarded"
+        : item.installed && item.update_available
+          ? "update ready"
+          : "install ready",
+    actionReady,
+    rollback: "rollback unavailable · package not installed with receipt",
+    rollbackReceipt: null,
+    rollbackSnapshotId: null,
+    reasons: issueReasons.length ? issueReasons : ["no blocking reasons reported"],
+    alternatives: ["draft review", ...(item.recommended_actions?.length ? ["repair action available"] : [])],
+    catalogItem: item,
+    marketplaceFlow: flow ?? undefined,
+  };
+}
+
+function formatLifecyclePlanSummary(preview: ExtensionPathPreview | null | undefined): string | null {
+  if (!preview) return null;
+  const lifecyclePlan = preview.lifecycle_plan;
+  if (!lifecyclePlan) return null;
+  const currentVersion = lifecyclePlan.current_version?.trim();
+  const candidateVersion = lifecyclePlan.candidate_version?.trim() ?? preview.version?.trim();
+  const relation = lifecyclePlan.version_relation?.trim();
+  const parts =
+    lifecyclePlan.recommended_action === "update"
+      ? [lifecyclePlan.mode.replace(/_/g, " "), currentVersion ? `${currentVersion} -> ${candidateVersion ?? "candidate"}` : candidateVersion ?? null, relation]
+      : lifecyclePlan.recommended_action === "none"
+        ? ["up to date", candidateVersion ?? currentVersion ?? null]
+        : [lifecyclePlan.mode.replace(/_/g, " "), candidateVersion ?? null, relation];
+  return parts.filter(Boolean).join(" · ");
+}
+
+const SUPPORTED_CAPABILITY_ACTION_TYPES = new Set<CapabilityAction["type"]>([
+  "enable_extension",
+  "toggle_skill",
+  "toggle_workflow",
+  "toggle_mcp_server",
+  "test_mcp_server",
+  "test_native_notification",
+  "set_tool_policy",
+  "set_mcp_policy",
+  "install_catalog_item",
+  "activate_starter_pack",
+  "open_settings",
+]);
+
+const LOW_RISK_BATCH_CAPABILITY_ACTION_TYPES = new Set<CapabilityAction["type"]>([
+  "toggle_skill",
+  "toggle_workflow",
+  "test_mcp_server",
+  "test_native_notification",
+  "open_settings",
+]);
+
+function isLowRiskBatchCapabilityAction(action: CapabilityAction): boolean {
+  return LOW_RISK_BATCH_CAPABILITY_ACTION_TYPES.has(action.type);
+}
+
+const IMPORTED_CAPABILITY_FAMILY_DEFS = [
+  { type: "toolset_presets", label: "toolsets" },
+  { type: "context_packs", label: "context packs" },
+  { type: "browser_providers", label: "browser providers" },
+  { type: "automation_triggers", label: "automation triggers" },
+  { type: "messaging_connectors", label: "messaging" },
+  { type: "speech_profiles", label: "speech" },
+  { type: "node_adapters", label: "node adapters" },
+  { type: "canvas_outputs", label: "canvas outputs" },
+  { type: "workflow_runtimes", label: "workflow runtimes" },
+  { type: "channel_adapters", label: "channel adapters" },
+  { type: "observer_definitions", label: "observer sources" },
+] as const;
+
+function activitySpendBucketLabel(value: string): string {
+  return value.replace(/[_-]+/g, " ");
+}
+
+function summarizeMissingPermissions(summary: ExtensionPermissionSummary | null | undefined): string[] {
+  if (!summary) return [];
+  const parts: string[] = [];
+  if (summary.missing.network === true) {
+    parts.push("network");
+  }
+  if (Array.isArray(summary.missing.tools) && summary.missing.tools.length) {
+    parts.push(`${summary.missing.tools.length} tool${summary.missing.tools.length === 1 ? "" : "s"}`);
+  }
+  if (
+    Array.isArray(summary.missing.execution_boundaries)
+    && summary.missing.execution_boundaries.length
+  ) {
+    parts.push(`${summary.missing.execution_boundaries.length} ${summary.missing.execution_boundaries.length === 1 ? "boundary" : "boundaries"}`);
+  }
+  return parts;
+}
+
+function formatExtensionGovernanceSummary(extensionPackage: ExtensionPackageInfo): string | null {
+  const parts: string[] = [];
+  const missingPermissions = summarizeMissingPermissions(extensionPackage.permission_summary);
+  if (missingPermissions.length) {
+    parts.push(`missing ${missingPermissions.join(", ")}`);
+  }
+  if (extensionPackage.approval_profile?.requires_lifecycle_approval) {
+    parts.push("lifecycle approval");
+  }
+  if (extensionPackage.approval_profile?.requires_runtime_approval) {
+    parts.push("runtime approval");
+  }
+  const degradedConnectors = extensionPackage.diagnostics_summary?.degraded_connector_count ?? 0;
+  if (degradedConnectors > 0) {
+    parts.push(`${degradedConnectors} degraded ${degradedConnectors === 1 ? "connector" : "connectors"}`);
+  }
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function readContractDeclaredList(
+  contract: ExtensionCapabilityContract | null | undefined,
+  field: "data_access" | "audit_events" | "execution_boundaries",
+): string[] {
+  const value = contract?.permissions?.declared?.[field];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function readContractMutationRights(contract: ExtensionCapabilityContract | null | undefined): string[] {
+  const declared = contract?.permissions?.declared?.mutation_rights;
+  if (Array.isArray(declared)) {
+    return declared.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  }
+  if (declared && typeof declared === "object") {
+    return Object.entries(declared)
+      .filter(([, enabled]) => enabled === true)
+      .map(([name]) => name);
+  }
+  const derived = contract?.mutation_rights;
+  if (derived && typeof derived === "object") {
+    return Object.entries(derived)
+      .filter(([, enabled]) => enabled === true)
+      .map(([name]) => name);
+  }
+  return [];
+}
+
+function formatExtensionContractSummary(extensionPackage: ExtensionPackageInfo): string | null {
+  const contributionsWithContracts = extensionPackage.contributions.filter((item) => item.capability_contract);
+  if (!contributionsWithContracts.length) return null;
+  const dataAccess = Array.from(new Set(
+    contributionsWithContracts.flatMap((item) => readContractDeclaredList(item.capability_contract, "data_access")),
+  ));
+  const mutationRights = Array.from(new Set(
+    contributionsWithContracts.flatMap((item) => readContractMutationRights(item.capability_contract)),
+  ));
+  const parts = [`${contributionsWithContracts.length}/${extensionPackage.contributions.length} contracts`];
+  if (dataAccess.length) {
+    parts.push(`${dataAccess.slice(0, 2).map(activitySpendBucketLabel).join(", ")} data`);
+  }
+  if (mutationRights.length) {
+    parts.push(`${mutationRights.slice(0, 2).map(activitySpendBucketLabel).join(", ")} mutation`);
+  }
+  return parts.join(" · ");
+}
+
+function isContributionActive(contribution: ExtensionContributionInfo): boolean {
+  const status = (contribution.status ?? contribution.health?.state ?? "").trim().toLowerCase();
+  if (contribution.loaded === false) return false;
+  if (contribution.enabled === false) return false;
+  if (contribution.health?.enabled === false) return false;
+  if (contribution.configured === false || contribution.health?.configured === false) return false;
+  return ![
+    "planned",
+    "requires_config",
+    "invalid",
+    "invalid_config",
+    "overridden",
+    "disabled",
+    "unloaded",
+  ].includes(status);
 }
 
 function readActionList(value: unknown): CapabilityAction[] {
@@ -703,6 +3065,2156 @@ function normalizeExtensionToggleTarget(value: Record<string, unknown>): Extensi
   };
 }
 
+function normalizeExtensionPermissionSummary(value: unknown): ExtensionPermissionSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : "unknown",
+    ok: Boolean(record.ok),
+    required: record.required && typeof record.required === "object" && !Array.isArray(record.required)
+      ? record.required as Record<string, unknown>
+      : {},
+    missing: record.missing && typeof record.missing === "object" && !Array.isArray(record.missing)
+      ? record.missing as Record<string, unknown>
+      : {},
+    risk_level: typeof record.risk_level === "string" ? record.risk_level : "low",
+  };
+}
+
+function normalizeExtensionApprovalProfile(value: unknown): ExtensionApprovalProfile | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    requires_runtime_approval: Boolean(record.requires_runtime_approval),
+    runtime_behavior: typeof record.runtime_behavior === "string" ? record.runtime_behavior : "never",
+    requires_lifecycle_approval: Boolean(record.requires_lifecycle_approval),
+    lifecycle_boundaries: Array.isArray(record.lifecycle_boundaries)
+      ? record.lifecycle_boundaries.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    risk_level: typeof record.risk_level === "string" ? record.risk_level : "low",
+  };
+}
+
+function normalizeContributionPermissionProfile(value: unknown): ExtensionContributionPermissionProfile | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : "unknown",
+    requires_network: Boolean(record.requires_network),
+    missing_network: Boolean(record.missing_network),
+    requires_approval: Boolean(record.requires_approval),
+    approval_behavior: typeof record.approval_behavior === "string" ? record.approval_behavior : "never",
+    missing_tools: Array.isArray(record.missing_tools)
+      ? record.missing_tools.filter((entry): entry is string => typeof entry === "string")
+      : [],
+    missing_execution_boundaries: Array.isArray(record.missing_execution_boundaries)
+      ? record.missing_execution_boundaries.filter((entry): entry is string => typeof entry === "string")
+      : [],
+  };
+}
+
+function normalizeContributionHealth(value: unknown): ExtensionContributionHealth | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    state: typeof record.state === "string" ? record.state : "unknown",
+    summary: typeof record.summary === "string" ? record.summary : null,
+    ready: typeof record.ready === "boolean" ? record.ready : undefined,
+    enabled: typeof record.enabled === "boolean" ? record.enabled : undefined,
+    configured: typeof record.configured === "boolean" ? record.configured : undefined,
+    connected: typeof record.connected === "boolean" ? record.connected : undefined,
+    error: typeof record.error === "string" ? record.error : null,
+  };
+}
+
+function normalizeExtensionConnectorSummary(value: unknown): ExtensionConnectorSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    total: typeof record.total === "number" ? record.total : 0,
+    ready: typeof record.ready === "number" ? record.ready : 0,
+    states: record.states && typeof record.states === "object" && !Array.isArray(record.states)
+      ? Object.fromEntries(
+        Object.entries(record.states as Record<string, unknown>).flatMap(([key, entry]) => (
+          typeof entry === "number" ? [[key, entry]] : []
+        )),
+      )
+      : {},
+  };
+}
+
+function normalizeExtensionCompatibility(value: unknown): ExtensionCompatibilityInfo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.seraph !== "string") return null;
+  return {
+    seraph: record.seraph,
+    current_version: typeof record.current_version === "string" ? record.current_version : null,
+    compatible: typeof record.compatible === "boolean" ? record.compatible : undefined,
+  };
+}
+
+function normalizeExtensionDiagnosticsSummary(value: unknown): ExtensionDiagnosticsSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    issue_count: typeof record.issue_count === "number" ? record.issue_count : 0,
+    error_issue_count: typeof record.error_issue_count === "number" ? record.error_issue_count : 0,
+    warning_issue_count: typeof record.warning_issue_count === "number" ? record.warning_issue_count : 0,
+    load_error_count: typeof record.load_error_count === "number" ? record.load_error_count : 0,
+    degraded_contribution_count: typeof record.degraded_contribution_count === "number" ? record.degraded_contribution_count : 0,
+    degraded_connector_count: typeof record.degraded_connector_count === "number" ? record.degraded_connector_count : 0,
+    state_counts:
+      record.state_counts && typeof record.state_counts === "object" && !Array.isArray(record.state_counts)
+        ? (Object.fromEntries(
+          Object.entries(record.state_counts as Record<string, unknown>)
+            .filter(([, count]) => typeof count === "number"),
+        ) as Record<string, number>)
+        : {},
+    highlighted_messages: Array.isArray(record.highlighted_messages)
+      ? record.highlighted_messages.filter((entry): entry is string => typeof entry === "string")
+      : [],
+  };
+}
+
+function normalizeOperatorControlPlane(value: unknown): OperatorControlPlane | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const governance = record.governance;
+  const usage = record.usage;
+  const runtimePosture = record.runtime_posture;
+  const handoff = record.handoff;
+  if (
+    !governance || typeof governance !== "object" || Array.isArray(governance)
+    || !usage || typeof usage !== "object" || Array.isArray(usage)
+    || !runtimePosture || typeof runtimePosture !== "object" || Array.isArray(runtimePosture)
+    || !handoff || typeof handoff !== "object" || Array.isArray(handoff)
+  ) {
+    return null;
+  }
+  const governanceRecord = governance as Record<string, unknown>;
+  const usageRecord = usage as Record<string, unknown>;
+  const runtimePostureRecord = runtimePosture as Record<string, unknown>;
+  const handoffRecord = handoff as Record<string, unknown>;
+  const runtime = runtimePostureRecord.runtime;
+  const extensions = runtimePostureRecord.extensions;
+  const continuity = runtimePostureRecord.continuity;
+  if (
+    !runtime || typeof runtime !== "object" || Array.isArray(runtime)
+    || !extensions || typeof extensions !== "object" || Array.isArray(extensions)
+    || !continuity || typeof continuity !== "object" || Array.isArray(continuity)
+  ) {
+    return null;
+  }
+  return {
+    governance: {
+      workspace_mode: typeof governanceRecord.workspace_mode === "string" ? governanceRecord.workspace_mode : "unknown",
+      review_posture: typeof governanceRecord.review_posture === "string" ? governanceRecord.review_posture : "",
+      approval_mode: typeof governanceRecord.approval_mode === "string" ? governanceRecord.approval_mode : "unknown",
+      tool_policy_mode: typeof governanceRecord.tool_policy_mode === "string" ? governanceRecord.tool_policy_mode : "unknown",
+      mcp_policy_mode: typeof governanceRecord.mcp_policy_mode === "string" ? governanceRecord.mcp_policy_mode : "unknown",
+      delegation_enabled: Boolean(governanceRecord.delegation_enabled),
+      workspace_dir: typeof governanceRecord.workspace_dir === "string" ? governanceRecord.workspace_dir : undefined,
+      roles: Array.isArray(governanceRecord.roles)
+        ? governanceRecord.roles.flatMap((entry) => (
+          entry && typeof entry === "object" && !Array.isArray(entry)
+            ? [{
+              id: typeof (entry as Record<string, unknown>).id === "string" ? String((entry as Record<string, unknown>).id) : "role",
+              label: typeof (entry as Record<string, unknown>).label === "string" ? String((entry as Record<string, unknown>).label) : "role",
+              scope: typeof (entry as Record<string, unknown>).scope === "string" ? String((entry as Record<string, unknown>).scope) : "unknown",
+              summary: typeof (entry as Record<string, unknown>).summary === "string" ? String((entry as Record<string, unknown>).summary) : "",
+              status: typeof (entry as Record<string, unknown>).status === "string" ? String((entry as Record<string, unknown>).status) : "unknown",
+              permissions: Array.isArray((entry as Record<string, unknown>).permissions)
+                ? ((entry as Record<string, unknown>).permissions as unknown[]).filter((item): item is string => typeof item === "string")
+                : [],
+              boundaries: Array.isArray((entry as Record<string, unknown>).boundaries)
+                ? ((entry as Record<string, unknown>).boundaries as unknown[]).filter((item): item is string => typeof item === "string")
+                : [],
+            }]
+            : []
+        ))
+        : [],
+    },
+    usage: {
+      window_hours: typeof usageRecord.window_hours === "number" ? usageRecord.window_hours : 24,
+      llm_call_count: typeof usageRecord.llm_call_count === "number" ? usageRecord.llm_call_count : 0,
+      llm_cost_usd: typeof usageRecord.llm_cost_usd === "number" ? usageRecord.llm_cost_usd : 0,
+      input_tokens: typeof usageRecord.input_tokens === "number" ? usageRecord.input_tokens : 0,
+      output_tokens: typeof usageRecord.output_tokens === "number" ? usageRecord.output_tokens : 0,
+      user_triggered_llm_calls: typeof usageRecord.user_triggered_llm_calls === "number" ? usageRecord.user_triggered_llm_calls : 0,
+      autonomous_llm_calls: typeof usageRecord.autonomous_llm_calls === "number" ? usageRecord.autonomous_llm_calls : 0,
+      failure_count: typeof usageRecord.failure_count === "number" ? usageRecord.failure_count : 0,
+      pending_approvals: typeof usageRecord.pending_approvals === "number" ? usageRecord.pending_approvals : 0,
+      active_workflows: typeof usageRecord.active_workflows === "number" ? usageRecord.active_workflows : 0,
+      blocked_workflows: typeof usageRecord.blocked_workflows === "number" ? usageRecord.blocked_workflows : 0,
+    },
+    runtime_posture: {
+      runtime: runtime as RuntimeStatus,
+      extensions: extensions as OperatorControlPlaneRuntimeExtensions,
+      continuity: continuity as OperatorControlPlaneRuntimeContinuity,
+    },
+    handoff: {
+      pending_approvals: Array.isArray(handoffRecord.pending_approvals)
+        ? handoffRecord.pending_approvals as OperatorControlPlaneHandoffEntry[]
+        : [],
+      blocked_workflows: Array.isArray(handoffRecord.blocked_workflows)
+        ? handoffRecord.blocked_workflows as OperatorControlPlaneHandoffEntry[]
+        : [],
+      follow_ups: Array.isArray(handoffRecord.follow_ups)
+        ? handoffRecord.follow_ups as OperatorControlPlaneHandoffEntry[]
+        : [],
+      review_receipts: Array.isArray(handoffRecord.review_receipts)
+        ? handoffRecord.review_receipts as OperatorControlPlaneReviewReceipt[]
+        : [],
+    },
+  };
+}
+
+function normalizeOperatorBenchmarkProof(value: unknown): OperatorBenchmarkProof | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  const governedImprovement = record.governed_improvement;
+  if (
+    !summary || typeof summary !== "object" || Array.isArray(summary)
+    || !governedImprovement || typeof governedImprovement !== "object" || Array.isArray(governedImprovement)
+  ) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const governedRecord = governedImprovement as Record<string, unknown>;
+  const gatePolicy = governedRecord.gate_policy;
+  if (!gatePolicy || typeof gatePolicy !== "object" || Array.isArray(gatePolicy)) {
+    return null;
+  }
+  const gatePolicyRecord = gatePolicy as Record<string, unknown>;
+  const memoryBenchmark = record.memory_benchmark;
+  const userModelBenchmark = record.user_model_benchmark;
+  const workflowEnduranceBenchmark = record.workflow_endurance_benchmark;
+  const liveWorkflowEnduranceCanary = record.live_workflow_endurance_canary;
+  const oneReachChannelCanary = record.one_reach_channel_canary;
+  const trustBoundaryBenchmark = record.trust_boundary_benchmark;
+  const secureCapabilityHostBenchmark = record.secure_capability_host_benchmark;
+  const computerUseBenchmark = record.computer_use_benchmark;
+  const governedBenchmarkSummary = governedRecord.summary;
+  const governedBenchmarkPolicy = governedRecord.policy;
+  let normalizedMemoryBenchmark: OperatorMemoryBenchmark | null = null;
+  let normalizedUserModelBenchmark: OperatorUserModelBenchmark | null = null;
+  let normalizedWorkflowEnduranceBenchmark: OperatorWorkflowEnduranceBenchmark | null = null;
+  let normalizedLiveWorkflowEnduranceCanary: OperatorLiveWorkflowEnduranceCanary | null = null;
+  let normalizedOneReachChannelCanary: OperatorOneReachChannelCanary | null = null;
+  let normalizedTrustBoundaryBenchmark: OperatorTrustBoundaryBenchmark | null = null;
+  let normalizedSecureCapabilityHostBenchmark: OperatorSecureCapabilityHostBenchmark | null = null;
+  let normalizedComputerUseBenchmark: OperatorComputerUseBenchmark | null = null;
+  let normalizedGovernedBenchmarkSummary: OperatorBenchmarkProof["governed_improvement"]["summary"] = null;
+  let normalizedGovernedBenchmarkPolicy: OperatorBenchmarkProof["governed_improvement"]["policy"] = null;
+  let normalizedGovernedBenchmarkFailures: OperatorGovernedImprovementBenchmarkFailure[] = [];
+  let normalizedGovernedBenchmarkReceipts: OperatorGovernedImprovementReceipt[] = [];
+  if (memoryBenchmark && typeof memoryBenchmark === "object" && !Array.isArray(memoryBenchmark)) {
+    const memoryBenchmarkRecord = memoryBenchmark as Record<string, unknown>;
+    const memorySummary = memoryBenchmarkRecord.summary;
+    const memoryPolicy = memoryBenchmarkRecord.policy;
+    if (
+      memorySummary && typeof memorySummary === "object" && !Array.isArray(memorySummary)
+      && memoryPolicy && typeof memoryPolicy === "object" && !Array.isArray(memoryPolicy)
+    ) {
+      const memorySummaryRecord = memorySummary as Record<string, unknown>;
+      const memoryPolicyRecord = memoryPolicy as Record<string, unknown>;
+      normalizedMemoryBenchmark = {
+        summary: {
+          suite_name: typeof memorySummaryRecord.suite_name === "string" ? memorySummaryRecord.suite_name : "guardian_memory_quality",
+          benchmark_posture: typeof memorySummaryRecord.benchmark_posture === "string" ? memorySummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof memorySummaryRecord.operator_status === "string" ? memorySummaryRecord.operator_status : "unknown",
+          scenario_count: typeof memorySummaryRecord.scenario_count === "number" ? memorySummaryRecord.scenario_count : 0,
+          dimension_count: typeof memorySummaryRecord.dimension_count === "number" ? memorySummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof memorySummaryRecord.failure_mode_count === "number" ? memorySummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof memorySummaryRecord.active_failure_count === "number" ? memorySummaryRecord.active_failure_count : 0,
+          contradiction_state: typeof memorySummaryRecord.contradiction_state === "string" ? memorySummaryRecord.contradiction_state : "unknown",
+          selective_forgetting_state: typeof memorySummaryRecord.selective_forgetting_state === "string" ? memorySummaryRecord.selective_forgetting_state : "unknown",
+        },
+        failure_report: Array.isArray(memoryBenchmarkRecord.failure_report)
+          ? memoryBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          retrieval_ranking_policy: typeof memoryPolicyRecord.retrieval_ranking_policy === "string"
+            ? memoryPolicyRecord.retrieval_ranking_policy
+            : "unknown",
+          ci_gate_mode: typeof memoryPolicyRecord.ci_gate_mode === "string" ? memoryPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
+  if (userModelBenchmark && typeof userModelBenchmark === "object" && !Array.isArray(userModelBenchmark)) {
+    const userModelBenchmarkRecord = userModelBenchmark as Record<string, unknown>;
+    const userModelSummary = userModelBenchmarkRecord.summary;
+    const userModelPolicy = userModelBenchmarkRecord.policy;
+    if (
+      userModelSummary && typeof userModelSummary === "object" && !Array.isArray(userModelSummary)
+      && userModelPolicy && typeof userModelPolicy === "object" && !Array.isArray(userModelPolicy)
+    ) {
+      const userModelSummaryRecord = userModelSummary as Record<string, unknown>;
+      const userModelPolicyRecord = userModelPolicy as Record<string, unknown>;
+      normalizedUserModelBenchmark = {
+        summary: {
+          suite_name: typeof userModelSummaryRecord.suite_name === "string" ? userModelSummaryRecord.suite_name : "guardian_user_model_restraint",
+          benchmark_posture: typeof userModelSummaryRecord.benchmark_posture === "string" ? userModelSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof userModelSummaryRecord.operator_status === "string" ? userModelSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof userModelSummaryRecord.scenario_count === "number" ? userModelSummaryRecord.scenario_count : 0,
+          dimension_count: typeof userModelSummaryRecord.dimension_count === "number" ? userModelSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof userModelSummaryRecord.failure_mode_count === "number" ? userModelSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof userModelSummaryRecord.active_failure_count === "number" ? userModelSummaryRecord.active_failure_count : 0,
+          clarification_policy_state: typeof userModelSummaryRecord.clarification_policy_state === "string" ? userModelSummaryRecord.clarification_policy_state : "unknown",
+          restraint_policy_state: typeof userModelSummaryRecord.restraint_policy_state === "string" ? userModelSummaryRecord.restraint_policy_state : "unknown",
+        },
+        failure_report: Array.isArray(userModelBenchmarkRecord.failure_report)
+          ? userModelBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          canonical_authority: typeof userModelPolicyRecord.canonical_authority === "string" ? userModelPolicyRecord.canonical_authority : "unknown",
+          clarify_before_action_policy: typeof userModelPolicyRecord.clarify_before_action_policy === "string"
+            ? userModelPolicyRecord.clarify_before_action_policy
+            : "unknown",
+          personalization_override_policy: typeof userModelPolicyRecord.personalization_override_policy === "string"
+            ? userModelPolicyRecord.personalization_override_policy
+            : "unknown",
+          operator_visibility: typeof userModelPolicyRecord.operator_visibility === "string" ? userModelPolicyRecord.operator_visibility : "unknown",
+          ci_gate_mode: typeof userModelPolicyRecord.ci_gate_mode === "string" ? userModelPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
+  if (workflowEnduranceBenchmark && typeof workflowEnduranceBenchmark === "object" && !Array.isArray(workflowEnduranceBenchmark)) {
+    const workflowBenchmarkRecord = workflowEnduranceBenchmark as Record<string, unknown>;
+    const workflowSummary = workflowBenchmarkRecord.summary;
+    const workflowPolicy = workflowBenchmarkRecord.policy;
+    if (
+      workflowSummary && typeof workflowSummary === "object" && !Array.isArray(workflowSummary)
+      && workflowPolicy && typeof workflowPolicy === "object" && !Array.isArray(workflowPolicy)
+    ) {
+      const workflowSummaryRecord = workflowSummary as Record<string, unknown>;
+      const workflowPolicyRecord = workflowPolicy as Record<string, unknown>;
+      normalizedWorkflowEnduranceBenchmark = {
+        summary: {
+          suite_name: typeof workflowSummaryRecord.suite_name === "string" ? workflowSummaryRecord.suite_name : "workflow_endurance_and_repair",
+          benchmark_posture: typeof workflowSummaryRecord.benchmark_posture === "string" ? workflowSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof workflowSummaryRecord.operator_status === "string" ? workflowSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof workflowSummaryRecord.scenario_count === "number" ? workflowSummaryRecord.scenario_count : 0,
+          dimension_count: typeof workflowSummaryRecord.dimension_count === "number" ? workflowSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof workflowSummaryRecord.failure_mode_count === "number" ? workflowSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof workflowSummaryRecord.active_failure_count === "number" ? workflowSummaryRecord.active_failure_count : 0,
+          anticipatory_repair_state: typeof workflowSummaryRecord.anticipatory_repair_state === "string"
+            ? workflowSummaryRecord.anticipatory_repair_state
+            : "unknown",
+          condensation_fidelity_state: typeof workflowSummaryRecord.condensation_fidelity_state === "string"
+            ? workflowSummaryRecord.condensation_fidelity_state
+            : "unknown",
+          branch_continuity_state: typeof workflowSummaryRecord.branch_continuity_state === "string"
+            ? workflowSummaryRecord.branch_continuity_state
+            : "unknown",
+        },
+        failure_report: Array.isArray(workflowBenchmarkRecord.failure_report)
+          ? workflowBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          anticipatory_repair_policy: typeof workflowPolicyRecord.anticipatory_repair_policy === "string"
+            ? workflowPolicyRecord.anticipatory_repair_policy
+            : "unknown",
+          backup_branch_policy: typeof workflowPolicyRecord.backup_branch_policy === "string"
+            ? workflowPolicyRecord.backup_branch_policy
+            : "unknown",
+          condensation_fidelity_policy: typeof workflowPolicyRecord.condensation_fidelity_policy === "string"
+            ? workflowPolicyRecord.condensation_fidelity_policy
+            : "unknown",
+          operator_visibility: typeof workflowPolicyRecord.operator_visibility === "string"
+            ? workflowPolicyRecord.operator_visibility
+            : "unknown",
+          ci_gate_mode: typeof workflowPolicyRecord.ci_gate_mode === "string"
+            ? workflowPolicyRecord.ci_gate_mode
+            : "unknown",
+        },
+      };
+    }
+  }
+  if (liveWorkflowEnduranceCanary && typeof liveWorkflowEnduranceCanary === "object" && !Array.isArray(liveWorkflowEnduranceCanary)) {
+    const canaryRecord = liveWorkflowEnduranceCanary as Record<string, unknown>;
+    const canarySummary = canaryRecord.summary;
+    const canaryProtocol = canaryRecord.protocol;
+    const canaryPolicy = canaryRecord.policy;
+    const canaryStory = canaryRecord.operator_story;
+    if (
+      canarySummary && typeof canarySummary === "object" && !Array.isArray(canarySummary)
+      && canaryProtocol && typeof canaryProtocol === "object" && !Array.isArray(canaryProtocol)
+      && canaryPolicy && typeof canaryPolicy === "object" && !Array.isArray(canaryPolicy)
+      && canaryStory && typeof canaryStory === "object" && !Array.isArray(canaryStory)
+    ) {
+      const summaryValue = canarySummary as Record<string, unknown>;
+      const protocolValue = canaryProtocol as Record<string, unknown>;
+      const policyValue = canaryPolicy as Record<string, unknown>;
+      const storyValue = canaryStory as Record<string, unknown>;
+      normalizedLiveWorkflowEnduranceCanary = {
+        summary: {
+          suite_name: typeof summaryValue.suite_name === "string" ? summaryValue.suite_name : "live_workflow_endurance_canary",
+          benchmark_posture: typeof summaryValue.benchmark_posture === "string" ? summaryValue.benchmark_posture : "unknown",
+          operator_status: typeof summaryValue.operator_status === "string" ? summaryValue.operator_status : "unknown",
+          scenario_count: typeof summaryValue.scenario_count === "number" ? summaryValue.scenario_count : 0,
+          session_count: typeof summaryValue.session_count === "number" ? summaryValue.session_count : 0,
+          run_count: typeof summaryValue.run_count === "number" ? summaryValue.run_count : 0,
+          branch_run_count: typeof summaryValue.branch_run_count === "number" ? summaryValue.branch_run_count : 0,
+          checkpoint_count: typeof summaryValue.checkpoint_count === "number" ? summaryValue.checkpoint_count : 0,
+          failure_injection_count: typeof summaryValue.failure_injection_count === "number" ? summaryValue.failure_injection_count : 0,
+          recovery_action_count: typeof summaryValue.recovery_action_count === "number" ? summaryValue.recovery_action_count : 0,
+          artifact_receipt_count: typeof summaryValue.artifact_receipt_count === "number" ? summaryValue.artifact_receipt_count : 0,
+          approval_preservation_count: typeof summaryValue.approval_preservation_count === "number" ? summaryValue.approval_preservation_count : 0,
+          trust_boundary_block_count: typeof summaryValue.trust_boundary_block_count === "number" ? summaryValue.trust_boundary_block_count : 0,
+          audit_receipt_count: typeof summaryValue.audit_receipt_count === "number" ? summaryValue.audit_receipt_count : 0,
+          active_failure_count: typeof summaryValue.active_failure_count === "number" ? summaryValue.active_failure_count : 0,
+          claim_boundary: typeof summaryValue.claim_boundary === "string" ? summaryValue.claim_boundary : "unknown",
+        },
+        protocol: {
+          replay_command: typeof protocolValue.replay_command === "string" ? protocolValue.replay_command : "",
+          time_anchor: typeof protocolValue.time_anchor === "string"
+            ? protocolValue.time_anchor
+            : typeof protocolValue.fixed_time_anchor === "string" ? protocolValue.fixed_time_anchor : "",
+          receipt_contract: Array.isArray(protocolValue.receipt_contract)
+            ? protocolValue.receipt_contract.filter((item): item is string => typeof item === "string")
+            : Array.isArray(policyValue.required_receipts)
+              ? policyValue.required_receipts.filter((item): item is string => typeof item === "string")
+            : [],
+        },
+        policy: {
+          claim_boundary: typeof policyValue.claim_boundary === "string" ? policyValue.claim_boundary : "unknown",
+          receipt_surfaces: Array.isArray(policyValue.receipt_surfaces)
+            ? policyValue.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          not_claimed: Array.isArray(policyValue.not_claimed)
+            ? policyValue.not_claimed.filter((item): item is string => typeof item === "string")
+            : [],
+          required_receipts: Array.isArray(policyValue.required_receipts)
+            ? policyValue.required_receipts.filter((item): item is string => typeof item === "string")
+            : [],
+        },
+        sessions: Array.isArray(canaryRecord.sessions)
+          ? canaryRecord.sessions.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+          : [],
+        runs: Array.isArray(canaryRecord.runs)
+          ? canaryRecord.runs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+          : [],
+        operator_story: {
+          multi_session_visible: Boolean(storyValue.multi_session_visible),
+          delegated_owner_visible: Boolean(storyValue.delegated_owner_visible),
+          checkpoint_branch_visible: Boolean(storyValue.checkpoint_branch_visible),
+          failure_recovery_visible: Boolean(storyValue.failure_recovery_visible),
+          artifact_comparison_visible: Boolean(storyValue.artifact_comparison_visible),
+          approval_preservation_visible: Boolean(storyValue.approval_preservation_visible),
+          trust_boundary_fail_closed_visible: Boolean(storyValue.trust_boundary_fail_closed_visible),
+          audit_trail_visible: Boolean(storyValue.audit_trail_visible),
+        },
+        failure_report: Array.isArray(canaryRecord.failure_report)
+          ? canaryRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : typeof failure.scenario_name === "string" ? failure.scenario_name : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : typeof failure.error === "string" ? failure.error : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "deterministic_eval_failure",
+            }];
+          })
+          : [],
+      };
+    }
+  }
+  if (oneReachChannelCanary && typeof oneReachChannelCanary === "object" && !Array.isArray(oneReachChannelCanary)) {
+    const canaryRecord = oneReachChannelCanary as Record<string, unknown>;
+    const canarySummary = canaryRecord.summary;
+    const canaryProtocol = canaryRecord.protocol;
+    const canaryPolicy = canaryRecord.policy;
+    const canaryReceipt = canaryRecord.receipt;
+    const canaryStory = canaryRecord.operator_story;
+    if (
+      canarySummary && typeof canarySummary === "object" && !Array.isArray(canarySummary)
+      && canaryProtocol && typeof canaryProtocol === "object" && !Array.isArray(canaryProtocol)
+      && canaryPolicy && typeof canaryPolicy === "object" && !Array.isArray(canaryPolicy)
+      && canaryReceipt && typeof canaryReceipt === "object" && !Array.isArray(canaryReceipt)
+      && canaryStory && typeof canaryStory === "object" && !Array.isArray(canaryStory)
+    ) {
+      const summaryValue = canarySummary as Record<string, unknown>;
+      const protocolValue = canaryProtocol as Record<string, unknown>;
+      const policyValue = canaryPolicy as Record<string, unknown>;
+      const storyValue = canaryStory as Record<string, unknown>;
+      normalizedOneReachChannelCanary = {
+        summary: {
+          suite_name: typeof summaryValue.suite_name === "string" ? summaryValue.suite_name : "one_excellent_reach_channel_canary",
+          benchmark_posture: typeof summaryValue.benchmark_posture === "string" ? summaryValue.benchmark_posture : "unknown",
+          operator_status: typeof summaryValue.operator_status === "string" ? summaryValue.operator_status : "unknown",
+          selected_channel: typeof summaryValue.selected_channel === "string" ? summaryValue.selected_channel : "unknown",
+          scenario_count: typeof summaryValue.scenario_count === "number" ? summaryValue.scenario_count : 0,
+          active_failure_count: typeof summaryValue.active_failure_count === "number" ? summaryValue.active_failure_count : 0,
+          pairing_state: typeof summaryValue.pairing_state === "string" ? summaryValue.pairing_state : "unknown",
+          revocation_state: typeof summaryValue.revocation_state === "string" ? summaryValue.revocation_state : "unknown",
+          health_state: typeof summaryValue.health_state === "string" ? summaryValue.health_state : "unknown",
+          degraded_state: typeof summaryValue.degraded_state === "string" ? summaryValue.degraded_state : "unknown",
+          retry_state: typeof summaryValue.retry_state === "string" ? summaryValue.retry_state : "unknown",
+          thread_continuity_state: typeof summaryValue.thread_continuity_state === "string" ? summaryValue.thread_continuity_state : "unknown",
+          approval_handoff_state: typeof summaryValue.approval_handoff_state === "string" ? summaryValue.approval_handoff_state : "unknown",
+          audit_receipt_count: typeof summaryValue.audit_receipt_count === "number" ? summaryValue.audit_receipt_count : 0,
+          e2e_step_count: typeof summaryValue.e2e_step_count === "number" ? summaryValue.e2e_step_count : 0,
+          channel_sprawl_state: typeof summaryValue.channel_sprawl_state === "string" ? summaryValue.channel_sprawl_state : "unknown",
+          claim_boundary: typeof summaryValue.claim_boundary === "string" ? summaryValue.claim_boundary : "unknown",
+        },
+        protocol: {
+          replay_command: typeof protocolValue.replay_command === "string" ? protocolValue.replay_command : "",
+          time_anchor: typeof protocolValue.time_anchor === "string" ? protocolValue.time_anchor : "",
+        },
+        policy: {
+          claim_boundary: typeof policyValue.claim_boundary === "string" ? policyValue.claim_boundary : "unknown",
+          receipt_surfaces: Array.isArray(policyValue.receipt_surfaces)
+            ? policyValue.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          not_claimed: Array.isArray(policyValue.not_claimed)
+            ? policyValue.not_claimed.filter((item): item is string => typeof item === "string")
+            : [],
+        },
+        receipt: canaryReceipt as Record<string, unknown>,
+        operator_story: {
+          single_channel_selected: Boolean(storyValue.single_channel_selected),
+          channel_sprawl_rejected: Boolean(storyValue.channel_sprawl_rejected),
+          pairing_visible: Boolean(storyValue.pairing_visible),
+          revocation_fail_closed_visible: Boolean(storyValue.revocation_fail_closed_visible),
+          health_visible: Boolean(storyValue.health_visible),
+          retry_visible: Boolean(storyValue.retry_visible),
+          thread_continuity_visible: Boolean(storyValue.thread_continuity_visible),
+          memory_context_visible: Boolean(storyValue.memory_context_visible),
+          approval_handoff_visible: Boolean(storyValue.approval_handoff_visible),
+          audit_trail_visible: Boolean(storyValue.audit_trail_visible),
+          degraded_state_ui_visible: Boolean(storyValue.degraded_state_ui_visible),
+          e2e_flow_visible: Boolean(storyValue.e2e_flow_visible),
+        },
+        failure_report: Array.isArray(canaryRecord.failure_report)
+          ? canaryRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : typeof failure.scenario_name === "string" ? failure.scenario_name : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : typeof failure.error === "string" ? failure.error : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "deterministic_eval_failure",
+            }];
+          })
+          : [],
+      };
+    }
+  }
+  if (trustBoundaryBenchmark && typeof trustBoundaryBenchmark === "object" && !Array.isArray(trustBoundaryBenchmark)) {
+    const trustBenchmarkRecord = trustBoundaryBenchmark as Record<string, unknown>;
+    const trustSummary = trustBenchmarkRecord.summary;
+    const trustPolicy = trustBenchmarkRecord.policy;
+    if (
+      trustSummary && typeof trustSummary === "object" && !Array.isArray(trustSummary)
+      && trustPolicy && typeof trustPolicy === "object" && !Array.isArray(trustPolicy)
+    ) {
+      const trustSummaryRecord = trustSummary as Record<string, unknown>;
+      const trustPolicyRecord = trustPolicy as Record<string, unknown>;
+      normalizedTrustBoundaryBenchmark = {
+        summary: {
+          suite_name: typeof trustSummaryRecord.suite_name === "string" ? trustSummaryRecord.suite_name : "trust_boundary_and_safety_receipts",
+          benchmark_posture: typeof trustSummaryRecord.benchmark_posture === "string" ? trustSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof trustSummaryRecord.operator_status === "string" ? trustSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof trustSummaryRecord.scenario_count === "number" ? trustSummaryRecord.scenario_count : 0,
+          dimension_count: typeof trustSummaryRecord.dimension_count === "number" ? trustSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof trustSummaryRecord.failure_mode_count === "number" ? trustSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof trustSummaryRecord.active_failure_count === "number" ? trustSummaryRecord.active_failure_count : 0,
+          secret_egress_state: typeof trustSummaryRecord.secret_egress_state === "string" ? trustSummaryRecord.secret_egress_state : "unknown",
+          delegation_partition_state: typeof trustSummaryRecord.delegation_partition_state === "string" ? trustSummaryRecord.delegation_partition_state : "unknown",
+          workflow_replay_state: typeof trustSummaryRecord.workflow_replay_state === "string" ? trustSummaryRecord.workflow_replay_state : "unknown",
+          operator_receipt_state: typeof trustSummaryRecord.operator_receipt_state === "string" ? trustSummaryRecord.operator_receipt_state : "unknown",
+        },
+        failure_report: Array.isArray(trustBenchmarkRecord.failure_report)
+          ? trustBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          secret_egress_policy: typeof trustPolicyRecord.secret_egress_policy === "string" ? trustPolicyRecord.secret_egress_policy : "unknown",
+          delegation_partition_policy: typeof trustPolicyRecord.delegation_partition_policy === "string" ? trustPolicyRecord.delegation_partition_policy : "unknown",
+          background_execution_policy: typeof trustPolicyRecord.background_execution_policy === "string" ? trustPolicyRecord.background_execution_policy : "unknown",
+          workflow_replay_policy: typeof trustPolicyRecord.workflow_replay_policy === "string" ? trustPolicyRecord.workflow_replay_policy : "unknown",
+          operator_visibility: typeof trustPolicyRecord.operator_visibility === "string" ? trustPolicyRecord.operator_visibility : "unknown",
+          receipt_surfaces: Array.isArray(trustPolicyRecord.receipt_surfaces)
+            ? trustPolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          ci_gate_mode: typeof trustPolicyRecord.ci_gate_mode === "string" ? trustPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
+  if (secureCapabilityHostBenchmark && typeof secureCapabilityHostBenchmark === "object" && !Array.isArray(secureCapabilityHostBenchmark)) {
+    const secureHostRecord = secureCapabilityHostBenchmark as Record<string, unknown>;
+    const secureHostSummary = secureHostRecord.summary;
+    const secureHostPolicy = secureHostRecord.policy;
+    if (
+      secureHostSummary && typeof secureHostSummary === "object" && !Array.isArray(secureHostSummary)
+      && secureHostPolicy && typeof secureHostPolicy === "object" && !Array.isArray(secureHostPolicy)
+    ) {
+      const secureSummaryRecord = secureHostSummary as Record<string, unknown>;
+      const securePolicyRecord = secureHostPolicy as Record<string, unknown>;
+      normalizedSecureCapabilityHostBenchmark = {
+        summary: {
+          suite_name: typeof secureSummaryRecord.suite_name === "string" ? secureSummaryRecord.suite_name : "secure_capability_host",
+          benchmark_posture: typeof secureSummaryRecord.benchmark_posture === "string" ? secureSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof secureSummaryRecord.operator_status === "string" ? secureSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof secureSummaryRecord.scenario_count === "number" ? secureSummaryRecord.scenario_count : 0,
+          dimension_count: typeof secureSummaryRecord.dimension_count === "number" ? secureSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof secureSummaryRecord.failure_mode_count === "number" ? secureSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof secureSummaryRecord.active_failure_count === "number" ? secureSummaryRecord.active_failure_count : 0,
+          credential_egress_state: typeof secureSummaryRecord.credential_egress_state === "string" ? secureSummaryRecord.credential_egress_state : "unknown",
+          workspace_secret_file_state: typeof secureSummaryRecord.workspace_secret_file_state === "string" ? secureSummaryRecord.workspace_secret_file_state : "unknown",
+          process_environment_state: typeof secureSummaryRecord.process_environment_state === "string" ? secureSummaryRecord.process_environment_state : "unknown",
+          prompt_surface_state: typeof secureSummaryRecord.prompt_surface_state === "string" ? secureSummaryRecord.prompt_surface_state : "unknown",
+          delegation_provider_state: typeof secureSummaryRecord.delegation_provider_state === "string" ? secureSummaryRecord.delegation_provider_state : "unknown",
+        },
+        failure_report: Array.isArray(secureHostRecord.failure_report)
+          ? secureHostRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          credential_egress_policy: typeof securePolicyRecord.credential_egress_policy === "string" ? securePolicyRecord.credential_egress_policy : "unknown",
+          workspace_secret_file_policy: typeof securePolicyRecord.workspace_secret_file_policy === "string" ? securePolicyRecord.workspace_secret_file_policy : "unknown",
+          process_environment_policy: typeof securePolicyRecord.process_environment_policy === "string" ? securePolicyRecord.process_environment_policy : "unknown",
+          prompt_surface_policy: typeof securePolicyRecord.prompt_surface_policy === "string" ? securePolicyRecord.prompt_surface_policy : "unknown",
+          delegation_provider_policy: typeof securePolicyRecord.delegation_provider_policy === "string" ? securePolicyRecord.delegation_provider_policy : "unknown",
+          operator_visibility: typeof securePolicyRecord.operator_visibility === "string" ? securePolicyRecord.operator_visibility : "unknown",
+          claim_boundary: typeof securePolicyRecord.claim_boundary === "string" ? securePolicyRecord.claim_boundary : "unknown",
+          receipt_surfaces: Array.isArray(securePolicyRecord.receipt_surfaces)
+            ? securePolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          ci_gate_mode: typeof securePolicyRecord.ci_gate_mode === "string" ? securePolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
+  if (computerUseBenchmark && typeof computerUseBenchmark === "object" && !Array.isArray(computerUseBenchmark)) {
+    const computerBenchmarkRecord = computerUseBenchmark as Record<string, unknown>;
+    const computerSummary = computerBenchmarkRecord.summary;
+    const computerPolicy = computerBenchmarkRecord.policy;
+    if (
+      computerSummary && typeof computerSummary === "object" && !Array.isArray(computerSummary)
+      && computerPolicy && typeof computerPolicy === "object" && !Array.isArray(computerPolicy)
+    ) {
+      const computerSummaryRecord = computerSummary as Record<string, unknown>;
+      const computerPolicyRecord = computerPolicy as Record<string, unknown>;
+      normalizedComputerUseBenchmark = {
+        summary: {
+          suite_name: typeof computerSummaryRecord.suite_name === "string" ? computerSummaryRecord.suite_name : "computer_use_browser_desktop",
+          benchmark_posture: typeof computerSummaryRecord.benchmark_posture === "string" ? computerSummaryRecord.benchmark_posture : "unknown",
+          operator_status: typeof computerSummaryRecord.operator_status === "string" ? computerSummaryRecord.operator_status : "unknown",
+          scenario_count: typeof computerSummaryRecord.scenario_count === "number" ? computerSummaryRecord.scenario_count : 0,
+          dimension_count: typeof computerSummaryRecord.dimension_count === "number" ? computerSummaryRecord.dimension_count : 0,
+          failure_mode_count: typeof computerSummaryRecord.failure_mode_count === "number" ? computerSummaryRecord.failure_mode_count : 0,
+          active_failure_count: typeof computerSummaryRecord.active_failure_count === "number" ? computerSummaryRecord.active_failure_count : 0,
+          browser_replay_state: typeof computerSummaryRecord.browser_replay_state === "string" ? computerSummaryRecord.browser_replay_state : "unknown",
+          desktop_action_state: typeof computerSummaryRecord.desktop_action_state === "string" ? computerSummaryRecord.desktop_action_state : "unknown",
+          cross_surface_receipt_state: typeof computerSummaryRecord.cross_surface_receipt_state === "string" ? computerSummaryRecord.cross_surface_receipt_state : "unknown",
+        },
+        failure_report: Array.isArray(computerBenchmarkRecord.failure_report)
+          ? computerBenchmarkRecord.failure_report.flatMap((entry) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+            const failure = entry as Record<string, unknown>;
+            return [{
+              type: typeof failure.type === "string" ? failure.type : "unknown",
+              summary: typeof failure.summary === "string" ? failure.summary : "",
+              reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+            }];
+          })
+          : [],
+        policy: {
+          browser_task_replay_policy: typeof computerPolicyRecord.browser_task_replay_policy === "string"
+            ? computerPolicyRecord.browser_task_replay_policy
+            : "unknown",
+          desktop_action_replay_policy: typeof computerPolicyRecord.desktop_action_replay_policy === "string"
+            ? computerPolicyRecord.desktop_action_replay_policy
+            : "unknown",
+          cross_surface_continuity_policy: typeof computerPolicyRecord.cross_surface_continuity_policy === "string"
+            ? computerPolicyRecord.cross_surface_continuity_policy
+            : "unknown",
+          operator_visibility: typeof computerPolicyRecord.operator_visibility === "string"
+            ? computerPolicyRecord.operator_visibility
+            : "unknown",
+          receipt_surfaces: Array.isArray(computerPolicyRecord.receipt_surfaces)
+            ? computerPolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+            : [],
+          ci_gate_mode: typeof computerPolicyRecord.ci_gate_mode === "string" ? computerPolicyRecord.ci_gate_mode : "unknown",
+        },
+      };
+    }
+  }
+  if (
+    governedBenchmarkSummary && typeof governedBenchmarkSummary === "object" && !Array.isArray(governedBenchmarkSummary)
+    && governedBenchmarkPolicy && typeof governedBenchmarkPolicy === "object" && !Array.isArray(governedBenchmarkPolicy)
+  ) {
+    const governedSummaryRecord = governedBenchmarkSummary as Record<string, unknown>;
+    const governedPolicyRecord = governedBenchmarkPolicy as Record<string, unknown>;
+    normalizedGovernedBenchmarkSummary = {
+      suite_name: typeof governedSummaryRecord.suite_name === "string" ? governedSummaryRecord.suite_name : "governed_improvement",
+      benchmark_posture: typeof governedSummaryRecord.benchmark_posture === "string" ? governedSummaryRecord.benchmark_posture : "unknown",
+      operator_status: typeof governedSummaryRecord.operator_status === "string" ? governedSummaryRecord.operator_status : "unknown",
+      scenario_count: typeof governedSummaryRecord.scenario_count === "number" ? governedSummaryRecord.scenario_count : 0,
+      dimension_count: typeof governedSummaryRecord.dimension_count === "number" ? governedSummaryRecord.dimension_count : 0,
+      failure_mode_count: typeof governedSummaryRecord.failure_mode_count === "number" ? governedSummaryRecord.failure_mode_count : 0,
+      active_failure_count: typeof governedSummaryRecord.active_failure_count === "number" ? governedSummaryRecord.active_failure_count : 0,
+      anti_misevolution_state: typeof governedSummaryRecord.anti_misevolution_state === "string" ? governedSummaryRecord.anti_misevolution_state : "unknown",
+      canary_rollout_state: typeof governedSummaryRecord.canary_rollout_state === "string" ? governedSummaryRecord.canary_rollout_state : "unknown",
+      rollback_state: typeof governedSummaryRecord.rollback_state === "string" ? governedSummaryRecord.rollback_state : "unknown",
+      operator_receipt_state: typeof governedSummaryRecord.operator_receipt_state === "string" ? governedSummaryRecord.operator_receipt_state : "unknown",
+      recent_receipt_count: typeof governedSummaryRecord.recent_receipt_count === "number" ? governedSummaryRecord.recent_receipt_count : 0,
+      held_receipt_count: typeof governedSummaryRecord.held_receipt_count === "number" ? governedSummaryRecord.held_receipt_count : 0,
+    };
+    normalizedGovernedBenchmarkPolicy = {
+      preference_diversity_policy: typeof governedPolicyRecord.preference_diversity_policy === "string" ? governedPolicyRecord.preference_diversity_policy : "unknown",
+      canary_rollout_policy: typeof governedPolicyRecord.canary_rollout_policy === "string" ? governedPolicyRecord.canary_rollout_policy : "unknown",
+      rollback_policy: typeof governedPolicyRecord.rollback_policy === "string" ? governedPolicyRecord.rollback_policy : "unknown",
+      acceptance_policy: typeof governedPolicyRecord.acceptance_policy === "string" ? governedPolicyRecord.acceptance_policy : "unknown",
+      operator_visibility: typeof governedPolicyRecord.operator_visibility === "string" ? governedPolicyRecord.operator_visibility : "unknown",
+      receipt_surfaces: Array.isArray(governedPolicyRecord.receipt_surfaces)
+        ? governedPolicyRecord.receipt_surfaces.filter((item): item is string => typeof item === "string")
+        : [],
+      ci_gate_mode: typeof governedPolicyRecord.ci_gate_mode === "string" ? governedPolicyRecord.ci_gate_mode : "unknown",
+    };
+    normalizedGovernedBenchmarkFailures = Array.isArray(governedRecord.failure_report)
+      ? governedRecord.failure_report.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const failure = entry as Record<string, unknown>;
+        return [{
+          type: typeof failure.type === "string" ? failure.type : "unknown",
+          summary: typeof failure.summary === "string" ? failure.summary : "",
+          reason: typeof failure.reason === "string" ? failure.reason : "unknown",
+        }];
+      })
+      : [];
+    normalizedGovernedBenchmarkReceipts = Array.isArray(governedRecord.recent_receipts)
+      ? governedRecord.recent_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const receipt = entry as Record<string, unknown>;
+        return [{
+          id: typeof receipt.id === "string" ? receipt.id : "receipt",
+          candidate_name: typeof receipt.candidate_name === "string" ? receipt.candidate_name : "Candidate",
+          target_type: typeof receipt.target_type === "string" ? receipt.target_type : "unknown",
+          quality_state: typeof receipt.quality_state === "string" ? receipt.quality_state : "unknown",
+          score: typeof receipt.score === "number" ? receipt.score : 0,
+          rollout_state: typeof receipt.rollout_state === "string" ? receipt.rollout_state : "unknown",
+          acceptance_state: typeof receipt.acceptance_state === "string" ? receipt.acceptance_state : "unknown",
+          diversity_guard_state: typeof receipt.diversity_guard_state === "string" ? receipt.diversity_guard_state : "unknown",
+          rollback_ready: Boolean(receipt.rollback_ready),
+          blocked_constraints: Array.isArray(receipt.blocked_constraints)
+            ? receipt.blocked_constraints.filter((item): item is string => typeof item === "string")
+            : [],
+          saved_candidate_path: typeof receipt.saved_candidate_path === "string" ? receipt.saved_candidate_path : "",
+          receipt_path: typeof receipt.receipt_path === "string" ? receipt.receipt_path : "",
+          updated_at: typeof receipt.updated_at === "string" ? receipt.updated_at : "",
+        }];
+      })
+      : [];
+  }
+  return {
+    summary: {
+      suite_count: typeof summaryRecord.suite_count === "number" ? summaryRecord.suite_count : 0,
+      scenario_count: typeof summaryRecord.scenario_count === "number" ? summaryRecord.scenario_count : 0,
+      benchmark_posture: typeof summaryRecord.benchmark_posture === "string" ? summaryRecord.benchmark_posture : "unknown",
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      remaining_gap: typeof summaryRecord.remaining_gap === "string" ? summaryRecord.remaining_gap : "unknown",
+      governed_improvement_status: typeof summaryRecord.governed_improvement_status === "string" ? summaryRecord.governed_improvement_status : "unknown",
+      memory_benchmark_posture: typeof summaryRecord.memory_benchmark_posture === "string"
+        ? summaryRecord.memory_benchmark_posture
+        : "unknown",
+      user_model_benchmark_posture: typeof summaryRecord.user_model_benchmark_posture === "string"
+        ? summaryRecord.user_model_benchmark_posture
+        : "unknown",
+      workflow_endurance_benchmark_posture: typeof summaryRecord.workflow_endurance_benchmark_posture === "string"
+        ? summaryRecord.workflow_endurance_benchmark_posture
+        : "unknown",
+      live_workflow_endurance_canary_posture: typeof summaryRecord.live_workflow_endurance_canary_posture === "string"
+        ? summaryRecord.live_workflow_endurance_canary_posture
+        : "unknown",
+      one_reach_channel_canary_posture: typeof summaryRecord.one_reach_channel_canary_posture === "string"
+        ? summaryRecord.one_reach_channel_canary_posture
+        : "unknown",
+      trust_boundary_benchmark_posture: typeof summaryRecord.trust_boundary_benchmark_posture === "string"
+        ? summaryRecord.trust_boundary_benchmark_posture
+        : "unknown",
+      secure_capability_host_benchmark_posture: typeof summaryRecord.secure_capability_host_benchmark_posture === "string"
+        ? summaryRecord.secure_capability_host_benchmark_posture
+        : "unknown",
+      computer_use_benchmark_posture: typeof summaryRecord.computer_use_benchmark_posture === "string"
+        ? summaryRecord.computer_use_benchmark_posture
+        : "unknown",
+      governed_improvement_benchmark_posture: typeof summaryRecord.governed_improvement_benchmark_posture === "string"
+        ? summaryRecord.governed_improvement_benchmark_posture
+        : "unknown",
+    },
+    suites: Array.isArray(record.suites)
+      ? record.suites.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const suite = entry as Record<string, unknown>;
+        return [{
+          name: typeof suite.name === "string" ? suite.name : "suite",
+          label: typeof suite.label === "string" ? suite.label : "Suite",
+          description: typeof suite.description === "string" ? suite.description : "",
+          benchmark_axis: typeof suite.benchmark_axis === "string" ? suite.benchmark_axis : "unknown",
+          operator_summary: typeof suite.operator_summary === "string" ? suite.operator_summary : "",
+          remaining_gap: typeof suite.remaining_gap === "string" ? suite.remaining_gap : "",
+          scenario_count: typeof suite.scenario_count === "number" ? suite.scenario_count : 0,
+          scenario_names: Array.isArray(suite.scenario_names)
+            ? suite.scenario_names.filter((item): item is string => typeof item === "string")
+            : [],
+        }];
+    })
+      : [],
+    memory_benchmark: normalizedMemoryBenchmark,
+    user_model_benchmark: normalizedUserModelBenchmark,
+    workflow_endurance_benchmark: normalizedWorkflowEnduranceBenchmark,
+    live_workflow_endurance_canary: normalizedLiveWorkflowEnduranceCanary,
+    one_reach_channel_canary: normalizedOneReachChannelCanary,
+    trust_boundary_benchmark: normalizedTrustBoundaryBenchmark,
+    secure_capability_host_benchmark: normalizedSecureCapabilityHostBenchmark,
+    computer_use_benchmark: normalizedComputerUseBenchmark,
+    governed_improvement: {
+      target_count: typeof governedRecord.target_count === "number" ? governedRecord.target_count : 0,
+      target_types: Array.isArray(governedRecord.target_types)
+        ? governedRecord.target_types.filter((item): item is string => typeof item === "string")
+        : [],
+      required_suite_count: typeof governedRecord.required_suite_count === "number" ? governedRecord.required_suite_count : 0,
+      gate_policy: {
+        min_review_ready_score: typeof gatePolicyRecord.min_review_ready_score === "number" ? gatePolicyRecord.min_review_ready_score : 0.7,
+        min_strong_score: typeof gatePolicyRecord.min_strong_score === "number" ? gatePolicyRecord.min_strong_score : 0.9,
+        requires_human_review: Boolean(gatePolicyRecord.requires_human_review),
+        blocks_on_constraint_failure: Boolean(gatePolicyRecord.blocks_on_constraint_failure),
+        required_benchmark_suites: Array.isArray(gatePolicyRecord.required_benchmark_suites)
+          ? gatePolicyRecord.required_benchmark_suites.filter((item): item is string => typeof item === "string")
+          : [],
+        proof_contract: typeof gatePolicyRecord.proof_contract === "string" ? gatePolicyRecord.proof_contract : "unknown",
+      },
+      summary: normalizedGovernedBenchmarkSummary,
+      failure_report: normalizedGovernedBenchmarkFailures,
+      policy: normalizedGovernedBenchmarkPolicy,
+      recent_receipts: normalizedGovernedBenchmarkReceipts,
+    },
+  };
+}
+
+function normalizeWorkflowOrchestration(value: unknown): OperatorWorkflowOrchestration | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const normalizeStepFocus = (entry: unknown): WorkflowOrchestrationStepFocus | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const step = entry as Record<string, unknown>;
+    return {
+      kind: typeof step.kind === "string" ? step.kind : "latest",
+      step_id: typeof step.step_id === "string" ? step.step_id : null,
+      tool: typeof step.tool === "string" ? step.tool : null,
+      status: typeof step.status === "string" ? step.status : null,
+      summary: typeof step.summary === "string" ? step.summary : null,
+      error_summary: typeof step.error_summary === "string" ? step.error_summary : null,
+      recovery_hint: typeof step.recovery_hint === "string" ? step.recovery_hint : null,
+      recovery_action_count: typeof step.recovery_action_count === "number" ? step.recovery_action_count : 0,
+      is_recoverable: Boolean(step.is_recoverable),
+    };
+  };
+  const normalizeRecoveryDensity = (entry: unknown): WorkflowOrchestrationRecoveryDensity | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    return {
+      recommended_path: typeof record.recommended_path === "string" ? record.recommended_path : "observe",
+      approval_pending: Boolean(record.approval_pending),
+      boundary_blocked: Boolean(record.boundary_blocked),
+      retry_ready: Boolean(record.retry_ready),
+      checkpoint_ready: Boolean(record.checkpoint_ready),
+      repair_ready: Boolean(record.repair_ready),
+      branch_ready: Boolean(record.branch_ready),
+      replay_ready: Boolean(record.replay_ready),
+      stalled: Boolean(record.stalled),
+      checkpoint_candidate_count: typeof record.checkpoint_candidate_count === "number" ? record.checkpoint_candidate_count : 0,
+      recovery_action_count: typeof record.recovery_action_count === "number" ? record.recovery_action_count : 0,
+      repair_action_types: Array.isArray(record.repair_action_types)
+        ? record.repair_action_types.filter((item): item is string => typeof item === "string")
+        : [],
+      repair_hint: typeof record.repair_hint === "string" ? record.repair_hint : null,
+      failure_step_id: typeof record.failure_step_id === "string" ? record.failure_step_id : null,
+      failure_step_tool: typeof record.failure_step_tool === "string" ? record.failure_step_tool : null,
+    };
+  };
+  const normalizeOutputDebugger = (entry: unknown): WorkflowOrchestrationOutputDebugger | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    return {
+      family_run_count: typeof record.family_run_count === "number" ? record.family_run_count : 0,
+      branch_run_count: typeof record.branch_run_count === "number" ? record.branch_run_count : 0,
+      history_output_count: typeof record.history_output_count === "number" ? record.history_output_count : 0,
+      primary_output_path: typeof record.primary_output_path === "string" ? record.primary_output_path : null,
+      related_output_paths: Array.isArray(record.related_output_paths)
+        ? record.related_output_paths.filter((item): item is string => typeof item === "string")
+        : [],
+      history_outputs: Array.isArray(record.history_outputs)
+        ? record.history_outputs.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return [];
+          }
+          const item = entry as Record<string, unknown>;
+          const path = typeof item.path === "string" ? item.path : null;
+          if (!path) {
+            return [];
+          }
+          return [{
+            path,
+            run_identity: typeof item.run_identity === "string" ? item.run_identity : null,
+            summary: typeof item.summary === "string" ? item.summary : null,
+            status: typeof item.status === "string" ? item.status : null,
+            branch_kind: typeof item.branch_kind === "string" ? item.branch_kind : null,
+            updated_at: typeof item.updated_at === "string" ? item.updated_at : null,
+            is_primary: Boolean(item.is_primary),
+          }];
+        })
+        : [],
+      latest_branch_run_identity: typeof record.latest_branch_run_identity === "string" ? record.latest_branch_run_identity : null,
+      latest_branch_summary: typeof record.latest_branch_summary === "string" ? record.latest_branch_summary : null,
+      latest_branch_status: typeof record.latest_branch_status === "string" ? record.latest_branch_status : null,
+      latest_branch_output_path: typeof record.latest_branch_output_path === "string" ? record.latest_branch_output_path : null,
+      comparison_ready: Boolean(record.comparison_ready),
+      checkpoint_labels: Array.isArray(record.checkpoint_labels)
+        ? record.checkpoint_labels.filter((item): item is string => typeof item === "string")
+        : [],
+    };
+  };
+  const normalizeCondensationFidelity = (entry: unknown): WorkflowOrchestrationCondensationFidelity | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const fidelity = entry as Record<string, unknown>;
+    return {
+      state: typeof fidelity.state === "string" ? fidelity.state : "unknown",
+      watch_required: Boolean(fidelity.watch_required),
+      visible_step_count: typeof fidelity.visible_step_count === "number" ? fidelity.visible_step_count : 0,
+      total_step_count: typeof fidelity.total_step_count === "number" ? fidelity.total_step_count : 0,
+      preserved_path_count: typeof fidelity.preserved_path_count === "number" ? fidelity.preserved_path_count : 0,
+      history_output_count: typeof fidelity.history_output_count === "number" ? fidelity.history_output_count : 0,
+      branch_run_count: typeof fidelity.branch_run_count === "number" ? fidelity.branch_run_count : 0,
+      summary: typeof fidelity.summary === "string" ? fidelity.summary : null,
+    };
+  };
+  const normalizeAnticipatoryPlan = (entry: unknown): WorkflowOrchestrationAnticipatoryPlan | null => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const plan = entry as Record<string, unknown>;
+    return {
+      risk_level: typeof plan.risk_level === "string" ? plan.risk_level : "unknown",
+      anticipatory_ready: Boolean(plan.anticipatory_ready),
+      signal_count: typeof plan.signal_count === "number" ? plan.signal_count : 0,
+      signals: Array.isArray(plan.signals)
+        ? plan.signals.filter((item): item is string => typeof item === "string")
+        : [],
+      summary: typeof plan.summary === "string" ? plan.summary : null,
+      backup_branch_ready: Boolean(plan.backup_branch_ready),
+      backup_branch_step_id: typeof plan.backup_branch_step_id === "string" ? plan.backup_branch_step_id : null,
+      backup_branch_label: typeof plan.backup_branch_label === "string" ? plan.backup_branch_label : null,
+      backup_branch_draft: typeof plan.backup_branch_draft === "string" ? plan.backup_branch_draft : null,
+      anticipatory_repair_draft: typeof plan.anticipatory_repair_draft === "string" ? plan.anticipatory_repair_draft : null,
+      family_failure_count: typeof plan.family_failure_count === "number" ? plan.family_failure_count : 0,
+    };
+  };
+  return {
+    summary: {
+      tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
+      workflow_count: typeof summaryRecord.workflow_count === "number" ? summaryRecord.workflow_count : 0,
+      active_workflows: typeof summaryRecord.active_workflows === "number" ? summaryRecord.active_workflows : 0,
+      blocked_workflows: typeof summaryRecord.blocked_workflows === "number" ? summaryRecord.blocked_workflows : 0,
+      awaiting_approval_workflows: typeof summaryRecord.awaiting_approval_workflows === "number" ? summaryRecord.awaiting_approval_workflows : 0,
+      recoverable_workflows: typeof summaryRecord.recoverable_workflows === "number" ? summaryRecord.recoverable_workflows : 0,
+      long_running_workflows: typeof summaryRecord.long_running_workflows === "number" ? summaryRecord.long_running_workflows : 0,
+      compacted_workflows: typeof summaryRecord.compacted_workflows === "number" ? summaryRecord.compacted_workflows : 0,
+      total_step_count: typeof summaryRecord.total_step_count === "number" ? summaryRecord.total_step_count : 0,
+      compacted_step_count: typeof summaryRecord.compacted_step_count === "number" ? summaryRecord.compacted_step_count : 0,
+      boundary_blocked_workflows: typeof summaryRecord.boundary_blocked_workflows === "number" ? summaryRecord.boundary_blocked_workflows : 0,
+      repair_ready_workflows: typeof summaryRecord.repair_ready_workflows === "number" ? summaryRecord.repair_ready_workflows : 0,
+      branch_ready_workflows: typeof summaryRecord.branch_ready_workflows === "number" ? summaryRecord.branch_ready_workflows : 0,
+      anticipatory_ready_workflows: typeof summaryRecord.anticipatory_ready_workflows === "number" ? summaryRecord.anticipatory_ready_workflows : 0,
+      backup_branch_ready_workflows: typeof summaryRecord.backup_branch_ready_workflows === "number" ? summaryRecord.backup_branch_ready_workflows : 0,
+      fidelity_watch_workflows: typeof summaryRecord.fidelity_watch_workflows === "number" ? summaryRecord.fidelity_watch_workflows : 0,
+      stalled_workflows: typeof summaryRecord.stalled_workflows === "number" ? summaryRecord.stalled_workflows : 0,
+      output_debugger_ready_workflows: typeof summaryRecord.output_debugger_ready_workflows === "number" ? summaryRecord.output_debugger_ready_workflows : 0,
+      attention_sessions: typeof summaryRecord.attention_sessions === "number" ? summaryRecord.attention_sessions : 0,
+    },
+    sessions: Array.isArray(record.sessions)
+      ? record.sessions.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const session = entry as Record<string, unknown>;
+          return [{
+            thread_id: typeof session.thread_id === "string" ? session.thread_id : null,
+            thread_label: typeof session.thread_label === "string" ? session.thread_label : null,
+            workflow_count: typeof session.workflow_count === "number" ? session.workflow_count : 0,
+            active_workflows: typeof session.active_workflows === "number" ? session.active_workflows : 0,
+            blocked_workflows: typeof session.blocked_workflows === "number" ? session.blocked_workflows : 0,
+            awaiting_approval_workflows: typeof session.awaiting_approval_workflows === "number" ? session.awaiting_approval_workflows : 0,
+            recoverable_workflows: typeof session.recoverable_workflows === "number" ? session.recoverable_workflows : 0,
+            latest_updated_at: typeof session.latest_updated_at === "string" ? session.latest_updated_at : "",
+            lead_run_identity: typeof session.lead_run_identity === "string" ? session.lead_run_identity : null,
+            lead_workflow_name: typeof session.lead_workflow_name === "string" ? session.lead_workflow_name : null,
+            lead_status: typeof session.lead_status === "string" ? session.lead_status : null,
+            lead_summary: typeof session.lead_summary === "string" ? session.lead_summary : null,
+            continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
+            lead_step_focus: normalizeStepFocus(session.lead_step_focus),
+            total_step_count: typeof session.total_step_count === "number" ? session.total_step_count : 0,
+            compacted_step_count: typeof session.compacted_step_count === "number" ? session.compacted_step_count : 0,
+            compacted_workflow_count: typeof session.compacted_workflow_count === "number" ? session.compacted_workflow_count : 0,
+            long_running_workflow_count: typeof session.long_running_workflow_count === "number" ? session.long_running_workflow_count : 0,
+            artifact_count: typeof session.artifact_count === "number" ? session.artifact_count : 0,
+            lead_state_capsule: typeof session.lead_state_capsule === "string" ? session.lead_state_capsule : null,
+            boundary_blocked_workflows: typeof session.boundary_blocked_workflows === "number" ? session.boundary_blocked_workflows : 0,
+            repair_ready_workflows: typeof session.repair_ready_workflows === "number" ? session.repair_ready_workflows : 0,
+            branch_ready_workflows: typeof session.branch_ready_workflows === "number" ? session.branch_ready_workflows : 0,
+            anticipatory_ready_workflows: typeof session.anticipatory_ready_workflows === "number" ? session.anticipatory_ready_workflows : 0,
+            backup_branch_ready_workflows: typeof session.backup_branch_ready_workflows === "number" ? session.backup_branch_ready_workflows : 0,
+            fidelity_watch_workflows: typeof session.fidelity_watch_workflows === "number" ? session.fidelity_watch_workflows : 0,
+            stalled_workflows: typeof session.stalled_workflows === "number" ? session.stalled_workflows : 0,
+            output_debugger_ready_workflows: typeof session.output_debugger_ready_workflows === "number" ? session.output_debugger_ready_workflows : 0,
+            queue_state: typeof session.queue_state === "string" ? session.queue_state : null,
+            queue_position: typeof session.queue_position === "number" ? session.queue_position : 0,
+            queue_reason: typeof session.queue_reason === "string" ? session.queue_reason : null,
+            attention_summary: typeof session.attention_summary === "string" ? session.attention_summary : null,
+            queue_draft: typeof session.queue_draft === "string" ? session.queue_draft : null,
+            handoff_draft: typeof session.handoff_draft === "string" ? session.handoff_draft : null,
+            lead_recommended_recovery_path: typeof session.lead_recommended_recovery_path === "string" ? session.lead_recommended_recovery_path : null,
+            lead_anticipatory_risk_level: typeof session.lead_anticipatory_risk_level === "string" ? session.lead_anticipatory_risk_level : null,
+            lead_anticipatory_summary: typeof session.lead_anticipatory_summary === "string" ? session.lead_anticipatory_summary : null,
+            lead_backup_branch_label: typeof session.lead_backup_branch_label === "string" ? session.lead_backup_branch_label : null,
+            lead_backup_branch_draft: typeof session.lead_backup_branch_draft === "string" ? session.lead_backup_branch_draft : null,
+            lead_anticipatory_repair_draft: typeof session.lead_anticipatory_repair_draft === "string" ? session.lead_anticipatory_repair_draft : null,
+            lead_condensation_fidelity_state: typeof session.lead_condensation_fidelity_state === "string" ? session.lead_condensation_fidelity_state : null,
+            lead_condensation_fidelity_summary: typeof session.lead_condensation_fidelity_summary === "string" ? session.lead_condensation_fidelity_summary : null,
+            lead_output_path: typeof session.lead_output_path === "string" ? session.lead_output_path : null,
+            lead_related_output_paths: Array.isArray(session.lead_related_output_paths)
+              ? session.lead_related_output_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            lead_output_history: normalizeOutputDebugger({ history_outputs: session.lead_output_history })?.history_outputs ?? [],
+            lead_latest_branch_run_identity: typeof session.lead_latest_branch_run_identity === "string" ? session.lead_latest_branch_run_identity : null,
+            lead_latest_branch_summary: typeof session.lead_latest_branch_summary === "string" ? session.lead_latest_branch_summary : null,
+          }];
+        })
+      : [],
+    workflows: Array.isArray(record.workflows)
+      ? record.workflows.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const workflow = entry as Record<string, unknown>;
+          return [{
+            id: typeof workflow.id === "string" ? workflow.id : null,
+            tool_name: typeof workflow.tool_name === "string" ? workflow.tool_name : null,
+            run_identity: typeof workflow.run_identity === "string" ? workflow.run_identity : null,
+            root_run_identity: typeof workflow.root_run_identity === "string" ? workflow.root_run_identity : null,
+            parent_run_identity: typeof workflow.parent_run_identity === "string" ? workflow.parent_run_identity : null,
+            workflow_name: typeof workflow.workflow_name === "string" ? workflow.workflow_name : "workflow",
+            summary: typeof workflow.summary === "string" ? workflow.summary : "",
+            status: typeof workflow.status === "string" ? workflow.status : "unknown",
+            availability: typeof workflow.availability === "string" ? workflow.availability : null,
+            session_id: typeof workflow.session_id === "string" ? workflow.session_id : null,
+            started_at: typeof workflow.started_at === "string" ? workflow.started_at : "",
+            updated_at: typeof workflow.updated_at === "string" ? workflow.updated_at : "",
+            thread_id: typeof workflow.thread_id === "string" ? workflow.thread_id : null,
+            thread_label: typeof workflow.thread_label === "string" ? workflow.thread_label : null,
+            continue_message: typeof workflow.continue_message === "string" ? workflow.continue_message : null,
+            thread_continue_message: typeof workflow.thread_continue_message === "string" ? workflow.thread_continue_message : null,
+            output_path: typeof workflow.output_path === "string" ? workflow.output_path : null,
+            artifact_paths: Array.isArray(workflow.artifact_paths)
+              ? workflow.artifact_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            step_records: Array.isArray(workflow.step_records)
+              ? workflow.step_records.flatMap((item) => (
+                item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []
+              ))
+              : [],
+            pending_approval_count: typeof workflow.pending_approval_count === "number" ? workflow.pending_approval_count : 0,
+            pending_approval_ids: Array.isArray(workflow.pending_approval_ids)
+              ? workflow.pending_approval_ids.filter((item): item is string => typeof item === "string")
+              : [],
+            checkpoint_candidate_count: typeof workflow.checkpoint_candidate_count === "number" ? workflow.checkpoint_candidate_count : 0,
+            checkpoint_candidates: Array.isArray(workflow.checkpoint_candidates)
+              ? workflow.checkpoint_candidates.flatMap((item) => (
+                item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []
+              ))
+              : [],
+            retry_from_step_available: Boolean(workflow.retry_from_step_available),
+            retry_from_step_draft: typeof workflow.retry_from_step_draft === "string" ? workflow.retry_from_step_draft : null,
+            replay_allowed: typeof workflow.replay_allowed === "boolean" ? workflow.replay_allowed : true,
+            replay_block_reason: typeof workflow.replay_block_reason === "string" ? workflow.replay_block_reason : null,
+            replay_recommended_actions: Array.isArray(workflow.replay_recommended_actions)
+              ? workflow.replay_recommended_actions.flatMap((item) => (
+                item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : []
+              ))
+              : [],
+            step_focus: normalizeStepFocus(workflow.step_focus),
+            is_long_running: Boolean(workflow.is_long_running),
+            is_compacted: Boolean(workflow.is_compacted),
+            duration_minutes: typeof workflow.duration_minutes === "number" ? workflow.duration_minutes : 0,
+            step_count: typeof workflow.step_count === "number" ? workflow.step_count : 0,
+            visible_step_count: typeof workflow.visible_step_count === "number" ? workflow.visible_step_count : 0,
+            compacted_step_count: typeof workflow.compacted_step_count === "number" ? workflow.compacted_step_count : 0,
+            artifact_count: typeof workflow.artifact_count === "number" ? workflow.artifact_count : 0,
+            preserved_recovery_paths: Array.isArray(workflow.preserved_recovery_paths)
+              ? workflow.preserved_recovery_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            recent_step_labels: Array.isArray(workflow.recent_step_labels)
+              ? workflow.recent_step_labels.filter((item): item is string => typeof item === "string")
+              : [],
+            state_capsule: typeof workflow.state_capsule === "string" ? workflow.state_capsule : null,
+            recovery_density: normalizeRecoveryDensity(workflow.recovery_density),
+            output_debugger: normalizeOutputDebugger(workflow.output_debugger),
+            condensation_fidelity: normalizeCondensationFidelity(workflow.condensation_fidelity),
+            anticipatory_plan: normalizeAnticipatoryPlan(workflow.anticipatory_plan),
+          }];
+        })
+      : [],
+  };
+}
+
+function normalizeOperatorGuardianState(value: unknown): OperatorGuardianState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  const explanation = record.explanation;
+  const operatorGuidance = record.operator_guidance;
+  const observer = record.observer;
+  if (
+    !summary || typeof summary !== "object" || Array.isArray(summary)
+    || !explanation || typeof explanation !== "object" || Array.isArray(explanation)
+    || !operatorGuidance || typeof operatorGuidance !== "object" || Array.isArray(operatorGuidance)
+    || !observer || typeof observer !== "object" || Array.isArray(observer)
+  ) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const explanationRecord = explanation as Record<string, unknown>;
+  const guidanceRecord = operatorGuidance as Record<string, unknown>;
+  const observerRecord = observer as Record<string, unknown>;
+  const userModelRecord = record.user_model && typeof record.user_model === "object" && !Array.isArray(record.user_model)
+    ? record.user_model as Record<string, unknown>
+    : null;
+  return {
+    summary: {
+      session_id: typeof summaryRecord.session_id === "string" ? summaryRecord.session_id : null,
+      overall_confidence: typeof summaryRecord.overall_confidence === "string" ? summaryRecord.overall_confidence : "unknown",
+      observer_confidence: typeof summaryRecord.observer_confidence === "string" ? summaryRecord.observer_confidence : "unknown",
+      world_model_confidence: typeof summaryRecord.world_model_confidence === "string" ? summaryRecord.world_model_confidence : "unknown",
+      memory_confidence: typeof summaryRecord.memory_confidence === "string" ? summaryRecord.memory_confidence : "unknown",
+      current_session_confidence: typeof summaryRecord.current_session_confidence === "string" ? summaryRecord.current_session_confidence : "unknown",
+      recent_sessions_confidence: typeof summaryRecord.recent_sessions_confidence === "string" ? summaryRecord.recent_sessions_confidence : "unknown",
+      intent_uncertainty_level: typeof summaryRecord.intent_uncertainty_level === "string" ? summaryRecord.intent_uncertainty_level : "clear",
+      intent_resolution: typeof summaryRecord.intent_resolution === "string" ? summaryRecord.intent_resolution : "proceed",
+      action_posture: typeof summaryRecord.action_posture === "string" ? summaryRecord.action_posture : "act_when_grounded",
+      current_focus: typeof summaryRecord.current_focus === "string" ? summaryRecord.current_focus : "No clear focus signal",
+      focus_source: typeof summaryRecord.focus_source === "string" ? summaryRecord.focus_source : "unknown",
+      focus_alignment: typeof summaryRecord.focus_alignment === "string" ? summaryRecord.focus_alignment : "unknown",
+      intervention_receptivity: typeof summaryRecord.intervention_receptivity === "string" ? summaryRecord.intervention_receptivity : "unknown",
+      dominant_thread: typeof summaryRecord.dominant_thread === "string" ? summaryRecord.dominant_thread : "No dominant thread",
+      user_model_confidence: typeof summaryRecord.user_model_confidence === "string" ? summaryRecord.user_model_confidence : "empty",
+    },
+    explanation: {
+      judgment_proof_lines: Array.isArray(explanationRecord.judgment_proof_lines)
+        ? explanationRecord.judgment_proof_lines.filter((item): item is string => typeof item === "string")
+        : [],
+      intent_uncertainty_diagnostics: Array.isArray(explanationRecord.intent_uncertainty_diagnostics)
+        ? explanationRecord.intent_uncertainty_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      judgment_risks: Array.isArray(explanationRecord.judgment_risks)
+        ? explanationRecord.judgment_risks.filter((item): item is string => typeof item === "string")
+        : [],
+      corroboration_sources: Array.isArray(explanationRecord.corroboration_sources)
+        ? explanationRecord.corroboration_sources.filter((item): item is string => typeof item === "string")
+        : [],
+      preference_inference_diagnostics: Array.isArray(explanationRecord.preference_inference_diagnostics)
+        ? explanationRecord.preference_inference_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      learning_diagnostics: Array.isArray(explanationRecord.learning_diagnostics)
+        ? explanationRecord.learning_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      restraint_reasons: Array.isArray(explanationRecord.restraint_reasons)
+        ? explanationRecord.restraint_reasons.filter((item): item is string => typeof item === "string")
+        : [],
+      user_model_benchmark_diagnostics: Array.isArray(explanationRecord.user_model_benchmark_diagnostics)
+        ? explanationRecord.user_model_benchmark_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      memory_provider_diagnostics: Array.isArray(explanationRecord.memory_provider_diagnostics)
+        ? explanationRecord.memory_provider_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+      memory_reconciliation_diagnostics: Array.isArray(explanationRecord.memory_reconciliation_diagnostics)
+        ? explanationRecord.memory_reconciliation_diagnostics.filter((item): item is string => typeof item === "string")
+        : [],
+    },
+    user_model: {
+      confidence: userModelRecord && typeof userModelRecord.confidence === "string" ? userModelRecord.confidence : "empty",
+      restraint_posture: userModelRecord && typeof userModelRecord.restraint_posture === "string" ? userModelRecord.restraint_posture : "act_when_grounded",
+      continuity_strategy: userModelRecord && typeof userModelRecord.continuity_strategy === "string" ? userModelRecord.continuity_strategy : "preserve_current_context",
+      clarification_watchpoints: userModelRecord && Array.isArray(userModelRecord.clarification_watchpoints)
+        ? userModelRecord.clarification_watchpoints.filter((item): item is string => typeof item === "string")
+        : [],
+      restraint_reasons: userModelRecord && Array.isArray(userModelRecord.restraint_reasons)
+        ? userModelRecord.restraint_reasons.filter((item): item is string => typeof item === "string")
+        : [],
+      evidence_store: userModelRecord && Array.isArray(userModelRecord.evidence_store)
+        ? userModelRecord.evidence_store.filter((item): item is string => typeof item === "string")
+        : [],
+      facets: userModelRecord && Array.isArray(userModelRecord.facets)
+        ? userModelRecord.facets.flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const facet = item as Record<string, unknown>;
+          return [{
+            key: typeof facet.key === "string" ? facet.key : "facet",
+            label: typeof facet.label === "string" ? facet.label : "Facet",
+            value: typeof facet.value === "string" ? facet.value : "unknown",
+            confidence: typeof facet.confidence === "string" ? facet.confidence : "unknown",
+            evidence_sources: Array.isArray(facet.evidence_sources)
+              ? facet.evidence_sources.filter((entry): entry is string => typeof entry === "string")
+              : [],
+            evidence_lines: Array.isArray(facet.evidence_lines)
+              ? facet.evidence_lines.filter((entry): entry is string => typeof entry === "string")
+              : [],
+          }];
+        })
+        : [],
+    },
+    operator_guidance: {
+      active_projects: Array.isArray(guidanceRecord.active_projects)
+        ? guidanceRecord.active_projects.filter((item): item is string => typeof item === "string")
+        : [],
+      active_commitments: Array.isArray(guidanceRecord.active_commitments)
+        ? guidanceRecord.active_commitments.filter((item): item is string => typeof item === "string")
+        : [],
+      active_blockers: Array.isArray(guidanceRecord.active_blockers)
+        ? guidanceRecord.active_blockers.filter((item): item is string => typeof item === "string")
+        : [],
+      next_up: Array.isArray(guidanceRecord.next_up)
+        ? guidanceRecord.next_up.filter((item): item is string => typeof item === "string")
+        : [],
+      learning_guidance: typeof guidanceRecord.learning_guidance === "string" ? guidanceRecord.learning_guidance : null,
+      recent_execution_summary: typeof guidanceRecord.recent_execution_summary === "string" ? guidanceRecord.recent_execution_summary : null,
+    },
+    observer: {
+      user_state: typeof observerRecord.user_state === "string" ? observerRecord.user_state : null,
+      interruption_mode: typeof observerRecord.interruption_mode === "string" ? observerRecord.interruption_mode : null,
+      active_window: typeof observerRecord.active_window === "string" ? observerRecord.active_window : null,
+      active_project: typeof observerRecord.active_project === "string" ? observerRecord.active_project : null,
+      active_goals_summary: typeof observerRecord.active_goals_summary === "string" ? observerRecord.active_goals_summary : null,
+      screen_context: typeof observerRecord.screen_context === "string" ? observerRecord.screen_context : null,
+      data_quality: typeof observerRecord.data_quality === "string" ? observerRecord.data_quality : null,
+      is_working_hours: typeof observerRecord.is_working_hours === "boolean" ? observerRecord.is_working_hours : null,
+    },
+  };
+}
+
+function normalizeOperatorBackgroundSessions(value: unknown): OperatorBackgroundSessions | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  return {
+    summary: {
+      tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
+      background_process_count: typeof summaryRecord.background_process_count === "number" ? summaryRecord.background_process_count : 0,
+      running_background_process_count: typeof summaryRecord.running_background_process_count === "number" ? summaryRecord.running_background_process_count : 0,
+      sessions_with_branch_handoff: typeof summaryRecord.sessions_with_branch_handoff === "number" ? summaryRecord.sessions_with_branch_handoff : 0,
+      sessions_with_active_workflows: typeof summaryRecord.sessions_with_active_workflows === "number" ? summaryRecord.sessions_with_active_workflows : 0,
+    },
+    sessions: Array.isArray(record.sessions)
+      ? record.sessions.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const session = entry as Record<string, unknown>;
+          const handoff = session.branch_handoff;
+          const leadProcess = session.lead_process;
+          return [{
+            session_id: typeof session.session_id === "string" ? session.session_id : "",
+            title: typeof session.title === "string" ? session.title : "Untitled session",
+            latest_updated_at: typeof session.latest_updated_at === "string" ? session.latest_updated_at : "",
+            last_message: typeof session.last_message === "string" ? session.last_message : null,
+            workflow_count: typeof session.workflow_count === "number" ? session.workflow_count : 0,
+            active_workflows: typeof session.active_workflows === "number" ? session.active_workflows : 0,
+            blocked_workflows: typeof session.blocked_workflows === "number" ? session.blocked_workflows : 0,
+            background_process_count: typeof session.background_process_count === "number" ? session.background_process_count : 0,
+            running_background_process_count: typeof session.running_background_process_count === "number" ? session.running_background_process_count : 0,
+            lead_workflow_name: typeof session.lead_workflow_name === "string" ? session.lead_workflow_name : null,
+            lead_workflow_status: typeof session.lead_workflow_status === "string" ? session.lead_workflow_status : null,
+            continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
+            branch_handoff_available: Boolean(session.branch_handoff_available),
+            branch_handoff: handoff && typeof handoff === "object" && !Array.isArray(handoff)
+              ? {
+                  available: Boolean((handoff as Record<string, unknown>).available),
+                  target_type: typeof (handoff as Record<string, unknown>).target_type === "string" ? String((handoff as Record<string, unknown>).target_type) : "none",
+                  continue_message: typeof (handoff as Record<string, unknown>).continue_message === "string" ? String((handoff as Record<string, unknown>).continue_message) : null,
+                  workflow_name: typeof (handoff as Record<string, unknown>).workflow_name === "string" ? String((handoff as Record<string, unknown>).workflow_name) : null,
+                  run_identity: typeof (handoff as Record<string, unknown>).run_identity === "string" ? String((handoff as Record<string, unknown>).run_identity) : null,
+                  branch_kind: typeof (handoff as Record<string, unknown>).branch_kind === "string" ? String((handoff as Record<string, unknown>).branch_kind) : null,
+                  branch_depth: typeof (handoff as Record<string, unknown>).branch_depth === "number" ? Number((handoff as Record<string, unknown>).branch_depth) : 0,
+                  artifact_paths: Array.isArray((handoff as Record<string, unknown>).artifact_paths)
+                    ? ((handoff as Record<string, unknown>).artifact_paths as unknown[]).filter((item): item is string => typeof item === "string")
+                    : [],
+                  resume_checkpoint_label: typeof (handoff as Record<string, unknown>).resume_checkpoint_label === "string" ? String((handoff as Record<string, unknown>).resume_checkpoint_label) : null,
+                  summary: typeof (handoff as Record<string, unknown>).summary === "string" ? String((handoff as Record<string, unknown>).summary) : null,
+                }
+              : {
+                  available: false,
+                  target_type: "none",
+                  continue_message: null,
+                  workflow_name: null,
+                  run_identity: null,
+                  branch_kind: null,
+                  branch_depth: 0,
+                  artifact_paths: [],
+                  resume_checkpoint_label: null,
+                  summary: null,
+                },
+            lead_process: leadProcess && typeof leadProcess === "object" && !Array.isArray(leadProcess)
+              ? {
+                  process_id: typeof (leadProcess as Record<string, unknown>).process_id === "string" ? String((leadProcess as Record<string, unknown>).process_id) : "process",
+                  pid: typeof (leadProcess as Record<string, unknown>).pid === "number" ? Number((leadProcess as Record<string, unknown>).pid) : null,
+                  command: typeof (leadProcess as Record<string, unknown>).command === "string" ? String((leadProcess as Record<string, unknown>).command) : null,
+                  args: Array.isArray((leadProcess as Record<string, unknown>).args)
+                    ? ((leadProcess as Record<string, unknown>).args as unknown[]).filter((item): item is string => typeof item === "string")
+                    : [],
+                  cwd: typeof (leadProcess as Record<string, unknown>).cwd === "string" ? String((leadProcess as Record<string, unknown>).cwd) : null,
+                  status: typeof (leadProcess as Record<string, unknown>).status === "string" ? String((leadProcess as Record<string, unknown>).status) : null,
+                  started_at: typeof (leadProcess as Record<string, unknown>).started_at === "string" ? String((leadProcess as Record<string, unknown>).started_at) : null,
+                  session_id: typeof (leadProcess as Record<string, unknown>).session_id === "string" ? String((leadProcess as Record<string, unknown>).session_id) : null,
+                }
+              : null,
+            background_processes: Array.isArray(session.background_processes)
+              ? session.background_processes.flatMap((process) => {
+                  if (!process || typeof process !== "object" || Array.isArray(process)) return [];
+                  const processRecord = process as Record<string, unknown>;
+                  return [{
+                    process_id: typeof processRecord.process_id === "string" ? processRecord.process_id : "process",
+                    pid: typeof processRecord.pid === "number" ? processRecord.pid : null,
+                    command: typeof processRecord.command === "string" ? processRecord.command : null,
+                    args: Array.isArray(processRecord.args)
+                      ? processRecord.args.filter((item): item is string => typeof item === "string")
+                      : [],
+                    cwd: typeof processRecord.cwd === "string" ? processRecord.cwd : null,
+                    status: typeof processRecord.status === "string" ? processRecord.status : null,
+                    started_at: typeof processRecord.started_at === "string" ? processRecord.started_at : null,
+                    session_id: typeof processRecord.session_id === "string" ? processRecord.session_id : null,
+                  }];
+                })
+              : [],
+          }];
+        }).filter((entry) => entry.session_id)
+      : [],
+  };
+}
+
+function normalizeOperatorM5OperatingLayer(value: unknown): OperatorM5OperatingLayer | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const normalizeJob = (entry: unknown): OperatorM5JobEntry[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const job = entry as Record<string, unknown>;
+    const id = typeof job.id === "string" ? job.id : "";
+    if (!id) return [];
+    return [{
+      id,
+      name: typeof job.name === "string" ? job.name : "Scheduled job",
+      status: typeof job.status === "string" ? job.status : (job.enabled === false ? "paused" : "active"),
+      enabled: typeof job.enabled === "boolean" ? job.enabled : true,
+      trigger_type: typeof job.trigger_type === "string" ? job.trigger_type : "cron",
+      trigger_label: typeof job.trigger_label === "string" ? job.trigger_label : "cron",
+      action_type: typeof job.action_type === "string" ? job.action_type : "unknown",
+      action_label: typeof job.action_label === "string" ? job.action_label : "action",
+      session_id: typeof job.session_id === "string" ? job.session_id : null,
+      created_by_session_id: typeof job.created_by_session_id === "string" ? job.created_by_session_id : null,
+      next_run_at: typeof job.next_run_at === "string" ? job.next_run_at : null,
+      last_run_at: typeof job.last_run_at === "string" ? job.last_run_at : null,
+      last_outcome: typeof job.last_outcome === "string" ? job.last_outcome : null,
+      last_error: typeof job.last_error === "string" ? job.last_error : null,
+      last_approval_id: typeof job.last_approval_id === "string" ? job.last_approval_id : null,
+      run_count: typeof job.run_count === "number" ? job.run_count : 0,
+      run_history: Array.isArray(job.run_history)
+        ? job.run_history.flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const run = item as Record<string, unknown>;
+          return [{
+            id: typeof run.id === "string" ? run.id : "run",
+            status: typeof run.status === "string" ? run.status : "unknown",
+            outcome: typeof run.outcome === "string" ? run.outcome : null,
+            approval_id: typeof run.approval_id === "string" ? run.approval_id : null,
+            workflow_run_identity: typeof run.workflow_run_identity === "string" ? run.workflow_run_identity : null,
+            error: typeof run.error === "string" ? run.error : null,
+            started_at: typeof run.started_at === "string" ? run.started_at : null,
+            finished_at: typeof run.finished_at === "string" ? run.finished_at : null,
+            audit_event_id: typeof run.audit_event_id === "string" ? run.audit_event_id : null,
+          }];
+        })
+        : [],
+      lifecycle_controls: stringList(job.lifecycle_controls),
+      audit_receipts: stringList(job.audit_receipts),
+    }];
+  };
+  const jobs = Array.isArray(record.jobs) ? record.jobs.flatMap(normalizeJob) : [];
+  const routines = Array.isArray(record.routines) ? record.routines.flatMap(normalizeJob) : [];
+  return {
+    summary: {
+      work_item_count: typeof summaryRecord.work_item_count === "number" ? summaryRecord.work_item_count : 0,
+      scheduled_job_count: typeof summaryRecord.scheduled_job_count === "number" ? summaryRecord.scheduled_job_count : jobs.length,
+      routine_count: typeof summaryRecord.routine_count === "number" ? summaryRecord.routine_count : routines.length,
+      workflow_run_count: typeof summaryRecord.workflow_run_count === "number" ? summaryRecord.workflow_run_count : 0,
+      delegation_partition_count: typeof summaryRecord.delegation_partition_count === "number" ? summaryRecord.delegation_partition_count : 0,
+      active_work_count: typeof summaryRecord.active_work_count === "number" ? summaryRecord.active_work_count : 0,
+      paused_work_count: typeof summaryRecord.paused_work_count === "number" ? summaryRecord.paused_work_count : 0,
+      awaiting_approval_count: typeof summaryRecord.awaiting_approval_count === "number" ? summaryRecord.awaiting_approval_count : 0,
+      failed_work_count: typeof summaryRecord.failed_work_count === "number" ? summaryRecord.failed_work_count : 0,
+      repair_ready_count: typeof summaryRecord.repair_ready_count === "number" ? summaryRecord.repair_ready_count : 0,
+      checkpoint_ready_count: typeof summaryRecord.checkpoint_ready_count === "number" ? summaryRecord.checkpoint_ready_count : 0,
+      branch_ready_count: typeof summaryRecord.branch_ready_count === "number" ? summaryRecord.branch_ready_count : 0,
+      session_churn_risk_count: typeof summaryRecord.session_churn_risk_count === "number" ? summaryRecord.session_churn_risk_count : 0,
+      durable_run_receipt_count: typeof summaryRecord.durable_run_receipt_count === "number" ? summaryRecord.durable_run_receipt_count : 0,
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      claim_boundary: typeof summaryRecord.claim_boundary === "string" ? summaryRecord.claim_boundary : "audit_projected_supervision_not_full_durable_executor",
+    },
+    jobs,
+    routines,
+    delegations: Array.isArray(record.delegations)
+      ? record.delegations.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const delegation = entry as Record<string, unknown>;
+        const trustPartition = delegation.trust_partition;
+        const trust = trustPartition && typeof trustPartition === "object" && !Array.isArray(trustPartition)
+          ? trustPartition as Record<string, unknown>
+          : {};
+        return [{
+          id: typeof delegation.id === "string" ? delegation.id : "delegation",
+          specialist: typeof delegation.specialist === "string" ? delegation.specialist : "unknown",
+          owner: typeof delegation.owner === "string" ? delegation.owner : "operator",
+          status: typeof delegation.status === "string" ? delegation.status : "available",
+          risk_level: typeof delegation.risk_level === "string" ? delegation.risk_level : "unknown",
+          task_summary: typeof delegation.task_summary === "string" ? delegation.task_summary : "",
+          execution_boundaries: stringList(delegation.execution_boundaries),
+          delegated_tool_names: stringList(delegation.delegated_tool_names),
+          artifact_count: typeof delegation.artifact_count === "number" ? delegation.artifact_count : 0,
+          review_state: typeof delegation.review_state === "string" ? delegation.review_state : "not_started",
+          trust_partition: {
+            mode: typeof trust.mode === "string" ? trust.mode : "unknown",
+            background_capable: Boolean(trust.background_capable),
+            authenticated_source: Boolean(trust.authenticated_source),
+            credential_egress_policy_count: typeof trust.credential_egress_policy_count === "number" ? trust.credential_egress_policy_count : 0,
+            blocked: Boolean(trust.blocked),
+          },
+        }];
+      })
+      : [],
+    work_queue: Array.isArray(record.work_queue)
+      ? record.work_queue.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        return [{
+          id: typeof item.id === "string" ? item.id : "work",
+          kind: typeof item.kind === "string" ? item.kind : "work",
+          label: typeof item.label === "string" ? item.label : "Work item",
+          status: typeof item.status === "string" ? item.status : "unknown",
+          detail: typeof item.detail === "string" ? item.detail : "",
+          priority: typeof item.priority === "string" ? item.priority : "normal",
+          thread_id: typeof item.thread_id === "string" ? item.thread_id : null,
+          continue_message: typeof item.continue_message === "string" ? item.continue_message : null,
+          checkpoint_ready: Boolean(item.checkpoint_ready),
+          repair_ready: Boolean(item.repair_ready),
+          branch_ready: Boolean(item.branch_ready),
+          delegation_ready: Boolean(item.delegation_ready),
+          approval_required: Boolean(item.approval_required),
+          actions: stringList(item.actions),
+        }];
+      })
+      : [],
+    missing_trigger_classes: stringList(record.missing_trigger_classes),
+    proof_receipts: stringList(record.proof_receipts),
+  };
+}
+
+function normalizeOperatorM6MemorySuperiority(value: unknown): OperatorM6MemorySuperiority | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      active_memory_count: numberValue(summaryRecord.active_memory_count),
+      superseded_memory_count: numberValue(summaryRecord.superseded_memory_count),
+      archived_memory_count: numberValue(summaryRecord.archived_memory_count),
+      source_receipt_count: numberValue(summaryRecord.source_receipt_count),
+      control_receipt_count: numberValue(summaryRecord.control_receipt_count),
+      behavior_receipt_count: numberValue(summaryRecord.behavior_receipt_count),
+      privacy_boundary_count: numberValue(summaryRecord.privacy_boundary_count),
+      provider_writeback_blocked_count: numberValue(summaryRecord.provider_writeback_blocked_count),
+      memory_confidence: typeof summaryRecord.memory_confidence === "string" ? summaryRecord.memory_confidence : "unknown",
+      action_posture: typeof summaryRecord.action_posture === "string" ? summaryRecord.action_posture : "unknown",
+      claim_boundary: typeof summaryRecord.claim_boundary === "string" ? summaryRecord.claim_boundary : "unknown",
+    },
+    behavior_receipts: Array.isArray(record.behavior_receipts)
+      ? record.behavior_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const receipt = entry as Record<string, unknown>;
+        return [{
+          id: typeof receipt.id === "string" ? receipt.id : "behavior",
+          changed: Boolean(receipt.changed),
+          changed_dimensions: stringList(receipt.changed_dimensions),
+          action_posture: typeof receipt.action_posture === "string" ? receipt.action_posture : "unknown",
+          intent_resolution: typeof receipt.intent_resolution === "string" ? receipt.intent_resolution : "unknown",
+          memory_confidence: typeof receipt.memory_confidence === "string" ? receipt.memory_confidence : "unknown",
+          evidence: stringList(receipt.evidence),
+          diagnostics: stringList(receipt.diagnostics),
+          receipt_contract: typeof receipt.receipt_contract === "string" ? receipt.receipt_contract : "unknown",
+        }];
+      })
+      : [],
+    memory_records: Array.isArray(record.memory_records)
+      ? record.memory_records.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const provenance = item.provenance && typeof item.provenance === "object" && !Array.isArray(item.provenance)
+          ? item.provenance as Record<string, unknown>
+          : {};
+        const control = item.control && typeof item.control === "object" && !Array.isArray(item.control)
+          ? item.control as Record<string, unknown>
+          : {};
+        const conflict = item.conflict && typeof item.conflict === "object" && !Array.isArray(item.conflict)
+          ? item.conflict as Record<string, unknown>
+          : {};
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          kind: typeof item.kind === "string" ? item.kind : "memory",
+          status: typeof item.status === "string" ? item.status : "unknown",
+          summary: typeof item.summary === "string" ? item.summary : "",
+          content: typeof item.content === "string" ? item.content : "",
+          confidence: numberValue(item.confidence),
+          importance: numberValue(item.importance),
+          reinforcement: numberValue(item.reinforcement),
+          last_confirmed_at: typeof item.last_confirmed_at === "string" ? item.last_confirmed_at : null,
+          updated_at: typeof item.updated_at === "string" ? item.updated_at : "",
+          provenance: {
+            source_session_id: typeof provenance.source_session_id === "string" ? provenance.source_session_id : null,
+            source_count: numberValue(provenance.source_count),
+            source_types: stringList(provenance.source_types),
+            has_source_receipt: Boolean(provenance.has_source_receipt),
+          },
+          control: {
+            pinned: Boolean(control.pinned),
+            corrected: Boolean(control.corrected),
+            forgotten: Boolean(control.forgotten),
+            privacy_boundary: typeof control.privacy_boundary === "string" ? control.privacy_boundary : "standard",
+            provider_writeback_allowed: Boolean(control.provider_writeback_allowed),
+          },
+          conflict: {
+            superseded_by_memory_id: typeof conflict.superseded_by_memory_id === "string" ? conflict.superseded_by_memory_id : null,
+            superseded_reason: typeof conflict.superseded_reason === "string" ? conflict.superseded_reason : null,
+            archived_reason: typeof conflict.archived_reason === "string" ? conflict.archived_reason : null,
+          },
+        }];
+      })
+      : [],
+    control_receipts: Array.isArray(record.control_receipts)
+      ? record.control_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const receipt = entry as Record<string, unknown>;
+        const id = typeof receipt.id === "string" ? receipt.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          action: typeof receipt.action === "string" ? receipt.action : "audit",
+          event_type: typeof receipt.event_type === "string" ? receipt.event_type : "memory.audited",
+          memory_id: typeof receipt.memory_id === "string" ? receipt.memory_id : null,
+          summary: typeof receipt.summary === "string" ? receipt.summary : "",
+          risk_level: typeof receipt.risk_level === "string" ? receipt.risk_level : "low",
+          session_id: typeof receipt.session_id === "string" ? receipt.session_id : null,
+          created_at: typeof receipt.created_at === "string" ? receipt.created_at : "",
+          details: receipt.details && typeof receipt.details === "object" && !Array.isArray(receipt.details)
+            ? receipt.details as Record<string, unknown>
+            : {},
+        }];
+      })
+      : [],
+    privacy_boundaries: stringList(record.privacy_boundaries),
+    reconciliation: record.reconciliation && typeof record.reconciliation === "object" && !Array.isArray(record.reconciliation)
+      ? record.reconciliation as Record<string, unknown>
+      : {},
+    benchmark: record.benchmark && typeof record.benchmark === "object" && !Array.isArray(record.benchmark)
+      ? record.benchmark as Record<string, unknown>
+      : {},
+    policy: record.policy && typeof record.policy === "object" && !Array.isArray(record.policy)
+      ? record.policy as Record<string, unknown>
+      : {},
+  };
+}
+
+function normalizeGuardianMemoryLiveControl(value: unknown): GuardianMemoryLiveControl | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      memory_candidate_count: numberValue(summaryRecord.memory_candidate_count),
+      provider_count: numberValue(summaryRecord.provider_count),
+      quarantined_provider_count: numberValue(summaryRecord.quarantined_provider_count),
+      stale_candidate_count: numberValue(summaryRecord.stale_candidate_count),
+      rollback_available_count: numberValue(summaryRecord.rollback_available_count),
+      delete_export_pending_count: numberValue(summaryRecord.delete_export_pending_count),
+      action_receipt_count: numberValue(summaryRecord.action_receipt_count),
+      claim_boundary: typeof summaryRecord.claim_boundary === "string" ? summaryRecord.claim_boundary : "bounded_live_controls_not_superiority",
+    },
+    memory_candidates: Array.isArray(record.memory_candidates)
+      ? record.memory_candidates.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          kind: typeof item.kind === "string" ? item.kind : "memory",
+          status: typeof item.status === "string" ? item.status : "unknown",
+          summary: typeof item.summary === "string" ? item.summary : "",
+          content: typeof item.content === "string" ? item.content : "",
+          confidence: numberValue(item.confidence),
+          privacy_boundary: typeof item.privacy_boundary === "string" ? item.privacy_boundary : "operator_visible",
+          learning_outcome: typeof item.learning_outcome === "string" ? item.learning_outcome : "unreviewed",
+          stale_evidence: Boolean(item.stale_evidence),
+          rollback_available: Boolean(item.rollback_available),
+          delete_export_state: typeof item.delete_export_state === "string" ? item.delete_export_state : "not_requested",
+          recommended_actions: stringList(item.recommended_actions),
+        }];
+      })
+      : [],
+    provider_controls: Array.isArray(record.provider_controls)
+      ? record.provider_controls.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const name = typeof item.name === "string" ? item.name : "";
+        if (!name) return [];
+        return [{
+          name,
+          runtime_state: typeof item.runtime_state === "string" ? item.runtime_state : "unknown",
+          control_state: typeof item.control_state === "string" ? item.control_state : "watch",
+          retrieval_allowed: Boolean(item.retrieval_allowed),
+          writeback_allowed: Boolean(item.writeback_allowed),
+          advisory_only: item.advisory_only !== false,
+          notes: stringList(item.notes),
+          recommended_actions: stringList(item.recommended_actions),
+        }];
+      })
+      : [],
+    action_receipts: Array.isArray(record.action_receipts)
+      ? record.action_receipts.flatMap((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const item = entry as Record<string, unknown>;
+        const id = typeof item.id === "string" ? item.id : "";
+        if (!id) return [];
+        return [{
+          id,
+          action: typeof item.action === "string" ? item.action : "audit",
+          target_kind: typeof item.target_kind === "string" ? item.target_kind : "memory",
+          target_id: typeof item.target_id === "string" ? item.target_id : "",
+          summary: typeof item.summary === "string" ? item.summary : "",
+          outcome: typeof item.outcome === "string" ? item.outcome : "recorded",
+          changed_memory: Boolean(item.changed_memory),
+          changed_provider_state: Boolean(item.changed_provider_state),
+          risk_level: typeof item.risk_level === "string" ? item.risk_level : "low",
+          created_at: typeof item.created_at === "string" ? item.created_at : "",
+        }];
+      })
+      : [],
+    blocked_claims: stringList(record.blocked_claims),
+    policy: record.policy && typeof record.policy === "object" && !Array.isArray(record.policy)
+      ? record.policy as Record<string, unknown>
+      : {},
+  };
+}
+
+function normalizeOperatorM7Cockpit(value: unknown): OperatorM7Cockpit | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const normalizeControl = (entry: unknown): OperatorM7Control[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const control = entry as Record<string, unknown>;
+    const action = typeof control.action === "string" ? control.action : "";
+    if (!action) return [];
+    return [{
+      action,
+      enabled: Boolean(control.enabled),
+      label: typeof control.label === "string" ? control.label : action.replace(/_/g, " "),
+      target_kind: typeof control.target_kind === "string" ? control.target_kind : null,
+      control_mode: typeof control.control_mode === "string" ? control.control_mode : "operator_draft_control",
+      receipt_required: Boolean(control.receipt_required),
+    }];
+  };
+  const claimBoundaries = record.claim_boundaries;
+  const claimBoundaryRecord = claimBoundaries && typeof claimBoundaries === "object" && !Array.isArray(claimBoundaries)
+    ? claimBoundaries as Record<string, unknown>
+    : {};
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      active_work_count: numberValue(summaryRecord.active_work_count),
+      pending_approval_count: numberValue(summaryRecord.pending_approval_count),
+      trust_boundary_count: numberValue(summaryRecord.trust_boundary_count),
+      memory_evidence_count: numberValue(summaryRecord.memory_evidence_count),
+      tool_call_count: numberValue(summaryRecord.tool_call_count),
+      artifact_count: numberValue(summaryRecord.artifact_count),
+      job_count: numberValue(summaryRecord.job_count),
+      delegation_count: numberValue(summaryRecord.delegation_count),
+      background_session_count: numberValue(summaryRecord.background_session_count),
+      recovery_action_count: numberValue(summaryRecord.recovery_action_count),
+      fast_control_count: numberValue(summaryRecord.fast_control_count),
+      claim_boundary: typeof summaryRecord.claim_boundary === "string"
+        ? summaryRecord.claim_boundary
+        : "composed_operator_projection_from_existing_receipts_not_new_executor_state",
+    },
+    fast_controls: Array.isArray(record.fast_controls) ? record.fast_controls.flatMap(normalizeControl) : [],
+    proof_receipts: stringList(record.proof_receipts),
+    claim_boundaries: {
+      source: typeof claimBoundaryRecord.source === "string" ? claimBoundaryRecord.source : "unknown",
+      not_claimed: stringList(claimBoundaryRecord.not_claimed),
+    },
+  };
+}
+
+function normalizeOperatorM8GuardianBrain(value: unknown): OperatorM8GuardianBrain | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  const numberValue = (entry: unknown) => (typeof entry === "number" ? entry : 0);
+  const stringList = (entry: unknown) => Array.isArray(entry)
+    ? entry.filter((item): item is string => typeof item === "string")
+    : [];
+  const normalizeCapability = (entry: unknown) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const capability = entry as Record<string, unknown>;
+    return {
+      id: typeof capability.id === "string" ? capability.id : "capability",
+      label: typeof capability.label === "string" ? capability.label : "Capability",
+      lane: typeof capability.lane === "string" ? capability.lane : "unknown",
+      risk_level: typeof capability.risk_level === "string" ? capability.risk_level : "unknown",
+      requires_approval: Boolean(capability.requires_approval),
+      trust_level: typeof capability.trust_level === "string" ? capability.trust_level : undefined,
+      channel: typeof capability.channel === "string" ? capability.channel : undefined,
+    };
+  };
+  const normalizeReceipt = (entry: unknown): OperatorM8GuardianBrainReceipt[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const receipt = entry as Record<string, unknown>;
+    const scenarioId = typeof receipt.scenario_id === "string" ? receipt.scenario_id : "";
+    if (!scenarioId) return [];
+    const selectedCapability = normalizeCapability(receipt.selected_capability);
+    const scores = receipt.scores && typeof receipt.scores === "object" && !Array.isArray(receipt.scores)
+      ? receipt.scores as Record<string, unknown>
+      : {};
+    const correction = receipt.operator_correction && typeof receipt.operator_correction === "object" && !Array.isArray(receipt.operator_correction)
+      ? receipt.operator_correction as Record<string, unknown>
+      : {};
+    return [{
+      scenario_id: scenarioId,
+      action: typeof receipt.action === "string" ? receipt.action : "unknown",
+      reason: typeof receipt.reason === "string" ? receipt.reason : "unknown",
+      signal: typeof receipt.signal === "string" ? receipt.signal : "",
+      selected_capability: selectedCapability,
+      rejected_capabilities: Array.isArray(receipt.rejected_capabilities)
+        ? receipt.rejected_capabilities.flatMap((item) => {
+          const capability = normalizeCapability(item);
+          return capability ? [capability] : [];
+        })
+        : [],
+      inputs: receipt.inputs && typeof receipt.inputs === "object" && !Array.isArray(receipt.inputs)
+        ? receipt.inputs as Record<string, unknown>
+        : {},
+      scores: {
+        timing: typeof scores.timing === "string" ? scores.timing : undefined,
+        usefulness: typeof scores.usefulness === "string" ? scores.usefulness : undefined,
+        false_positive_risk: typeof scores.false_positive_risk === "string" ? scores.false_positive_risk : undefined,
+        false_negative_risk: typeof scores.false_negative_risk === "string" ? scores.false_negative_risk : undefined,
+        trust_preservation: typeof scores.trust_preservation === "string" ? scores.trust_preservation : undefined,
+        recovery: typeof scores.recovery === "string" ? scores.recovery : undefined,
+      },
+      operator_correction: {
+        can_correct_action: Boolean(correction.can_correct_action),
+        can_correct_capability: Boolean(correction.can_correct_capability),
+        receipt_surface: typeof correction.receipt_surface === "string" ? correction.receipt_surface : "",
+      },
+      claim_boundary: typeof receipt.claim_boundary === "string"
+        ? receipt.claim_boundary
+        : "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+    }];
+  };
+  const decisionReceipts = Array.isArray(record.decision_receipts)
+    ? record.decision_receipts.flatMap(normalizeReceipt)
+    : [];
+  const capabilityChoices = Array.isArray(record.capability_choices)
+    ? record.capability_choices.flatMap((entry) => {
+      const capability = normalizeCapability(entry);
+      return capability ? [capability] : [];
+    })
+    : [];
+  return {
+    summary: {
+      operator_status: typeof summaryRecord.operator_status === "string" ? summaryRecord.operator_status : "unknown",
+      decision_count: numberValue(summaryRecord.decision_count),
+      action_count: numberValue(summaryRecord.action_count),
+      restraint_count: numberValue(summaryRecord.restraint_count),
+      capability_choice_count: numberValue(summaryRecord.capability_choice_count),
+      approval_preservation_count: numberValue(summaryRecord.approval_preservation_count),
+      score_dimensions: stringList(summaryRecord.score_dimensions),
+      guardian_action_posture: typeof summaryRecord.guardian_action_posture === "string" ? summaryRecord.guardian_action_posture : "unknown",
+      intent_resolution: typeof summaryRecord.intent_resolution === "string" ? summaryRecord.intent_resolution : "unknown",
+      claim_boundary: typeof summaryRecord.claim_boundary === "string"
+        ? summaryRecord.claim_boundary
+        : "deterministic_guardian_judgment_receipts_not_live_superiority_claim",
+      receipt_source: typeof summaryRecord.receipt_source === "string" ? summaryRecord.receipt_source : undefined,
+    },
+    decision_receipts: decisionReceipts,
+    capability_choices: capabilityChoices,
+    restraint_receipts: Array.isArray(record.restraint_receipts)
+      ? record.restraint_receipts.flatMap(normalizeReceipt)
+      : [],
+    approval_receipts: Array.isArray(record.approval_receipts)
+      ? record.approval_receipts.flatMap(normalizeReceipt)
+      : [],
+    proof_receipts: stringList(record.proof_receipts),
+  };
+}
+
+function normalizeOperatorEngineeringMemory(value: unknown): OperatorEngineeringMemory | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  return {
+    summary: {
+      query: typeof summaryRecord.query === "string" ? summaryRecord.query : null,
+      tracked_bundles: typeof summaryRecord.tracked_bundles === "number" ? summaryRecord.tracked_bundles : 0,
+      repository_bundle_count: typeof summaryRecord.repository_bundle_count === "number" ? summaryRecord.repository_bundle_count : 0,
+      pull_request_bundle_count: typeof summaryRecord.pull_request_bundle_count === "number" ? summaryRecord.pull_request_bundle_count : 0,
+      work_item_bundle_count: typeof summaryRecord.work_item_bundle_count === "number" ? summaryRecord.work_item_bundle_count : 0,
+      search_match_count: typeof summaryRecord.search_match_count === "number" ? summaryRecord.search_match_count : 0,
+    },
+    bundles: Array.isArray(record.bundles)
+      ? record.bundles.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const bundle = entry as Record<string, unknown>;
+          return [{
+            reference: typeof bundle.reference === "string" ? bundle.reference : "",
+            target_kind: typeof bundle.target_kind === "string" ? bundle.target_kind : "unknown",
+            repository_reference: typeof bundle.repository_reference === "string" ? bundle.repository_reference : null,
+            latest_updated_at: typeof bundle.latest_updated_at === "string" ? bundle.latest_updated_at : "",
+            workflow_count: typeof bundle.workflow_count === "number" ? bundle.workflow_count : 0,
+            approval_count: typeof bundle.approval_count === "number" ? bundle.approval_count : 0,
+            audit_event_count: typeof bundle.audit_event_count === "number" ? bundle.audit_event_count : 0,
+            session_match_count: typeof bundle.session_match_count === "number" ? bundle.session_match_count : 0,
+            thread_ids: Array.isArray(bundle.thread_ids)
+              ? bundle.thread_ids.filter((item): item is string => typeof item === "string")
+              : [],
+            thread_labels: Array.isArray(bundle.thread_labels)
+              ? bundle.thread_labels.filter((item): item is string => typeof item === "string")
+              : [],
+            artifact_paths: Array.isArray(bundle.artifact_paths)
+              ? bundle.artifact_paths.filter((item): item is string => typeof item === "string")
+              : [],
+            continue_message: typeof bundle.continue_message === "string" ? bundle.continue_message : null,
+            session_matches: Array.isArray(bundle.session_matches)
+              ? bundle.session_matches.flatMap((item) => {
+                  if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+                  const match = item as Record<string, unknown>;
+                  return [{
+                    session_id: typeof match.session_id === "string" ? match.session_id : null,
+                    title: typeof match.title === "string" ? match.title : null,
+                    matched_at: typeof match.matched_at === "string" ? match.matched_at : null,
+                    snippet: typeof match.snippet === "string" ? match.snippet : null,
+                    source: typeof match.source === "string" ? match.source : null,
+                  }];
+                })
+              : [],
+          }];
+        }).filter((entry) => entry.reference)
+      : [],
+  };
+}
+
+function normalizeOperatorContinuityGraph(value: unknown): OperatorContinuityGraph | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const summary = record.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return null;
+  }
+  const summaryRecord = summary as Record<string, unknown>;
+  return {
+    summary: {
+      continuity_health: typeof summaryRecord.continuity_health === "string" ? summaryRecord.continuity_health : null,
+      primary_surface: typeof summaryRecord.primary_surface === "string" ? summaryRecord.primary_surface : null,
+      recommended_focus: typeof summaryRecord.recommended_focus === "string" ? summaryRecord.recommended_focus : null,
+      tracked_sessions: typeof summaryRecord.tracked_sessions === "number" ? summaryRecord.tracked_sessions : 0,
+      workflow_count: typeof summaryRecord.workflow_count === "number" ? summaryRecord.workflow_count : 0,
+      approval_count: typeof summaryRecord.approval_count === "number" ? summaryRecord.approval_count : 0,
+      notification_count: typeof summaryRecord.notification_count === "number" ? summaryRecord.notification_count : 0,
+      queued_insight_count: typeof summaryRecord.queued_insight_count === "number" ? summaryRecord.queued_insight_count : 0,
+      intervention_count: typeof summaryRecord.intervention_count === "number" ? summaryRecord.intervention_count : 0,
+      artifact_count: typeof summaryRecord.artifact_count === "number" ? summaryRecord.artifact_count : 0,
+      edge_count: typeof summaryRecord.edge_count === "number" ? summaryRecord.edge_count : 0,
+    },
+    sessions: Array.isArray(record.sessions)
+      ? record.sessions.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const session = entry as Record<string, unknown>;
+          const metadata = session.metadata;
+          if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+          const metadataRecord = metadata as Record<string, unknown>;
+          return [{
+            id: typeof session.id === "string" ? session.id : "session",
+            kind: typeof session.kind === "string" ? session.kind : "session",
+            title: typeof session.title === "string" ? session.title : "Untitled session",
+            summary: typeof session.summary === "string" ? session.summary : null,
+            updated_at: typeof session.updated_at === "string" ? session.updated_at : "",
+            thread_id: typeof session.thread_id === "string" ? session.thread_id : null,
+            continue_message: typeof session.continue_message === "string" ? session.continue_message : null,
+            metadata: {
+              pending_notification_count: typeof metadataRecord.pending_notification_count === "number" ? metadataRecord.pending_notification_count : 0,
+              queued_insight_count: typeof metadataRecord.queued_insight_count === "number" ? metadataRecord.queued_insight_count : 0,
+              recent_intervention_count: typeof metadataRecord.recent_intervention_count === "number" ? metadataRecord.recent_intervention_count : 0,
+              item_count: typeof metadataRecord.item_count === "number" ? metadataRecord.item_count : 0,
+              primary_surface: typeof metadataRecord.primary_surface === "string" ? metadataRecord.primary_surface : null,
+              continuity_surface: typeof metadataRecord.continuity_surface === "string" ? metadataRecord.continuity_surface : null,
+              workflow_count: typeof metadataRecord.workflow_count === "number" ? metadataRecord.workflow_count : 0,
+              approval_count: typeof metadataRecord.approval_count === "number" ? metadataRecord.approval_count : 0,
+              notification_count: typeof metadataRecord.notification_count === "number" ? metadataRecord.notification_count : 0,
+              intervention_count: typeof metadataRecord.intervention_count === "number" ? metadataRecord.intervention_count : 0,
+              artifact_count: typeof metadataRecord.artifact_count === "number" ? metadataRecord.artifact_count : 0,
+              linked_item_count: typeof metadataRecord.linked_item_count === "number" ? metadataRecord.linked_item_count : 0,
+            },
+          }];
+        })
+      : [],
+  };
+}
+
+function normalizeExtensionContribution(value: Record<string, unknown>): ExtensionContributionInfo | null {
+  if (typeof value.type !== "string" || typeof value.reference !== "string") {
+    return null;
+  }
+  const readString = (field: string) => (typeof value[field] === "string" ? value[field] as string : null);
+  const readStringList = (field: string) => (
+    Array.isArray(value[field]) ? value[field].filter((entry): entry is string => typeof entry === "string") : []
+  );
+  return {
+    type: value.type,
+    reference: value.reference,
+    resolved_path: readString("resolved_path"),
+    name: readString("name"),
+    description: readString("description"),
+    status: readString("status"),
+    loaded: typeof value.loaded === "boolean" ? value.loaded : true,
+    enabled: typeof value.enabled === "boolean" ? value.enabled : null,
+    configured: typeof value.configured === "boolean" ? value.configured : null,
+    default_enabled: typeof value.default_enabled === "boolean" ? value.default_enabled : null,
+    availability: readString("availability"),
+    source: readString("source"),
+    platform: readString("platform"),
+    provider_kind: readString("provider_kind"),
+    trigger_type: readString("trigger_type"),
+    schedule: readString("schedule"),
+    endpoint: readString("endpoint"),
+    topic: readString("topic"),
+    adapter_kind: readString("adapter_kind"),
+    transport: readString("transport"),
+    source_type: readString("source_type"),
+    runtime_profile: readString("runtime_profile"),
+    surface_kind: readString("surface_kind"),
+    preferred_panel: readString("preferred_panel"),
+    output_surface: readString("output_surface"),
+    effective_output_surface: readString("effective_output_surface"),
+    health: normalizeContributionHealth(value.health),
+    permission_profile: normalizeContributionPermissionProfile(value.permission_profile),
+    capability_contract:
+      value.capability_contract && typeof value.capability_contract === "object" && !Array.isArray(value.capability_contract)
+        ? value.capability_contract as ExtensionCapabilityContract
+        : null,
+    capability_enforcement:
+      value.capability_enforcement && typeof value.capability_enforcement === "object" && !Array.isArray(value.capability_enforcement)
+        ? value.capability_enforcement as Record<string, unknown>
+        : null,
+    config_fields: Array.isArray(value.config_fields)
+      ? value.config_fields.flatMap((entry) => (
+        entry && typeof entry === "object" && !Array.isArray(entry) ? [entry as Record<string, unknown>] : []
+      ))
+      : [],
+    config_keys: readStringList("config_keys"),
+    capabilities: readStringList("capabilities"),
+    delivery_modes: readStringList("delivery_modes"),
+    requires_network: Boolean(value.requires_network),
+    requires_daemon: Boolean(value.requires_daemon),
+    approval_behavior: readString("approval_behavior"),
+    requires_approval: typeof value.requires_approval === "boolean" ? value.requires_approval : undefined,
+  };
+}
+
+function normalizeExtensionLifecycle(value: unknown): ExtensionLifecycleInfo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const rollbackSnapshots = Array.isArray(record.rollback_snapshots)
+    ? record.rollback_snapshots.flatMap((entry): ExtensionRollbackSnapshotInfo[] => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const snapshot = entry as Record<string, unknown>;
+      if (typeof snapshot.id !== "string" || !snapshot.id.trim()) return [];
+      return [{
+        id: snapshot.id,
+        path: typeof snapshot.path === "string" ? snapshot.path : null,
+        version: typeof snapshot.version === "string" ? snapshot.version : null,
+        digest: typeof snapshot.digest === "string" ? snapshot.digest : null,
+        reason: typeof snapshot.reason === "string" ? snapshot.reason : null,
+        created_at: typeof snapshot.created_at === "string" ? snapshot.created_at : null,
+      }];
+    })
+    : [];
+  const quarantineRecord = (
+    record.quarantine && typeof record.quarantine === "object" && !Array.isArray(record.quarantine)
+      ? record.quarantine as Record<string, unknown>
+      : null
+  );
+  return {
+    rollback_snapshots: rollbackSnapshots,
+    quarantine: quarantineRecord
+      ? {
+        active: typeof quarantineRecord.active === "boolean" ? quarantineRecord.active : false,
+        state: typeof quarantineRecord.state === "string" ? quarantineRecord.state : null,
+        reason: typeof quarantineRecord.reason === "string" ? quarantineRecord.reason : null,
+        updated_at: typeof quarantineRecord.updated_at === "string" ? quarantineRecord.updated_at : null,
+      }
+      : null,
+    last_event: record.last_event && typeof record.last_event === "object" && !Array.isArray(record.last_event)
+      ? record.last_event as Record<string, unknown>
+      : null,
+  };
+}
+
 function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPackageInfo | null {
   if (
     typeof value.id !== "string"
@@ -743,10 +5255,18 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
         : []
     ))
     : [];
+  const contributions = Array.isArray(value.contributions)
+    ? value.contributions.flatMap((entry) => (
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? [normalizeExtensionContribution(entry as Record<string, unknown>)].filter(Boolean) as ExtensionContributionInfo[]
+        : []
+    ))
+    : [];
   return {
     id: value.id,
     display_name: value.display_name,
     version: typeof value.version === "string" ? value.version : null,
+    version_line: typeof value.version_line === "string" ? value.version_line : null,
     kind: value.kind,
     trust: value.trust,
     source: value.source,
@@ -754,10 +5274,7 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
     status: value.status,
     summary: typeof value.summary === "string" ? value.summary : null,
     description: typeof value.description === "string" ? value.description : null,
-    compatibility:
-      value.compatibility && typeof value.compatibility === "object" && !Array.isArray(value.compatibility)
-        ? { seraph: String((value.compatibility as Record<string, unknown>).seraph ?? "") }
-        : null,
+    compatibility: normalizeExtensionCompatibility(value.compatibility),
     publisher:
       value.publisher && typeof value.publisher === "object" && !Array.isArray(value.publisher)
         ? {
@@ -772,6 +5289,7 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
               : null,
         }
         : null,
+    diagnostics_summary: normalizeExtensionDiagnosticsSummary(value.diagnostics_summary),
     issues,
     load_errors: loadErrors,
     toggle_targets: toggleTargets,
@@ -798,6 +5316,21 @@ function normalizeExtensionPackage(value: Record<string, unknown>): ExtensionPac
       value.config && typeof value.config === "object" && !Array.isArray(value.config)
         ? value.config as Record<string, unknown>
         : {},
+    permission_summary: normalizeExtensionPermissionSummary(value.permission_summary),
+    approval_profile: normalizeExtensionApprovalProfile(value.approval_profile),
+    connector_summary: normalizeExtensionConnectorSummary(value.connector_summary),
+    lifecycle: normalizeExtensionLifecycle(value.lifecycle),
+    lifecycle_receipt_id: typeof value.lifecycle_receipt_id === "string" ? value.lifecycle_receipt_id : null,
+    rollback_receipt_id: typeof value.rollback_receipt_id === "string" ? value.rollback_receipt_id : null,
+    rollback_receipt_path: typeof value.rollback_receipt_path === "string" ? value.rollback_receipt_path : null,
+    rollback_ready: typeof value.rollback_ready === "boolean" ? value.rollback_ready : undefined,
+    review_state: typeof value.review_state === "string" ? value.review_state : null,
+    revocation_state: typeof value.revocation_state === "string" ? value.revocation_state : null,
+    provenance:
+      value.provenance && typeof value.provenance === "object" && !Array.isArray(value.provenance)
+        ? value.provenance as Record<string, unknown>
+        : null,
+    contributions,
     studio_files: studioFiles,
   };
 }
@@ -949,8 +5482,36 @@ function buildExtensionManifestEntity(extension: ExtensionPackageInfo): Operator
       config_scope: extension.config_scope,
       enabled: extension.enabled ?? null,
       config: extension.config,
+      permission_summary: extension.permission_summary ?? null,
+      approval_profile: extension.approval_profile ?? null,
+      connector_summary: extension.connector_summary ?? null,
+      capability_contract_summary: formatExtensionContractSummary(extension),
+      contributions: extension.contributions,
     },
   };
+}
+
+function buildExtensionPackageReviewDraft(
+  extension: ExtensionPackageInfo,
+  catalogItem: CatalogItemInfo | null = null,
+): string {
+  const lines = [
+    `Review extension package "${extension.display_name}" and recommend the next lifecycle action.`,
+    extension.version ? `Installed version: ${extension.version}.` : null,
+    catalogItem?.update_available && catalogItem.version
+      ? `Catalog candidate: ${catalogItem.version}${catalogItem.installed_version ? ` (currently ${catalogItem.installed_version})` : ""}.`
+      : null,
+    formatExtensionCompatibilityLabel(extension.compatibility)
+      ? `Compatibility: ${formatExtensionCompatibilityLabel(extension.compatibility)}.`
+      : null,
+    formatExtensionDiagnosticsSummary(extension.diagnostics_summary)
+      ? `Diagnostics: ${formatExtensionDiagnosticsSummary(extension.diagnostics_summary)}.`
+      : null,
+    formatExtensionGovernanceSummary(extension)
+      ? `Governance: ${formatExtensionGovernanceSummary(extension)}.`
+      : null,
+  ].filter(Boolean);
+  return lines.join(" ");
 }
 
 function buildExtensionStudioDraft(entity: OperatorEntity): string {
@@ -1008,12 +5569,109 @@ function workflowResumeDetails(workflow: WorkflowRunRecord): string[] {
   if (workflow.runIdentity) details.push(`run ${shortIdentifier(workflow.runIdentity)}`);
   if (workflow.branchKind) details.push(workflow.branchKind.replace(/_/g, " "));
   if (typeof workflow.branchDepth === "number" && workflow.branchDepth > 0) details.push(`depth ${workflow.branchDepth}`);
+  if (workflow.parentRunIdentity) details.push(`parent ${shortIdentifier(workflow.parentRunIdentity)}`);
+  if (
+    workflow.rootRunIdentity
+    && workflow.rootRunIdentity !== workflow.runIdentity
+  ) {
+    details.push(`root ${shortIdentifier(workflow.rootRunIdentity)}`);
+  }
   if (workflow.runFingerprint) details.push(`fingerprint ${shortIdentifier(workflow.runFingerprint)}`);
   if (workflow.resumeCheckpointLabel) details.push(`checkpoint ${workflow.resumeCheckpointLabel}`);
   if (workflow.resumeFromStep) details.push(`resume ${workflow.resumeFromStep}`);
+  if (workflow.checkpointContextAvailable === true) details.push("checkpoint state ready");
+  if (workflow.checkpointContextAvailable === false && workflow.continuedErrorSteps.length > 0) {
+    details.push("checkpoint state missing");
+  }
   if (workflow.threadContinueMessage) details.push("thread continue ready");
   if (workflow.approvalRecoveryMessage) details.push("approval recovery ready");
   return details;
+}
+
+function workflowStepSummary(step: WorkflowStepRecord): string {
+  const parts = [
+    `${step.id} ${step.status}`,
+    step.durationMs ? `${step.durationMs}ms` : null,
+    step.resultSummary,
+    step.errorSummary,
+    step.recoveryHint,
+  ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+  return parts.join(" · ");
+}
+
+function workflowUpdatedAtMs(workflow: WorkflowRunRecord): number {
+  const timestamp = Date.parse(workflow.updatedAt);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function workflowFamilyRootIdentity(workflow: WorkflowRunRecord): string {
+  return workflow.rootRunIdentity ?? workflow.runIdentity ?? workflow.id;
+}
+
+function compareWorkflowRunsNewestFirst(a: WorkflowRunRecord, b: WorkflowRunRecord): number {
+  return workflowUpdatedAtMs(b) - workflowUpdatedAtMs(a);
+}
+
+interface WorkflowFamilyArtifactOutput {
+  key: string;
+  filePath: string;
+  createdAt: string;
+  sourceWorkflow: WorkflowRunRecord;
+  sourceLabel: string;
+}
+
+interface WorkflowHistoryArtifactEntry {
+  key: string;
+  filePath: string;
+  createdAt: string;
+  sourceWorkflow: WorkflowRunRecord;
+  scopeLabel: string;
+  summary: string;
+}
+
+interface WorkflowCheckpointHistoryEntry {
+  key: string;
+  createdAt: string;
+  stepId: string;
+  kind: string;
+  actionLabel: string;
+  sourceWorkflow: WorkflowRunRecord;
+  scopeLabel: string;
+  draft: string;
+}
+
+interface WorkflowLineageEventEntry {
+  key: string;
+  createdAt: string;
+  sourceWorkflow: WorkflowRunRecord;
+  scopeLabel: string;
+  timelineEntry: WorkflowTimelineEntry;
+  failureStep: WorkflowStepRecord | null;
+  checkpointDraft: string | null;
+  outputPath: string | null;
+}
+
+function workflowCheckpointActions(
+  workflow: WorkflowRunRecord,
+): Array<{ stepId: string; draft: string; label: string; kind: string }> {
+  if (!Array.isArray(workflow.checkpointCandidates)) {
+    return [];
+  }
+  return workflow.checkpointCandidates.reduce<Array<{ stepId: string; draft: string; label: string; kind: string }>>((actions, candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return actions;
+    const record = candidate as Record<string, unknown>;
+    const stepId = typeof record.step_id === "string" ? record.step_id : "";
+    const draft = typeof record.resume_draft === "string" ? record.resume_draft : "";
+    if (!stepId || !draft) return actions;
+    const kind = typeof record.kind === "string" ? record.kind : "branch_from_checkpoint";
+    actions.push({
+      stepId,
+      draft,
+      kind,
+      label: kind === "retry_failed_step" ? `Retry ${stepId}` : `Branch ${stepId}`,
+    });
+    return actions;
+  }, []);
 }
 
 const RUNBOOK_MACROS_KEY = "seraph_operator_runbook_macros";
@@ -1204,6 +5862,10 @@ function normalizeWorkflowRun(value: Record<string, unknown>): WorkflowRunRecord
     isBranchRun: typeof value.is_branch_run === "boolean" ? value.is_branch_run : undefined,
     retryFromStepDraft:
       typeof value.retry_from_step_draft === "string" ? value.retry_from_step_draft : null,
+    checkpointContextAvailable:
+      typeof value.checkpoint_context_available === "boolean"
+        ? value.checkpoint_context_available
+        : undefined,
     checkpointCandidates: Array.isArray(value.checkpoint_candidates)
       ? value.checkpoint_candidates.filter(
           (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
@@ -1257,6 +5919,9 @@ function buildWorkflowReplayDraft(workflow: WorkflowRunRecord): string {
   }
   if (workflow.acceptsSecretRefs) {
     warnings.push("This workflow can cross secret-reference injection boundaries.");
+  }
+  if (workflow.checkpointContextAvailable === false && workflow.continuedErrorSteps.length > 0) {
+    warnings.push("Checkpoint state was not persisted for the failed step, so only a full rerun is available.");
   }
   return [base, ...warnings].join("\n");
 }
@@ -1394,6 +6059,12 @@ function activityRowMeta(value: ActivityLedgerEntry): string {
   }
   const parts: string[] = [activityStatusLabel(value)];
   if (value.thread_label) parts.push(value.thread_label);
+  if (typeof value.metadata?.capability_family === "string" && value.metadata.capability_family.trim()) {
+    parts.push(activitySpendBucketLabel(String(value.metadata.capability_family)));
+  }
+  if (typeof value.metadata?.runtime_path === "string" && value.metadata.runtime_path.trim()) {
+    parts.push(String(value.metadata.runtime_path));
+  }
   if (value.model) parts.push(_modelLabelForRow(value.model));
   if (value.provider) parts.push(value.provider);
   const duration = formatDuration(value.duration_ms);
@@ -1420,6 +6091,14 @@ function activityRoutingSummary(value: ActivityLedgerEntry): string {
 
 function activityLeadDetail(value: ActivityLedgerEntry): string | null {
   if (value.kind === "routing") return activityRoutingSummary(value);
+  if (value.kind === "llm_call") {
+    return [
+      typeof value.metadata?.runtime_path === "string" ? `runtime ${String(value.metadata.runtime_path)}` : null,
+      typeof value.metadata?.selected_source === "string" ? `target ${String(value.metadata.selected_source)}` : null,
+      typeof value.metadata?.max_budget_class === "string" ? `budget ${String(value.metadata.max_budget_class)}` : null,
+      typeof value.metadata?.required_task_class === "string" ? `task ${String(value.metadata.required_task_class)}` : null,
+    ].filter(Boolean).join(" · ") || null;
+  }
   if (value.kind === "extension" && typeof value.metadata?.error === "string" && value.metadata.error.trim()) {
     return value.metadata.error;
   }
@@ -1427,6 +6106,17 @@ function activityLeadDetail(value: ActivityLedgerEntry): string | null {
 }
 
 function activityChildMeta(value: ActivityLedgerEntry): string {
+  if (value.kind === "llm_call") {
+    const baseMeta = activityRowMeta(value);
+    const llmMeta = [
+      Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
+        ? `intents ${value.metadata.required_policy_intents.join(", ")}`
+        : null,
+      typeof value.metadata?.max_cost_tier === "string" ? `cost ${String(value.metadata.max_cost_tier)}` : null,
+      typeof value.metadata?.max_latency_tier === "string" ? `latency ${String(value.metadata.max_latency_tier)}` : null,
+    ].filter(Boolean).join(" · ");
+    return [baseMeta, llmMeta].filter(Boolean).join(" · ");
+  }
   if (value.kind !== "routing") return activityRowMeta(value);
   return [
     Array.isArray(value.metadata?.required_policy_intents) && value.metadata.required_policy_intents.length
@@ -1602,6 +6292,24 @@ function canOpenLedgerThread(
 
 function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSummary {
   const llmItems = items.filter((item) => item.kind === "llm_call");
+  const normalizedBucketKey = (value: unknown, fallback: string) => {
+    if (typeof value !== "string") return fallback;
+    const normalized = value.trim();
+    return normalized || fallback;
+  };
+  const bucketBy = (field: "runtime_path" | "capability_family", fallback: string) => {
+    const buckets = new Map<string, { key: string; calls: number; cost_usd: number; input_tokens: number; output_tokens: number }>();
+    llmItems.forEach((item) => {
+      const key = normalizedBucketKey(item.metadata?.[field], fallback);
+      const current = buckets.get(key) ?? { key, calls: 0, cost_usd: 0, input_tokens: 0, output_tokens: 0 };
+      current.calls += 1;
+      current.cost_usd += item.cost_usd ?? 0;
+      current.input_tokens += item.prompt_tokens ?? 0;
+      current.output_tokens += item.completion_tokens ?? 0;
+      buckets.set(key, current);
+    });
+    return Array.from(buckets.values()).sort((left, right) => right.cost_usd - left.cost_usd || right.calls - left.calls);
+  };
   return {
     window_hours: 24,
     started_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
@@ -1617,6 +6325,8 @@ function deriveActivitySummary(items: ActivityLedgerEntry[]): ActivityLedgerSumm
     output_tokens: llmItems.reduce((sum, item) => sum + (item.completion_tokens ?? 0), 0),
     user_triggered_llm_calls: llmItems.filter((item) => ["rest_chat", "websocket_chat"].includes(item.source)).length,
     autonomous_llm_calls: llmItems.filter((item) => !["rest_chat", "websocket_chat"].includes(item.source)).length,
+    llm_cost_by_runtime_path: bucketBy("runtime_path", "unattributed"),
+    llm_cost_by_capability_family: bucketBy("capability_family", "unattributed"),
     categories: {
       llm: items.filter((item) => item.category === "llm").length,
       workflow: items.filter((item) => item.category === "workflow").length,
@@ -1675,7 +6385,7 @@ function normalizeActivityLedgerEntry(raw: Record<string, unknown>): ActivityLed
 }
 
 function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
-  return Object.prototype.hasOwnProperty.call(workflow.inputs, "file_path");
+  return workflowArtifactInputs(workflow).length > 0;
 }
 
 const COCKPIT_GLOBAL_HINTS = [
@@ -1732,7 +6442,7 @@ function CockpitWorkspaceWindow({
   minWidth?: number;
   minHeight?: number;
   onClose?: () => void;
-  children: ReactNode;
+  children: ReactNode | ((state: { isFront: boolean }) => ReactNode);
 }) {
   const resolvedMinWidth = PANEL_MIN_SIZES[panelId]?.width ?? minWidth ?? 240;
   const resolvedMinHeight = PANEL_MIN_SIZES[panelId]?.height ?? minHeight ?? 160;
@@ -1773,9 +6483,99 @@ function CockpitWorkspaceWindow({
         </div>
       </div>
       {showHint && hint ? <div className="cockpit-window-hint">{hint}</div> : null}
-      <div className="cockpit-window-body">{children}</div>
+      <div className="cockpit-window-body">
+        {typeof children === "function" ? children({ isFront }) : children}
+      </div>
     </section>
   );
+}
+
+function normalizeBrowserProviders(payload: unknown): BrowserProviderControlInfo[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const providers = (payload as Record<string, unknown>).providers;
+  if (!Array.isArray(providers)) return [];
+  return providers.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.name !== "string" || typeof record.provider_kind !== "string") return [];
+    return [{
+      extension_id: typeof record.extension_id === "string" ? record.extension_id : "",
+      name: record.name,
+      provider_kind: record.provider_kind,
+      description: typeof record.description === "string" ? record.description : "",
+      enabled: Boolean(record.enabled),
+      configured: Boolean(record.configured),
+      selected: Boolean(record.selected),
+      execution_mode: typeof record.execution_mode === "string" ? record.execution_mode : "unknown",
+      runtime_state: typeof record.runtime_state === "string" ? record.runtime_state : "unknown",
+      requires_network: Boolean(record.requires_network),
+      requires_daemon: Boolean(record.requires_daemon),
+      capabilities: Array.isArray(record.capabilities)
+        ? record.capabilities.filter((item): item is string => typeof item === "string")
+        : [],
+      credential_surface: typeof record.credential_surface === "string" ? record.credential_surface : null,
+      cookie_scope: typeof record.cookie_scope === "string" ? record.cookie_scope : null,
+      profile_persistence: typeof record.profile_persistence === "string" ? record.profile_persistence : null,
+      owner_scope: typeof record.owner_scope === "string" ? record.owner_scope : null,
+      remote_transport: typeof record.remote_transport === "string" ? record.remote_transport : null,
+      fallback_policy: typeof record.fallback_policy === "string" ? record.fallback_policy : null,
+    }];
+  });
+}
+
+function normalizeBrowserSessions(payload: unknown): BrowserSessionControlInfo[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const sessionsValue = (payload as Record<string, unknown>).sessions;
+  if (!Array.isArray(sessionsValue)) return [];
+  return sessionsValue.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.session_id !== "string" || typeof record.owner_session_id !== "string") return [];
+    const boundaryRecord = record.boundary_decisions && typeof record.boundary_decisions === "object" && !Array.isArray(record.boundary_decisions)
+      ? record.boundary_decisions as Record<string, unknown>
+      : {};
+    const boundaryDecisions = Object.fromEntries(
+      Object.entries(boundaryRecord).flatMap(([key, value]) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+        const boundary = value as Record<string, unknown>;
+        return [[key, {
+          state: typeof boundary.state === "string" ? boundary.state : "unknown",
+          enforced: Boolean(boundary.enforced),
+          operator_visible: Boolean(boundary.operator_visible),
+        }]];
+      }),
+    );
+    const providerDegradation = record.provider_degradation && typeof record.provider_degradation === "object" && !Array.isArray(record.provider_degradation)
+      ? record.provider_degradation as BrowserSessionControlInfo["provider_degradation"]
+      : {};
+    const provenance = record.latest_artifact_provenance && typeof record.latest_artifact_provenance === "object" && !Array.isArray(record.latest_artifact_provenance)
+      ? record.latest_artifact_provenance as BrowserSessionArtifactProvenance
+      : null;
+    return [{
+      session_id: record.session_id,
+      owner_session_id: record.owner_session_id,
+      url: typeof record.url === "string" ? record.url : "",
+      provider_name: typeof record.provider_name === "string" ? record.provider_name : "unknown",
+      provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "unknown",
+      execution_mode: typeof record.execution_mode === "string" ? record.execution_mode : "unknown",
+      status: typeof record.status === "string" ? record.status : "unknown",
+      risk_state: typeof record.risk_state === "string" ? record.risk_state : "unknown",
+      recovery_state: typeof record.recovery_state === "string" ? record.recovery_state : "unknown",
+      partition_id: typeof record.partition_id === "string" ? record.partition_id : "",
+      partition_revision: typeof record.partition_revision === "number" ? record.partition_revision : 0,
+      boundary_decisions: boundaryDecisions,
+      provider_degradation: providerDegradation,
+      snapshot_count: typeof record.snapshot_count === "number" ? record.snapshot_count : 0,
+      latest_ref: typeof record.latest_ref === "string" ? record.latest_ref : null,
+      latest_capture: typeof record.latest_capture === "string" ? record.latest_capture : null,
+      latest_summary: typeof record.latest_summary === "string" ? record.latest_summary : null,
+      latest_artifact_provenance: provenance,
+      control_events: Array.isArray(record.control_events)
+        ? record.control_events.filter((item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item))
+        : [],
+      updated_at: typeof record.updated_at === "string" ? record.updated_at : "",
+    }];
+  });
 }
 
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
@@ -1793,8 +6593,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [queuedInsights, setQueuedInsights] = useState<ObserverContinuitySnapshot["queued_insights"]>([]);
   const [queuedBundleCount, setQueuedBundleCount] = useState(0);
   const [recentInterventions, setRecentInterventions] = useState<GuardianContinuityIntervention[]>([]);
+  const [desktopRouteStatuses, setDesktopRouteStatuses] = useState<ObserverReachRouteStatus[]>([]);
+  const [continuityImportedReach, setContinuityImportedReach] = useState<ObserverImportedReachSnapshot | null>(null);
+  const [continuitySourceAdapters, setContinuitySourceAdapters] = useState<ObserverSourceAdapterSnapshot | null>(null);
+  const [continuityPresenceSurfaces, setContinuityPresenceSurfaces] = useState<ObserverPresenceSurfaceSnapshot | null>(null);
+  const [continuitySummary, setContinuitySummary] = useState<ObserverContinuitySummary | null>(null);
+  const [continuityThreads, setContinuityThreads] = useState<ObserverContinuityThread[]>([]);
+  const [continuityRecoveryActions, setContinuityRecoveryActions] = useState<ObserverContinuityRecoveryAction[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunRecord[]>([]);
+  const [artifactLineageRuns, setArtifactLineageRuns] = useState<WorkflowRunRecord[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
   const [tools, setTools] = useState<ToolInfo[]>([]);
@@ -1802,11 +6610,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [catalogItems, setCatalogItems] = useState<CatalogItemInfo[]>([]);
   const [capabilityRecommendations, setCapabilityRecommendations] = useState<CapabilityRecommendation[]>([]);
   const [runbooks, setRunbooks] = useState<RunbookInfo[]>([]);
+  const [marketplaceFlows, setMarketplaceFlows] = useState<MarketplaceFlowInfo[]>([]);
   const [extensionPackages, setExtensionPackages] = useState<ExtensionPackageInfo[]>([]);
   const [savedRunbooks, setSavedRunbooks] = useState<RunbookInfo[]>(() => readRunbookMacros());
   const [activityLedger, setActivityLedger] = useState<ActivityLedgerEntry[]>([]);
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
+  const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
+  const [operatorBenchmarkProof, setOperatorBenchmarkProof] = useState<OperatorBenchmarkProof | null>(null);
+  const [operatorGuardianState, setOperatorGuardianState] = useState<OperatorGuardianState | null>(null);
+  const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
+  const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
+  const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
+  const [guardianMemoryLiveControl, setGuardianMemoryLiveControl] = useState<GuardianMemoryLiveControl | null>(null);
+  const [operatorM6MemorySuperiority, setOperatorM6MemorySuperiority] = useState<OperatorM6MemorySuperiority | null>(null);
+  const [operatorM7Cockpit, setOperatorM7Cockpit] = useState<OperatorM7Cockpit | null>(null);
+  const [operatorM8GuardianBrain, setOperatorM8GuardianBrain] = useState<OperatorM8GuardianBrain | null>(null);
+  const [operatorEngineeringMemory, setOperatorEngineeringMemory] = useState<OperatorEngineeringMemory | null>(null);
+  const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
+  const [browserProviders, setBrowserProviders] = useState<BrowserProviderControlInfo[]>([]);
+  const [browserSessions, setBrowserSessions] = useState<BrowserSessionControlInfo[]>([]);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
+  const activityLedgerScopeRef = useRef<string>("");
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -1826,6 +6650,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [studioMcpUrl, setStudioMcpUrl] = useState("");
   const [studioMcpDescription, setStudioMcpDescription] = useState("");
   const [studioExtensionPath, setStudioExtensionPath] = useState("");
+  const [studioScaffoldName, setStudioScaffoldName] = useState("");
+  const [studioScaffoldDisplayName, setStudioScaffoldDisplayName] = useState("");
   const [studioExtensionConfigDraft, setStudioExtensionConfigDraft] = useState("{}");
   const [studioExtensionConfigDirty, setStudioExtensionConfigDirty] = useState(false);
   const [pendingLifecycleApprovalId, setPendingLifecycleApprovalId] = useState<string | null>(null);
@@ -1977,7 +6803,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       capabilitiesResult,
       extensionsResult,
       activityLedgerResult,
+      controlPlaneResult,
+      benchmarkProofResult,
+      guardianStateResult,
+      workflowOrchestrationResult,
+      backgroundSessionsResult,
+      m5OperatingLayerResult,
+      guardianMemoryLiveControlResult,
+      m6MemorySuperiorityResult,
+      m7CockpitResult,
+      m8GuardianBrainResult,
+      engineeringMemoryResult,
+      continuityGraphResult,
       workflowRunsResult,
+      artifactLineageRunsResult,
+      browserProvidersResult,
+      browserSessionsResult,
       toolModeResult,
       mcpModeResult,
       approvalModeResult,
@@ -1990,7 +6831,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       fetchJson(`${API_URL}/api/capabilities/overview`),
       fetchJson(`${API_URL}/api/extensions`),
       fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/control-plane`),
+      fetchJson(`${API_URL}/api/operator/benchmark-proof`),
+      fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
+      fetchJson(`${API_URL}/api/operator/background-sessions`),
+      fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
+      fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
+      fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
+      fetchJson(`${API_URL}/api/browser/providers`),
+      sessionId
+        ? fetchJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`)
+        : Promise.resolve({ ok: true, payload: { sessions: [] } }),
       fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
       fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
       fetchJson(`${API_URL}/api/settings/approval-mode`),
@@ -2017,6 +6875,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setQueuedInsights(continuityPayload.queued_insights ?? []);
       setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
       setRecentInterventions(continuityPayload.recent_interventions ?? []);
+      setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
+      setContinuityImportedReach(continuityPayload.imported_reach ?? null);
+      setContinuitySourceAdapters(continuityPayload.source_adapters ?? null);
+      setContinuityPresenceSurfaces(continuityPayload.presence_surfaces ?? null);
+      setContinuitySummary(continuityPayload.summary ?? null);
+      setContinuityThreads(continuityPayload.threads ?? []);
+      setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
@@ -2030,12 +6895,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
       );
       setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
+      setMarketplaceFlows(
+        Array.isArray(capabilityPayload.marketplace_flows) ? capabilityPayload.marketplace_flows : [],
+      );
     }
     if (extensionsResult.ok) {
       setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
     } else {
       setExtensionPackages([]);
     }
+    setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
+    setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
+    setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
+    setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
+    setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
+    setGuardianMemoryLiveControl(normalizeGuardianMemoryLiveControl(guardianMemoryLiveControlResult.payload));
+    setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
+    setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
+    setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
+    setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
+    setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
+    setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
+    setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
+    const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
       && activityLedgerResult.payload
@@ -2057,24 +6940,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
           : derivedSummary,
       );
-    } else {
-      const fallbackTimelineResult = await fetchJson(
-        `${API_URL}/api/operator/timeline?limit=16${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`,
-      );
-      if (fallbackTimelineResult.ok && fallbackTimelineResult.payload && typeof fallbackTimelineResult.payload === "object") {
-        const items = Array.isArray((fallbackTimelineResult.payload as { items?: unknown }).items)
-          ? ((fallbackTimelineResult.payload as { items?: unknown }).items as unknown[]).flatMap((item) => (
-            item && typeof item === "object" && !Array.isArray(item)
-              ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
-              : []
-          ))
-          : [];
-        setActivityLedger(items);
-        setActivitySummary(deriveActivitySummary(items));
-      } else {
-        setActivityLedger([]);
-        setActivitySummary(deriveActivitySummary([]));
-      }
+      activityLedgerScopeRef.current = activityLedgerScope;
+    } else if (activityLedgerScopeRef.current !== activityLedgerScope) {
+      setActivityLedger([]);
+      setActivitySummary(deriveActivitySummary([]));
+      activityLedgerScopeRef.current = activityLedgerScope;
     }
     if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
       const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
@@ -2083,6 +6953,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
           : [],
       );
+    }
+    if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
+      const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
+      setArtifactLineageRuns(
+        Array.isArray(runs)
+          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+          : [],
+      );
+    } else {
+      setArtifactLineageRuns([]);
     }
     if (toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
       setToolPolicyMode(((toolModeResult.payload as { mode?: string }).mode ?? "unknown") as ToolPolicyMode | "unknown");
@@ -2179,8 +7059,117 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     syncCockpitPaneStack(paneVisibility);
   }, [paneVisibility, syncCockpitPaneStack]);
 
+  const runBrowserSessionControl = useCallback(async (
+    session: BrowserSessionControlInfo,
+    action: "quarantine" | "recover" | "reset_partition" | "replay_snapshot" | "close",
+  ) => {
+    if (!sessionId) {
+      setOperatorStatus("Browser control unavailable: no active session");
+      return;
+    }
+    const acknowledgeDegradedFallback = action === "replay_snapshot" && session.provider_degradation.degraded === true;
+    if (acknowledgeDegradedFallback) {
+      const confirmed = window.confirm(
+        "Replay this degraded local-fallback browser session?",
+      );
+      if (!confirmed) {
+        setOperatorStatus(`Browser replay cancelled ${session.session_id}: degraded fallback not acknowledged`);
+        return;
+      }
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/operator/browser-computer-use-control/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          session_id: session.session_id,
+          action,
+          reason: "cockpit_operator_control",
+          acknowledge_degraded_fallback: acknowledgeDegradedFallback,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        const reason = detail && typeof detail === "object"
+          ? String((detail as Record<string, unknown>).error ?? "refused")
+          : String(detail ?? response.status);
+        setOperatorStatus(`Browser control refused ${session.session_id}: ${reason}`);
+        await refreshCockpit();
+        return;
+      }
+      setOperatorStatus(`Browser control ${action.replace(/_/g, " ")} applied to ${session.session_id}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Browser control failed ${session.session_id}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [refreshCockpit, sessionId]);
+
+  const runGuardianMemoryControl = useCallback(async (
+    action: string,
+    target: { memoryId?: string; providerName?: string },
+    outcome?: string,
+  ) => {
+    if (!sessionId) {
+      setOperatorStatus("Guardian memory control unavailable: no active session");
+      return;
+    }
+    const acknowledgeRollback = action === "rollback_memory";
+    if (acknowledgeRollback) {
+      const confirmed = window.confirm("Rollback this guardian memory control state?");
+      if (!confirmed) {
+        setOperatorStatus("Guardian memory rollback cancelled: boundary not acknowledged");
+        return;
+      }
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/operator/guardian-memory-live-control/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          action,
+          acknowledged: true,
+          memory_id: target.memoryId,
+          provider_name: target.providerName,
+          outcome,
+          reason: "cockpit_operator_control",
+          privacy_boundary: "operator_visible",
+          acknowledge_rollback_boundary: acknowledgeRollback,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        const reason = detail && typeof detail === "object"
+          ? String((detail as Record<string, unknown>).error ?? "refused")
+          : String(detail ?? response.status);
+        setOperatorStatus(`Guardian memory control refused: ${reason}`);
+        await refreshCockpit();
+        return;
+      }
+      const label = target.memoryId ?? target.providerName ?? "guardian memory";
+      setOperatorStatus(`Guardian memory ${action.replace(/_/g, " ")} applied to ${label}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Guardian memory control failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [refreshCockpit, sessionId]);
+
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeLayout = getCockpitLayout(activeLayoutId);
+  const selectedBrowserProvider = browserProviders.find((provider) => provider.selected) ?? browserProviders[0] ?? null;
+  const degradedBrowserProviderCount = browserProviders.filter(
+    (provider) => provider.runtime_state.includes("fallback") || provider.runtime_state.includes("degraded"),
+  ).length;
+  const quarantinedBrowserSessionCount = browserSessions.filter((session) => session.status === "quarantined").length;
+  const browserControlSummary = [
+    `${browserProviders.length} providers`,
+    `${browserSessions.length} sessions`,
+    degradedBrowserProviderCount ? `${degradedBrowserProviderCount} degraded` : "no degraded fallback",
+    quarantinedBrowserSessionCount ? `${quarantinedBrowserSessionCount} quarantined` : "no quarantine",
+  ].join(" · ");
   const visibleSections = useMemo(
     () => ({
       rail:
@@ -2228,6 +7217,63 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         .filter((artifact): artifact is ArtifactRecord => artifact != null),
     }));
   }, [artifacts, workflowRuns]);
+  const artifactLineageRunsWithArtifacts = useMemo(() => {
+    const artifactMap = new Map(
+      artifacts.map((artifact) => [`${artifact.sessionId ?? "global"}:${artifact.filePath}`, artifact]),
+    );
+    return artifactLineageRuns.map((run) => ({
+      ...run,
+      artifacts: run.artifactPaths
+        .map((filePath) => artifactMap.get(`${run.sessionId ?? "global"}:${filePath}`))
+        .filter((artifact): artifact is ArtifactRecord => artifact != null),
+    }));
+  }, [artifactLineageRuns, artifacts]);
+  const workspaceWorkflowRunsWithArtifacts = useMemo(() => {
+    const entries = new Map<string, WorkflowRunRecord>();
+    artifactLineageRunsWithArtifacts.forEach((workflow) => {
+      entries.set(workflow.runIdentity ?? workflow.id, workflow);
+    });
+    workflowRunsWithArtifacts.forEach((workflow) => {
+      entries.set(workflow.runIdentity ?? workflow.id, workflow);
+    });
+    return [...entries.values()].sort(compareWorkflowRunsNewestFirst);
+  }, [artifactLineageRunsWithArtifacts, workflowRunsWithArtifacts]);
+  const workflowRunById = useMemo(
+    () => new Map(workspaceWorkflowRunsWithArtifacts.map((workflow) => [workflow.id, workflow])),
+    [workspaceWorkflowRunsWithArtifacts],
+  );
+  const workflowRunByIdentity = useMemo(() => {
+    const entries = workspaceWorkflowRunsWithArtifacts
+      .filter((workflow) => typeof workflow.runIdentity === "string" && workflow.runIdentity.trim().length > 0)
+      .map((workflow) => [workflow.runIdentity as string, workflow] as const);
+    return new Map(entries);
+  }, [workspaceWorkflowRunsWithArtifacts]);
+  const workflowChildrenByParentIdentity = useMemo(() => {
+    const grouped = new Map<string, WorkflowRunRecord[]>();
+    workspaceWorkflowRunsWithArtifacts.forEach((workflow) => {
+      if (!workflow.parentRunIdentity) return;
+      const existing = grouped.get(workflow.parentRunIdentity) ?? [];
+      existing.push(workflow);
+      grouped.set(workflow.parentRunIdentity, existing);
+    });
+    grouped.forEach((entries, key) => {
+      grouped.set(key, [...entries].sort(compareWorkflowRunsNewestFirst));
+    });
+    return grouped;
+  }, [workspaceWorkflowRunsWithArtifacts]);
+  const workflowFamilyByRootIdentity = useMemo(() => {
+    const grouped = new Map<string, WorkflowRunRecord[]>();
+    workspaceWorkflowRunsWithArtifacts.forEach((workflow) => {
+      const rootIdentity = workflowFamilyRootIdentity(workflow);
+      const existing = grouped.get(rootIdentity) ?? [];
+      existing.push(workflow);
+      grouped.set(rootIdentity, existing);
+    });
+    grouped.forEach((entries, key) => {
+      grouped.set(key, [...entries].sort(compareWorkflowRunsNewestFirst));
+    });
+    return grouped;
+  }, [workspaceWorkflowRunsWithArtifacts]);
   const artifactRoundtripWorkflows = useMemo(
     () =>
       workflows.filter(
@@ -2239,6 +7285,674 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ),
     [workflows],
   );
+  const workflowDefinitionByName = useMemo(
+    () => new Map(workflows.map((workflow) => [workflow.name, workflow])),
+    [workflows],
+  );
+  function compatibleArtifactWorkflows(
+    artifactPath: string,
+    producedArtifactTypes?: string[],
+    excludeWorkflowNames: string[] = [],
+  ): WorkflowInfo[] {
+    return artifactRoundtripWorkflows.filter((workflow) =>
+      !excludeWorkflowNames.includes(workflow.name)
+      && !excludeWorkflowNames.includes(workflow.tool_name)
+      &&
+      workflowAcceptsArtifact(workflow, artifactPath, producedArtifactTypes),
+    );
+  }
+  function resolveWorkflowRun(workflow: WorkflowRunRecord): WorkflowRunRecord {
+    if (workflow.runIdentity) {
+      return workflowRunByIdentity.get(workflow.runIdentity) ?? workflowRunById.get(workflow.id) ?? workflow;
+    }
+    return workflowRunById.get(workflow.id) ?? workflow;
+  }
+  function workflowChildRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    if (!workflow.runIdentity) return [];
+    return workflowChildrenByParentIdentity.get(workflow.runIdentity) ?? [];
+  }
+  function workflowFamilyRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    return workflowFamilyByRootIdentity.get(workflowFamilyRootIdentity(workflow)) ?? [workflow];
+  }
+  function workflowLineageScopeLabel(base: WorkflowRunRecord, target: WorkflowRunRecord): string {
+    const baseIdentity = base.runIdentity ?? base.id;
+    const targetIdentity = target.runIdentity ?? target.id;
+    if (targetIdentity === baseIdentity) return "current run";
+    const bestContinuation = workflowBestContinuationRun(base);
+    if (bestContinuation && (bestContinuation.runIdentity ?? bestContinuation.id) === targetIdentity) {
+      return "best continuation";
+    }
+    if (base.parentRunIdentity && target.runIdentity === base.parentRunIdentity) {
+      return "parent run";
+    }
+    if (workflowPeerRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "peer branch";
+    }
+    if (workflowChildRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "child branch";
+    }
+    if (workflowAncestorRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "ancestor run";
+    }
+    if (workflowFailureLineage(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "failure lineage";
+    }
+    if (workflowFamilyRuns(base).some((entry) => (entry.runIdentity ?? entry.id) === targetIdentity)) {
+      return "family branch";
+    }
+    return "related run";
+  }
+  function workflowRelevantHistoryRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    return [
+      resolved,
+      ...workflowFamilyRuns(resolved),
+      ...workflowAncestorRuns(resolved),
+    ].filter((entry) => {
+      const key = entry.runIdentity ?? entry.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).sort(compareWorkflowRunsNewestFirst);
+  }
+  function workflowPeerRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    if (!workflow.parentRunIdentity) return [];
+    return (workflowChildrenByParentIdentity.get(workflow.parentRunIdentity) ?? [])
+      .filter((entry) => entry.runIdentity !== workflow.runIdentity);
+  }
+  function workflowAncestorRuns(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    const ancestors: WorkflowRunRecord[] = [];
+    const seen = new Set<string>();
+    let cursor = workflow.parentRunIdentity;
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const parent = workflowRunByIdentity.get(cursor);
+      if (!parent) break;
+      ancestors.push(parent);
+      cursor = parent.parentRunIdentity ?? null;
+    }
+    return ancestors;
+  }
+  function workflowLatestBranchRun(workflow: WorkflowRunRecord): WorkflowRunRecord | null {
+    const childRuns = workflowChildRuns(workflow);
+    if (childRuns.length > 0) return childRuns[0] ?? null;
+    if (!workflow.runIdentity) return null;
+    const ancestorIds = new Set(workflowAncestorRuns(workflow).map((entry) => entry.runIdentity).filter(Boolean));
+    const familyRuns = workflowFamilyRuns(workflow);
+    return familyRuns.find((entry) => (
+      entry.runIdentity !== workflow.runIdentity
+      && !!entry.parentRunIdentity
+      && !ancestorIds.has(entry.runIdentity)
+    )) ?? null;
+  }
+  function workflowSupervisionLabel(workflow: WorkflowRunRecord): string {
+    const childRuns = workflowChildRuns(workflow);
+    if ((workflow.pendingApprovalCount ?? 0) > 0) return "approval gate";
+    if (workflow.status === "running") return "live run";
+    if (workflow.status === "awaiting_approval") return "awaiting approval";
+    if ((workflow.status === "degraded" || workflow.status === "failed") && workflow.checkpointContextAvailable === true) {
+      return "recovery ready";
+    }
+    if ((workflow.status === "degraded" || workflow.status === "failed") && workflow.continuedErrorSteps.length > 0) {
+      return "rerun only";
+    }
+    if (childRuns.length > 0) return "branched";
+    if (workflow.status === "succeeded") return "completed";
+    return workflow.status.replace(/_/g, " ");
+  }
+  function workflowSupervisionSummary(workflow: WorkflowRunRecord): string[] {
+    const summary = [workflowSupervisionLabel(workflow)];
+    const childRuns = workflowChildRuns(workflow);
+    const peerRuns = workflowPeerRuns(workflow);
+    const familyRuns = workflowFamilyRuns(workflow);
+    if (childRuns.length > 0) {
+      summary.push(`${childRuns.length} child ${childRuns.length === 1 ? "branch" : "branches"}`);
+    }
+    if (peerRuns.length > 0) {
+      summary.push(`${peerRuns.length} peer ${peerRuns.length === 1 ? "branch" : "branches"}`);
+    }
+    if (familyRuns.length > 1) {
+      summary.push(`family ${familyRuns.length}`);
+    }
+    return summary;
+  }
+  function workflowCanContinue(workflow: WorkflowRunRecord): boolean {
+    const approval = approvalForWorkflow(workflow);
+    const continueTarget = approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId;
+    if ((approval?.resume_message ?? workflow.threadContinueMessage) && continueTarget) {
+      return true;
+    }
+    return workflowCheckpointActions(workflow).length > 0 || !!workflow.retryFromStepDraft;
+  }
+  function workflowBestContinuationRun(workflow: WorkflowRunRecord): WorkflowRunRecord | null {
+    const resolved = resolveWorkflowRun(workflow);
+    const familyRuns = workflowFamilyRuns(resolved);
+    const ancestorIds = new Set(
+      workflowAncestorRuns(resolved)
+        .map((entry) => entry.runIdentity)
+        .filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+    );
+    const familyCandidates = familyRuns.filter((entry) => (
+      entry.runIdentity !== resolved.runIdentity
+      && (!entry.runIdentity || !ancestorIds.has(entry.runIdentity))
+    ));
+    return familyCandidates.find((entry) => (
+      workflowCanContinue(entry)
+      || entry.pendingApprovalCount
+    )) ?? (
+      workflowCanContinue(resolved) || resolved.pendingApprovalCount
+        ? resolved
+        : null
+    );
+  }
+  function inspectLatestWorkflowBranch(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    inspectWorkflowRun(workflowLatestBranchRun(workflow));
+  }
+  function inspectWorkflowBestContinuation(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    if (!bestContinuation) return;
+    if ((bestContinuation.runIdentity ?? bestContinuation.id) === (resolved.runIdentity ?? resolved.id)) return;
+    inspectWorkflowRun(bestContinuation);
+  }
+  function continueWorkflowBestContinuation(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    if (!bestContinuation) return;
+    if ((bestContinuation.runIdentity ?? bestContinuation.id) === (resolved.runIdentity ?? resolved.id)) return;
+    continueWorkflowRun(bestContinuation);
+  }
+  function queueWorkflowBestContinuationComparison(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    if (!bestContinuation) return;
+    if ((bestContinuation.runIdentity ?? bestContinuation.id) === (resolved.runIdentity ?? resolved.id)) return;
+    if (workflowPrimaryOutputPath(resolved) === workflowPrimaryOutputPath(bestContinuation)) return;
+    queueWorkflowOutputComparison(resolved, bestContinuation);
+  }
+  function workflowFailureLineage(workflow: WorkflowRunRecord): WorkflowRunRecord[] {
+    const familyRuns = workflowFamilyRuns(workflow);
+    return familyRuns
+      .filter((entry) => (
+        entry.status === "failed"
+        || entry.status === "degraded"
+        || entry.continuedErrorSteps.length > 0
+      ))
+      .sort(compareWorkflowRunsNewestFirst);
+  }
+  function workflowLatestFailureContext(
+    workflow: WorkflowRunRecord | null | undefined,
+  ): { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null {
+    if (!workflow) return null;
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    const candidates = [resolved, ...workflowFailureLineage(resolved)]
+      .filter((entry) => {
+        const key = entry.runIdentity ?? entry.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort(compareWorkflowRunsNewestFirst);
+    for (const candidate of candidates) {
+      const step = failedWorkflowStep(candidate);
+      if (step) {
+        return { workflow: candidate, step };
+      }
+    }
+    return null;
+  }
+  function workflowOwnFailureContext(
+    workflow: WorkflowRunRecord | null | undefined,
+  ): { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null {
+    if (!workflow) return null;
+    const resolved = resolveWorkflowRun(workflow);
+    const step = failedWorkflowStep(resolved);
+    return step ? { workflow: resolved, step } : null;
+  }
+  function workflowComparisonSummary(base: WorkflowRunRecord, target: WorkflowRunRecord): string[] {
+    const summary: string[] = [];
+    const baseUpdated = workflowUpdatedAtMs(base);
+    const targetUpdated = workflowUpdatedAtMs(target);
+    if (targetUpdated > baseUpdated) {
+      summary.push("newer than current");
+    } else if (targetUpdated < baseUpdated) {
+      summary.push("older than current");
+    }
+    if (target.status !== base.status) {
+      summary.push(`${target.status} vs ${base.status}`);
+    }
+    if ((target.artifactPaths.length || target.artifacts.length) > 0) {
+      summary.push(`${Math.max(target.artifactPaths.length, target.artifacts.length)} outputs`);
+    }
+    if (target.resumeCheckpointLabel && target.resumeCheckpointLabel !== base.resumeCheckpointLabel) {
+      summary.push(`checkpoint ${target.resumeCheckpointLabel}`);
+    }
+    return summary;
+  }
+  function workflowFamilyArtifactOutputs(workflow: WorkflowRunRecord): WorkflowFamilyArtifactOutput[] {
+    const seen = new Set<string>();
+    const outputs: WorkflowFamilyArtifactOutput[] = [];
+    workflowFamilyRuns(workflow).forEach((entry) => {
+      if (entry.runIdentity === workflow.runIdentity || entry.id === workflow.id) {
+        return;
+      }
+      entry.artifacts.forEach((artifact) => {
+        const key = `${artifact.filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath: artifact.filePath,
+          createdAt: artifact.createdAt,
+          sourceWorkflow: entry,
+          sourceLabel: entry.summary,
+        });
+      });
+      entry.artifactPaths.forEach((filePath, index) => {
+        const key = `${filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath,
+          createdAt: entry.updatedAt,
+          sourceWorkflow: entry,
+          sourceLabel: index === 0 ? entry.summary : `${entry.summary} output ${index + 1}`,
+        });
+      });
+    });
+    return outputs
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 4);
+  }
+  function workflowHistoryArtifactEntries(workflow: WorkflowRunRecord): WorkflowHistoryArtifactEntry[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    const outputs: WorkflowHistoryArtifactEntry[] = [];
+    workflowRelevantHistoryRuns(resolved).forEach((entry) => {
+      const scopeLabel = workflowLineageScopeLabel(resolved, entry);
+      entry.artifacts.forEach((artifact, index) => {
+        const key = `${artifact.filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath: artifact.filePath,
+          createdAt: artifact.createdAt,
+          sourceWorkflow: entry,
+          scopeLabel,
+          summary: index === 0 ? entry.summary : `${entry.summary} output ${index + 1}`,
+        });
+      });
+      entry.artifactPaths.forEach((filePath, index) => {
+        const key = `${filePath}:${entry.runIdentity ?? entry.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        outputs.push({
+          key,
+          filePath,
+          createdAt: entry.updatedAt,
+          sourceWorkflow: entry,
+          scopeLabel,
+          summary: index === 0 ? entry.summary : `${entry.summary} output ${index + 1}`,
+        });
+      });
+    });
+    return outputs
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 8);
+  }
+  function workflowCheckpointHistoryEntries(workflow: WorkflowRunRecord): WorkflowCheckpointHistoryEntry[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const seen = new Set<string>();
+    const entries: WorkflowCheckpointHistoryEntry[] = [];
+    workflowRelevantHistoryRuns(resolved).forEach((entry) => {
+      const scopeLabel = workflowLineageScopeLabel(resolved, entry);
+      workflowCheckpointActions(entry).forEach((action) => {
+        const key = `${entry.runIdentity ?? entry.id}:${action.stepId}:${action.label}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        entries.push({
+          key,
+          createdAt: entry.updatedAt,
+          stepId: action.stepId,
+          kind: action.kind,
+          actionLabel: action.label,
+          sourceWorkflow: entry,
+          scopeLabel,
+          draft: action.draft,
+        });
+      });
+      if (entry.retryFromStepDraft) {
+        const failedStep = failedWorkflowStep(entry);
+        const stepId = failedStep?.id ?? entry.resumeFromStep ?? "failed_step";
+        const key = `${entry.runIdentity ?? entry.id}:${stepId}:retry-step`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          entries.push({
+            key,
+            createdAt: entry.updatedAt,
+            stepId,
+            kind: "retry_failed_step",
+            actionLabel: "Retry Step",
+            sourceWorkflow: entry,
+            scopeLabel,
+            draft: entry.retryFromStepDraft,
+          });
+        }
+      }
+    });
+    return entries
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 8);
+  }
+  function workflowLineageEventEntries(workflow: WorkflowRunRecord): WorkflowLineageEventEntry[] {
+    const resolved = resolveWorkflowRun(workflow);
+    const entries: WorkflowLineageEventEntry[] = [];
+    workflowRelevantHistoryRuns(resolved).forEach((entry) => {
+      const scopeLabel = workflowLineageScopeLabel(resolved, entry);
+      const checkpointDraftByStep = new Map(
+        workflowCheckpointActions(entry).map((action) => [action.stepId, action.draft]),
+      );
+      (entry.timeline ?? []).forEach((timelineEntry) => {
+        const failedStep = failedWorkflowStep(entry);
+        const timelineStep = timelineEntry.stepId
+          ? entry.stepRecords?.find((record) => record.id === timelineEntry.stepId) ?? null
+          : null;
+        const failureStep = (timelineStep?.status === "failed" ? timelineStep : null) ?? (
+          timelineEntry.kind.includes("failed") || timelineEntry.kind.includes("degraded")
+            ? failedStep
+            : null
+        );
+        const checkpointStepId = timelineEntry.stepId ?? failureStep?.id ?? null;
+        const outputPath = timelineStep?.artifactPaths[0]
+          ?? failureStep?.artifactPaths[0]
+          ?? (timelineEntry.kind.includes("succeeded") || timelineEntry.kind.includes("degraded")
+            ? workflowPrimaryOutputPath(entry)
+            : null);
+        entries.push({
+          key: `${entry.runIdentity ?? entry.id}:${timelineEntry.kind}:${timelineEntry.at}:${timelineEntry.stepId ?? "none"}`,
+          createdAt: timelineEntry.at,
+          sourceWorkflow: entry,
+          scopeLabel,
+          timelineEntry,
+          failureStep,
+          checkpointDraft: checkpointStepId
+            ? checkpointDraftByStep.get(checkpointStepId)
+              ?? ((failedStep?.id ?? entry.resumeFromStep ?? null) === checkpointStepId
+                ? entry.retryFromStepDraft ?? null
+                : null)
+            : null,
+          outputPath,
+        });
+      });
+    });
+    return entries
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 10);
+  }
+  function workflowHistorySummary(workflow: WorkflowRunRecord): string[] {
+    const historyRuns = workflowRelevantHistoryRuns(workflow);
+    const artifactCount = workflowHistoryArtifactEntries(workflow).length;
+    const checkpointHistory = workflowCheckpointHistoryEntries(workflow);
+    const checkpointCount = new Set(checkpointHistory.map((entry) => entry.stepId)).size;
+    const recoveryPathCount = checkpointHistory.length;
+    const lineageEventCount = workflowLineageEventEntries(workflow).length;
+    const familyCount = Math.max(workflowFamilyRuns(workflow).length - 1, 0);
+    const summary: string[] = [];
+    if (familyCount > 0) summary.push(`family ${familyCount + 1}`);
+    if (artifactCount > 0) summary.push(`history ${artifactCount} outputs`);
+    if (checkpointCount > 0) summary.push(`${checkpointCount} checkpoints`);
+    if (recoveryPathCount > checkpointCount) summary.push(`${recoveryPathCount} recovery paths`);
+    if (lineageEventCount > 0) summary.push(`${lineageEventCount} lineage events`);
+    if (historyRuns.length > 1) summary.push(`${historyRuns.length - 1} related runs`);
+    return summary;
+  }
+  function workflowBranchOriginSummary(workflow: WorkflowRunRecord): string[] {
+    const summary: string[] = [];
+    const parent = workflow.parentRunIdentity
+      ? workflowRunByIdentity.get(workflow.parentRunIdentity)
+      : null;
+    const familyRuns = workflowFamilyRuns(workflow);
+    if (parent) {
+      summary.push(`from ${parent.workflowName}`);
+    } else if (familyRuns.length > 1) {
+      summary.push("root branch");
+    }
+    if (workflow.resumeCheckpointLabel) {
+      summary.push(`checkpoint ${workflow.resumeCheckpointLabel}`);
+    } else if (workflow.branchKind) {
+      summary.push(workflow.branchKind.replace(/_/g, " "));
+    }
+    if (typeof workflow.branchDepth === "number") {
+      summary.push(`depth ${workflow.branchDepth}`);
+    }
+    return summary;
+  }
+  function workflowBranchDebugSummary(workflow: WorkflowRunRecord): string[] {
+    const summary = workflowBranchOriginSummary(workflow);
+    const bestContinuation = workflowBestContinuationRun(workflow);
+    if (bestContinuation) {
+      summary.push(
+        bestContinuation.runIdentity === workflow.runIdentity
+          ? "continue here"
+          : `continue ${bestContinuation.workflowName}`,
+      );
+      summary.push(workflowSupervisionLabel(bestContinuation));
+    }
+    const latestFailure = workflowFailureLineage(workflow)[0];
+    if (latestFailure) {
+      summary.push(`latest failure ${latestFailure.summary}`);
+    }
+    return summary;
+  }
+  function inspectWorkflowRun(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    setSelectedInspector({ kind: "workflow", workflow: resolveWorkflowRun(workflow) });
+  }
+  function resumePlanFallbackDraft(workflow: WorkflowRunRecord): string | null {
+    const checkpointAction = workflowCheckpointActions(workflow)[0];
+    if (checkpointAction?.draft) return checkpointAction.draft;
+    if (workflow.retryFromStepDraft) return workflow.retryFromStepDraft;
+    if (workflow.replayAllowed !== false) return workflow.replayDraft ?? buildWorkflowReplayDraft(workflow);
+    return null;
+  }
+  async function queueLiveWorkflowResumePlan(
+    workflow: WorkflowRunRecord | null | undefined,
+    options: {
+      action?: string;
+      stepId?: string | null;
+      fallbackDraft?: string | null;
+      fallbackThreadId?: string | null;
+      label?: string;
+    } = {},
+  ) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const fallbackDraft = options.fallbackDraft ?? resumePlanFallbackDraft(resolved);
+    const queueFallbackDraft = async () => {
+      if (!fallbackDraft) return;
+      if (options.fallbackThreadId) {
+        await queueThreadDraft(fallbackDraft, options.fallbackThreadId);
+        return;
+      }
+      queueComposerDraft(fallbackDraft);
+    };
+    if (!resolved.runIdentity) {
+      await queueFallbackDraft();
+      return;
+    }
+    const label = options.label ?? resolved.workflowName;
+    setOperatorStatus(`Checking live recovery plan for ${label}...`);
+    try {
+      const action = options.action ?? "resume";
+      const response = await fetch(
+        `${API_URL}/api/workflows/runs/${encodeURIComponent(resolved.runIdentity)}/control`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action,
+            step_id: options.stepId ?? undefined,
+            target: options.stepId ?? resolved.workflowName,
+            owner: "cockpit",
+            operator_context: {
+              source: "cockpit",
+              workflow_name: resolved.workflowName,
+              status: resolved.status,
+              thread_id: resolved.threadId,
+            },
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" && "detail" in payload
+          ? String((payload as { detail?: unknown }).detail)
+          : `Could not build a live recovery plan for ${label}`;
+        setOperatorStatus(`Live recovery control refused ${label}: ${detail}`);
+        return;
+      }
+      const plan = payload && typeof payload === "object"
+        ? (payload as { resume_plan?: unknown }).resume_plan
+        : null;
+      const planRecord = plan && typeof plan === "object" && !Array.isArray(plan)
+        ? plan as Record<string, unknown>
+        : null;
+      const draft = typeof planRecord?.draft === "string" && planRecord.draft.trim()
+        ? planRecord.draft
+        : (
+          typeof planRecord?.continue_message === "string" && planRecord.continue_message.trim()
+            ? planRecord.continue_message
+            : fallbackDraft
+        );
+      if (!draft) {
+        setOperatorStatus(`No recovery draft is available for ${label}`);
+        return;
+      }
+      const threadId = options.fallbackThreadId ?? resolved.threadId ?? resolved.sessionId;
+      if (typeof planRecord?.continue_message === "string" && planRecord.continue_message === draft && threadId) {
+        await queueThreadDraft(draft, threadId);
+      } else {
+        queueComposerDraft(draft);
+      }
+      const checkpointLabel = typeof planRecord?.resume_checkpoint_label === "string"
+        ? planRecord.resume_checkpoint_label
+        : null;
+      setOperatorStatus(
+        checkpointLabel
+          ? `Loaded live recovery plan for ${label}: ${checkpointLabel}`
+          : `Loaded live recovery plan for ${label}`,
+      );
+    } catch {
+      setOperatorStatus(`Could not reach workflow recovery controls for ${label}; no fallback draft was queued.`);
+    }
+  }
+  function continueWorkflowRun(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const approval = approvalForWorkflow(resolved);
+    const continueMessage = approval?.resume_message ?? resolved.threadContinueMessage;
+    const threadId = approval?.thread_id ?? approval?.session_id ?? resolved.threadId ?? resolved.sessionId;
+    void queueLiveWorkflowResumePlan(resolved, {
+      action: "resume",
+      fallbackDraft: continueMessage ?? undefined,
+      fallbackThreadId: threadId,
+      label: resolved.workflowName,
+    });
+  }
+  function renderWorkflowCheckpointControls(
+    workflow: WorkflowRunRecord,
+    scopeLabel: string,
+    keyPrefix: string,
+  ) {
+    return workflowCheckpointActions(workflow).map((action) => (
+      <button
+        key={`${keyPrefix}:${action.stepId}:${action.label}`}
+        className="cockpit-feedback-button"
+        aria-label={`${action.label} from ${scopeLabel} ${workflow.workflowName}`}
+        onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+          action: action.kind === "retry_failed_step" ? "retry" : "branch",
+          stepId: action.stepId,
+          fallbackDraft: action.draft,
+          label: `${scopeLabel} ${workflow.workflowName}`,
+        })}
+      >
+        {action.label}
+      </button>
+    ));
+  }
+  function renderWorkflowRecoveryControls(
+    workflow: WorkflowRunRecord,
+    scopeLabel: string,
+    keyPrefix: string,
+  ) {
+    const failedStep = failedWorkflowStep(workflow);
+    const controls: ReactNode[] = [];
+    if (workflow.retryFromStepDraft) {
+      controls.push(
+        <button
+          key={`${keyPrefix}:retry-step`}
+          className="cockpit-feedback-button"
+          aria-label={`Retry step for ${scopeLabel} ${workflow.workflowName}`}
+          onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+            action: "retry",
+            stepId: failedStep?.id ?? workflow.resumeFromStep,
+            fallbackDraft: workflow.retryFromStepDraft,
+            label: `${scopeLabel} ${workflow.workflowName}`,
+          })}
+        >
+          Retry Step
+        </button>,
+      );
+    }
+    if (workflow.replayAllowed === false && workflow.replayRecommendedActions?.length) {
+      controls.push(
+        <button
+          key={`${keyPrefix}:repair-replay`}
+          className="cockpit-feedback-button"
+          aria-label={`Repair replay for ${scopeLabel} ${workflow.workflowName}`}
+          onClick={() => void repairWorkflowReplay(workflow)}
+        >
+          Repair Replay
+        </button>,
+      );
+    }
+    if (failedStep?.recoveryActions?.length) {
+      controls.push(
+        <button
+          key={`${keyPrefix}:repair-step:${failedStep.id}`}
+          className="cockpit-feedback-button"
+          aria-label={`Repair step ${failedStep.id} for ${scopeLabel} ${workflow.workflowName}`}
+          onClick={() => void runCapabilityActions(readActionList(failedStep.recoveryActions), `${workflow.workflowName} ${failedStep.id}`)}
+        >
+          Repair Step
+        </button>,
+      );
+    }
+    return controls;
+  }
+  function buildWorkflowRedirectDraft(workflow: WorkflowRunRecord): string {
+    const resolved = resolveWorkflowRun(workflow);
+    const parts = [
+      `Redirect workflow "${resolved.workflowName}" from its current state.`,
+      `Current status: ${resolved.status}.`,
+      `Current summary: ${resolved.summary}.`,
+    ];
+    if (resolved.threadContinueMessage) {
+      parts.push("Keep the current thread continuity instead of starting a fresh run.");
+    }
+    if (resolved.artifactPaths[0]) {
+      parts.push(`Consider the latest artifact at "${resolved.artifactPaths[0]}".`);
+    }
+    return parts.join(" ");
+  }
   const availableWorkflows = useMemo(
     () => workflows.filter((workflow) => workflow.is_available !== false),
     [workflows],
@@ -2300,6 +8014,74 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .replace(/[_/-]+/g, " ")
     .toUpperCase();
   const runtimeBuildLabel = runtimeStatus?.build_id ?? SERAPH_BUILD_ID;
+  const controlPlaneHandoffEntries = useMemo(
+    () => (
+      operatorControlPlane
+        ? [
+          ...operatorControlPlane.handoff.pending_approvals,
+          ...operatorControlPlane.handoff.blocked_workflows,
+          ...operatorControlPlane.handoff.follow_ups,
+        ].slice(0, 6)
+        : []
+    ),
+    [operatorControlPlane],
+  );
+  const controlPlaneRuntimeSummary = operatorControlPlane
+    ? [
+      `${operatorControlPlane.runtime_posture.runtime.provider}/${operatorControlPlane.runtime_posture.runtime.model_label}`,
+      `${operatorControlPlane.runtime_posture.extensions.ready}/${operatorControlPlane.runtime_posture.extensions.total} extensions ready`,
+      `${operatorControlPlane.runtime_posture.extensions.governed} governed`,
+      `${operatorControlPlane.runtime_posture.continuity.continuity_health} continuity`,
+    ].join(" · ")
+    : null;
+  const controlPlaneUsageSummary = operatorControlPlane
+    ? [
+      `last ${operatorControlPlane.usage.window_hours}h`,
+      `${operatorControlPlane.usage.llm_call_count} llm`,
+      `${formatUsd(operatorControlPlane.usage.llm_cost_usd) ?? "$0.0000"} spend`,
+      `${operatorControlPlane.usage.pending_approvals} approvals`,
+      `${operatorControlPlane.usage.blocked_workflows} blocked workflows`,
+    ].join(" · ")
+    : null;
+  const benchmarkProofSummary = operatorBenchmarkProof
+    ? [
+      `${operatorBenchmarkProof.summary.suite_count} suites`,
+      `${operatorBenchmarkProof.summary.scenario_count} scenarios`,
+      operatorBenchmarkProof.summary.benchmark_posture.replace(/_/g, " "),
+      `${operatorBenchmarkProof.governed_improvement.target_count} evolution targets`,
+    ].join(" · ")
+    : null;
+  const m6MemorySummary = operatorM6MemorySuperiority
+    ? [
+      operatorM6MemorySuperiority.summary.operator_status.replace(/_/g, " "),
+      `${operatorM6MemorySuperiority.summary.active_memory_count} active`,
+      `${operatorM6MemorySuperiority.summary.control_receipt_count} control receipts`,
+      `${operatorM6MemorySuperiority.summary.behavior_receipt_count} behavior receipts`,
+      `${operatorM6MemorySuperiority.summary.provider_writeback_blocked_count} provider-blocked`,
+    ].join(" · ")
+    : null;
+  const guardianMemoryControlSummary = guardianMemoryLiveControl
+    ? [
+      guardianMemoryLiveControl.summary.operator_status.replace(/_/g, " "),
+      `${guardianMemoryLiveControl.summary.memory_candidate_count} memories`,
+      `${guardianMemoryLiveControl.summary.provider_count} providers`,
+      `${guardianMemoryLiveControl.summary.quarantined_provider_count} quarantined`,
+      `${guardianMemoryLiveControl.summary.rollback_available_count} rollback-ready`,
+      `${guardianMemoryLiveControl.summary.delete_export_pending_count} delete/export pending`,
+    ].join(" · ")
+    : m6MemorySummary;
+  const backgroundContinuitySummary = (
+    operatorBackgroundSessions
+    && operatorEngineeringMemory
+    && operatorContinuityGraph
+  )
+    ? [
+      `${operatorBackgroundSessions.summary.tracked_sessions} sessions`,
+      `${operatorBackgroundSessions.summary.running_background_process_count}/${operatorBackgroundSessions.summary.background_process_count} running procs`,
+      `${operatorEngineeringMemory.summary.tracked_bundles} bundles`,
+      `${operatorContinuityGraph.summary.edge_count} edges`,
+    ].join(" · ")
+    : null;
   const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
   const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
   const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
@@ -2328,6 +8110,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       animationState: agentVisual.animationState,
       isAgentBusy,
       pendingApprovalCount: pendingApprovals.length,
+      pendingNotificationCount: continuitySummary?.pending_notification_count ?? desktopNotifications.length,
+      queuedInsightCount: continuitySummary?.queued_insight_count ?? queuedInsights.length,
+      degradedRouteCount: continuitySummary?.degraded_route_count ?? desktopRouteStatuses.filter((route) => route.status !== "ready").length,
+      degradedSourceAdapterCount: continuitySummary?.degraded_source_adapter_count ?? continuitySourceAdapters?.summary.degraded_adapter_count ?? 0,
+      attentionImportedFamilyCount: continuitySummary?.attention_family_count ?? continuityImportedReach?.summary.attention_family_count ?? 0,
+      attentionPresenceSurfaceCount: continuitySummary?.attention_presence_surface_count ?? continuityPresenceSurfaces?.summary.attention_surface_count ?? 0,
+      actionableThreadCount: continuitySummary?.actionable_thread_count ?? continuityThreads.length,
+      continuityHealth: continuitySummary?.continuity_health ?? null,
+      recommendedFocus: continuitySummary?.recommended_focus ?? null,
       recentTraceRole: recentTrace[0]?.role ?? null,
       recentTraceTool: recentTrace.find((message) => message.toolUsed)?.toolUsed ?? null,
       latestResponseRole: latestResponse?.role ?? null,
@@ -2340,11 +8131,27 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       agentVisual.animationState,
       ambientState,
       connectionStatus,
+      continuitySummary?.actionable_thread_count,
+      continuitySummary?.attention_family_count,
+      continuitySummary?.attention_presence_surface_count,
+      continuitySummary?.continuity_health,
+      continuitySummary?.degraded_route_count,
+      continuitySummary?.degraded_source_adapter_count,
+      continuitySummary?.pending_notification_count,
+      continuitySummary?.queued_insight_count,
+      continuitySummary?.recommended_focus,
+      continuityImportedReach?.summary.attention_family_count,
+      continuityPresenceSurfaces?.summary.attention_surface_count,
+      continuitySourceAdapters?.summary.degraded_adapter_count,
+      continuityThreads.length,
+      desktopNotifications.length,
+      desktopRouteStatuses,
       isAgentBusy,
       latestResponse?.role,
       observerState?.data_quality,
       operatorStatus,
       pendingApprovals.length,
+      queuedInsights.length,
       recentInterventions.length,
       recentTrace,
     ],
@@ -2356,6 +8163,900 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const extensionPackagesById = useMemo(
     () => new Map(extensionPackages.map((item) => [item.id, item])),
     [extensionPackages],
+  );
+  const importedCapabilityFamilies = useMemo<ImportedCapabilityFamilySummary[]>(
+    () => IMPORTED_CAPABILITY_FAMILY_DEFS.map((definition) => {
+      const entries = extensionPackages.flatMap((extensionPackage) => (
+        extensionPackage.contributions
+          .filter((contribution) => contribution.type === definition.type)
+          .map((contribution) => ({
+            packageId: extensionPackage.id,
+            packageLabel: extensionPackage.display_name,
+            contribution,
+          }))
+      ));
+      const packages = Array.from(new Set(entries.map((entry) => entry.packageLabel)));
+      const activeEntries = entries.filter((entry) => isContributionActive(entry.contribution));
+      const ready = activeEntries.filter((entry) => (
+        entry.contribution.health?.ready
+        || ["ready", "active"].includes(entry.contribution.status ?? "")
+      )).length;
+      const attention = entries.filter((entry) => {
+        const status = entry.contribution.status ?? entry.contribution.health?.state ?? "";
+        return [
+          "degraded",
+          "invalid",
+          "invalid_config",
+          "requires_config",
+          "planned",
+          "overridden",
+        ].includes(status)
+          || entry.contribution.permission_profile?.status === "missing_permissions";
+      }).length;
+      const approval = entries.filter((entry) => (
+        entry.contribution.permission_profile?.requires_approval
+        || entry.contribution.approval_behavior === "always"
+      )).length;
+      const contractCount = entries.filter((entry) => entry.contribution.capability_contract).length;
+      return {
+        type: definition.type,
+        label: definition.label,
+        total: activeEntries.length,
+        installed: entries.length,
+        ready,
+        attention,
+        approval,
+        contractCount,
+        packages,
+        entries,
+      };
+    }).filter((entry) => entry.installed > 0),
+    [extensionPackages],
+  );
+  const extensionGovernanceQueue = useMemo<ExtensionGovernanceSummary[]>(
+    () => extensionPackages
+      .flatMap((extensionPackage) => {
+        const details: string[] = [];
+        const missingPermissions = summarizeMissingPermissions(extensionPackage.permission_summary);
+        if (missingPermissions.length > 0) {
+          details.push(`missing ${missingPermissions.join(", ")}`);
+        }
+        if (extensionPackage.approval_profile?.requires_lifecycle_approval) {
+          const boundaries = extensionPackage.approval_profile.lifecycle_boundaries.length
+            ? extensionPackage.approval_profile.lifecycle_boundaries.join(", ")
+            : extensionPackage.approval_profile.runtime_behavior;
+          details.push(`lifecycle approval ${boundaries}`);
+        }
+        if (extensionPackage.approval_profile?.requires_runtime_approval) {
+          details.push(`runtime approval ${extensionPackage.approval_profile.runtime_behavior}`);
+        }
+        if (extensionPackage.connector_summary?.states) {
+          const degradedStates = Object.entries(extensionPackage.connector_summary.states)
+            .filter(([state, count]) => state !== "ready" && count > 0)
+            .map(([state, count]) => `${count} ${state}`);
+          if (degradedStates.length > 0) {
+            details.push(`connectors ${degradedStates.join(", ")}`);
+          }
+        }
+        if (extensionPackage.status === "degraded" && extensionPackage.issues[0]?.message) {
+          details.push(extensionPackage.issues[0].message);
+        }
+        if (details.length === 0) return [];
+        return [{
+          packageId: extensionPackage.id,
+          label: extensionPackage.display_name,
+          riskLevel: extensionPackage.permission_summary?.risk_level ?? extensionPackage.approval_profile?.risk_level ?? "low",
+          status: extensionPackage.status,
+          detail: details.join(" · "),
+          packageInfo: extensionPackage,
+        }];
+      })
+      .sort((left, right) => {
+        const severity = (value: ExtensionGovernanceSummary) => {
+          if (value.status === "degraded") return 0;
+          if (value.riskLevel === "high") return 1;
+          if (value.detail.includes("missing")) return 2;
+          return 3;
+        };
+        return severity(left) - severity(right) || left.label.localeCompare(right.label);
+      }),
+    [extensionPackages],
+  );
+  const operatorTriageEntries = useMemo<OperatorTriageEntry[]>(() => {
+    const entries: OperatorTriageEntry[] = [];
+
+    pendingApprovals.forEach((approval) => {
+      const threadLabel = approval.thread_label
+        ?? (approval.thread_id ? sessionTitleById[approval.thread_id] : null)
+        ?? (approval.thread_id ? `thread ${approval.thread_id.slice(0, 6)}` : null);
+      entries.push({
+        id: `approval:${approval.id}`,
+        kind: "approval",
+        label: `approval: ${approval.tool_name}`,
+        detail: `awaiting approval · ${approval.summary}`,
+        meta: [approval.risk_level, threadLabel, formatAge(approval.created_at)].filter(Boolean).join(" · "),
+        priority: 100,
+        threadId: approval.thread_id ?? approval.session_id ?? null,
+        continueMessage: approval.resume_message ?? null,
+        approval,
+      });
+    });
+
+    workflowRunsWithArtifacts.forEach((workflow) => {
+      const approval = approvalForWorkflow(workflow);
+      const latestBranch = workflowLatestBranchRun(workflow);
+      const needsAttention = (
+        !!approval
+        || workflow.status === "running"
+        || workflow.status === "awaiting_approval"
+        || workflow.status === "failed"
+        || workflow.status === "degraded"
+        || workflow.replayAllowed === false
+        || workflow.checkpointContextAvailable === true
+        || latestBranch !== null
+      );
+      if (!needsAttention) return;
+
+      let priority = 78;
+      if (approval) priority = 96;
+      else if (workflow.status === "running") priority = 92;
+      else if (workflow.status === "awaiting_approval") priority = 90;
+      else if (workflow.status === "failed" || workflow.status === "degraded") priority = 88;
+      else if (workflow.replayAllowed === false) priority = 82;
+
+      const threadLabel = workflow.threadLabel
+        ?? (workflow.threadId ? sessionTitleById[workflow.threadId] : null)
+        ?? (workflow.threadId ? `thread ${workflow.threadId.slice(0, 6)}` : null);
+      entries.push({
+        id: `workflow:${workflow.id}`,
+        kind: "workflow",
+        label: `workflow ${formatContinuityLabel(workflow.status)}: ${workflow.workflowName}`,
+        detail: `${formatContinuityLabel(workflow.status)} · ${workflow.summary}`,
+        meta: [
+          workflowSupervisionLabel(workflow),
+          approval ? "approval waiting" : null,
+          latestBranch ? `latest branch ${latestBranch.workflowName}` : null,
+          threadLabel,
+          formatAge(workflow.updatedAt),
+        ].filter(Boolean).join(" · "),
+        priority,
+        threadId: approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId ?? null,
+        continueMessage: approval?.resume_message ?? workflow.threadContinueMessage ?? null,
+        workflow,
+      });
+    });
+
+    queuedInsights.forEach((item) => {
+      const threadLabel = item.thread_label
+        ?? (item.thread_id ? sessionTitleById[item.thread_id] : null)
+        ?? (item.thread_id ? `thread ${item.thread_id.slice(0, 6)}` : "ambient queue");
+      entries.push({
+        id: `queued:${item.id}`,
+        kind: "queued",
+        label: `queued: ${item.intervention_type}`,
+        detail: `queued follow-up · ${item.content_excerpt}`,
+        meta: [
+          item.continuation_mode ? formatContinuityLabel(item.continuation_mode) : "queued",
+          threadLabel,
+          formatAge(item.created_at),
+        ].filter(Boolean).join(" · "),
+        priority: 84,
+        threadId: item.thread_id ?? item.session_id ?? null,
+        continueMessage: item.resume_message ?? `Follow up on this deferred guardian item: ${item.content_excerpt}`,
+      });
+    });
+
+    desktopRouteStatuses
+      .filter((route) => route.status !== "ready")
+      .forEach((route) => {
+        entries.push({
+          id: `reach:${route.route}`,
+          kind: "reach",
+          label: `reach: ${route.label}`,
+          detail: `${formatContinuityLabel(route.status)} · ${route.summary}`,
+          meta: [
+            formatContinuityLabel(route.status),
+            route.selected_transport ? `via ${formatContinuityLabel(route.selected_transport)}` : null,
+            route.repair_hint,
+          ].filter(Boolean).join(" · "),
+          priority: route.status === "unavailable" ? 86 : 72,
+          route,
+        });
+      });
+
+    continuityRecoveryActions
+      .filter((action) => (
+        action.kind === "source_adapter_repair"
+        || action.kind === "imported_reach_attention"
+        || action.kind === "presence_repair"
+        || action.kind === "presence_follow_up"
+      ))
+      .forEach((action) => {
+        const followUpBlocked = action.kind === "presence_follow_up" && isPresenceReachBlocked(action);
+        entries.push({
+          id: `recovery:${action.id}`,
+          kind: "reach",
+          label: `reach: ${action.label}`,
+          detail: `${formatContinuityLabel(action.status)} · ${action.detail}`,
+          meta: [
+            formatContinuityLabel(action.surface),
+            ...continuityBoundaryParts(action),
+            followUpBlocked ? "follow-up blocked" : null,
+            action.repair_hint,
+          ].filter(Boolean).join(" · "),
+          priority: action.kind === "source_adapter_repair"
+            ? 80
+            : action.kind === "presence_repair"
+              ? 76
+              : action.kind === "presence_follow_up"
+                ? 73
+                : 74,
+          repairDraft: followUpBlocked
+            ? undefined
+            : action.kind === "presence_follow_up"
+            ? (action.continue_message ?? `Plan follow-up for ${action.label.toLowerCase()}: ${action.detail}`)
+            : `Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`,
+          draftActionLabel: action.kind === "presence_follow_up" ? "follow-up" : "repair",
+          recoveryAction: action,
+        });
+      });
+
+    return entries
+      .sort((left, right) => right.priority - left.priority || left.label.localeCompare(right.label))
+      .slice(0, 8);
+  }, [
+    continuityRecoveryActions,
+    desktopRouteStatuses,
+    pendingApprovals,
+    queuedInsights,
+    sessionTitleById,
+    workflowRunsWithArtifacts,
+  ]);
+  const operatorEvidenceEntries = useMemo<OperatorEvidenceEntry[]>(() => {
+    const entries: OperatorEvidenceEntry[] = [];
+    const latestArtifactEvidence = [...artifacts]
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+      .map((artifact) => ({ artifact, lineage: resolveArtifactLineage(artifact) }))[0] ?? null;
+    if (latestArtifactEvidence) {
+      const { artifact, lineage } = latestArtifactEvidence;
+      const workflowWithArtifact = lineage.sourceWorkflow;
+      const threadLabel = workflowWithArtifact
+        ? workflowWithArtifact.threadLabel
+          ?? (workflowWithArtifact.threadId ? sessionTitleById[workflowWithArtifact.threadId] : null)
+          ?? (workflowWithArtifact.threadId ? `thread ${workflowWithArtifact.threadId.slice(0, 6)}` : null)
+        : null;
+      entries.push({
+        id: `artifact:${artifact.id}`,
+        kind: "artifact",
+        label: `artifact: ${artifact.filePath}`,
+        detail: workflowWithArtifact
+          ? `${workflowWithArtifact.workflowName} · ${formatContinuityLabel(workflowWithArtifact.status)} · ${artifact.summary}`
+          : `${lineage.ambiguous ? "source ambiguous" : "source unresolved"} · ${artifact.summary}`,
+        meta: [
+          artifact.source,
+          lineage.ambiguous ? "source ambiguous" : !workflowWithArtifact ? "source unresolved" : null,
+          threadLabel,
+          formatAge(artifact.createdAt),
+        ].filter(Boolean).join(" · "),
+        sortKey: new Date(artifact.createdAt).getTime(),
+        threadId: workflowWithArtifact?.threadId ?? workflowWithArtifact?.sessionId ?? artifact.sessionId ?? null,
+        artifact,
+        workflow: workflowWithArtifact ?? undefined,
+      });
+    }
+
+    const latestTrace = recentTrace[0];
+    if (latestTrace) {
+      const relatedAudit = auditEvents.find((event) => event.tool_name === latestTrace.toolUsed) ?? null;
+      entries.push({
+        id: `trace:${latestTrace.id}`,
+        kind: "trace",
+        label: `trace: ${latestTrace.toolUsed ?? labelForRole(latestTrace)}`,
+        detail: latestTrace.content,
+        meta: [
+          latestTrace.stepNumber != null ? `step ${latestTrace.stepNumber}` : null,
+          relatedAudit?.summary ?? null,
+          formatAge(latestTrace.timestamp),
+        ].filter(Boolean).join(" · "),
+        sortKey: latestTrace.timestamp,
+        trace: latestTrace,
+        audit: relatedAudit,
+      });
+    }
+
+    const approval = pendingApprovals[0] ?? null;
+    if (approval) {
+      const threadLabel = approval.thread_label
+        ?? (approval.thread_id ? sessionTitleById[approval.thread_id] : null)
+        ?? (approval.thread_id ? `thread ${approval.thread_id.slice(0, 6)}` : null);
+      entries.push({
+        id: `approval-context:${approval.id}`,
+        kind: "approval",
+        label: `approval context: ${approval.tool_name}`,
+        detail: `approval context · ${approval.summary}`,
+        meta: [
+          approval.risk_level,
+          approval.extension_action ? `extension ${approval.extension_action}` : null,
+          threadLabel,
+          formatAge(approval.created_at),
+        ].filter(Boolean).join(" · "),
+        sortKey: new Date(approval.created_at).getTime(),
+        threadId: approval.thread_id ?? approval.session_id ?? null,
+        continueMessage: approval.resume_message ?? null,
+        approval,
+      });
+    }
+
+    return entries
+      .sort((left, right) => right.sortKey - left.sortKey || left.label.localeCompare(right.label))
+      .slice(0, 3);
+  }, [
+    auditEvents,
+    artifacts,
+    pendingApprovals,
+    recentTrace,
+    sessionTitleById,
+  ]);
+  const operatorWorkflowEntries = useMemo<OperatorWorkflowEntry[]>(() => {
+    const seen = new Set<string>();
+    return workspaceWorkflowRunsWithArtifacts
+      .map((workflow) => resolveWorkflowRun(workflow))
+      .filter((workflow) => {
+        const key = workflow.runIdentity ?? workflow.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((workflow) => {
+        const latestBranch = workflowLatestBranchRun(workflow);
+        const bestContinuation = workflowBestContinuationRun(workflow);
+        const latestFailure = workflowLatestFailureContext(workflow);
+        const outputPath = workflowPrimaryOutputPath(workflow);
+        const threadLabel = workflow.threadLabel
+          ?? (workflow.threadId ? sessionTitleById[workflow.threadId] : null)
+          ?? (workflow.threadId ? `thread ${workflow.threadId.slice(0, 6)}` : null);
+        const historySummary = workflowHistorySummary(workflow);
+        const branchSummary = workflowBranchDebugSummary(workflow);
+        let priority = 50;
+        if ((workflow.pendingApprovalCount ?? 0) > 0) priority = 98;
+        else if (workflow.status === "running") priority = 94;
+        else if (workflow.status === "awaiting_approval") priority = 92;
+        else if (workflow.status === "failed" || workflow.status === "degraded") priority = 90;
+        else if (latestBranch) priority = 82;
+        else if (historySummary.length > 0) priority = 76;
+        else if (outputPath) priority = 68;
+        return {
+          id: `supervision:${workflow.id}`,
+          label: `workflow: ${workflow.workflowName}`,
+          detail: `${workflowSupervisionLabel(workflow)} · ${workflow.summary}`,
+          meta: [threadLabel, formatAge(workflow.updatedAt)].filter(Boolean).join(" · "),
+          priority,
+          threadId: workflow.threadId ?? workflow.sessionId ?? null,
+          workflow,
+          latestBranch,
+          bestContinuation,
+          latestFailure,
+          outputPath,
+          historySummary: historySummary.join(" · "),
+          branchSummary: branchSummary.join(" · "),
+        };
+      })
+      .sort((left, right) => (
+        right.priority - left.priority
+        || compareWorkflowRunsNewestFirst(left.workflow, right.workflow)
+        || left.label.localeCompare(right.label)
+      ))
+      .slice(0, 8);
+  }, [sessionTitleById, workspaceWorkflowRunsWithArtifacts]);
+  const orchestrationWorkflowRunByIdentity = useMemo(() => {
+    if (!operatorWorkflowOrchestration) return new Map<string, WorkflowRunRecord>();
+    const entries = operatorWorkflowOrchestration.workflows.flatMap((workflow) => {
+      if (!workflow.run_identity) return [];
+      return [[workflow.run_identity, normalizeWorkflowRun(workflow as unknown as Record<string, unknown>)] as const];
+    });
+    return new Map(entries);
+  }, [operatorWorkflowOrchestration]);
+  const continuityGraphSessionByThreadId = useMemo(() => {
+    const entries = operatorContinuityGraph?.sessions.flatMap((entry) => (
+      entry.thread_id ? [[entry.thread_id, entry] as const] : []
+    )) ?? [];
+    return new Map(entries);
+  }, [operatorContinuityGraph]);
+  const operatorWorkflowOrchestrationEntries = useMemo<OperatorWorkflowOrchestrationEntry[]>(() => {
+    if (!operatorWorkflowOrchestration) return [];
+    return operatorWorkflowOrchestration.sessions.map((entry) => {
+      const orchestrationWorkflow = entry.lead_run_identity
+        ? operatorWorkflowOrchestration.workflows.find((workflowEntry) => workflowEntry.run_identity === entry.lead_run_identity) ?? null
+        : null;
+      const workflow = entry.lead_run_identity
+        ? workflowRunByIdentity.get(entry.lead_run_identity)
+          ?? orchestrationWorkflowRunByIdentity.get(entry.lead_run_identity)
+          ?? null
+        : null;
+      const latestBranchWorkflow = entry.lead_latest_branch_run_identity
+        ? workflowRunByIdentity.get(entry.lead_latest_branch_run_identity)
+          ?? orchestrationWorkflowRunByIdentity.get(entry.lead_latest_branch_run_identity)
+          ?? null
+        : workflow
+          ? workflowLatestBranchRun(workflow)
+          : null;
+      const compareOutputPath = orchestrationWorkflow?.output_debugger?.comparison_ready
+        ? orchestrationWorkflow.output_debugger.latest_branch_output_path ?? null
+        : null;
+      return {
+        id: `orchestration:${entry.thread_id ?? "ambient"}:${entry.lead_run_identity ?? entry.lead_workflow_name ?? "workflow"}`,
+        threadId: entry.thread_id ?? null,
+        threadLabel: entry.thread_label ?? (entry.thread_id ? `thread ${entry.thread_id.slice(0, 6)}` : "Ambient workflows"),
+        workflowCount: entry.workflow_count,
+        activeWorkflows: entry.active_workflows,
+        blockedWorkflows: entry.blocked_workflows,
+        awaitingApprovalWorkflows: entry.awaiting_approval_workflows,
+        recoverableWorkflows: entry.recoverable_workflows,
+        latestUpdatedAt: entry.latest_updated_at,
+        continueMessage: entry.continue_message ?? workflow?.threadContinueMessage ?? null,
+        leadWorkflowName: entry.lead_workflow_name ?? workflow?.workflowName ?? null,
+        leadStatus: entry.lead_status ?? workflow?.status ?? null,
+        leadSummary: entry.lead_summary ?? workflow?.summary ?? null,
+        leadStepFocus: entry.lead_step_focus ?? null,
+        leadStateCapsule: entry.lead_state_capsule ?? orchestrationWorkflow?.state_capsule ?? null,
+        totalStepCount: entry.total_step_count || orchestrationWorkflow?.step_count || 0,
+        visibleStepCount: orchestrationWorkflow?.visible_step_count ?? 0,
+        compactedStepCount: entry.compacted_step_count || orchestrationWorkflow?.compacted_step_count || 0,
+        compactedWorkflowCount: entry.compacted_workflow_count,
+        longRunningWorkflowCount: entry.long_running_workflow_count || (orchestrationWorkflow?.is_long_running ? 1 : 0),
+        artifactCount: entry.artifact_count || orchestrationWorkflow?.artifact_count || 0,
+        recentStepLabels: orchestrationWorkflow?.recent_step_labels ?? [],
+        queueState: entry.queue_state ?? null,
+        queuePosition: entry.queue_position ?? 0,
+        queueReason: entry.queue_reason ?? null,
+        attentionSummary: entry.attention_summary ?? null,
+        repairReadyWorkflows: entry.repair_ready_workflows,
+        branchReadyWorkflows: entry.branch_ready_workflows,
+        anticipatoryReadyWorkflows: entry.anticipatory_ready_workflows,
+        backupBranchReadyWorkflows: entry.backup_branch_ready_workflows,
+        fidelityWatchWorkflows: entry.fidelity_watch_workflows,
+        stalledWorkflows: entry.stalled_workflows,
+        outputDebuggerReadyWorkflows: entry.output_debugger_ready_workflows,
+        queueDraft: entry.queue_draft ?? null,
+        handoffDraft: entry.handoff_draft ?? null,
+        backupBranchDraft: entry.lead_backup_branch_draft ?? workflow?.anticipatory_plan?.backup_branch_draft ?? null,
+        backupBranchLabel: entry.lead_backup_branch_label ?? workflow?.anticipatory_plan?.backup_branch_label ?? null,
+        anticipatoryRepairDraft: entry.lead_anticipatory_repair_draft ?? workflow?.anticipatory_plan?.anticipatory_repair_draft ?? null,
+        anticipatoryRiskLevel: entry.lead_anticipatory_risk_level ?? workflow?.anticipatory_plan?.risk_level ?? null,
+        anticipatorySummary: entry.lead_anticipatory_summary ?? workflow?.anticipatory_plan?.summary ?? null,
+        condensationFidelityState: entry.lead_condensation_fidelity_state ?? workflow?.condensation_fidelity?.state ?? null,
+        condensationFidelitySummary: entry.lead_condensation_fidelity_summary ?? workflow?.condensation_fidelity?.summary ?? null,
+        leadRecommendedRecoveryPath: entry.lead_recommended_recovery_path ?? null,
+        leadRelatedOutputPaths: entry.lead_related_output_paths ?? [],
+        leadOutputHistory: entry.lead_output_history ?? [],
+        leadLatestBranchSummary: entry.lead_latest_branch_summary ?? null,
+        workflow,
+        latestBranchWorkflow,
+        latestFailure: workflow ? workflowLatestFailureContext(workflow) : null,
+        outputPath: workflow ? workflowPrimaryOutputPath(workflow) : null,
+        compareOutputPath,
+      };
+    });
+  }, [operatorWorkflowOrchestration, orchestrationWorkflowRunByIdentity, workflowRunByIdentity]);
+  const operatorBackgroundSupervisionEntries = useMemo<OperatorBackgroundSupervisionEntry[]>(() => {
+    if (!operatorBackgroundSessions) return [];
+    return operatorBackgroundSessions.sessions.map((entry) => {
+      const workflow = entry.branch_handoff.run_identity
+        ? workflowRunByIdentity.get(entry.branch_handoff.run_identity)
+          ?? orchestrationWorkflowRunByIdentity.get(entry.branch_handoff.run_identity)
+          ?? null
+        : null;
+      const continuitySession = continuityGraphSessionByThreadId.get(entry.session_id) ?? null;
+      const latestBranch = workflow ? workflowLatestBranchRun(workflow) : null;
+      const detail = [
+        entry.lead_workflow_name ? `${entry.lead_workflow_name}` : null,
+        entry.lead_workflow_status ? formatContinuityLabel(entry.lead_workflow_status) : null,
+        entry.lead_process?.command ? `proc ${entry.lead_process.command}` : null,
+        entry.branch_handoff_available ? `${entry.branch_handoff.target_type.replace(/_/g, " ")}` : null,
+        entry.branch_handoff.summary ?? entry.last_message ?? null,
+      ].filter(Boolean).join(" · ");
+      const meta = [
+        `${entry.workflow_count} workflows`,
+        entry.active_workflows > 0 ? `${entry.active_workflows} active` : null,
+        entry.blocked_workflows > 0 ? `${entry.blocked_workflows} blocked` : null,
+        entry.running_background_process_count > 0 ? `${entry.running_background_process_count} running proc` : null,
+        continuitySession ? `${continuitySession.metadata.linked_item_count} linked` : null,
+        continuitySession?.metadata.notification_count ? `${continuitySession.metadata.notification_count} notifications` : null,
+        continuitySession?.metadata.artifact_count ? `${continuitySession.metadata.artifact_count} artifacts` : null,
+        entry.latest_updated_at ? formatAge(entry.latest_updated_at) : null,
+      ].filter(Boolean).join(" · ");
+      return {
+        id: `background:${entry.session_id}`,
+        sessionId: entry.session_id,
+        title: entry.title,
+        detail,
+        meta,
+        threadId: entry.session_id,
+        continueMessage: entry.continue_message ?? continuitySession?.continue_message ?? null,
+        workflow,
+        latestBranch,
+        outputPath: workflow ? workflowPrimaryOutputPath(workflow) : null,
+      };
+    });
+  }, [continuityGraphSessionByThreadId, operatorBackgroundSessions, orchestrationWorkflowRunByIdentity, workflowRunByIdentity]);
+  const operatorEngineeringMemoryEntries = useMemo<OperatorEngineeringMemoryEntry[]>(() => {
+    if (!operatorEngineeringMemory) return [];
+    return operatorEngineeringMemory.bundles.slice(0, 3).map((entry) => ({
+      id: `memory:${entry.reference}`,
+      reference: entry.reference,
+      detail: [
+        entry.target_kind.replace(/_/g, " "),
+        entry.repository_reference && entry.repository_reference !== entry.reference ? entry.repository_reference : null,
+        entry.artifact_paths[0] ?? null,
+      ].filter(Boolean).join(" · "),
+      meta: [
+        entry.workflow_count > 0 ? `${entry.workflow_count} workflows` : null,
+        entry.approval_count > 0 ? `${entry.approval_count} approvals` : null,
+        entry.audit_event_count > 0 ? `${entry.audit_event_count} receipts` : null,
+        entry.session_match_count > 0 ? `${entry.session_match_count} matches` : null,
+        entry.thread_labels[0] ?? null,
+        entry.latest_updated_at ? formatAge(entry.latest_updated_at) : null,
+      ].filter(Boolean).join(" · "),
+      threadId: entry.thread_ids[0] ?? entry.session_matches[0]?.session_id ?? null,
+      continueMessage: entry.continue_message ?? null,
+    }));
+  }, [operatorEngineeringMemory]);
+  const primaryTriageEntry = operatorTriageEntries[0] ?? null;
+  const primaryApprovalTriageEntry = operatorTriageEntries.find((entry) => entry.approval) ?? null;
+  const primaryWorkflowTriageEntry = operatorTriageEntries.find((entry) => entry.workflow) ?? null;
+  const primaryEvidenceEntry = operatorEvidenceEntries[0] ?? null;
+  const primaryWorkflowSupervisionEntry = operatorWorkflowEntries[0] ?? null;
+  const m7PrimaryWorkflow = operatorTriageEntries.find((entry) => (
+    entry.workflow
+    && ["awaiting_approval", "degraded", "failed"].includes(entry.workflow.status)
+  ))?.workflow
+    ?? primaryWorkflowTriageEntry?.workflow
+    ?? primaryWorkflowSupervisionEntry?.workflow
+    ?? workflowRunsWithArtifacts.find((workflow) => ["running", "awaiting_approval", "degraded", "failed"].includes(workflow.status))
+    ?? workflowRunsWithArtifacts[0]
+    ?? null;
+  const m7PrimaryFailure = m7PrimaryWorkflow ? workflowLatestFailureContext(m7PrimaryWorkflow) : null;
+  const m7PrimaryBranch = m7PrimaryWorkflow ? workflowLatestBranchRun(m7PrimaryWorkflow) : null;
+  const m7BestContinuation = m7PrimaryWorkflow ? workflowBestContinuationRun(m7PrimaryWorkflow) : null;
+  const m7PrimaryOutputPath = m7PrimaryWorkflow ? workflowPrimaryOutputPath(m7PrimaryWorkflow) : null;
+  const m7BestContinuationOutputPath = m7BestContinuation ? workflowPrimaryOutputPath(m7BestContinuation) : null;
+  const m7CanCompare = Boolean(
+    m7PrimaryWorkflow
+    && m7BestContinuation
+    && m7PrimaryOutputPath
+    && m7BestContinuationOutputPath
+    && m7PrimaryOutputPath !== m7BestContinuationOutputPath,
+  );
+  const m7RevocationTarget = continuityPresenceSurfaces?.surfaces.find((surface) => (
+    surface.active
+    && surface.revocation_state !== "revoked"
+    && surface.trust_state !== "revoked"
+  )) ?? continuityPresenceSurfaces?.surfaces.find((surface) => surface.attention) ?? null;
+  const m7Summary = operatorM7Cockpit?.summary ?? null;
+  const m7ActiveWorkCount = (
+    m7Summary?.active_work_count
+    ?? operatorM5OperatingLayer?.summary.active_work_count
+    ?? workflowRunsWithArtifacts.filter((workflow) => ["running", "awaiting_approval", "degraded"].includes(workflow.status)).length
+  );
+  const m7PausedWorkCount = operatorM5OperatingLayer?.summary.paused_work_count ?? 0;
+  const m7ToolCallCount = m7Summary?.tool_call_count
+    ?? activitySummary?.llm_call_count
+    ?? auditEvents.filter((event) => event.event_type === "tool_call").length
+    ?? 0;
+  const m7FallbackTrustBoundaryCount = [
+    approvalMode !== "off" ? "approval" : null,
+    toolPolicyMode !== "unknown" ? "tool policy" : null,
+    mcpPolicyMode !== "unknown" ? "mcp policy" : null,
+    ...(m7RevocationTarget ? [m7RevocationTarget.boundary_scope ?? m7RevocationTarget.boundary_posture ?? "presence"] : []),
+  ].filter(Boolean).length;
+  const m7TrustBoundaryCount = m7Summary?.trust_boundary_count ?? m7FallbackTrustBoundaryCount;
+  const m7MemoryEvidenceCount = operatorM6MemorySuperiority
+    ? (
+      m7Summary?.memory_evidence_count
+      ?? (
+        operatorM6MemorySuperiority.summary.source_receipt_count
+        + operatorM6MemorySuperiority.summary.control_receipt_count
+        + operatorM6MemorySuperiority.summary.behavior_receipt_count
+      )
+    )
+    : m7Summary?.memory_evidence_count ?? operatorEngineeringMemory?.summary.tracked_bundles ?? 0;
+  const m7ArtifactCount = m7Summary?.artifact_count ?? artifacts.length;
+  const m7NextActionLabel = primaryApprovalTriageEntry?.label
+    ?? primaryWorkflowTriageEntry?.label
+    ?? operatorWorkflowOrchestrationEntries[0]?.threadLabel
+    ?? primaryEvidenceEntry?.label
+    ?? "no urgent action";
+  const m7SignalTiles = [
+    { label: "active work", value: `${m7ActiveWorkCount} active · ${m7PausedWorkCount} paused` },
+    { label: "trust", value: `${m7TrustBoundaryCount} boundaries · approval ${approvalMode}` },
+    { label: "approvals", value: `${m7Summary?.pending_approval_count ?? pendingApprovals.length} pending · ${operatorTriageEntries.filter((entry) => entry.approval).length} hot` },
+    { label: "memory evidence", value: `${m7MemoryEvidenceCount} receipts · ${operatorM6MemorySuperiority?.summary.memory_confidence ?? "unknown"}` },
+    { label: "tool calls", value: `${m7ToolCallCount} calls · ${activitySummary?.failure_count ?? 0} failures` },
+    { label: "artifacts", value: `${m7ArtifactCount} files · ${m7PrimaryOutputPath ?? "no primary output"}` },
+    { label: "next action", value: m7NextActionLabel },
+  ];
+  const m7ControlByAction = new Map(
+    (operatorM7Cockpit?.fast_controls ?? []).map((control) => [control.action, control]),
+  );
+  const m7ControlEnabled = (action: string, fallback: boolean) => (
+    m7ControlByAction.get(action)?.enabled ?? fallback
+  );
+  const m7ControlModeLabel = (action: string, fallback: string) => (
+    m7ControlByAction.get(action)?.control_mode ?? fallback
+  ).replace(/_/g, " ");
+  function inspectOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.approval) {
+      setSelectedInspector({ kind: "approval", approval: entry.approval });
+      return;
+    }
+    if (entry.workflow) {
+      inspectWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.recoveryAction && !entry.route) {
+      focusPane("operator_surface_pane");
+      return;
+    }
+    focusPane("desktop_shell_pane");
+  }
+  function continueOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.workflow) {
+      continueWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+    }
+  }
+  function draftOperatorTriageRepair(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.repairDraft) return;
+    queueComposerDraft(entry.repairDraft);
+  }
+  function approveOperatorTriageEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.approval) return;
+    void handleApprovalDecision(entry.approval, "approve");
+  }
+  function openOperatorTriageThread(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.threadId || !canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds)) return;
+    void openThread(entry.threadId);
+  }
+  function redirectOperatorWorkflowEntry(entry: OperatorTriageEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    queueComposerDraft(buildWorkflowRedirectDraft(entry.workflow));
+  }
+  function inspectOperatorEvidenceEntry(entry: OperatorEvidenceEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.approval) {
+      setSelectedInspector({ kind: "approval", approval: entry.approval });
+      return;
+    }
+    if (entry.artifact) {
+      setSelectedInspector({ kind: "artifact", artifact: entry.artifact });
+      return;
+    }
+    if (entry.trace) {
+      setSelectedInspector({ kind: "trace", message: entry.trace });
+    }
+  }
+  function draftOperatorEvidenceEntry(entry: OperatorEvidenceEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.approval?.resume_message) {
+      void queueThreadDraft(entry.approval.resume_message, entry.threadId ?? undefined);
+      return;
+    }
+    if (entry.artifact) {
+      queueArtifactFollowOnPlan(entry.artifact);
+    }
+  }
+  function inspectOperatorWorkflowEntry(entry: OperatorWorkflowEntry | null | undefined) {
+    if (!entry) return;
+    inspectWorkflowRun(entry.workflow);
+  }
+  function continueOperatorWorkflowEntry(entry: OperatorWorkflowEntry | null | undefined) {
+    if (!entry) return;
+    continueWorkflowRun(entry.workflow);
+  }
+  function openOperatorWorkflowThread(entry: OperatorWorkflowEntry | null | undefined) {
+    if (!entry?.threadId || !canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds)) return;
+    void openThread(entry.threadId);
+  }
+  function inspectOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    inspectWorkflowRun(entry.workflow);
+  }
+  function continueOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.workflow) {
+      continueWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+    }
+  }
+  function openOperatorWorkflowOrchestrationThread(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.threadId) return;
+    void openThread(entry.threadId);
+  }
+  function queueOperatorWorkflowOrchestrationFocus(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.queueDraft) return;
+    queueComposerDraft(entry.queueDraft);
+  }
+  function queueOperatorWorkflowOrchestrationHandoff(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.handoffDraft) return;
+    queueComposerDraft(entry.handoffDraft);
+  }
+  function queueOperatorWorkflowOrchestrationBackupBranch(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.backupBranchDraft) return;
+    queueComposerDraft(entry.backupBranchDraft);
+  }
+  function queueOperatorWorkflowOrchestrationPreRepair(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.anticipatoryRepairDraft) return;
+    queueComposerDraft(entry.anticipatoryRepairDraft);
+  }
+  function redirectOperatorWorkflowOrchestrationEntry(entry: OperatorWorkflowOrchestrationEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    queueComposerDraft(buildWorkflowRedirectDraft(entry.workflow));
+  }
+  function inspectOperatorBackgroundSupervisionEntry(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
+    if (!entry?.workflow) return;
+    inspectWorkflowRun(entry.workflow);
+  }
+  function continueOperatorBackgroundSupervisionEntry(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
+    if (!entry) return;
+    if (entry.workflow) {
+      continueWorkflowRun(entry.workflow);
+      return;
+    }
+    if (entry.continueMessage) {
+      void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+    }
+  }
+  function openOperatorBackgroundSupervisionThread(entry: OperatorBackgroundSupervisionEntry | null | undefined) {
+    if (!entry?.threadId) return;
+    void openThread(entry.threadId);
+  }
+  function continueOperatorEngineeringMemoryEntry(entry: OperatorEngineeringMemoryEntry | null | undefined) {
+    if (!entry?.continueMessage) return;
+    void queueThreadDraft(entry.continueMessage, entry.threadId ?? undefined);
+  }
+  function openOperatorEngineeringMemoryThread(entry: OperatorEngineeringMemoryEntry | null | undefined) {
+    if (!entry?.threadId) return;
+    void openThread(entry.threadId);
+  }
+  useEffect(() => {
+    const handleOperatorShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === "k") {
+        event.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      if (paletteOpen || studioOpen || windowsMenuOpen || isEditableTarget(event.target)) return;
+      if (!event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (key === "k") {
+        event.preventDefault();
+        setPaletteOpen(true);
+      } else if (key === "i") {
+        event.preventDefault();
+        inspectOperatorTriageEntry(primaryTriageEntry);
+      } else if (key === "a") {
+        event.preventDefault();
+        approveOperatorTriageEntry(primaryApprovalTriageEntry);
+      } else if (key === "c") {
+        event.preventDefault();
+        continueOperatorTriageEntry(primaryTriageEntry);
+      } else if (key === "o") {
+        event.preventDefault();
+        openOperatorTriageThread(primaryTriageEntry);
+      } else if (key === "r") {
+        event.preventDefault();
+        redirectOperatorWorkflowEntry(primaryWorkflowTriageEntry);
+      } else if (key === "e") {
+        event.preventDefault();
+        inspectOperatorEvidenceEntry(primaryEvidenceEntry);
+      } else if (key === "f") {
+        event.preventDefault();
+        queueWorkflowLatestFailureContext(primaryWorkflowShortcutTarget());
+      } else if (key === "w") {
+        event.preventDefault();
+        inspectPrimaryWorkflowEntry();
+      } else if (key === "h") {
+        event.preventDefault();
+        inspectOperatorWorkflowEntry(primaryWorkflowSupervisionEntry);
+      } else if (key === "l") {
+        event.preventDefault();
+        inspectLatestWorkflowBranch(primaryWorkflowShortcutTarget());
+      } else if (key === "b") {
+        event.preventDefault();
+        inspectWorkflowBestContinuation(primaryWorkflowShortcutTarget());
+      } else if (key === "n") {
+        event.preventDefault();
+        continueWorkflowBestContinuation(primaryWorkflowShortcutTarget());
+      } else if (key === "g") {
+        event.preventDefault();
+        queueWorkflowBestContinuationComparison(primaryWorkflowShortcutTarget());
+      } else if (key === "u") {
+        event.preventDefault();
+        queueWorkflowOutputContext(primaryWorkflowShortcutTarget());
+      } else if (key === "p") {
+        event.preventDefault();
+        queueWorkflowFamilyPlan(primaryWorkflowShortcutTarget());
+      } else if (key === "t") {
+        event.preventDefault();
+        queueWorkflowRecoveryDraft(primaryWorkflowShortcutTarget());
+      } else if (key === "m") {
+        event.preventDefault();
+        inspectPrimaryArtifactEntry();
+      } else if (key === "s") {
+        event.preventDefault();
+        openPrimaryArtifactSourceRun();
+      } else if (key === "d") {
+        event.preventDefault();
+        continuePrimaryArtifactSourceRun();
+      } else if (key === "q") {
+        event.preventDefault();
+        queuePrimaryArtifactSourceFailure();
+      } else if (key === "x") {
+        event.preventDefault();
+        queuePrimaryArtifactRelatedOutputComparison();
+      } else if (key === "j") {
+        event.preventDefault();
+        queueArtifactFollowOnPlan(primaryArtifactShortcutTarget());
+      } else if (key === "y") {
+        event.preventDefault();
+        queueArtifactTopFollowOnWorkflowDraft(primaryArtifactShortcutTarget());
+      }
+    };
+    window.addEventListener("keydown", handleOperatorShortcut);
+    return () => window.removeEventListener("keydown", handleOperatorShortcut);
+  }, [
+    approveOperatorTriageEntry,
+    continueOperatorTriageEntry,
+    continueOperatorWorkflowEntry,
+    inspectOperatorEvidenceEntry,
+    inspectOperatorTriageEntry,
+    inspectOperatorWorkflowEntry,
+    openOperatorTriageThread,
+    openOperatorWorkflowThread,
+    paletteOpen,
+    primaryApprovalTriageEntry,
+    primaryEvidenceEntry,
+    primaryWorkflowSupervisionEntry,
+    primaryTriageEntry,
+    primaryWorkflowTriageEntry,
+    inspectLatestWorkflowBranch,
+    inspectPrimaryArtifactEntry,
+    inspectWorkflowBestContinuation,
+    inspectPrimaryWorkflowEntry,
+    continueWorkflowBestContinuation,
+    continuePrimaryArtifactSourceRun,
+    openPrimaryArtifactSourceRun,
+    queueArtifactFollowOnPlan,
+    queuePrimaryArtifactRelatedOutputComparison,
+    queuePrimaryArtifactSourceFailure,
+    queueArtifactTopFollowOnWorkflowDraft,
+    queueWorkflowBestContinuationComparison,
+    queueWorkflowFamilyPlan,
+    queueWorkflowLatestFailureContext,
+    queueWorkflowRecoveryDraft,
+    primaryArtifactShortcutTarget,
+    primaryWorkflowShortcutTarget,
+    queueWorkflowOutputContext,
+    redirectOperatorWorkflowEntry,
+    studioOpen,
+    workflowRunsWithArtifacts,
+    windowsMenuOpen,
+  ]);
+  const activitySpendByCapabilityFamily = useMemo(
+    () => (activitySummary?.llm_cost_by_capability_family ?? []).slice(0, 3),
+    [activitySummary],
+  );
+  const activitySpendByRuntimePath = useMemo(
+    () => (activitySummary?.llm_cost_by_runtime_path ?? []).slice(0, 3),
+    [activitySummary],
   );
 
   const matchPackageFile = useCallback(
@@ -2806,13 +9507,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       });
     });
     catalogItems.forEach((item) => {
-      if (item.installed) return;
+      if (item.installed && !item.update_available) return;
+      if (item.type === "extension_pack" && item.status && item.status !== "ready") return;
+      const itemKind = item.type === "extension_pack"
+        ? (item.installed && item.update_available ? "update pack" : "install pack")
+        : `install ${item.type}`;
+      const detailParts = [item.description];
+      if (item.missing_tools?.length) detailParts.push(`missing tools ${item.missing_tools.join(", ")}`);
+      if (item.type === "extension_pack" && item.contribution_types?.length) {
+        detailParts.push(item.contribution_types.join(", "));
+      }
       items.push({
         id: `catalog:${item.type}:${item.name}`,
-        kind: `install ${item.type}`,
+        kind: itemKind,
         label: item.name,
-        detail: `${item.description}${item.missing_tools?.length ? ` · missing tools ${item.missing_tools.join(", ")}` : ""}`,
-        action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: "Install", name: item.name },
+        detail: detailParts.filter(Boolean).join(" · "),
+        action: item.recommended_actions?.[0] ?? { type: "install_catalog_item", label: item.installed && item.update_available ? "Update" : "Install", name: item.catalog_id ?? item.name },
       });
     });
 
@@ -2830,6 +9540,131 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     operatorMacros,
     paletteQuery,
   ]);
+  const catalogExtensionItems = useMemo(
+    () => catalogItems.filter((item) => item.type === "extension_pack"),
+    [catalogItems],
+  );
+  const catalogExtensionItemsById = useMemo(
+    () => new Map(
+      catalogExtensionItems.map((item) => [item.catalog_id ?? item.name, item] as const),
+    ),
+    [catalogExtensionItems],
+  );
+  const installableCatalogItems = useMemo(
+    () => catalogItems.filter((item) => !item.installed || item.update_available),
+    [catalogItems],
+  );
+  const extensionPackagesNeedingAttention = useMemo(
+    () => extensionPackages.filter((extensionPackage) => {
+      const catalogItem = catalogExtensionItemsById.get(extensionPackage.id) ?? null;
+      return (
+        extensionPackage.status !== "ready"
+        || Boolean(catalogItem?.update_available)
+        || Boolean(formatExtensionGovernanceSummary(extensionPackage))
+      );
+    }),
+    [catalogExtensionItemsById, extensionPackages],
+  );
+  const extensionHealthSummary = useMemo(() => {
+    const degraded = extensionPackages.filter((item) => item.status !== "ready").length;
+    const updateReady = extensionPackages.filter((item) => {
+      const catalogItem = catalogExtensionItemsById.get(item.id);
+      return Boolean(catalogItem?.update_available);
+    }).length;
+    const approvalGated = extensionPackages.filter((item) => item.approval_profile?.requires_lifecycle_approval).length;
+    const attention = extensionPackagesNeedingAttention.length;
+    return [
+      `${extensionPackages.length} installed`,
+      degraded > 0 ? `${degraded} degraded` : null,
+      updateReady > 0 ? `${updateReady} updates` : null,
+      approvalGated > 0 ? `${approvalGated} approval gated` : null,
+      attention > 0 ? `${attention} attention` : null,
+    ].filter(Boolean).join(" · ");
+  }, [catalogExtensionItemsById, extensionPackages, extensionPackagesNeedingAttention.length]);
+  const installableCatalogSummary = useMemo(() => {
+    const extensionItems = installableCatalogItems.filter((item) => item.type === "extension_pack");
+    const updateCount = installableCatalogItems.filter((item) => item.installed && item.update_available).length;
+    const compatibleCount = extensionItems.filter((item) => item.compatibility?.compatible !== false).length;
+    const reviewNeeded = extensionItems.filter((item) =>
+      item.status && item.status !== "ready"
+      || item.compatibility?.compatible === false
+      || (item.diagnostics_summary?.issue_count ?? 0) > 0
+      || (item.diagnostics_summary?.load_error_count ?? 0) > 0,
+    ).length;
+    return [
+      `${installableCatalogItems.length} available`,
+      updateCount > 0 ? `${updateCount} updates` : null,
+      extensionItems.length > 0 ? `${extensionItems.length} extension packs` : null,
+      compatibleCount > 0 ? `${compatibleCount} compatible` : null,
+      reviewNeeded > 0 ? `${reviewNeeded} review` : null,
+    ].filter(Boolean).join(" · ");
+  }, [installableCatalogItems]);
+  const marketplaceFlowSummary = useMemo(() => {
+    const readyCount = marketplaceFlows.filter((flow) => flow.availability === "ready" || flow.availability === "installed").length;
+    const updateCount = marketplaceFlows.filter((flow) => flow.kind === "extension_pack" && flow.update_available).length;
+    const blockedCount = marketplaceFlows.filter(
+      (flow) => flow.availability === "blocked" || flow.availability === "attention" || flow.availability === "partial",
+    ).length;
+    return [
+      `${readyCount}/${marketplaceFlows.length} ready`,
+      updateCount > 0 ? `${updateCount} updates` : null,
+      blockedCount > 0 ? `${blockedCount} attention` : null,
+    ].filter(Boolean).join(" · ");
+  }, [marketplaceFlows]);
+  const marketplaceExtensionFlowsByCatalogId = useMemo(
+    () => new Map(
+      marketplaceFlows
+        .filter((flow) => flow.kind === "extension_pack")
+        .map((flow) => [flow.catalog_id ?? flow.id, flow] as const),
+    ),
+    [marketplaceFlows],
+  );
+  const governedExtensionRows = useMemo<GovernedExtensionConsoleRow[]>(() => {
+    const installedRows = extensionPackages.map((extensionPackage) => (
+      buildInstalledExtensionConsoleRow(
+        extensionPackage,
+        catalogExtensionItemsById.get(extensionPackage.id) ?? null,
+      )
+    ));
+    const installedIds = new Set(extensionPackages.map((extensionPackage) => extensionPackage.id));
+    const marketplaceRows = catalogExtensionItems
+      .filter((item) => {
+        const key = item.catalog_id ?? item.name;
+        return !installedIds.has(key) || item.update_available || !item.installed;
+      })
+      .map((item) => {
+        const key = item.catalog_id ?? item.name;
+        return buildCatalogExtensionConsoleRow(
+          item,
+          marketplaceExtensionFlowsByCatalogId.get(key) ?? marketplaceExtensionFlowsByCatalogId.get(item.name) ?? null,
+        );
+      });
+    return [...installedRows, ...marketplaceRows].sort((left, right) => {
+      const rank = (row: GovernedExtensionConsoleRow) => {
+        if (row.status.includes("revoked")) return 0;
+        if (row.actionReadiness.includes("blocked")) return 1;
+        if (row.actionReadiness.includes("review")) return 2;
+        if (row.actionReadiness.includes("update")) return 3;
+        if (row.kind === "marketplace") return 4;
+        return 5;
+      };
+      return rank(left) - rank(right) || left.label.localeCompare(right.label);
+    });
+  }, [catalogExtensionItems, catalogExtensionItemsById, extensionPackages, marketplaceExtensionFlowsByCatalogId]);
+  const governedExtensionConsoleSummary = useMemo(() => {
+    const blocked = governedExtensionRows.filter((row) => row.actionReadiness.includes("blocked")).length;
+    const review = governedExtensionRows.filter((row) => row.actionReadiness.includes("review")).length;
+    const rollbackReady = governedExtensionRows.filter((row) => row.rollbackReceipt).length;
+    const installed = governedExtensionRows.filter((row) => row.kind === "installed").length;
+    const marketplace = governedExtensionRows.filter((row) => row.kind === "marketplace").length;
+    return [
+      `${installed} installed`,
+      `${marketplace} installable`,
+      blocked > 0 ? `${blocked} blocked` : null,
+      review > 0 ? `${review} review` : null,
+      `${rollbackReady} rollback receipts`,
+    ].filter(Boolean).join(" · ");
+  }, [governedExtensionRows]);
 
   function approvalForWorkflow(workflow: WorkflowRunRecord): PendingApproval | null {
     if (workflow.pendingApprovalIds?.length) {
@@ -3281,6 +10116,65 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function scaffoldStudioSkillPack() {
+    const packageName = studioScaffoldName.trim();
+    const displayName = studioScaffoldDisplayName.trim() || packageName;
+    if (!packageName) {
+      setStudioPackageStatus("Enter a package slug before scaffolding");
+      return;
+    }
+    setStudioBusy("extension-scaffold");
+    setStudioPackagePreview(null);
+    setStudioPackageStatus(`Scaffolding ${displayName}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/scaffold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          package_name: packageName,
+          display_name: displayName,
+          kind: "capability-pack",
+          contributions: ["skills"],
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setStudioPackageStatus(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : `Failed to scaffold ${displayName}`,
+        );
+        return;
+      }
+      const scaffold = payload as ExtensionScaffoldResponse;
+      setStudioExtensionPath(scaffold.path);
+      setStudioPackagePreview(scaffold.preview);
+      const scaffoldLabel = scaffold.preview.display_name ?? displayName;
+      const invalidScaffold = scaffold.status !== "scaffolded" || scaffold.preview.ok === false;
+      if (invalidScaffold) {
+        const issueCount = Array.isArray(scaffold.preview.results)
+          ? scaffold.preview.results.reduce((count, result) => count + (Array.isArray(result.issues) ? result.issues.length : 0), 0)
+          : 0;
+        setStudioPackageStatus(
+          `${scaffoldLabel} scaffolded but needs fixes${issueCount > 0 ? ` (${issueCount} issue${issueCount === 1 ? "" : "s"})` : ""}`,
+        );
+        appendOperatorFeed(
+          `Scaffolded extension package needs fixes: ${scaffoldLabel}`,
+          "info",
+        );
+        return;
+      }
+      setStudioPackageStatus(
+        `${scaffoldLabel} scaffolded with ${scaffold.created_files.length} file${scaffold.created_files.length === 1 ? "" : "s"}`,
+      );
+      appendOperatorFeed(`Scaffolded extension package: ${scaffoldLabel}`, "success");
+    } catch {
+      setStudioPackageStatus(`Failed to scaffold ${displayName}`);
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
   async function installStudioExtensionPath() {
     const path = studioExtensionPath.trim();
     if (!path) {
@@ -3465,6 +10359,56 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function runExtensionConsoleLifecycleAction(
+    extensionPackage: ExtensionPackageInfo,
+    action: "enable" | "disable" | "remove" | "review" | "quarantine" | "reentry" | "rollback",
+    snapshotId?: string | null,
+  ) {
+    const label = extensionPackage.display_name;
+    const actionLabel = action === "reentry" ? "re-entry" : action;
+    setOperatorStatus(`${actionLabel} ${label}...`);
+    const encodedId = encodeURIComponent(extensionPackage.id);
+    const body = action === "review"
+      ? { reason: "cockpit lifecycle review" }
+      : action === "quarantine"
+        ? { reason: "cockpit operator quarantine" }
+        : action === "reentry"
+          ? { reason: "cockpit re-entry review" }
+          : action === "rollback"
+            ? { snapshot_id: snapshotId ?? null }
+            : null;
+    const endpoint = action === "remove"
+      ? `${API_URL}/api/extensions/${encodedId}`
+      : `${API_URL}/api/extensions/${encodedId}/${action}`;
+    try {
+      const response = await fetch(endpoint, {
+        method: action === "remove" ? "DELETE" : "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const handled = await handleExtensionLifecycleFailure(
+          payload,
+          `Failed to ${actionLabel} ${label}`,
+          setOperatorStatus,
+        );
+        if (!handled) appendOperatorFeed(`Failed to ${actionLabel} ${label}`, "failed");
+        return;
+      }
+      await refreshCockpit();
+      const nextLabel = typeof payload?.extension?.display_name === "string"
+        ? payload.extension.display_name
+        : label;
+      const receiptId = typeof payload?.receipt?.id === "string" ? ` · ${shortIdentifier(payload.receipt.id, 18)}` : "";
+      setOperatorStatus(`${nextLabel} ${actionLabel} complete${receiptId}`);
+      appendOperatorFeed(`${nextLabel} ${actionLabel} complete${receiptId}`, "success");
+    } catch {
+      setOperatorStatus(`Failed to ${actionLabel} ${label}`);
+      appendOperatorFeed(`Failed to ${actionLabel} ${label}`, "failed");
+    }
+  }
+
   function saveRunbookMacro(runbook: RunbookInfo) {
     setSavedRunbooks((current) => {
       if (current.some((item) => item.id === runbook.id)) return current;
@@ -3574,8 +10518,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
-  function queueArtifactWorkflowDraft(workflow: WorkflowInfo, artifactPath: string) {
-    queueComposerDraft(buildWorkflowDraft(workflow, artifactPath));
+  function queueArtifactWorkflowDraft(
+    workflow: WorkflowInfo,
+    artifactPath: string,
+    producedArtifactTypes?: string[],
+  ) {
+    queueComposerDraft(buildWorkflowDraft(workflow, artifactPath, producedArtifactTypes));
   }
 
   async function reloadOperatorSurface(path: "skills" | "workflows") {
@@ -3693,7 +10641,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         `${label}: ${result.manual_actions.map((action) => formatCapabilityAction(action)).join(" · ")}`,
         "info",
       );
-      await runCapabilityActions(result.manual_actions, `${label} bootstrap`);
     }
     if (result.ready) {
       setOperatorStatus(`${label} ready`);
@@ -3765,6 +10712,391 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
 
+  function workflowStepFocusRecords(workflow: WorkflowRunRecord): WorkflowStepRecord[] {
+    const records = workflow.stepRecords ?? [];
+    return [...records]
+      .sort((left, right) => {
+        const leftPriority =
+          left.status !== "succeeded" || workflow.continuedErrorSteps.includes(left.id)
+            ? 0
+            : left.isRecoverable || (left.recoveryActions?.length ?? 0) > 0
+              ? 1
+              : left.artifactPaths.length > 0
+                ? 2
+                : 3;
+        const rightPriority =
+          right.status !== "succeeded" || workflow.continuedErrorSteps.includes(right.id)
+            ? 0
+            : right.isRecoverable || (right.recoveryActions?.length ?? 0) > 0
+              ? 1
+              : right.artifactPaths.length > 0
+                ? 2
+                : 3;
+        if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+        return right.index - left.index;
+      })
+      .slice(0, 3);
+  }
+
+  function queueWorkflowStepContext(workflow: WorkflowRunRecord, step: WorkflowStepRecord) {
+    const outputPath = step.artifactPaths[0];
+    const parts = [
+      `Review workflow "${workflow.workflowName}" step "${step.id}" (${step.tool}).`,
+      outputPath ? `Latest step output: "${outputPath}".` : null,
+      step.errorSummary ? `Current failure: ${step.errorSummary}.` : null,
+      step.resultSummary ? `Latest result: ${step.resultSummary}.` : null,
+      step.recoveryHint ? `Recovery hint: ${step.recoveryHint}.` : null,
+    ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    queueComposerDraft(parts.join(" "));
+  }
+
+  function queueWorkflowOutputContext(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const outputPath = resolved.artifacts[0]?.filePath ?? resolved.artifactPaths[0];
+    if (!outputPath) return;
+    queueComposerDraft(`Use the workspace file "${outputPath}" as context for the next action.`);
+  }
+
+  function workflowPrimaryOutputPath(workflow: WorkflowRunRecord | null | undefined): string | null {
+    if (!workflow) return null;
+    const resolved = resolveWorkflowRun(workflow);
+    return resolved.artifacts[0]?.filePath ?? resolved.artifactPaths[0] ?? null;
+  }
+
+  function workflowsForArtifactRecord(artifact: ArtifactRecord): WorkflowRunRecord[] {
+    const seen = new Set<string>();
+    return artifactLineageRunsWithArtifacts
+      .map((workflow) => resolveWorkflowRun(workflow))
+      .map((workflow) => {
+        const exactArtifact = workflow.artifacts.some((entry) => entry.id === artifact.id);
+        const sessionPathMatch = workflow.artifacts.some((entry) => (
+          entry.filePath === artifact.filePath
+          && (entry.sessionId ?? workflow.sessionId ?? null) === (artifact.sessionId ?? null)
+        ));
+        const sessionArtifactPathMatch = workflow.artifactPaths.includes(artifact.filePath)
+          && (workflow.sessionId ?? null) === (artifact.sessionId ?? null);
+        const score = exactArtifact ? 3 : sessionPathMatch ? 2 : sessionArtifactPathMatch ? 1 : 0;
+        return { workflow, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .filter((workflow) => {
+        const key = workflow.workflow.runIdentity ?? workflow.workflow.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((left, right) => right.score - left.score || compareWorkflowRunsNewestFirst(left.workflow, right.workflow))
+      .map((entry) => entry.workflow);
+  }
+
+  function resolveArtifactLineage(artifact: ArtifactRecord | null | undefined): ArtifactLineageResolution {
+    if (!artifact) {
+      return {
+        sourceWorkflow: null,
+        candidateWorkflows: [],
+        ambiguous: false,
+        unresolvedReason: "unavailable",
+      };
+    }
+    const candidates = workflowsForArtifactRecord(artifact);
+    if (candidates.length === 0) {
+      return {
+        sourceWorkflow: null,
+        candidateWorkflows: [],
+        ambiguous: false,
+        unresolvedReason: "unavailable",
+      };
+    }
+    const candidateFamilies = new Set(candidates.map((workflow) => workflowFamilyRootIdentity(workflow)));
+    if (candidateFamilies.size === 1) {
+      return {
+        sourceWorkflow: candidates[0] ?? null,
+        candidateWorkflows: candidates,
+        ambiguous: false,
+        unresolvedReason: null,
+      };
+    }
+    if (candidates.length > 1) {
+      return {
+        sourceWorkflow: null,
+        candidateWorkflows: candidates,
+        ambiguous: true,
+        unresolvedReason: "ambiguous",
+      };
+    }
+    return {
+      sourceWorkflow: candidates[0] ?? null,
+      candidateWorkflows: candidates,
+      ambiguous: false,
+      unresolvedReason: null,
+    };
+  }
+
+  function artifactSourceWorkflow(artifact: ArtifactRecord | null | undefined): WorkflowRunRecord | null {
+    return resolveArtifactLineage(artifact).sourceWorkflow;
+  }
+
+  function artifactSourceOutputSurfaceTypes(artifact: ArtifactRecord | null | undefined): string[] | undefined {
+    const sourceWorkflow = artifactSourceWorkflow(artifact);
+    if (!sourceWorkflow) return undefined;
+    return workflowDefinitionByName.get(sourceWorkflow.workflowName)?.output_surface_artifact_types;
+  }
+
+  function artifactCompatibleFollowOnWorkflows(artifact: ArtifactRecord | null | undefined): WorkflowInfo[] {
+    if (!artifact) return [];
+    const sourceWorkflow = artifactSourceWorkflow(artifact);
+    const excludeWorkflowNames = sourceWorkflow
+      ? [sourceWorkflow.workflowName, sourceWorkflow.toolName]
+      : [];
+    return compatibleArtifactWorkflows(
+      artifact.filePath,
+      artifactSourceOutputSurfaceTypes(artifact),
+      excludeWorkflowNames,
+    );
+  }
+
+  function artifactRelatedFamilyOutputs(artifact: ArtifactRecord | null | undefined): WorkflowFamilyArtifactOutput[] {
+    if (!artifact) return [];
+    const sourceWorkflow = artifactSourceWorkflow(artifact);
+    if (!sourceWorkflow) return [];
+    return workflowFamilyArtifactOutputs(sourceWorkflow).filter((output) => output.filePath !== artifact.filePath);
+  }
+
+  function artifactPrimaryRelatedOutput(
+    artifact: ArtifactRecord | null | undefined,
+  ): WorkflowFamilyArtifactOutput | null {
+    return artifactRelatedFamilyOutputs(artifact)[0] ?? null;
+  }
+
+  function artifactLatestFailureContext(
+    artifact: ArtifactRecord | null | undefined,
+  ): { workflow: WorkflowRunRecord; step: WorkflowStepRecord } | null {
+    return workflowOwnFailureContext(artifactSourceWorkflow(artifact));
+  }
+
+  function artifactLineageCandidateRuns(
+    artifact: ArtifactRecord | null | undefined,
+  ): WorkflowRunRecord[] {
+    const lineage = resolveArtifactLineage(artifact);
+    if (!lineage.ambiguous) return [];
+    return lineage.candidateWorkflows.slice(0, 4);
+  }
+
+  function artifactInspectorSummary(artifact: ArtifactRecord | null | undefined): string[] {
+    if (!artifact) return [];
+    const lineage = resolveArtifactLineage(artifact);
+    const sourceWorkflow = lineage.sourceWorkflow;
+    const followOnWorkflows = artifactCompatibleFollowOnWorkflows(artifact);
+    const relatedOutputs = artifactRelatedFamilyOutputs(artifact);
+    const summary: string[] = [];
+    if (sourceWorkflow) {
+      summary.push(`source ${sourceWorkflow.workflowName}`);
+      summary.push(workflowSupervisionLabel(sourceWorkflow));
+      if (workflowCanContinue(sourceWorkflow)) {
+        summary.push("continue available");
+      }
+    }
+    if (lineage.ambiguous) {
+      summary.push(`source ambiguous (${lineage.candidateWorkflows.length} candidates)`);
+    } else if (!sourceWorkflow) {
+      summary.push("source unavailable");
+    }
+    if (followOnWorkflows.length > 0) {
+      summary.push(`${followOnWorkflows.length} follow-on ${followOnWorkflows.length === 1 ? "workflow" : "workflows"}`);
+    }
+    if (relatedOutputs.length > 0) {
+      summary.push(`${relatedOutputs.length} related ${relatedOutputs.length === 1 ? "output" : "outputs"}`);
+    }
+    return summary;
+  }
+
+  function queueArtifactOutputComparison(
+    artifact: ArtifactRecord | null | undefined,
+    relatedOutputPath: string | null | undefined,
+  ) {
+    if (!artifact || !relatedOutputPath || relatedOutputPath === artifact.filePath) return;
+    queueComposerDraft(
+      `Compare the workspace files "${artifact.filePath}" and "${relatedOutputPath}". `
+      + "Summarize the key differences, what changed between these artifact outputs, and which file is the better base for the next step.",
+    );
+  }
+
+  function queueArtifactFollowOnPlan(artifact: ArtifactRecord | null | undefined) {
+    if (!artifact) return;
+    const lineage = resolveArtifactLineage(artifact);
+    const sourceWorkflow = lineage.sourceWorkflow;
+    const followOnWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 4);
+    const relatedOutputs = artifactRelatedFamilyOutputs(artifact).slice(0, 4);
+    const latestFailure = workflowLatestFailureContext(sourceWorkflow);
+    if (!sourceWorkflow && !lineage.ambiguous && followOnWorkflows.length === 0 && relatedOutputs.length === 0) {
+      queueComposerDraft(`Use the workspace file "${artifact.filePath}" as context for the next action.`);
+      return;
+    }
+    const parts = [
+      `Review next steps for artifact "${artifact.filePath}".`,
+      sourceWorkflow
+        ? `Source workflow: "${sourceWorkflow.workflowName}" (${sourceWorkflow.summary}).`
+        : null,
+      lineage.ambiguous
+        ? `Source workflow is ambiguous across ${lineage.candidateWorkflows.length} recent runs, so do not assume a single source run.`
+        : null,
+      !sourceWorkflow && !lineage.ambiguous
+        ? "A verified source workflow is not available in the current lineage window."
+        : null,
+      sourceWorkflow && workflowCanContinue(sourceWorkflow)
+        ? `The source workflow can continue from its current state.`
+        : null,
+      latestFailure?.step.errorSummary
+        ? `Latest source failure: ${latestFailure.step.errorSummary}.`
+        : null,
+      followOnWorkflows.length > 0
+        ? `Compatible follow-on workflows: ${followOnWorkflows.map((workflow) => `"${workflow.name}"`).join(", ")}.`
+        : null,
+      relatedOutputs.length > 0
+        ? `Related family outputs: ${relatedOutputs.map((output) => `"${output.filePath}"`).join(", ")}.`
+        : null,
+      "Recommend whether to continue the source workflow, compare against a related output, or run one of the compatible follow-on workflows.",
+    ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    queueComposerDraft(parts.join(" "));
+  }
+
+  function queueArtifactTopFollowOnWorkflowDraft(artifact: ArtifactRecord | null | undefined) {
+    if (!artifact) return;
+    const workflow = artifactCompatibleFollowOnWorkflows(artifact)[0];
+    if (!workflow) {
+      queueArtifactFollowOnPlan(artifact);
+      return;
+    }
+    queueArtifactWorkflowDraft(workflow, artifact.filePath, artifactSourceOutputSurfaceTypes(artifact));
+  }
+
+  function primaryArtifactShortcutTarget(): ArtifactRecord | null {
+    if (selectedInspector?.kind === "artifact") {
+      return selectedInspector.artifact;
+    }
+    return primaryEvidenceEntry?.artifact ?? artifacts[0] ?? null;
+  }
+
+  function openPrimaryArtifactSourceRun() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    inspectWorkflowRun(artifactSourceWorkflow(artifact));
+  }
+
+  function continuePrimaryArtifactSourceRun() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    continueWorkflowRun(artifactSourceWorkflow(artifact));
+  }
+
+  function queuePrimaryArtifactSourceFailure() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    const sourceFailure = artifactLatestFailureContext(artifact);
+    if (!sourceFailure) return;
+    queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step);
+  }
+
+  function queuePrimaryArtifactRelatedOutputComparison() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    queueArtifactOutputComparison(artifact, artifactPrimaryRelatedOutput(artifact)?.filePath);
+  }
+
+  function inspectPrimaryArtifactEntry() {
+    const artifact = primaryArtifactShortcutTarget();
+    if (!artifact) return;
+    setSelectedInspector({ kind: "artifact", artifact });
+  }
+
+  function queueWorkflowOutputComparison(
+    currentWorkflow: WorkflowRunRecord | null | undefined,
+    relatedWorkflow: WorkflowRunRecord | null | undefined,
+    relatedOutputPathOverride?: string | null,
+  ) {
+    const currentOutputPath = workflowPrimaryOutputPath(currentWorkflow);
+    const relatedOutputPath = relatedOutputPathOverride ?? workflowPrimaryOutputPath(relatedWorkflow);
+    if (!currentOutputPath || !relatedOutputPath) return;
+    queueComposerDraft(
+      `Compare the workspace files "${currentOutputPath}" and "${relatedOutputPath}". `
+      + "Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.",
+    );
+  }
+
+  function queueWorkflowFamilyPlan(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const currentOutputPath = workflowPrimaryOutputPath(resolved);
+    const bestContinuation = workflowBestContinuationRun(resolved);
+    const latestFailure = workflowFailureLineage(resolved)[0] ?? null;
+    const familyOutputs = workflowFamilyArtifactOutputs(resolved).slice(0, 3);
+    if (!currentOutputPath && !bestContinuation && !latestFailure && familyOutputs.length === 0) return;
+    const parts = [
+      `Review workflow family state for "${resolved.workflowName}".`,
+      currentOutputPath ? `Current output: "${currentOutputPath}".` : null,
+      bestContinuation
+        ? [
+            `Best continuation: "${bestContinuation.summary}"`,
+            workflowPrimaryOutputPath(bestContinuation)
+              ? `latest output "${workflowPrimaryOutputPath(bestContinuation)}"`
+              : null,
+          ].filter((part): part is string => typeof part === "string" && part.length > 0).join(" with ")
+        : null,
+      latestFailure ? `Latest family failure: "${latestFailure.summary}".` : null,
+      familyOutputs.length > 0
+        ? `Related reusable outputs: ${familyOutputs.map((output) => `"${output.filePath}"`).join(", ")}.`
+        : null,
+      "Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.",
+    ].filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    queueComposerDraft(parts.join(" "));
+  }
+  function queueWorkflowLatestFailureContext(workflow: WorkflowRunRecord | null | undefined) {
+    const latestFailure = workflowLatestFailureContext(workflow);
+    if (!latestFailure) return;
+    queueWorkflowStepContext(latestFailure.workflow, latestFailure.step);
+  }
+  function queueWorkflowRecoveryDraft(workflow: WorkflowRunRecord | null | undefined) {
+    if (!workflow) return;
+    const resolved = resolveWorkflowRun(workflow);
+    const failedStep = failedWorkflowStep(resolved);
+    if (resolved.retryFromStepDraft) {
+      void queueLiveWorkflowResumePlan(resolved, {
+        action: "retry",
+        stepId: failedStep?.id ?? resolved.resumeFromStep,
+        fallbackDraft: resolved.retryFromStepDraft,
+        label: resolved.workflowName,
+      });
+      return;
+    }
+    if (resolved.replayAllowed !== false) {
+      void queueLiveWorkflowResumePlan(resolved, {
+        action: "replay",
+        fallbackDraft: resolved.replayDraft ?? buildWorkflowReplayDraft(resolved),
+        label: resolved.workflowName,
+      });
+    }
+  }
+
+  function primaryWorkflowShortcutTarget(): WorkflowRunRecord | null {
+    const candidates = [
+      primaryWorkflowTriageEntry?.workflow ?? null,
+      ...workspaceWorkflowRunsWithArtifacts,
+    ]
+      .filter((workflow): workflow is WorkflowRunRecord => workflow != null)
+      .map((workflow) => resolveWorkflowRun(workflow));
+    return (
+      candidates.find((workflow) => workflowStepFocusRecords(workflow).length > 0)
+      ?? candidates.find((workflow) => (workflow.artifacts[0]?.filePath ?? workflow.artifactPaths[0]) != null)
+      ?? candidates[0]
+      ?? null
+    );
+  }
+
+  function inspectPrimaryWorkflowEntry() {
+    inspectWorkflowRun(primaryWorkflowShortcutTarget());
+  }
+
   async function toggleWorkflow(workflow: WorkflowInfo, enabled: boolean) {
     setOperatorStatus(`${enabled ? "Enabling" : "Disabling"} ${workflow.name}...`);
     try {
@@ -3803,7 +11135,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       executionBoundaries: [],
     });
     try {
-      const response = await fetch(`${API_URL}/api/catalog/install/${item.name}`, {
+      const identifier = item.catalog_id ?? item.name;
+      const response = await fetch(`${API_URL}/api/catalog/install/${encodeURIComponent(identifier)}`, {
         method: "POST",
       });
       const payload = await response.json().catch(() => null);
@@ -3846,23 +11179,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     actions: CapabilityAction[],
     label: string,
   ) {
-    const safeTypes = new Set<CapabilityAction["type"]>([
-      "enable_extension",
-      "toggle_skill",
-      "toggle_workflow",
-      "toggle_mcp_server",
-      "test_mcp_server",
-      "test_native_notification",
-      "set_tool_policy",
-      "set_mcp_policy",
-      "install_catalog_item",
-      "activate_starter_pack",
-      "open_settings",
-    ]);
-    const allowedActions = actions.filter((action) => safeTypes.has(action.type));
+    const allowedActions = actions.filter((action) => SUPPORTED_CAPABILITY_ACTION_TYPES.has(action.type));
     if (allowedActions.length === 0) {
       setOperatorStatus(`No safe repair actions available for ${label}`);
       appendOperatorFeed(`No safe repair actions available for ${label}`, "failed");
+      return;
+    }
+    const requiresStepByStepExecution = (
+      allowedActions.length > 1
+      && allowedActions.some((action) => !isLowRiskBatchCapabilityAction(action))
+    );
+    if (requiresStepByStepExecution) {
+      const actionSummary = allowedActions.map((action) => formatCapabilityAction(action)).join(" · ");
+      setOperatorStatus(`${label} requires step-by-step execution`);
+      appendOperatorFeed(
+        `${label} requires step-by-step execution: ${actionSummary}`,
+        "info",
+      );
       return;
     }
     setOperatorStatus(`Repairing ${label}...`);
@@ -3918,7 +11251,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         }
         return true;
       case "install_catalog_item": {
-        const item = catalogItems.find((entry) => entry.name === action.name);
+        const item = catalogItems.find((entry) => entry.name === action.name || entry.catalog_id === action.name);
         if (item) await installCatalogItem(item);
         return true;
       }
@@ -4152,12 +11485,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     let meta = "";
     let body = "";
     let details: Record<string, unknown> = {};
+    const selectedWorkflow = selectedInspector?.kind === "workflow"
+      ? resolveWorkflowRun(selectedInspector.workflow)
+      : null;
+    const selectedWorkflowApproval = selectedWorkflow ? approvalForWorkflow(selectedWorkflow) : null;
+    const selectedWorkflowLatestBranch = selectedWorkflow ? workflowLatestBranchRun(selectedWorkflow) : null;
+    const selectedWorkflowBestContinuation = selectedWorkflow ? workflowBestContinuationRun(selectedWorkflow) : null;
+    const selectedWorkflowCheckpointActions = selectedWorkflow ? workflowCheckpointActions(selectedWorkflow) : [];
+    const selectedWorkflowHistorySummary = selectedWorkflow ? workflowHistorySummary(selectedWorkflow) : [];
+    const selectedWorkflowName = selectedWorkflow?.workflowName ?? "workflow";
+    const selectedWorkflowCheckpointDraftByStep = new Map(
+      selectedWorkflowCheckpointActions.map((action) => [action.stepId, action.draft]),
+    );
 
     if (selectedInspector.kind === "approval") {
       const approval = selectedInspector.approval;
       title = approval.tool_name;
       meta = `${approval.risk_level} approval`;
-      body = approval.summary;
+      body = `approval request · ${approval.summary}`;
       details = {
         approval_id: approval.id,
         session_id: approval.session_id ?? "n/a",
@@ -4173,9 +11518,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         permissions: approval.permissions ?? {},
       };
     } else if (selectedInspector.kind === "workflow") {
-      const workflow = selectedInspector.workflow;
-      const approval = approvalForWorkflow(workflow);
+      const workflow = selectedWorkflow!;
       const linkedInterventions = interventionsForWorkflow(workflow);
+      const childRuns = workflowChildRuns(workflow);
+      const peerRuns = workflowPeerRuns(workflow);
+      const familyRuns = workflowFamilyRuns(workflow);
       title = workflow.workflowName;
       meta = `${workflow.status} · ${workflow.artifacts.length} artifacts`;
       body = workflow.summary;
@@ -4186,14 +11533,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         status: workflow.status,
         run_fingerprint: workflow.runFingerprint ?? "n/a",
         run_identity: workflow.runIdentity ?? "n/a",
+        parent_run_identity: workflow.parentRunIdentity ?? "none",
+        root_run_identity: workflow.rootRunIdentity ?? "n/a",
+        branch_kind: workflow.branchKind ?? "none",
+        branch_depth: workflow.branchDepth ?? 0,
+        supervision_state: workflowSupervisionLabel(workflow),
+        branch_child_count: childRuns.length,
+        branch_peer_count: peerRuns.length,
+        branch_family_size: familyRuns.length,
         risk_level: workflow.riskLevel ?? "unknown",
         execution_boundaries: workflow.executionBoundaries ?? [],
         accepts_secret_refs: workflow.acceptsSecretRefs ?? false,
         step_tools: workflow.stepTools,
         step_records: workflow.stepRecords ?? [],
         continued_error_steps: workflow.continuedErrorSteps,
+        checkpoint_context_available: workflow.checkpointContextAvailable ?? false,
         artifact_paths: workflow.artifactPaths,
-        pending_approval: approval ? approval.id : "none",
+        pending_approval: selectedWorkflowApproval ? selectedWorkflowApproval.id : "none",
         pending_approval_count: workflow.pendingApprovalCount ?? 0,
         pending_approvals: workflow.pendingApprovals?.map((item) => item.summary).join(" | ") || "none",
         replay_allowed: workflow.replayAllowed ?? false,
@@ -4262,115 +11618,988 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         <div className="cockpit-inspector-title">{title}</div>
         <div className="cockpit-inspector-meta">{meta}</div>
         <div className="cockpit-inspector-body">{body}</div>
-        {selectedInspector.kind === "workflow" && (
+        {selectedInspector.kind === "workflow" && selectedWorkflow && (
           <div className="cockpit-feedback-row">
-            {selectedInspector.workflow.replayAllowed !== false ? (
+            {selectedWorkflow.replayAllowed !== false ? (
               <>
-                <button
-                  className="cockpit-feedback-button"
-                  onClick={() =>
-                    queueComposerDraft(
-                      selectedInspector.workflow.replayDraft
-                        ?? buildWorkflowReplayDraft(selectedInspector.workflow),
-                    )
+	                <button
+	                  className="cockpit-feedback-button"
+	                  onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                    action: "replay",
+	                    fallbackDraft: selectedWorkflow.replayDraft ?? buildWorkflowReplayDraft(selectedWorkflow),
+	                    label: selectedWorkflow.workflowName,
+	                  })}
+	                >
+	                  {selectedWorkflow.executionBoundaries?.length
+	                    ? "Plan Boundary-Aware Rerun"
+	                    : "Plan Rerun"}
+	                </button>
+                {(() => {
+                  const checkpointActions = selectedWorkflowCheckpointActions.slice(0, 2);
+                  if (checkpointActions.length > 0) {
+                    return checkpointActions.map((action) => (
+                      <button
+                        key={`${selectedWorkflow.id}:${action.stepId}`}
+                        className="cockpit-feedback-button"
+                        onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+                          action: action.kind === "retry_failed_step" ? "retry" : "branch",
+                          stepId: action.stepId,
+                          fallbackDraft: action.draft,
+                          label: selectedWorkflow.workflowName,
+                        })}
+                      >
+                        {action.label}
+                      </button>
+                    ));
                   }
-                >
-                  {selectedInspector.workflow.executionBoundaries?.length
-                    ? "Draft Boundary-Aware Rerun"
-                    : "Draft Rerun"}
-                </button>
-                {selectedInspector.workflow.retryFromStepDraft && (
+                  if (!selectedWorkflow.retryFromStepDraft) {
+                    return null;
+                  }
+                  return (
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+                        action: "retry",
+                        stepId: selectedWorkflow.resumeFromStep,
+                        fallbackDraft: selectedWorkflow.retryFromStepDraft ?? buildWorkflowReplayDraft(selectedWorkflow),
+                        label: selectedWorkflow.workflowName,
+                      })}
+                    >
+                      Retry From Step
+                    </button>
+                  );
+                })()}
+                {studioEntryForWorkflowRun(selectedWorkflow) && (
                   <button
                     className="cockpit-feedback-button"
-                    onClick={() =>
-                      queueComposerDraft(
-                        selectedInspector.workflow.retryFromStepDraft
-                        ?? buildWorkflowReplayDraft(selectedInspector.workflow),
-                      )
-                    }
-                  >
-                    Retry From Step
-                  </button>
-                )}
-                {studioEntryForWorkflowRun(selectedInspector.workflow) && (
-                  <button
-                    className="cockpit-feedback-button"
-                    onClick={() => openExtensionStudio(studioEntryForWorkflowRun(selectedInspector.workflow))}
+                    onClick={() => openExtensionStudio(studioEntryForWorkflowRun(selectedWorkflow))}
                   >
                     Open Studio
                   </button>
                 )}
+                {selectedWorkflowLatestBranch && (
+                  <>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => inspectWorkflowRun(selectedWorkflowLatestBranch)}
+                    >
+                      Open Latest Branch
+                    </button>
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => continueWorkflowRun(selectedWorkflowLatestBranch)}
+                    >
+                      Continue Latest Branch
+                    </button>
+                  </>
+                )}
               </>
             ) : (
               <span className="cockpit-feedback-status">
-                Replay blocked: {replayBlockCopy(selectedInspector.workflow.replayBlockReason)}
+                Replay blocked: {replayBlockCopy(selectedWorkflow.replayBlockReason)}
               </span>
             )}
-            {selectedInspector.workflow.threadId && (
+            {selectedWorkflowApproval && (
+              <>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
+                >
+                  Approve
+                </button>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "deny")}
+                >
+                  Deny
+                </button>
+              </>
+            )}
+            {selectedWorkflow.threadId && (
               <button
                 className="cockpit-feedback-button"
-                onClick={() => void openThread(selectedInspector.workflow.threadId)}
+                onClick={() => void openThread(selectedWorkflow.threadId)}
               >
                 Open Thread
               </button>
             )}
-            {selectedInspector.workflow.artifactPaths[0] && (
+            {selectedWorkflow.artifactPaths[0] && (
               <button
                 className="cockpit-feedback-button"
                 onClick={() =>
                   queueComposerDraft(
-                    `Use the workspace file "${selectedInspector.workflow.artifactPaths[0]}" as context for the next action.`,
+                    `Use the workspace file "${selectedWorkflow.artifactPaths[0]}" as context for the next action.`,
                   )
                 }
-                >
-                  Use Output
-                </button>
-              )}
-              {selectedInspector.workflow.artifactPaths[0]
-                && artifactRoundtripWorkflows.slice(0, 2).map((workflow) => (
+              >
+                Use Output
+              </button>
+            )}
+              {selectedWorkflow.artifactPaths[0]
+                && compatibleArtifactWorkflows(
+                  selectedWorkflow.artifactPaths[0]!,
+                  workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
+                  [selectedWorkflow.workflowName, selectedWorkflow.toolName],
+                ).slice(0, 2).map((workflow) => (
                   <button
-                    key={`${selectedInspector.workflow.id}:${workflow.name}`}
+                    key={`${selectedWorkflow.id}:${workflow.name}`}
                     className="cockpit-feedback-button"
                     onClick={() =>
                       queueArtifactWorkflowDraft(
                         workflow,
-                        selectedInspector.workflow.artifactPaths[0]!,
+                        selectedWorkflow.artifactPaths[0]!,
+                        workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
                       )
                     }
                   >
                     Run {workflow.name}
                   </button>
                 ))}
-            {selectedInspector.workflow.approvalRecoveryMessage && (
+            {selectedWorkflow.approvalRecoveryMessage && (
               <span className="cockpit-feedback-status">
-                {selectedInspector.workflow.approvalRecoveryMessage}
+                {selectedWorkflow.approvalRecoveryMessage}
               </span>
+            )}
+            {selectedWorkflow.continuedErrorSteps.length > 0
+              && selectedWorkflow.checkpointContextAvailable === false && (
+              <span className="cockpit-feedback-status">
+                Checkpoint state was not persisted for this failure. Only a full rerun is currently safe.
+              </span>
+            )}
+            {selectedWorkflow.parentRunIdentity && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => inspectWorkflowRun(workflowRunByIdentity.get(selectedWorkflow.parentRunIdentity ?? ""))}
+              >
+                Open Parent
+              </button>
+            )}
+            {workflowPeerRuns(selectedWorkflow)[0] && (
+              <button
+                className="cockpit-feedback-button"
+                onClick={() => inspectWorkflowRun(workflowPeerRuns(selectedWorkflow)[0])}
+              >
+                Open Peer Branch
+              </button>
             )}
           </div>
         )}
-        {selectedInspector.kind === "workflow" && workflowResumeDetails(selectedInspector.workflow).length > 0 && (
+        {selectedInspector.kind === "workflow" && selectedWorkflow && workflowResumeDetails(selectedWorkflow).length > 0 && (
           <div className="cockpit-chip-row">
-            {workflowResumeDetails(selectedInspector.workflow).map((detail) => (
-              <span key={`${selectedInspector.workflow.id}:${detail}`} className="cockpit-chip">
+            {workflowResumeDetails(selectedWorkflow).map((detail) => (
+              <span key={`${selectedWorkflow.id}:${detail}`} className="cockpit-chip">
                 {detail}
               </span>
             ))}
           </div>
         )}
-        {selectedInspector.kind === "workflow" && selectedInspector.workflow.timeline?.length && (
-          <div className="cockpit-inspector-stack">
-            {selectedInspector.workflow.timeline.map((entry) => (
-              <div key={`${selectedInspector.workflow.id}:${entry.kind}:${entry.at}`} className="cockpit-inspector-stack-row">
-                <div className="cockpit-key">{entry.kind.replace(/_/g, " ")}</div>
-                <div className="cockpit-value">
-                  {entry.summary}
-                  {entry.stepId ? ` · ${entry.stepId}` : ""}
-                  {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
-                </div>
-              </div>
+        {selectedInspector.kind === "workflow" && selectedWorkflow && (
+          <div className="cockpit-chip-row">
+            {workflowSupervisionSummary(selectedWorkflow).map((detail) => (
+              <span key={`${selectedWorkflow.id}:supervision:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
             ))}
           </div>
         )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && workflowBranchDebugSummary(selectedWorkflow).length > 0 && (
+          <div className="cockpit-chip-row">
+            {workflowBranchDebugSummary(selectedWorkflow).map((detail) => (
+              <span key={`${selectedWorkflow.id}:branch-debug:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflowHistorySummary.length > 0 && (
+          <div className="cockpit-chip-row">
+            {selectedWorkflowHistorySummary.map((detail) => (
+              <span key={`${selectedWorkflow.id}:history:${detail}`} className="cockpit-chip">
+                {detail}
+              </span>
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflowApproval && (
+          <div className="cockpit-inspector-stack">
+            <div className="cockpit-inspector-stack-row">
+              <div className="cockpit-key">pending approval</div>
+              <div className="cockpit-value">
+                approval context · {selectedWorkflowApproval.summary}
+                {selectedWorkflowApproval.thread_label
+                  ? ` · ${selectedWorkflowApproval.thread_label}`
+                  : selectedWorkflowApproval.thread_id
+                    ? ` · thread ${selectedWorkflowApproval.thread_id.slice(0, 6)}`
+                    : ""}
+                {` · ${selectedWorkflowApproval.risk_level} risk`}
+              </div>
+	              {selectedWorkflowApproval.resume_message && (
+	                <button
+	                  className="cockpit-feedback-button"
+	                  aria-label={`Continue approval context for ${selectedWorkflowName}`}
+	                  onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                    action: "resume",
+	                    fallbackDraft: selectedWorkflowApproval.resume_message,
+	                    fallbackThreadId: selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id,
+	                    label: selectedWorkflowName,
+	                  })}
+	                >
+	                  Continue
+	                </button>
+              )}
+              {(() => {
+                const threadTarget = selectedWorkflowApproval.thread_id ?? selectedWorkflowApproval.session_id;
+                if (!threadTarget) return null;
+                return (
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open approval thread for ${selectedWorkflowName}`}
+                    onClick={() => void openThread(threadTarget)}
+                  >
+                    Open Thread
+                  </button>
+                );
+              })()}
+              <button
+                className="cockpit-feedback-button"
+                aria-label={`Approve approval context for ${selectedWorkflowName}`}
+                onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "approve")}
+              >
+                Approve
+              </button>
+              <button
+                className="cockpit-feedback-button"
+                aria-label={`Deny approval context for ${selectedWorkflowName}`}
+                onClick={() => void handleApprovalDecision(selectedWorkflowApproval, "deny")}
+              >
+                Deny
+              </button>
+            </div>
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && selectedWorkflow.artifacts.length > 0 && (
+          <div className="cockpit-inspector-stack">
+            {selectedWorkflow.artifacts.slice(0, 3).map((artifact) => {
+              const compatible = compatibleArtifactWorkflows(
+                artifact.filePath,
+                workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
+                [selectedWorkflow.workflowName, selectedWorkflow.toolName],
+              ).slice(0, 1);
+              return (
+                <div key={`${selectedWorkflow.id}:artifact:${artifact.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">artifact output</div>
+                  <div className="cockpit-value">
+                    artifact output · {artifact.filePath} · {artifact.source} · {formatAge(artifact.createdAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Inspect artifact output ${artifact.filePath}`}
+                    onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                  >
+                    Inspect
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use artifact output ${artifact.filePath}`}
+                    onClick={() =>
+                      queueComposerDraft(
+                        `Use the workspace file "${artifact.filePath}" as context for the next action.`,
+                      )
+                    }
+                  >
+                    Use
+                  </button>
+                  {compatible.map((workflow) => (
+                    <button
+                      key={`${selectedWorkflow.id}:${artifact.id}:${workflow.name}`}
+                      className="cockpit-feedback-button"
+                      aria-label={`Run ${workflow.name} from artifact output ${artifact.filePath}`}
+                      onClick={() => queueArtifactWorkflowDraft(workflow, artifact.filePath)}
+                    >
+                      Run {workflow.name}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+            {selectedWorkflow.artifacts.length > 3 && (
+              <div className="cockpit-inspector-stack-row">
+                <div className="cockpit-key">artifact output</div>
+                <div className="cockpit-value">
+                  {selectedWorkflow.artifacts.length - 3} more artifact outputs remain available in Recent outputs.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && workflowStepFocusRecords(selectedWorkflow).length > 0 && (
+          <div className="cockpit-inspector-stack">
+            {workflowStepFocusRecords(selectedWorkflow).map((step) => {
+              const checkpointDraft = selectedWorkflowCheckpointDraftByStep.get(step.id) ?? null;
+              const outputPath = step.artifactPaths[0] ?? null;
+              const compatible = outputPath
+                ? compatibleArtifactWorkflows(
+                    outputPath,
+                    workflowDefinitionByName.get(selectedWorkflow.workflowName)?.output_surface_artifact_types,
+                    [selectedWorkflow.workflowName, selectedWorkflow.toolName],
+                  ).slice(0, 1)
+                : [];
+              return (
+                <div key={`${selectedWorkflow.id}:step-focus:${step.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{`step ${step.index + 1}`}</div>
+                  <div className="cockpit-value">
+                    {step.tool} · {workflowStepSummary(step)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use step context ${step.id} for ${selectedWorkflowName}`}
+                    onClick={() => queueWorkflowStepContext(selectedWorkflow, step)}
+                  >
+                    Use Context
+                  </button>
+	                  {checkpointDraft && (
+	                    <button
+	                      className="cockpit-feedback-button"
+	                      aria-label={`Plan retry for step ${step.id} in ${selectedWorkflowName}`}
+	                      onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                        action: "retry",
+	                        stepId: step.id,
+	                        fallbackDraft: checkpointDraft,
+	                        label: selectedWorkflowName,
+	                      })}
+	                    >
+	                      Plan Retry
+	                    </button>
+	                  )}
+                  {step.recoveryActions?.length ? (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Repair step ${step.id} in ${selectedWorkflowName}`}
+                      onClick={() => void runCapabilityActions(readActionList(step.recoveryActions), `${selectedWorkflow.workflowName} ${step.id}`)}
+                    >
+                      Repair
+                    </button>
+                  ) : null}
+                  {outputPath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use step output ${outputPath}`}
+                      onClick={() => queueComposerDraft(`Use the workspace file "${outputPath}" as context for the next action.`)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {outputPath && compatible.map((workflow) => (
+                    <button
+                      key={`${selectedWorkflow.id}:${step.id}:${workflow.name}`}
+                      className="cockpit-feedback-button"
+                      aria-label={`Run ${workflow.name} from step output ${outputPath}`}
+                      onClick={() => queueArtifactWorkflowDraft(workflow, outputPath)}
+                    >
+                      Run {workflow.name}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && (() => {
+          const ancestors = workflowAncestorRuns(selectedWorkflow);
+          const childRuns = workflowChildRuns(selectedWorkflow);
+          const peerRuns = workflowPeerRuns(selectedWorkflow);
+          const branchOriginSummary = workflowBranchOriginSummary(selectedWorkflow);
+          const failureLineage = workflowFailureLineage(selectedWorkflow).slice(0, 3);
+          const familyOutputs = workflowFamilyArtifactOutputs(selectedWorkflow);
+          const selectedWorkflowOutputPath = workflowPrimaryOutputPath(selectedWorkflow);
+          if (
+            ancestors.length === 0
+            && childRuns.length === 0
+            && peerRuns.length === 0
+            && branchOriginSummary.length === 0
+            && !selectedWorkflowBestContinuation
+            && failureLineage.length === 0
+            && familyOutputs.length === 0
+          ) {
+            return null;
+          }
+          return (
+            <div className="cockpit-inspector-stack">
+              {branchOriginSummary.length > 0 && (
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">branch origin</div>
+                  <div className="cockpit-value">{branchOriginSummary.join(" · ")}</div>
+                  {selectedWorkflow.parentRunIdentity && (
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => inspectWorkflowRun(workflowRunByIdentity.get(selectedWorkflow.parentRunIdentity ?? ""))}
+                    >
+                      Open Parent
+                    </button>
+                  )}
+                </div>
+              )}
+              {selectedWorkflowBestContinuation && (
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">best continuation</div>
+                  <div className="cockpit-value">
+                    {selectedWorkflowBestContinuation.workflowName}
+                    {" · "}
+                    {selectedWorkflowBestContinuation.summary}
+                    {" · "}
+                    {workflowSupervisionLabel(selectedWorkflowBestContinuation)}
+                    {" · "}
+                    {formatAge(selectedWorkflowBestContinuation.updatedAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open best continuation for ${selectedWorkflowName}`}
+                    onClick={() => inspectWorkflowRun(selectedWorkflowBestContinuation)}
+                  >
+                    Open
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Continue best continuation for ${selectedWorkflowName}`}
+                    onClick={() => continueWorkflowRun(selectedWorkflowBestContinuation)}
+                  >
+                    Continue
+                  </button>
+                  {(selectedWorkflowBestContinuation.artifacts[0]?.filePath ?? selectedWorkflowBestContinuation.artifactPaths[0]) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use latest output from best continuation for ${selectedWorkflowName}`}
+                      onClick={() => queueWorkflowOutputContext(selectedWorkflowBestContinuation)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(selectedWorkflowBestContinuation) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare best continuation output for ${selectedWorkflowName}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, selectedWorkflowBestContinuation)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    selectedWorkflowBestContinuation,
+                    "best continuation",
+                    `${selectedWorkflow.id}:best-continuation`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    selectedWorkflowBestContinuation,
+                    "best continuation",
+                    `${selectedWorkflow.id}:best-continuation`,
+                  )}
+                </div>
+              )}
+              {(selectedWorkflowOutputPath || selectedWorkflowBestContinuation || failureLineage.length > 0 || familyOutputs.length > 0) && (
+                <div className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">next step</div>
+                  <div className="cockpit-value">Bundle current workflow-family state into one continuation-planning draft.</div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Draft next step from workflow family for ${selectedWorkflowName}`}
+                    onClick={() => queueWorkflowFamilyPlan(selectedWorkflow)}
+                  >
+                    Draft Next Step
+                  </button>
+                </div>
+              )}
+              {failureLineage.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:failure-lineage:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "failure lineage" : "failure branch"}</div>
+                  <div className="cockpit-value">
+                    {entry.workflowName} · {entry.summary} · {workflowSupervisionLabel(entry)} · {formatAge(entry.updatedAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open failure lineage branch ${entry.workflowName}`}
+                    onClick={() => inspectWorkflowRun(entry)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue failure lineage branch ${entry.workflowName}`}
+                      onClick={() => continueWorkflowRun(entry)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  {workflowLatestFailureContext(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use failure context from ${entry.workflowName} failure lineage`}
+                      onClick={() => queueWorkflowLatestFailureContext(entry)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    index === 0 ? "failure lineage branch" : "failure branch",
+                    `${selectedWorkflow.id}:failure-lineage-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    entry,
+                    index === 0 ? "failure lineage branch" : "failure branch",
+                    `${selectedWorkflow.id}:failure-lineage-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                </div>
+              ))}
+              {familyOutputs.map((output) => (
+                <div key={`${selectedWorkflow.id}:family-output:${output.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">family output</div>
+                  <div className="cockpit-value">
+                    {output.filePath}
+                    {" · "}
+                    {output.sourceWorkflow.workflowName}
+                    {" · "}
+                    {output.sourceLabel}
+                    {" · "}
+                    {formatAge(output.createdAt)}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open workflow for family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                    onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
+                  >
+                    Open Run
+                  </button>
+                  {workflowCanContinue(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue workflow for family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                      onClick={() => continueWorkflowRun(output.sourceWorkflow)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                    onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
+                  >
+                    Use Output
+                  </button>
+                  {workflowOwnFailureContext(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use family output failure from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                      onClick={() => queueWorkflowStepContext(output.sourceWorkflow, failedWorkflowStep(output.sourceWorkflow)!)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
+                  {selectedWorkflowOutputPath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare family output ${output.filePath} from ${shortIdentifier(output.sourceWorkflow.runIdentity ?? output.sourceWorkflow.id)}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, output.sourceWorkflow, output.filePath)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    output.sourceWorkflow,
+                    `family output ${output.filePath}`,
+                    `${selectedWorkflow.id}:family-output-controls:${output.key}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    output.sourceWorkflow,
+                    `family output ${output.filePath}`,
+                    `${selectedWorkflow.id}:family-output-controls:${output.key}`,
+                  )}
+                </div>
+              ))}
+              {ancestors.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:ancestor:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "parent run" : "ancestor run"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.workflowName,
+                      entry.status,
+                      workflowSupervisionLabel(entry),
+                      ...workflowComparisonSummary(selectedWorkflow, entry),
+                      formatAge(entry.updatedAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => inspectWorkflowRun(entry)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue ancestor run ${entry.workflowName}`}
+                      onClick={() => continueWorkflowRun(entry)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  {workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use ancestor output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputContext(entry)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare ancestor output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, entry)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    index === 0 ? "parent run" : "ancestor run",
+                    `${selectedWorkflow.id}:ancestor-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    entry,
+                    index === 0 ? "parent run" : "ancestor run",
+                    `${selectedWorkflow.id}:ancestor-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                </div>
+              ))}
+              {childRuns.map((entry) => (
+                <div key={`${selectedWorkflow.id}:child:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">child branch</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.workflowName,
+                      entry.status,
+                      workflowSupervisionLabel(entry),
+                      entry.resumeCheckpointLabel ?? entry.branchKind ?? "branch",
+                      ...workflowComparisonSummary(selectedWorkflow, entry),
+                      formatAge(entry.updatedAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => inspectWorkflowRun(entry)}
+                  >
+                    Open
+                  </button>
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => continueWorkflowRun(entry)}
+                  >
+                    Continue
+                  </button>
+                  {(entry.artifacts[0]?.filePath ?? entry.artifactPaths[0]) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use child branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputContext(entry)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare child branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, entry)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    "child branch",
+                    `${selectedWorkflow.id}:child-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    entry,
+                    "child branch",
+                    `${selectedWorkflow.id}:child-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                </div>
+              ))}
+              {peerRuns.map((entry) => (
+                <div key={`${selectedWorkflow.id}:peer:${entry.runIdentity ?? entry.id}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">peer branch</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.workflowName,
+                      entry.status,
+                      workflowSupervisionLabel(entry),
+                      entry.resumeCheckpointLabel ?? entry.branchKind ?? "branch",
+                      ...workflowComparisonSummary(selectedWorkflow, entry),
+                      formatAge(entry.updatedAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => inspectWorkflowRun(entry)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue peer branch ${entry.workflowName}`}
+                      onClick={() => continueWorkflowRun(entry)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  {(entry.artifacts[0]?.filePath ?? entry.artifactPaths[0]) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use peer branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputContext(entry)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(entry) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare peer branch output ${entry.artifactPaths[0] ?? entry.artifacts[0]?.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, entry)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {renderWorkflowCheckpointControls(
+                    entry,
+                    "peer branch",
+                    `${selectedWorkflow.id}:peer-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                  {renderWorkflowRecoveryControls(
+                    entry,
+                    "peer branch",
+                    `${selectedWorkflow.id}:peer-controls:${entry.runIdentity ?? entry.id}`,
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+        {selectedInspector.kind === "workflow" && selectedWorkflow?.timeline?.length && (
+          <div className="cockpit-inspector-stack">
+            {selectedWorkflow.timeline.map((entry) => (
+              (() => {
+                const checkpointStepId = entry.stepId ?? null;
+                const checkpointDraft = checkpointStepId
+                  ? selectedWorkflowCheckpointDraftByStep.get(checkpointStepId) ?? null
+                  : null;
+                return (
+                  <div key={`${selectedWorkflow.id}:${entry.kind}:${entry.at}`} className="cockpit-inspector-stack-row">
+                    <div className="cockpit-key">{entry.kind.replace(/_/g, " ")}</div>
+                    <div className="cockpit-value">
+                      {entry.summary}
+                      {entry.stepId ? ` · ${entry.stepId}` : ""}
+                      {entry.durationMs ? ` · ${entry.durationMs}ms` : ""}
+                    </div>
+	                    {checkpointDraft && (
+	                      <button
+	                        className="cockpit-feedback-button"
+	                        aria-label={`Plan retry from ${checkpointStepId} for ${selectedWorkflowName}`}
+	                        onClick={() => void queueLiveWorkflowResumePlan(selectedWorkflow, {
+	                          action: "retry",
+	                          stepId: checkpointStepId,
+	                          fallbackDraft: checkpointDraft,
+	                          label: selectedWorkflowName,
+	                        })}
+	                      >
+	                        Plan Retry
+	                      </button>
+	                    )}
+                  </div>
+                );
+              })()
+            ))}
+          </div>
+        )}
+        {selectedInspector.kind === "workflow" && selectedWorkflow && (() => {
+          const artifactHistory = workflowHistoryArtifactEntries(selectedWorkflow);
+          const checkpointHistory = workflowCheckpointHistoryEntries(selectedWorkflow);
+          const lineageEvents = workflowLineageEventEntries(selectedWorkflow);
+          const selectedWorkflowOutputPath = workflowPrimaryOutputPath(selectedWorkflow);
+          if (artifactHistory.length === 0 && checkpointHistory.length === 0 && lineageEvents.length === 0) {
+            return null;
+          }
+          return (
+            <div className="cockpit-inspector-stack">
+              {artifactHistory.map((output, index) => (
+                <div key={`${selectedWorkflow.id}:artifact-history:${output.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "output history" : "history output"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      output.filePath,
+                      output.scopeLabel,
+                      output.sourceWorkflow.workflowName,
+                      output.summary,
+                      formatAge(output.createdAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open ${output.scopeLabel} for output history ${output.filePath}`}
+                    onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue ${output.scopeLabel} for output history ${output.filePath}`}
+                      onClick={() => continueWorkflowRun(output.sourceWorkflow)}
+                    >
+                      Continue
+                    </button>
+                  )}
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Use ${output.scopeLabel} for output history ${output.filePath}`}
+                    onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
+                  >
+                    Use Output
+                  </button>
+                  {selectedWorkflowOutputPath && workflowPrimaryOutputPath(output.sourceWorkflow) && selectedWorkflowOutputPath !== output.filePath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Compare ${output.scopeLabel} for output history ${output.filePath}`}
+                      onClick={() => queueWorkflowOutputComparison(selectedWorkflow, output.sourceWorkflow, output.filePath)}
+                    >
+                      Compare
+                    </button>
+                  )}
+                  {workflowOwnFailureContext(output.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use failure from ${output.scopeLabel} for output history ${output.filePath}`}
+                      onClick={() => queueWorkflowStepContext(output.sourceWorkflow, failedWorkflowStep(output.sourceWorkflow)!)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
+                </div>
+              ))}
+              {checkpointHistory.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:checkpoint-history:${entry.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "checkpoint history" : "checkpoint branch"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.actionLabel,
+                      entry.stepId,
+                      entry.scopeLabel,
+                      entry.sourceWorkflow.workflowName,
+                      entry.sourceWorkflow.summary,
+                      formatAge(entry.createdAt),
+                    ].join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+                    onClick={() => inspectWorkflowRun(entry.sourceWorkflow)}
+                  >
+                    Open
+                  </button>
+                  {workflowCanContinue(entry.sourceWorkflow) && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Continue ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+                      onClick={() => continueWorkflowRun(entry.sourceWorkflow)}
+                    >
+                      Continue
+                    </button>
+                  )}
+	                  <button
+	                    className="cockpit-feedback-button"
+	                    aria-label={`${entry.actionLabel} from ${entry.scopeLabel} for checkpoint history ${entry.stepId}`}
+	                    onClick={() => void queueLiveWorkflowResumePlan(entry.sourceWorkflow, {
+	                      action: entry.kind === "retry_failed_step" ? "retry" : "branch",
+	                      stepId: entry.stepId,
+	                      fallbackDraft: entry.draft,
+	                      label: `${entry.scopeLabel} ${entry.sourceWorkflow.workflowName}`,
+	                    })}
+	                  >
+	                    {entry.actionLabel}
+	                  </button>
+                </div>
+              ))}
+              {lineageEvents.map((entry, index) => (
+                <div key={`${selectedWorkflow.id}:lineage-event:${entry.key}`} className="cockpit-inspector-stack-row">
+                  <div className="cockpit-key">{index === 0 ? "lineage event" : "history event"}</div>
+                  <div className="cockpit-value">
+                    {[
+                      entry.timelineEntry.kind.replace(/_/g, " "),
+                      entry.scopeLabel,
+                      entry.sourceWorkflow.workflowName,
+                      entry.timelineEntry.summary,
+                      entry.timelineEntry.stepId,
+                      entry.timelineEntry.durationMs ? `${entry.timelineEntry.durationMs}ms` : null,
+                      formatAge(entry.createdAt),
+                    ].filter(Boolean).join(" · ")}
+                  </div>
+                  <button
+                    className="cockpit-feedback-button"
+                    aria-label={`Open ${entry.scopeLabel} for lineage event ${entry.timelineEntry.kind}`}
+                    onClick={() => inspectWorkflowRun(entry.sourceWorkflow)}
+                  >
+                    Open
+                  </button>
+                  {entry.outputPath && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use output from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+                      onClick={() => queueComposerDraft(`Use the workspace file "${entry.outputPath}" as context for the next action.`)}
+                    >
+                      Use Output
+                    </button>
+                  )}
+                  {entry.failureStep && (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Use failure from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+                      onClick={() => queueWorkflowStepContext(entry.sourceWorkflow, entry.failureStep!)}
+                    >
+                      Use Failure
+                    </button>
+                  )}
+	                  {entry.checkpointDraft && (
+	                    <button
+	                      className="cockpit-feedback-button"
+	                      aria-label={`Plan retry from ${entry.scopeLabel} lineage event ${entry.timelineEntry.kind}`}
+	                      onClick={() => void queueLiveWorkflowResumePlan(entry.sourceWorkflow, {
+	                        action: "retry",
+	                        stepId: entry.timelineEntry.stepId,
+	                        fallbackDraft: entry.checkpointDraft,
+	                        label: `${entry.scopeLabel} ${entry.sourceWorkflow.workflowName}`,
+	                      })}
+	                    >
+	                      Plan Retry
+	                    </button>
+	                  )}
+                  {entry.failureStep?.recoveryActions?.length ? (
+                    <button
+                      className="cockpit-feedback-button"
+                      aria-label={`Repair ${entry.scopeLabel} lineage event ${entry.failureStep.id}`}
+                      onClick={() => void runCapabilityActions(readActionList(entry.failureStep?.recoveryActions), `${entry.sourceWorkflow.workflowName} ${entry.failureStep?.id}`)}
+                    >
+                      Repair
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
         {selectedInspector.kind === "operator" && (
           <div className="cockpit-feedback-row">
             {(selectedInspector.entity.entityType === "workflow_definition"
@@ -4441,31 +12670,272 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             )}
           </div>
         )}
-        {selectedInspector.kind === "artifact" && (
-          <div className="cockpit-feedback-row">
-            <button
-              className="cockpit-feedback-button"
-              onClick={() =>
-                queueComposerDraft(
-                  `Use the workspace file "${selectedInspector.artifact.filePath}" as context for the next action.`,
-                )
-              }
-              >
-                Use In Command Bar
-              </button>
-            {artifactRoundtripWorkflows.slice(0, 2).map((workflow) => (
-              <button
-                key={`${selectedInspector.artifact.id}:${workflow.name}`}
-                className="cockpit-feedback-button"
-                onClick={() =>
-                  queueArtifactWorkflowDraft(workflow, selectedInspector.artifact.filePath)
-                }
-              >
-                Run {workflow.name}
-              </button>
-            ))}
-          </div>
-        )}
+        {selectedInspector.kind === "artifact" && (() => {
+          const artifact = selectedInspector.artifact;
+          const lineage = resolveArtifactLineage(artifact);
+          const sourceWorkflow = lineage.sourceWorkflow;
+          const sourceFailure = artifactLatestFailureContext(artifact);
+          const relatedOutputs = artifactRelatedFamilyOutputs(artifact).slice(0, 3);
+          const primaryRelatedOutput = relatedOutputs[0] ?? null;
+          const candidateRuns = artifactLineageCandidateRuns(artifact);
+          const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 3);
+          return (
+            <>
+              <div className="cockpit-feedback-row">
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() =>
+                    queueComposerDraft(
+                      `Use the workspace file "${artifact.filePath}" as context for the next action.`,
+                    )
+                  }
+                >
+                  Use In Command Bar
+                </button>
+                <button
+                  className="cockpit-feedback-button"
+                  onClick={() => queueArtifactFollowOnPlan(artifact)}
+                >
+                  Draft Next Step
+                </button>
+                {sourceWorkflow && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => inspectWorkflowRun(sourceWorkflow)}
+                  >
+                    Open Source Run
+                  </button>
+                )}
+                {sourceWorkflow && workflowCanContinue(sourceWorkflow) && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => continueWorkflowRun(sourceWorkflow)}
+                  >
+                    Continue Source Run
+                  </button>
+                )}
+                {sourceFailure && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step)}
+                  >
+                    Use Source Failure
+                  </button>
+                )}
+                {primaryRelatedOutput && (
+                  <button
+                    className="cockpit-feedback-button"
+                    onClick={() => queueArtifactOutputComparison(artifact, primaryRelatedOutput.filePath)}
+                  >
+                    Compare Related Output
+                  </button>
+                )}
+                {compatibleWorkflows.map((workflow) => (
+                  <button
+                    key={`${artifact.id}:${workflow.name}`}
+                    className="cockpit-feedback-button"
+                    onClick={() =>
+                      queueArtifactWorkflowDraft(
+                        workflow,
+                        artifact.filePath,
+                        artifactSourceOutputSurfaceTypes(artifact),
+                      )
+                    }
+                  >
+                    Run {workflow.name}
+                  </button>
+                ))}
+              </div>
+              {artifactInspectorSummary(artifact).length > 0 && (
+                <div className="cockpit-chip-row">
+                  {artifactInspectorSummary(artifact).map((detail) => (
+                    <span key={`${artifact.id}:artifact-summary:${detail}`} className="cockpit-chip">
+                      {detail}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {(sourceWorkflow || compatibleWorkflows.length > 0 || relatedOutputs.length > 0 || !sourceWorkflow) && (
+                <div className="cockpit-inspector-stack">
+                  {!sourceWorkflow && (
+                    <div className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">source run</div>
+                      <div className="cockpit-value">
+                        {lineage.ambiguous
+                          ? `unresolved · ${lineage.candidateWorkflows.length} recent runs wrote ${artifact.filePath}`
+                          : "unresolved · source run not visible in the current lineage window"}
+                      </div>
+                    </div>
+                  )}
+                  {sourceWorkflow && (
+                    <div className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">source run</div>
+                      <div className="cockpit-value">
+                        {[
+                          sourceWorkflow.workflowName,
+                          sourceWorkflow.summary,
+                          workflowSupervisionLabel(sourceWorkflow),
+                          formatAge(sourceWorkflow.updatedAt),
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Open source run for artifact ${artifact.filePath}`}
+                        onClick={() => inspectWorkflowRun(sourceWorkflow)}
+                      >
+                        Open
+                      </button>
+                      {workflowCanContinue(sourceWorkflow) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Continue source run for artifact ${artifact.filePath}`}
+                          onClick={() => continueWorkflowRun(sourceWorkflow)}
+                        >
+                          Continue
+                        </button>
+                      )}
+                      {sourceFailure && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Use source failure for artifact ${artifact.filePath}`}
+                          onClick={() => queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step)}
+                        >
+                          Use Failure
+                        </button>
+                      )}
+                      {primaryRelatedOutput && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Compare related output for artifact ${artifact.filePath}`}
+                          onClick={() => queueArtifactOutputComparison(artifact, primaryRelatedOutput.filePath)}
+                        >
+                          Compare
+                        </button>
+                      )}
+                      {renderWorkflowCheckpointControls(
+                        sourceWorkflow,
+                        `artifact source ${artifact.filePath}`,
+                        `${artifact.id}:source-run`,
+                      )}
+                      {renderWorkflowRecoveryControls(
+                        sourceWorkflow,
+                        `artifact source ${artifact.filePath}`,
+                        `${artifact.id}:source-run`,
+                      )}
+                    </div>
+                  )}
+                  {!sourceWorkflow && candidateRuns.map((candidate, index) => (
+                    <div key={`${artifact.id}:candidate-source:${candidate.runIdentity ?? candidate.id}`} className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">{index === 0 ? "candidate source" : "candidate branch"}</div>
+                      <div className="cockpit-value">
+                        {[
+                          candidate.workflowName,
+                          candidate.summary,
+                          workflowSupervisionLabel(candidate),
+                          formatAge(candidate.updatedAt),
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Open candidate source run ${candidate.workflowName} for artifact ${artifact.filePath}`}
+                        onClick={() => inspectWorkflowRun(candidate)}
+                      >
+                        Open
+                      </button>
+                      {workflowOwnFailureContext(candidate) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Use candidate failure ${candidate.workflowName} for artifact ${artifact.filePath}`}
+                          onClick={() => queueWorkflowStepContext(candidate, failedWorkflowStep(candidate)!)}
+                        >
+                          Use Failure
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {compatibleWorkflows.map((workflow) => (
+                    <div key={`${artifact.id}:follow-on:${workflow.name}`} className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">follow-on</div>
+                      <div className="cockpit-value">
+                        {[
+                          workflow.name,
+                          workflow.description,
+                          workflow.risk_level,
+                          workflow.availability ?? "ready",
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Run ${workflow.name} from artifact ${artifact.filePath}`}
+                        onClick={() =>
+                          queueArtifactWorkflowDraft(
+                            workflow,
+                            artifact.filePath,
+                            artifactSourceOutputSurfaceTypes(artifact),
+                          )
+                        }
+                      >
+                        Run
+                      </button>
+                    </div>
+                  ))}
+                  {relatedOutputs.map((output) => (
+                    <div key={`${artifact.id}:related-output:${output.key}`} className="cockpit-inspector-stack-row">
+                      <div className="cockpit-key">related output</div>
+                      <div className="cockpit-value">
+                        {[
+                          output.filePath,
+                          output.sourceWorkflow.workflowName,
+                          output.sourceLabel,
+                          formatAge(output.createdAt),
+                        ].join(" · ")}
+                      </div>
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Open related output run ${output.filePath}`}
+                        onClick={() => inspectWorkflowRun(output.sourceWorkflow)}
+                      >
+                        Open Run
+                      </button>
+                      {workflowCanContinue(output.sourceWorkflow) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Continue related output run ${output.filePath}`}
+                          onClick={() => continueWorkflowRun(output.sourceWorkflow)}
+                        >
+                          Continue
+                        </button>
+                      )}
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Use related output ${output.filePath}`}
+                        onClick={() => queueComposerDraft(`Use the workspace file "${output.filePath}" as context for the next action.`)}
+                      >
+                        Use Output
+                      </button>
+                      {workflowOwnFailureContext(output.sourceWorkflow) && (
+                        <button
+                          className="cockpit-feedback-button"
+                          aria-label={`Use related output failure ${output.filePath}`}
+                          onClick={() => queueWorkflowStepContext(output.sourceWorkflow, failedWorkflowStep(output.sourceWorkflow)!)}
+                        >
+                          Use Failure
+                        </button>
+                      )}
+                      <button
+                        className="cockpit-feedback-button"
+                        aria-label={`Compare related output ${output.filePath} with artifact ${artifact.filePath}`}
+                        onClick={() => queueArtifactOutputComparison(artifact, output.filePath)}
+                      >
+                        Compare
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          );
+        })()}
         <div className="cockpit-inspector-details">
           {Object.entries(details).map(([key, value]) => (
             <div key={key} className="cockpit-inspector-detail">
@@ -4769,21 +13239,105 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("outputs_pane")}
               >
                 <section className="cockpit-panel cockpit-panel--embedded">
-                  <div className="cockpit-sublist">
-                    {artifacts.map((artifact) => (
-                      <button
-                        key={artifact.id}
-                        className={`cockpit-sublist-button ${
-                          selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
-                            ? "active"
-                            : ""
-                        }`}
-                        onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
-                      >
-                        <span>{artifact.filePath}</span>
-                        <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
-                      </button>
-                    ))}
+                  <div className="cockpit-list">
+                    {artifacts.map((artifact) => {
+                      const lineage = resolveArtifactLineage(artifact);
+                      const sourceWorkflow = lineage.sourceWorkflow;
+                      const sourceFailure = artifactLatestFailureContext(artifact);
+                      const primaryRelatedOutput = artifactPrimaryRelatedOutput(artifact);
+                      const compatibleWorkflows = artifactCompatibleFollowOnWorkflows(artifact).slice(0, 1);
+                      return (
+                        <div key={artifact.id} className="cockpit-row">
+                          <button
+                            className={`cockpit-row-button ${
+                              selectedInspector?.kind === "artifact" && selectedInspector.artifact.id === artifact.id
+                                ? "active"
+                                : ""
+                            }`}
+                            onClick={() => setSelectedInspector({ kind: "artifact", artifact })}
+                          >
+                            <div className="cockpit-row-header">
+                              <span className="cockpit-role">{artifact.filePath}</span>
+                              <span className="cockpit-row-age">{formatAge(artifact.createdAt)}</span>
+                            </div>
+                            <div className="cockpit-row-body">{artifact.summary}</div>
+                            <div className="cockpit-row-meta">
+                              {artifact.source}
+                              {sourceWorkflow ? ` · ${sourceWorkflow.workflowName} · ${workflowSupervisionLabel(sourceWorkflow)}` : ""}
+                              {lineage.ambiguous ? ` · source ambiguous` : !sourceWorkflow ? ` · source unresolved` : ""}
+                              {sourceFailure ? ` · failure context ready` : ""}
+                              {primaryRelatedOutput ? ` · related ${primaryRelatedOutput.filePath}` : ""}
+                              {compatibleWorkflows.length > 0 ? ` · ${compatibleWorkflows.length} follow-on ready` : ""}
+                            </div>
+                          </button>
+                          <div className="cockpit-feedback-row">
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() =>
+                                queueComposerDraft(
+                                  `Use the workspace file "${artifact.filePath}" as context for the next action.`,
+                                )
+                              }
+                            >
+                              Use
+                            </button>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => queueArtifactFollowOnPlan(artifact)}
+                            >
+                              Draft Next Step
+                            </button>
+                            {sourceWorkflow && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => inspectWorkflowRun(sourceWorkflow)}
+                              >
+                                Open Source
+                              </button>
+                            )}
+                            {sourceWorkflow && workflowCanContinue(sourceWorkflow) && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => continueWorkflowRun(sourceWorkflow)}
+                              >
+                                Continue Source
+                              </button>
+                            )}
+                            {sourceFailure && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueWorkflowStepContext(sourceFailure.workflow, sourceFailure.step)}
+                              >
+                                Use Source Failure
+                              </button>
+                            )}
+                            {primaryRelatedOutput && (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueArtifactOutputComparison(artifact, primaryRelatedOutput.filePath)}
+                              >
+                                Compare Related
+                              </button>
+                            )}
+                            {compatibleWorkflows.map((workflow) => (
+                              <button
+                                key={`${artifact.id}:outputs-pane:${workflow.name}`}
+                                className="cockpit-feedback-button"
+                                onClick={() =>
+                                  queueArtifactWorkflowDraft(
+                                    workflow,
+                                    artifact.filePath,
+                                    artifactSourceOutputSurfaceTypes(artifact),
+                                  )
+                                }
+                              >
+                                Run {workflow.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
                     {artifacts.length === 0 && (
                       <div className="cockpit-empty">No recent file outputs in the current audit window.</div>
                     )}
@@ -4926,7 +13480,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           <CockpitWorkspaceWindow
             panelId="guardian_state_pane"
             title="Guardian state"
-            meta={`${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`}
+            meta={
+              operatorGuardianState
+                ? `${operatorGuardianState.summary.overall_confidence} · ${operatorGuardianState.summary.action_posture.replace(/_/g, " ")}`
+                : `${observerState?.time_of_day ?? "pending"} · ${observerState?.day_of_week ?? "today"}`
+            }
             hint={COCKPIT_WINDOW_HINTS.guardianState}
             showHint={cockpitHintsEnabled}
             minWidth={420}
@@ -4936,34 +13494,228 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-state-grid">
                 <div>
+                  <div className="cockpit-key">overall confidence</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.summary.overall_confidence ?? "pending"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">intent resolution</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState
+                      ? operatorGuardianState.summary.intent_resolution.replace(/_/g, " ")
+                      : "unknown"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">action posture</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState
+                      ? operatorGuardianState.summary.action_posture.replace(/_/g, " ")
+                      : "unknown"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">world confidence</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.summary.world_model_confidence ?? "unknown"}
+                  </div>
+                </div>
+                <div>
+                  <div className="cockpit-key">user-model confidence</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.summary.user_model_confidence ?? "unknown"}
+                  </div>
+                </div>
+                <div>
                   <div className="cockpit-key">user state</div>
-                  <div className="cockpit-value">{observerState?.user_state ?? "unknown"}</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.observer.user_state ?? observerState?.user_state ?? "unknown"}
+                  </div>
                 </div>
                 <div>
                   <div className="cockpit-key">interrupt mode</div>
-                  <div className="cockpit-value">{observerState?.interruption_mode ?? "unknown"}</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.observer.interruption_mode ?? observerState?.interruption_mode ?? "unknown"}
+                  </div>
                 </div>
                 <div>
                   <div className="cockpit-key">active window</div>
-                  <div className="cockpit-value">{observerState?.active_window ?? "not observed"}</div>
+                  <div className="cockpit-value">
+                    {operatorGuardianState?.observer.active_window ?? observerState?.active_window ?? "not observed"}
+                  </div>
                 </div>
                 <div>
                   <div className="cockpit-key">work hours</div>
                   <div className="cockpit-value">
-                    {observerState?.is_working_hours ? "within window" : "outside window"}
+                    {(operatorGuardianState?.observer.is_working_hours ?? observerState?.is_working_hours)
+                      ? "within window"
+                      : "outside window"}
                   </div>
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">current focus</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.summary.current_focus ?? "No guardian focus synthesized yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">judgment proof</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.judgment_proof_lines.length
+                    ? operatorGuardianState.explanation.judgment_proof_lines.join(" • ")
+                    : "No explicit proof lines surfaced yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 guardian brain</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain
+                    ? [
+                      `${operatorM8GuardianBrain.summary.decision_count} decisions`,
+                      `${operatorM8GuardianBrain.summary.capability_choice_count} capability choices`,
+                      `${operatorM8GuardianBrain.summary.restraint_count} restraint receipts`,
+                      `${operatorM8GuardianBrain.summary.approval_preservation_count} approval-preserving paths`,
+                      operatorM8GuardianBrain.summary.receipt_source?.replace(/_/g, " "),
+                    ].filter(Boolean).join(" • ")
+                    : "M8 guardian-brain receipts pending."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 action split</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain?.decision_receipts.length
+                    ? operatorM8GuardianBrain.decision_receipts
+                      .map((receipt) => `${receipt.action.replace(/_/g, " ")}: ${receipt.reason.replace(/_/g, " ")}`)
+                      .join(" • ")
+                    : "No M8 action receipts surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 capability choice</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain?.capability_choices.length
+                    ? operatorM8GuardianBrain.capability_choices
+                      .slice(0, 4)
+                      .map((capability) => [
+                        capability.label,
+                        capability.lane.replace(/_/g, " "),
+                        capability.risk_level.replace(/_/g, " "),
+                        capability.requires_approval ? "approval required" : null,
+                      ].filter(Boolean).join(" · "))
+                      .join(" • ")
+                    : "No M8 capability-choice receipts surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">M8 quality scores</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorM8GuardianBrain?.decision_receipts.length
+                    ? operatorM8GuardianBrain.decision_receipts
+                      .slice(0, 3)
+                      .map((receipt) => [
+                        receipt.scenario_id.replace(/_/g, " "),
+                        receipt.scores.timing ? `timing ${receipt.scores.timing}` : null,
+                        receipt.scores.usefulness ? `usefulness ${receipt.scores.usefulness}` : null,
+                        receipt.scores.trust_preservation ? `trust ${receipt.scores.trust_preservation}` : null,
+                        receipt.scores.recovery ? `recovery ${receipt.scores.recovery}` : null,
+                      ].filter(Boolean).join(" · "))
+                      .join(" • ")
+                    : "No M8 quality-score receipts surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model restraint</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState
+                    ? [
+                      operatorGuardianState.user_model.restraint_posture.replace(/_/g, " "),
+                      operatorGuardianState.user_model.continuity_strategy.replace(/_/g, " "),
+                    ].join(" • ")
+                    : "User-model restraint unavailable."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">clarification watchpoints</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.user_model.clarification_watchpoints.length
+                    ? operatorGuardianState.user_model.clarification_watchpoints.join(" • ")
+                    : "No explicit watchpoints surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">restraint reasons</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.restraint_reasons.length
+                    ? operatorGuardianState.explanation.restraint_reasons.join(" • ")
+                    : "No explicit restraint reasons surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model evidence</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.user_model.evidence_store.length
+                    ? operatorGuardianState.user_model.evidence_store.slice(0, 3).join(" • ")
+                    : "No explicit user-model evidence surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model facets</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.user_model.facets.length
+                    ? operatorGuardianState.user_model.facets
+                      .slice(0, 3)
+                      .map((facet) => [
+                        facet.label,
+                        facet.value,
+                        facet.confidence.replace(/_/g, " "),
+                        facet.evidence_lines[0] ?? facet.evidence_sources[0] ?? null,
+                      ].filter(Boolean).join(" · "))
+                      .join(" • ")
+                    : "No explicit user-model facets surfaced."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">judgment risks</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.judgment_risks.length
+                    ? operatorGuardianState.explanation.judgment_risks.join(" • ")
+                    : "No elevated judgment risks."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">next up</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.operator_guidance.next_up.length
+                    ? operatorGuardianState.operator_guidance.next_up.join(" • ")
+                    : "No immediate next step surfaced."}
                 </div>
               </div>
               <div className="cockpit-context-block">
                 <div className="cockpit-key">screen context</div>
                 <div className="cockpit-value cockpit-value--multiline">
-                  {observerState?.screen_context ?? "No screen context ingested yet."}
+                  {operatorGuardianState?.observer.screen_context ?? observerState?.screen_context ?? "No screen context ingested yet."}
                 </div>
               </div>
               <div className="cockpit-context-block">
                 <div className="cockpit-key">active goals</div>
                 <div className="cockpit-value cockpit-value--multiline">
-                  {observerState?.active_goals_summary ?? "Goal summary unavailable."}
+                  {operatorGuardianState?.observer.active_goals_summary ?? observerState?.active_goals_summary ?? "Goal summary unavailable."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">learning guidance</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.operator_guidance.learning_guidance ?? "No explicit learning guidance yet."}
+                </div>
+              </div>
+              <div className="cockpit-context-block">
+                <div className="cockpit-key">user-model benchmark</div>
+                <div className="cockpit-value cockpit-value--multiline">
+                  {operatorGuardianState?.explanation.user_model_benchmark_diagnostics.length
+                    ? operatorGuardianState.explanation.user_model_benchmark_diagnostics.join(" • ")
+                    : "No user-model benchmark diagnostics surfaced."}
                 </div>
               </div>
               <div className="cockpit-context-block">
@@ -5013,6 +13765,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </span>
                   ) : null}
                 </div>
+                {activitySpendByCapabilityFamily.length > 0 ? (
+                  <div className="cockpit-ledger-summary">
+                    {activitySpendByCapabilityFamily.map((bucket) => (
+                      <span key={`family:${bucket.key}`} className="cockpit-ledger-badge">
+                        {activitySpendBucketLabel(bucket.key)} {formatUsd(bucket.cost_usd) ?? "$0.0000"} · {bucket.calls}x
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {activitySpendByRuntimePath.length > 0 ? (
+                  <div className="cockpit-ledger-summary">
+                    {activitySpendByRuntimePath.map((bucket) => (
+                      <span key={`runtime:${bucket.key}`} className="cockpit-ledger-badge">
+                        {bucket.key} {formatUsd(bucket.cost_usd) ?? "$0.0000"}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="cockpit-ledger-filter-row">
                   {ACTIVITY_LEDGER_FILTERS.map((filter) => (
                     <button
@@ -5026,9 +13796,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
               </div>
               <div className="cockpit-list">
-                {visibleActivityGroups.map((group) => {
-                  const actionTarget = activityGroupActionTarget(group);
-                  return (
+	                {visibleActivityGroups.map((group) => {
+	                  const actionTarget = activityGroupActionTarget(group);
+	                  const actionTargetWorkflow = workflowRuns.find((item) => item.threadId === actionTarget.thread_id);
+	                  return (
                     <div key={group.key} className="cockpit-row cockpit-ledger-group">
                       <button
                         className="cockpit-row-button cockpit-ledger-parent"
@@ -5084,15 +13855,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           ) : null}
                         </div>
                       )}
-                      <div className="cockpit-feedback-row">
-                        {actionTarget.continue_message && (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() => void queueThreadDraft(actionTarget.continue_message ?? "", actionTarget.thread_id)}
-                          >
-                            Continue
-                          </button>
-                        )}
+	                      <div className="cockpit-feedback-row">
+	                        {actionTarget.continue_message && (
+	                          <button
+	                            className="cockpit-feedback-button"
+	                            onClick={() => {
+	                              if (actionTargetWorkflow) {
+	                                continueWorkflowRun(actionTargetWorkflow);
+	                                return;
+	                              }
+	                              void queueThreadDraft(actionTarget.continue_message ?? "", actionTarget.thread_id);
+	                            }}
+	                          >
+	                            Continue
+	                          </button>
+	                        )}
                         {canOpenLedgerThread(actionTarget.thread_id, sessionId, knownSessionIds) && (
                           <button
                             className="cockpit-feedback-button"
@@ -5101,12 +13878,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             Open Thread
                           </button>
                         )}
-                        {actionTarget.replay_draft && actionTarget.replay_allowed !== false && (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() => queueComposerDraft(actionTarget.replay_draft ?? "")}
-                          >
-                            Replay
+	                        {actionTarget.replay_draft && actionTarget.replay_allowed !== false && actionTargetWorkflow && (
+	                          <button
+	                            className="cockpit-feedback-button"
+	                            onClick={() => void queueLiveWorkflowResumePlan(actionTargetWorkflow, {
+	                              action: "replay",
+	                              fallbackDraft: actionTarget.replay_draft,
+	                              label: actionTargetWorkflow.workflowName,
+	                            })}
+	                          >
+	                            Replay
                           </button>
                         )}
                         {actionTarget.recommended_actions?.length ? (
@@ -5154,7 +13935,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             ? "active"
                             : ""
                         }`}
-                        onClick={() => setSelectedInspector({ kind: "workflow", workflow })}
+                        onClick={() => inspectWorkflowRun(workflow)}
                       >
                         <div className="cockpit-row-header">
                           <span className="cockpit-role">{workflow.workflowName}</span>
@@ -5170,6 +13951,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             : ""}
                           {workflow.availability ? ` · ${workflow.availability}` : ""}
                           {workflow.replayAllowed === false ? ` · replay blocked` : ""}
+                          {` · supervision ${workflowSupervisionLabel(workflow)}`}
+                          {workflowChildRuns(workflow).length > 0 ? ` · ${workflowChildRuns(workflow).length} branches` : ""}
                         </div>
                         {workflow.stepRecords?.length ? (
                           <div className="cockpit-row-meta">
@@ -5189,20 +13972,53 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             {workflowResumeDetails(workflow).join(" · ")}
                           </div>
                         ) : null}
+                        {workflowStepFocusRecords(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowStepFocusRecords(workflow)
+                              .map((step) => `focus ${workflowStepSummary(step)}`)
+                              .join(" · ")}
+                          </div>
+                        ) : null}
+                        {workflowSupervisionSummary(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowSupervisionSummary(workflow).join(" · ")}
+                          </div>
+                        ) : null}
+                        {workflowBranchDebugSummary(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowBranchDebugSummary(workflow).join(" · ")}
+                          </div>
+                        ) : null}
+                        {workflowHistorySummary(workflow).length > 0 ? (
+                          <div className="cockpit-row-meta">
+                            {workflowHistorySummary(workflow).join(" · ")}
+                          </div>
+                        ) : null}
                       </button>
                       <div className="cockpit-feedback-row">
-                        {(approval?.resume_message || workflow.threadContinueMessage) && (
-                          <button
-                            className="cockpit-feedback-button"
-                            onClick={() =>
-                              void queueThreadDraft(
-                                approval?.resume_message ?? workflow.threadContinueMessage ?? "",
-                                approval?.thread_id ?? approval?.session_id ?? workflow.threadId ?? workflow.sessionId,
-                              )
-                            }
-                          >
-                            Continue
-                          </button>
+	                        {(approval?.resume_message || workflow.threadContinueMessage) && (
+	                          <button
+	                            className="cockpit-feedback-button"
+	                            onClick={() => continueWorkflowRun(workflow)}
+	                          >
+	                            Continue
+	                          </button>
+                        )}
+                        {approval && (
+                          <>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => void handleApprovalDecision(approval, "approve")}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => void handleApprovalDecision(approval, "deny")}
+                            >
+                              Deny
+                            </button>
+                          </>
                         )}
                         {(workflow.threadId || workflow.sessionId) && (
                           <button
@@ -5216,14 +14032,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           <>
                             <button
                               className="cockpit-feedback-button"
-                              onClick={() => queueComposerDraft(workflow.replayDraft ?? buildWorkflowReplayDraft(workflow))}
+                              onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+                                action: "replay",
+                                fallbackDraft: workflow.replayDraft ?? buildWorkflowReplayDraft(workflow),
+                                label: workflow.workflowName,
+                              })}
                             >
-                              Draft rerun
+                              Plan rerun
                             </button>
                             {workflow.retryFromStepDraft && (
                               <button
                                 className="cockpit-feedback-button"
-                                onClick={() => queueComposerDraft(workflow.retryFromStepDraft ?? buildWorkflowReplayDraft(workflow))}
+                                onClick={() => void queueLiveWorkflowResumePlan(workflow, {
+                                  action: "retry",
+                                  stepId: workflow.resumeFromStep,
+                                  fallbackDraft: workflow.retryFromStepDraft ?? buildWorkflowReplayDraft(workflow),
+                                  label: workflow.workflowName,
+                                })}
                               >
                                 Retry step
                               </button>
@@ -5255,12 +14080,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             Repair step
                           </button>
                         ) : null}
+                        {failedStep ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueWorkflowStepContext(workflow, failedStep)}
+                          >
+                            Use failure context
+                          </button>
+                        ) : null}
+                        {(workflow.artifacts[0]?.filePath ?? workflow.artifactPaths[0]) ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueWorkflowOutputContext(workflow)}
+                          >
+                            Use latest output
+                          </button>
+                        ) : null}
                         {studioEntryForWorkflowRun(workflow) ? (
                           <button
                             className="cockpit-feedback-button"
                             onClick={() => openExtensionStudio(studioEntryForWorkflowRun(workflow))}
                           >
                             Studio
+                          </button>
+                        ) : null}
+                        {workflowLatestBranchRun(workflow) ? (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => inspectWorkflowRun(workflowLatestBranchRun(workflow))}
+                          >
+                            Open Latest Branch
                           </button>
                         ) : null}
                       </div>
@@ -5458,7 +14307,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 minHeight={256}
                 onClose={() => closeWindowPane("presence_pane")}
               >
-                <SeraphPresencePane snapshot={seraphPresenceSnapshot} />
+                {({ isFront }) => <SeraphPresencePane snapshot={seraphPresenceSnapshot} isSelected={isFront} />}
               </CockpitWorkspaceWindow>
             )}
 
@@ -5526,8 +14375,180 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <div className="cockpit-sublist-item">
                     capture {daemonPresence?.capture_mode ?? "unknown"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
                   </div>
+                  {continuitySummary && (
+                    <>
+                      <div className="cockpit-sublist-item">
+                        continuity {formatContinuityLabel(continuitySummary.continuity_health)} · threads {continuitySummary.actionable_thread_count} · ambient {continuitySummary.ambient_item_count}
+                      </div>
+                      <div className="cockpit-sublist-item">
+                        alerts {continuitySummary.pending_notification_count} · queued {continuitySummary.queued_insight_count} · degraded routes {continuitySummary.degraded_route_count}
+                        {continuitySummary.degraded_source_adapter_count ? ` · adapters ${continuitySummary.degraded_source_adapter_count} degraded` : ""}
+                        {continuitySummary.attention_presence_surface_count ? ` · presence ${continuitySummary.attention_presence_surface_count} attention` : ""}
+                        {continuitySummary.attention_family_count ? ` · imported ${continuitySummary.attention_family_count} attention` : ""}
+                        {continuitySummary.recommended_focus ? ` · focus ${continuitySummary.recommended_focus}` : ""}
+                      </div>
+                    </>
+                  )}
+                  {continuitySourceAdapters?.summary && (
+                    <div className="cockpit-sublist-item">
+                      typed adapters {continuitySourceAdapters.summary.ready_adapter_count}/{continuitySourceAdapters.summary.adapter_count} ready
+                      {continuitySourceAdapters.summary.authenticated_adapter_count
+                        ? ` · authenticated ${continuitySourceAdapters.summary.authenticated_ready_adapter_count}/${continuitySourceAdapters.summary.authenticated_adapter_count}`
+                        : ""}
+                    </div>
+                  )}
+                  {continuityImportedReach?.summary && (
+                    <div className="cockpit-sublist-item">
+                      imported reach {continuityImportedReach.summary.active_family_count}/{continuityImportedReach.summary.family_count} active
+                      {continuityImportedReach.summary.attention_family_count
+                        ? ` · ${continuityImportedReach.summary.attention_family_count} attention`
+                        : ""}
+                    </div>
+                  )}
+                  {continuityPresenceSurfaces?.summary && (
+                    <div className="cockpit-sublist-item">
+                      presence {continuityPresenceSurfaces.summary.ready_surface_count}/{continuityPresenceSurfaces.summary.surface_count} ready
+                      {continuityPresenceSurfaces.summary.attention_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.attention_surface_count} attention`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.paired_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.paired_surface_count} paired`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.unpaired_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.unpaired_surface_count} unpaired`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.revoked_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.revoked_surface_count} revoked`
+                        : ""}
+                      {continuityPresenceSurfaces.summary.blocked_device_surface_count
+                        ? ` · ${continuityPresenceSurfaces.summary.blocked_device_surface_count} blocked reach`
+                        : ""}
+                    </div>
+                  )}
+                  {continuityPresenceSurfaces?.surfaces.slice(0, 2).map((surface) => (
+                    <div key={surface.id} className="cockpit-sublist-item">
+                      {surface.label}: {formatContinuityLabel(surface.status)}
+                      {surface.package_label ? ` · ${surface.package_label}` : ""}
+                      {continuityBoundaryParts(surface).length ? ` · ${continuityBoundaryParts(surface).join(" · ")}` : ""}
+                      {surface.repair_hint ? ` · ${surface.repair_hint}` : surface.follow_up_hint ? ` · ${surface.follow_up_hint}` : ""}
+                    </div>
+                  ))}
+                  {desktopRouteStatuses.map((route) => (
+                    <div key={route.route} className="cockpit-sublist-item">
+                      {route.label}: {formatContinuityLabel(route.status)}
+                      {route.selected_transport ? ` via ${formatContinuityLabel(route.selected_transport)}` : ""}
+                      {route.repair_hint ? ` · ${route.repair_hint}` : ""}
+                    </div>
+                  ))}
                 </div>
                 <div className="cockpit-list">
+                  {continuityRecoveryActions.slice(0, 8).map((action) => (
+                    <div key={action.id} className="cockpit-row">
+                      <div className="cockpit-row-header">
+                        <span className="cockpit-role">{action.label}</span>
+                        <span className="cockpit-row-age">{formatContinuityLabel(action.status)}</span>
+                      </div>
+                      <div className="cockpit-row-body">{action.detail}</div>
+                      <div className="cockpit-row-meta">
+                        {formatContinuityLabel(action.surface)}
+                        {continuityBoundaryParts(action).length ? ` · ${continuityBoundaryParts(action).join(" · ")}` : ""}
+                        {action.repair_hint ? ` · ${action.repair_hint}` : ""}
+                      </div>
+                      <div className="cockpit-feedback-row">
+                        {action.continue_message && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void queueThreadDraft(action.continue_message ?? action.detail, action.thread_id ?? undefined)}
+                          >
+                            Continue
+                          </button>
+                        )}
+                        {action.open_thread_available && action.thread_id && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(action.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
+                        {action.kind === "reach_repair" && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => queueComposerDraft(`Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`)}
+                          >
+                            Draft repair
+                          </button>
+                        )}
+                        {(action.kind === "source_adapter_repair" || action.kind === "imported_reach_attention" || action.kind === "presence_repair") && (
+                          <>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => queueComposerDraft(`Review ${action.label.toLowerCase()}: ${action.detail}${action.repair_hint ? ` Repair hint: ${action.repair_hint}` : ""}`)}
+                            >
+                              Draft repair
+                            </button>
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => focusPane("operator_surface_pane")}
+                            >
+                              Operator
+                            </button>
+                          </>
+                        )}
+                        {action.kind === "presence_follow_up" && (
+                          <>
+                            {isPresenceReachBlocked(action) ? (
+                              <span className="cockpit-feedback-status">follow-up blocked</span>
+                            ) : (
+                              <button
+                                className="cockpit-feedback-button"
+                                onClick={() => queueComposerDraft(action.continue_message ?? `Plan follow-up for ${action.label.toLowerCase()}: ${action.detail}`)}
+                              >
+                                Draft follow-up
+                              </button>
+                            )}
+                            <button
+                              className="cockpit-feedback-button"
+                              onClick={() => focusPane("operator_surface_pane")}
+                            >
+                              Operator
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {continuityThreads.slice(0, 3).map((thread) => (
+                    <div key={thread.id} className="cockpit-row">
+                      <div className="cockpit-row-header">
+                        <span className="cockpit-role">{thread.thread_label ?? (thread.thread_id ? `thread ${thread.thread_id.slice(0, 6)}` : "ambient follow-up")}</span>
+                        <span className="cockpit-row-age">{thread.latest_updated_at ? formatAge(thread.latest_updated_at) : formatContinuityLabel(thread.primary_surface)}</span>
+                      </div>
+                      <div className="cockpit-row-body">{thread.summary}</div>
+                      <div className="cockpit-row-meta">
+                        {thread.surfaces.map((surface) => formatContinuityLabel(surface)).join(" · ")}
+                        {thread.continuation_mode ? ` · ${formatContinuityLabel(thread.continuation_mode)}` : ""}
+                      </div>
+                      <div className="cockpit-feedback-row">
+                        {thread.continue_message && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void queueThreadDraft(thread.continue_message ?? thread.summary, thread.thread_id ?? undefined)}
+                          >
+                            Continue
+                          </button>
+                        )}
+                        {thread.open_thread_available && thread.thread_id && (
+                          <button
+                            className="cockpit-feedback-button"
+                            onClick={() => void openThread(thread.thread_id)}
+                          >
+                            Open Thread
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                   {desktopNotifications.slice(0, 3).map((notification) => (
                     <div key={notification.id} className="cockpit-row">
                       <div className="cockpit-row-header">
@@ -5550,7 +14571,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           onClick={() =>
                             void queueThreadDraft(
                               notification.resume_message
-                              || `Follow up on this desktop alert: ${notification.body}`,
+                                || `Follow up on this desktop alert: ${notification.body}`,
                               notification.thread_id ?? notification.session_id,
                             )
                           }
@@ -5587,6 +14608,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       </div>
                       <div className="cockpit-row-body">{item.content_excerpt}</div>
                       <div className="cockpit-row-meta">
+                        {item.continuation_mode ? `${formatContinuityLabel(item.continuation_mode)} · ` : ""}
                         {item.thread_label
                           ?? (item.thread_id ? sessionTitleById[item.thread_id] ?? `thread ${item.thread_id.slice(0, 6)}` : "ambient queue")}
                       </div>
@@ -5595,17 +14617,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           className="cockpit-feedback-button"
                           onClick={() =>
                             void queueThreadDraft(
-                              `Follow up on this deferred guardian item: ${item.content_excerpt}`,
-                              item.thread_id,
+                              item.resume_message ?? `Follow up on this deferred guardian item: ${item.content_excerpt}`,
+                              item.thread_id ?? item.session_id,
                             )
                           }
                         >
                           Draft Follow-up
                         </button>
-                        {item.thread_id && (
+                        {(item.thread_id || item.session_id) && (
                           <button
                             className="cockpit-feedback-button"
-                            onClick={() => void openThread(item.thread_id)}
+                            onClick={() => void openThread(item.thread_id ?? item.session_id)}
                           >
                             Open Thread
                           </button>
@@ -5622,13 +14644,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-row-body">{item.content_excerpt}</div>
                       <div className="cockpit-row-meta">
                         {formatContinuityLabel(item.continuity_surface)} · {formatContinuityLabel(item.latest_outcome)}
+                        {item.continuation_mode ? ` · ${formatContinuityLabel(item.continuation_mode)}` : ""}
                       </div>
                       <div className="cockpit-feedback-row">
                         <button
                           className="cockpit-feedback-button"
                           onClick={() =>
                             void queueThreadDraft(
-                              `Continue from this guardian intervention: ${item.content_excerpt}`,
+                              item.resume_message ?? `Continue from this guardian intervention: ${item.content_excerpt}`,
                               item.thread_id ?? item.session_id,
                             )
                           }
@@ -5707,6 +14730,18 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       {readyStarterPacks.length}/{starterPacks.length} ready
                     </div>
                   </div>
+                  <div>
+                    <div className="cockpit-key">extensions</div>
+                    <div className="cockpit-value">
+                      {extensionPackages.length} loaded · {extensionGovernanceQueue.length} governed
+                    </div>
+                  </div>
+                  <div>
+                    <div className="cockpit-key">imported reach</div>
+                    <div className="cockpit-value">
+                      {importedCapabilityFamilies.length} families · {importedCapabilityFamilies.reduce((sum, item) => sum + item.total, 0)} active / {importedCapabilityFamilies.reduce((sum, item) => sum + item.installed, 0)} installed
+                    </div>
+                  </div>
                 </div>
                 <div className="cockpit-sublist">
                   <div className="cockpit-operator-section">
@@ -5746,6 +14781,2344 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <div className="cockpit-sublist-item">
                         Search commands, install missing capabilities, and run starter packs from one place.
                       </div>
+                    )}
+                    <div className="cockpit-sublist-item">
+                      Shift+I inspect top triage · Shift+A approve top approval · Shift+C continue · Shift+O open thread · Shift+R redirect workflow · Shift+E inspect latest evidence · Shift+F use failure · Shift+T draft recovery · Shift+W inspect top workflow · Shift+H inspect top supervised workflow · Shift+L inspect latest branch · Shift+B open best continuation · Shift+N continue best continuation · Shift+G compare best continuation · Shift+U use latest output · Shift+P draft next step · Shift+M inspect latest artifact · Shift+S open artifact source · Shift+D continue artifact source · Shift+Q use artifact source failure · Shift+X compare related output · Shift+J draft artifact next step · Shift+Y run suggested artifact follow-on
+                    </div>
+                  </div>
+
+                  <section className="cockpit-operator-section" aria-label="M9 governed extension console">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M9 governed extensions</span>
+                      <span className="cockpit-operator-link">{governedExtensionConsoleSummary || "no extension rows"}</span>
+                    </div>
+                    <div className="cockpit-sublist-item">
+                      rollback requires backend receipt · blocked/degraded/revoked rows stay guarded
+                    </div>
+                    {governedExtensionRows.slice(0, 10).map((row) => (
+                      <div key={row.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: row.extensionPackage
+                                ? buildExtensionManifestEntity(row.extensionPackage)
+                                : {
+                                  entityType: "extension_manifest",
+                                  name: row.label,
+                                  meta: `${row.kind} · ${row.status}`,
+                                  summary: row.catalogItem?.description ?? row.marketplaceFlow?.summary ?? row.actionReadiness,
+                                  details: {
+                                    source: row.source,
+                                    trust: row.trust,
+                                    publisher: row.publisher,
+                                    version: row.version,
+                                    compatibility: row.compatibility,
+                                    health: row.health,
+                                    permissions: row.permissions,
+                                    risk: row.risk,
+                                    provenance: row.provenance,
+                                    contribution_families: row.contributionFamilies,
+                                    action_readiness: row.actionReadiness,
+                                    rollback: row.rollback,
+                                    reasons: row.reasons,
+                                    alternatives: row.alternatives,
+                                  },
+                                },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{row.label}</div>
+                          <div className="cockpit-operator-note">
+                            {[row.kind, row.status, row.source, row.trust, row.publisher, row.version].filter(Boolean).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            {[row.compatibility, row.health, `risk ${row.risk}`, row.permissions].filter(Boolean).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            {[row.contributionFamilies, row.actionReadiness, row.rollback].filter(Boolean).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            reasons: {row.reasons.slice(0, 3).join(" · ")}
+                          </div>
+                          <div className="cockpit-operator-note">
+                            provenance: {row.provenance} · alternatives: {row.alternatives.join(", ") || "none"}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {row.catalogItem && (row.kind === "marketplace" || row.catalogItem.update_available) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={!row.actionReady}
+                              title={row.actionReady ? row.actionReadiness : row.reasons.join(" · ")}
+                              onClick={() => void installCatalogItem(row.catalogItem as CatalogItemInfo)}
+                            >
+                              {row.catalogItem.installed && row.catalogItem.update_available ? "update" : row.actionReady ? "install" : "install guarded"}
+                            </button>
+                          ) : null}
+                          {row.extensionPackage ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${row.extensionPackage?.id}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                          ) : null}
+                          {row.extensionPackage?.disable_supported && !extensionPackageRevoked(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={extensionPackageQuarantined(row.extensionPackage)}
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "disable")}
+                            >
+                              disable
+                            </button>
+                          ) : null}
+                          {row.extensionPackage?.removable && !extensionPackageRevoked(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "remove")}
+                            >
+                              remove
+                            </button>
+                          ) : null}
+                          {row.extensionPackage && !extensionPackageRevoked(row.extensionPackage) && !extensionPackageQuarantined(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "quarantine")}
+                            >
+                              quarantine
+                            </button>
+                          ) : null}
+                          {row.extensionPackage && extensionPackageQuarantined(row.extensionPackage) ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runExtensionConsoleLifecycleAction(row.extensionPackage as ExtensionPackageInfo, "reentry")}
+                            >
+                              re-entry
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            disabled={!row.extensionPackage || !row.rollbackSnapshotId}
+                            title={row.rollback}
+                            onClick={() => {
+                              if (row.extensionPackage && row.rollbackSnapshotId) {
+                                void runExtensionConsoleLifecycleAction(row.extensionPackage, "rollback", row.rollbackSnapshotId);
+                              }
+                            }}
+                          >
+                            {row.rollbackSnapshotId ? "rollback" : "rollback unavailable"}
+                          </button>
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            disabled={!row.extensionPackage}
+                            onClick={() => {
+                              if (row.extensionPackage) {
+                                void runExtensionConsoleLifecycleAction(row.extensionPackage, "review");
+                              }
+                            }}
+                          >
+                            review
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {governedExtensionRows.length === 0 ? (
+                      <div className="cockpit-empty">No governed extension payloads loaded.</div>
+                    ) : null}
+                  </section>
+
+                  <section className="cockpit-operator-section cockpit-m7-board" aria-label="M7 command board">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M7 command board</span>
+                      <span className="cockpit-operator-link">
+                        {m7PrimaryWorkflow
+                          ? `${m7PrimaryWorkflow.workflowName} · ${formatContinuityLabel(m7PrimaryWorkflow.status)}`
+                          : "standing by"}
+                      </span>
+                    </div>
+                    <div className="cockpit-m7-signal-grid">
+                      {m7SignalTiles.map((tile) => (
+                        <div key={tile.label} className="cockpit-m7-signal">
+                          <div className="cockpit-key">{tile.label}</div>
+                          <div className="cockpit-value">{tile.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="cockpit-m7-control-strip" aria-label="M7 fast controls">
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Approve top M7 approval"
+                        disabled={!primaryApprovalTriageEntry || !m7ControlEnabled("approve", Boolean(primaryApprovalTriageEntry))}
+                        onClick={() => approveOperatorTriageEntry(primaryApprovalTriageEntry)}
+                      >
+                        approve
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Deny top M7 approval"
+                        disabled={!primaryApprovalTriageEntry?.approval || !m7ControlEnabled("deny", Boolean(primaryApprovalTriageEntry?.approval))}
+                        onClick={() => {
+                          if (primaryApprovalTriageEntry?.approval) {
+                            void handleApprovalDecision(primaryApprovalTriageEntry.approval, "deny");
+                          }
+                        }}
+                      >
+                        deny
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Pause active M7 work"
+                        disabled={!m7ControlEnabled("pause", true)}
+                        onClick={() => queueComposerDraft(
+                          `Pause active Seraph work. Active items: ${m7ActiveWorkCount}. Keep approvals, memory evidence, tool calls, and artifact lineage visible before resuming.`,
+                        )}
+                      >
+                        pause
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Resume paused M7 work"
+                        disabled={!m7ControlEnabled("resume", true)}
+                        onClick={() => queueComposerDraft(
+                          `Resume paused Seraph work. Paused items: ${m7PausedWorkCount}. Start with ${m7NextActionLabel}.`,
+                        )}
+                      >
+                        resume
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Retry primary M7 workflow"
+                        disabled={!m7PrimaryWorkflow?.retryFromStepDraft || !m7ControlEnabled("retry", Boolean(m7PrimaryWorkflow?.retryFromStepDraft))}
+                        onClick={() => {
+                          if (m7PrimaryWorkflow?.retryFromStepDraft) void queueLiveWorkflowResumePlan(m7PrimaryWorkflow, {
+                            action: "retry",
+                            stepId: m7PrimaryWorkflow.resumeFromStep,
+                            fallbackDraft: m7PrimaryWorkflow.retryFromStepDraft,
+                            label: m7PrimaryWorkflow.workflowName,
+                          });
+                        }}
+                      >
+                        retry
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Repair primary M7 workflow"
+                        disabled={!m7PrimaryFailure?.step.recoveryActions?.length || !m7ControlEnabled("repair", Boolean(m7PrimaryFailure?.step.recoveryActions?.length))}
+                        onClick={() => {
+                          if (m7PrimaryFailure?.step.recoveryActions?.length) {
+                            void runCapabilityActions(
+                              readActionList(m7PrimaryFailure.step.recoveryActions),
+                              `${m7PrimaryFailure.workflow.workflowName} ${m7PrimaryFailure.step.id}`,
+                            );
+                          }
+                        }}
+                      >
+                        repair
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Open primary M7 branch"
+                        disabled={!m7PrimaryBranch || !m7ControlEnabled("branch", Boolean(m7PrimaryBranch))}
+                        onClick={() => inspectWorkflowRun(m7PrimaryBranch)}
+                      >
+                        branch
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Compare primary M7 outputs"
+                        disabled={
+                          !m7CanCompare
+                          || !m7PrimaryWorkflow
+                          || !m7BestContinuation
+                          || !m7BestContinuationOutputPath
+                          || !m7ControlEnabled("compare", m7CanCompare)
+                        }
+                        onClick={() => {
+                          if (m7PrimaryWorkflow && m7BestContinuation && m7BestContinuationOutputPath) {
+                            queueWorkflowOutputComparison(m7PrimaryWorkflow, m7BestContinuation, m7BestContinuationOutputPath);
+                          }
+                        }}
+                      >
+                        compare
+                      </button>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        aria-label="Revoke M7 reach target"
+                        disabled={!m7RevocationTarget || !m7ControlEnabled("revoke", Boolean(m7RevocationTarget))}
+                        onClick={() => queueComposerDraft(
+                          m7RevocationTarget
+                            ? `Review and revoke reach for "${m7RevocationTarget.label}". Boundary: ${[
+                              m7RevocationTarget.boundary_posture,
+                              m7RevocationTarget.boundary_scope,
+                              m7RevocationTarget.trust_state,
+                              m7RevocationTarget.pairing_state,
+                            ].filter(Boolean).join(" · ") || "unknown"}.`
+                            : "Review reach targets and revoke any unsafe external or device surface.",
+                        )}
+                      >
+                        revoke
+                      </button>
+                    </div>
+                    <div className="cockpit-m7-evidence-line">
+                      <span>{m7PrimaryWorkflow ? `work ${m7PrimaryWorkflow.summary}` : "no primary workflow loaded"}</span>
+                      <span>{m7PrimaryFailure ? `failure ${workflowStepSummary(m7PrimaryFailure.step)}` : "no active failure"}</span>
+                      <span>{m7PrimaryOutputPath ? `artifact ${m7PrimaryOutputPath}` : "artifact pending"}</span>
+                      <span>{m7RevocationTarget ? `boundary ${m7RevocationTarget.label}` : "no reach revocation target"}</span>
+                      <span>{`approve ${m7ControlModeLabel("approve", "direct_backend_control")}`}</span>
+                      <span>{`repair ${m7ControlModeLabel("repair", "routed_or_policy_gated_control")}`}</span>
+                      <span>{`branch ${m7ControlModeLabel("branch", "operator_draft_control")}`}</span>
+                    </div>
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Browser computer-use live controls">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">browser control</span>
+                      <span className="cockpit-operator-link">{browserControlSummary}</span>
+                    </div>
+                    {selectedBrowserProvider ? (
+                      <div className="cockpit-sublist-item">
+                        {[
+                          selectedBrowserProvider.name,
+                          selectedBrowserProvider.provider_kind.replace(/_/g, " "),
+                          selectedBrowserProvider.runtime_state.replace(/_/g, " "),
+                          selectedBrowserProvider.execution_mode.replace(/_/g, " "),
+                          selectedBrowserProvider.fallback_policy ? `fallback ${selectedBrowserProvider.fallback_policy.replace(/_/g, " ")}` : null,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    ) : (
+                      <div className="cockpit-sublist-item">No browser provider inventory loaded.</div>
+                    )}
+                    {browserSessions.slice(0, 4).map((browserSession) => {
+                      const boundaryNames = Object.entries(browserSession.boundary_decisions)
+                        .filter(([, decision]) => decision.operator_visible)
+                        .slice(0, 6)
+                        .map(([name]) => name.replace(/_/g, " "));
+                      const artifactHandle = browserSession.latest_artifact_provenance?.artifact_handle
+                        ?? browserSession.latest_artifact_provenance?.handle
+                        ?? "receipt pending";
+                      const degraded = browserSession.provider_degradation.degraded === true;
+                      const quarantined = browserSession.status === "quarantined";
+                      return (
+                        <div key={browserSession.session_id} className="cockpit-operator-row cockpit-operator-row--entry">
+                          <button
+                            type="button"
+                            className="cockpit-operator-details cockpit-operator-details--button"
+                            onClick={() =>
+                              setSelectedInspector({
+                                kind: "operator",
+                                entity: {
+                                  entityType: "browser_session",
+                                  name: browserSession.session_id,
+                                  meta: `${browserSession.provider_name} · ${browserSession.status}`,
+                                  summary: browserSession.latest_summary || browserSession.url,
+                                  details: {
+                                    owner_session_id: browserSession.owner_session_id,
+                                    url: browserSession.url,
+                                    provider: browserSession.provider_name,
+                                    provider_kind: browserSession.provider_kind,
+                                    execution_mode: browserSession.execution_mode,
+                                    status: browserSession.status,
+                                    risk_state: browserSession.risk_state,
+                                    recovery_state: browserSession.recovery_state,
+                                    partition_id: browserSession.partition_id,
+                                    partition_revision: browserSession.partition_revision,
+                                    provider_degradation: browserSession.provider_degradation,
+                                    boundary_decisions: browserSession.boundary_decisions,
+                                    latest_artifact_provenance: browserSession.latest_artifact_provenance,
+                                    control_events: browserSession.control_events,
+                                  },
+                                },
+                              })
+                            }
+                          >
+                            <div className="cockpit-value">
+                              {browserSession.provider_name} · {browserSession.url}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              {[
+                                browserSession.status.replace(/_/g, " "),
+                                browserSession.risk_state.replace(/_/g, " "),
+                                browserSession.recovery_state.replace(/_/g, " "),
+                                `partition r${browserSession.partition_revision}`,
+                                `${browserSession.snapshot_count} snapshots`,
+                              ].join(" · ")}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              {[
+                                browserSession.provider_kind.replace(/_/g, " "),
+                                browserSession.execution_mode.replace(/_/g, " "),
+                                degraded ? "degraded fallback labeled" : "no silent fallback",
+                                browserSession.provider_degradation.silent_fallback_allowed === false ? "silent fallback blocked" : null,
+                              ].filter(Boolean).join(" · ")}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              boundaries: {boundaryNames.join(" · ") || "none visible"}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              receipt: {artifactHandle}
+                            </div>
+                          </button>
+                          <div className="cockpit-operator-actions">
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={quarantined}
+                              onClick={() => void runBrowserSessionControl(browserSession, "quarantine")}
+                            >
+                              quarantine
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={!quarantined && browserSession.recovery_state !== "needs_fresh_snapshot"}
+                              onClick={() => void runBrowserSessionControl(browserSession, "recover")}
+                            >
+                              recover
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runBrowserSessionControl(browserSession, "reset_partition")}
+                            >
+                              reset
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={quarantined}
+                              title={degraded ? "replay acknowledges labeled local fallback" : "replay latest capture"}
+                              onClick={() => void runBrowserSessionControl(browserSession, "replay_snapshot")}
+                            >
+                              replay
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runBrowserSessionControl(browserSession, "close")}
+                            >
+                              close
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {browserSessions.length === 0 ? (
+                      <div className="cockpit-empty">No browser/computer-use sessions for this thread yet.</div>
+                    ) : null}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Team control plane">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">team control plane</span>
+                      <span className="cockpit-operator-link">
+                        {operatorControlPlane?.governance.delegation_enabled ? "delegation on" : "delegation off"}
+                      </span>
+                    </div>
+                    {operatorControlPlane ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorControlPlane.governance.workspace_mode.replace(/_/g, " "),
+                            `approval ${operatorControlPlane.governance.approval_mode}`,
+                            `tool ${operatorControlPlane.governance.tool_policy_mode}`,
+                            `mcp ${operatorControlPlane.governance.mcp_policy_mode}`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">{operatorControlPlane.governance.review_posture}</div>
+                        {controlPlaneUsageSummary ? (
+                          <div className="cockpit-sublist-item">{controlPlaneUsageSummary}</div>
+                        ) : null}
+                        {controlPlaneRuntimeSummary ? (
+                          <div className="cockpit-sublist-item">{controlPlaneRuntimeSummary}</div>
+                        ) : null}
+                        {operatorControlPlane.governance.roles.slice(0, 4).map((role) => (
+                          <div key={role.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{role.label}</div>
+                              <div className="cockpit-operator-note">
+                                {[role.scope.replace(/_/g, " "), role.status, ...role.boundaries].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{role.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                        {controlPlaneHandoffEntries.map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{entry.label}</div>
+                              <div className="cockpit-operator-note">
+                                {[entry.kind.replace(/_/g, " "), entry.status, entry.thread_label].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{entry.detail}</div>
+                            </div>
+                            <div className="cockpit-operator-actions">
+                              {entry.continue_message ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  onClick={() => queueComposerDraft(entry.continue_message ?? "")}
+                                >
+                                  continue
+                                </button>
+                              ) : null}
+                              {entry.thread_id ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  onClick={() => {
+                                    void switchSession(entry.thread_id ?? "", "live");
+                                  }}
+                                >
+                                  open thread
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorControlPlane.handoff.review_receipts.slice(0, 4).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{receipt.title}</div>
+                              <div className="cockpit-operator-note">
+                                {[receipt.status.replace(/_/g, " "), receipt.thread_label].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{receipt.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                        {controlPlaneHandoffEntries.length === 0 && operatorControlPlane.handoff.review_receipts.length === 0 ? (
+                          <div className="cockpit-empty">No approvals, blocked workflows, or review receipts need handoff.</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Team control plane summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Benchmark proof">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">benchmark proof</span>
+                      <span className="cockpit-operator-link">{benchmarkProofSummary ?? "summary unavailable"}</span>
+                    </div>
+                    {operatorBenchmarkProof ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorBenchmarkProof.summary.operator_status.replace(/_/g, " "),
+                            operatorBenchmarkProof.summary.governed_improvement_status.replace(/_/g, " "),
+                            `review gate >= ${operatorBenchmarkProof.governed_improvement.gate_policy.min_review_ready_score.toFixed(1)}`,
+                            `strong >= ${operatorBenchmarkProof.governed_improvement.gate_policy.min_strong_score.toFixed(1)}`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${operatorBenchmarkProof.governed_improvement.required_suite_count} required suites`,
+                            `${operatorBenchmarkProof.governed_improvement.target_types.join(", ") || "no evolution targets"}`,
+                            operatorBenchmarkProof.governed_improvement.gate_policy.proof_contract.replace(/_/g, " "),
+                          ].join(" · ")}
+                        </div>
+                        {operatorBenchmarkProof.governed_improvement.summary && operatorBenchmarkProof.governed_improvement.policy ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Governed improvement benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.governed_improvement.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.governed_improvement.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.governed_improvement.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.governed_improvement.summary.anti_misevolution_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.summary.canary_rollout_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.summary.rollback_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.summary.operator_receipt_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.governed_improvement.policy.preference_diversity_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.governed_improvement.policy.canary_rollout_policy.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.governed_improvement.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.governed_improvement.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                              {operatorBenchmarkProof.governed_improvement.recent_receipts.slice(0, 2).map((receipt) => (
+                                <div key={receipt.id} className="cockpit-operator-note">
+                                  {[
+                                    receipt.candidate_name,
+                                    receipt.acceptance_state.replace(/_/g, " "),
+                                    receipt.diversity_guard_state.replace(/_/g, " "),
+                                    receipt.rollback_ready ? "rollback ready" : "rollback pending",
+                                  ].join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.memory_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Guardian memory benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.memory_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.memory_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.memory_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `contradiction ${operatorBenchmarkProof.memory_benchmark.summary.contradiction_state.replace(/_/g, " ")}`,
+                                  `forgetting ${operatorBenchmarkProof.memory_benchmark.summary.selective_forgetting_state.replace(/_/g, " ")}`,
+                                  operatorBenchmarkProof.memory_benchmark.policy.retrieval_ranking_policy.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.memory_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.user_model_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Guardian user-model benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.user_model_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.user_model_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.user_model_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.user_model_benchmark.summary.clarification_policy_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.user_model_benchmark.summary.restraint_policy_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.user_model_benchmark.policy.canonical_authority.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.user_model_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.workflow_endurance_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Workflow endurance benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.workflow_endurance_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.workflow_endurance_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.anticipatory_repair_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.condensation_fidelity_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.workflow_endurance_benchmark.summary.branch_continuity_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.workflow_endurance_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.live_workflow_endurance_canary ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Live workflow endurance canary</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.live_workflow_endurance_canary.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.session_count} sessions`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.run_count} runs`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.branch_run_count} branches`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.checkpoint_count} checkpoints`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.failure_injection_count} injected failures`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.recovery_action_count} recoveries`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.artifact_receipt_count} artifact receipts`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.approval_preservation_count} approvals preserved`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.trust_boundary_block_count} trust-boundary blocks`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.summary.audit_receipt_count} audit receipts`,
+                                  `${operatorBenchmarkProof.live_workflow_endurance_canary.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {Object.entries(operatorBenchmarkProof.live_workflow_endurance_canary.operator_story)
+                                  .filter(([, visible]) => visible)
+                                  .map(([key]) => key.replace(/_/g, " "))
+                                  .join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.live_workflow_endurance_canary.summary.claim_boundary.replace(/_/g, " "),
+                                  operatorBenchmarkProof.live_workflow_endurance_canary.policy.not_claimed.slice(0, 2).map((item) => `not ${item.replace(/_/g, " ")}`).join(" · "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.protocol.replay_command ? (
+                                <div className="cockpit-operator-note">{operatorBenchmarkProof.live_workflow_endurance_canary.protocol.replay_command}</div>
+                              ) : null}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.protocol.time_anchor ? (
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    operatorBenchmarkProof.live_workflow_endurance_canary.protocol.time_anchor,
+                                    `${operatorBenchmarkProof.live_workflow_endurance_canary.policy.required_receipts.length || operatorBenchmarkProof.live_workflow_endurance_canary.protocol.receipt_contract.length} required receipts`,
+                                  ].join(" · ")}
+                                </div>
+                              ) : null}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.runs.map((run, index) => {
+                                const runId = typeof run.run_identity === "string" ? run.run_identity : `canary-run-${index}`;
+                                const workflowName = typeof run.workflow_name === "string" ? run.workflow_name : "workflow";
+                                const status = typeof run.status === "string" ? run.status : "unknown";
+                                const branchKind = typeof run.branch_kind === "string" ? run.branch_kind : "root";
+                                const summary = typeof run.summary === "string" ? run.summary : "";
+                                const replayBlock = typeof run.replay_block_reason === "string" ? run.replay_block_reason : "";
+                                const checkpointCount = Array.isArray(run.checkpoint_candidates) ? run.checkpoint_candidates.length : 0;
+                                const auditCount = Array.isArray(run.audit_receipts) ? run.audit_receipts.length : 0;
+                                const artifacts = Array.isArray(run.artifact_receipts) ? run.artifact_receipts.length : 0;
+                                return (
+                                  <div key={runId} className="cockpit-operator-row cockpit-operator-row--entry">
+                                    <div className="cockpit-operator-details">
+                                      <div className="cockpit-value">{workflowName.replace(/_/g, " ")}</div>
+                                      <div className="cockpit-operator-note">
+                                        {[status.replace(/_/g, " "), branchKind.replace(/_/g, " "), summary].filter(Boolean).join(" · ")}
+                                      </div>
+                                      <div className="cockpit-operator-note">
+                                        {[
+                                          `${checkpointCount} checkpoints`,
+                                          `${artifacts} artifacts`,
+                                          `${auditCount} audit receipts`,
+                                          replayBlock ? `blocked ${replayBlock.replace(/_/g, " ")}` : null,
+                                        ].filter(Boolean).join(" · ")}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                              {operatorBenchmarkProof.live_workflow_endurance_canary.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.one_reach_channel_canary ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">One reach-channel canary</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.benchmark_posture.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.selected_channel.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.one_reach_channel_canary.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.one_reach_channel_canary.summary.e2e_step_count} E2E steps`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `pairing ${operatorBenchmarkProof.one_reach_channel_canary.summary.pairing_state.replace(/_/g, " ")}`,
+                                  `revocation ${operatorBenchmarkProof.one_reach_channel_canary.summary.revocation_state.replace(/_/g, " ")}`,
+                                  `health ${operatorBenchmarkProof.one_reach_channel_canary.summary.health_state.replace(/_/g, " ")}`,
+                                  `degraded ${operatorBenchmarkProof.one_reach_channel_canary.summary.degraded_state.replace(/_/g, " ")}`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.retry_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.thread_continuity_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.approval_handoff_state.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.one_reach_channel_canary.summary.audit_receipt_count} audit receipts`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {Object.entries(operatorBenchmarkProof.one_reach_channel_canary.operator_story)
+                                  .filter(([, visible]) => visible)
+                                  .map(([key]) => key.replace(/_/g, " "))
+                                  .join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.channel_sprawl_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.summary.claim_boundary.replace(/_/g, " "),
+                                  operatorBenchmarkProof.one_reach_channel_canary.policy.not_claimed.slice(0, 2).map((item) => `not ${item.replace(/_/g, " ")}`).join(" · "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.one_reach_channel_canary.protocol.replay_command ? (
+                                <div className="cockpit-operator-note">{operatorBenchmarkProof.one_reach_channel_canary.protocol.replay_command}</div>
+                              ) : null}
+                              {(() => {
+                                const receipt = operatorBenchmarkProof.one_reach_channel_canary.receipt;
+                                const continuity = receipt.continuity && typeof receipt.continuity === "object" && !Array.isArray(receipt.continuity)
+                                  ? receipt.continuity as Record<string, unknown>
+                                  : {};
+                                const degraded = receipt.degraded_state_ui && typeof receipt.degraded_state_ui === "object" && !Array.isArray(receipt.degraded_state_ui)
+                                  ? receipt.degraded_state_ui as Record<string, unknown>
+                                  : {};
+                                const e2eFlow = Array.isArray(receipt.e2e_flow)
+                                  ? receipt.e2e_flow.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+                                  : [];
+                                return (
+                                  <>
+                                    <div className="cockpit-operator-note">
+                                      {[
+                                        typeof continuity.thread_id === "string" ? continuity.thread_id : null,
+                                        typeof continuity.memory_context_id === "string" ? continuity.memory_context_id : null,
+                                        typeof degraded.primary_degraded_reason === "string" ? `degraded ${degraded.primary_degraded_reason.replace(/_/g, " ")}` : null,
+                                        typeof degraded.repair_action === "string" ? `repair ${degraded.repair_action.replace(/_/g, " ")}` : null,
+                                      ].filter(Boolean).join(" · ")}
+                                    </div>
+                                    {e2eFlow.map((step, index) => {
+                                      const stepName = typeof step.step === "string" ? step.step : `step-${index + 1}`;
+                                      const decision = typeof step.decision === "string" ? step.decision : typeof step.action === "string" ? step.action : "";
+                                      const status = typeof step.status === "string" ? step.status : "";
+                                      const reason = typeof step.reason === "string" ? step.reason : "";
+                                      return (
+                                        <div key={`${stepName}:${index}`} className="cockpit-operator-note">
+                                          {[stepName.replace(/_/g, " "), decision.replace(/_/g, " "), status.replace(/_/g, " "), reason].filter(Boolean).join(" · ")}
+                                        </div>
+                                      );
+                                    })}
+                                  </>
+                                );
+                              })()}
+                              {operatorBenchmarkProof.one_reach_channel_canary.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.trust_boundary_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Trust-boundary benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.trust_boundary_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.trust_boundary_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.secret_egress_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.delegation_partition_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.workflow_replay_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.summary.operator_receipt_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.trust_boundary_benchmark.policy.secret_egress_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.trust_boundary_benchmark.policy.workflow_replay_policy.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.trust_boundary_benchmark.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.trust_boundary_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.secure_capability_host_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Secure capability-host benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.secure_capability_host_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.secure_capability_host_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.credential_egress_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.workspace_secret_file_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.process_environment_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.prompt_surface_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.summary.delegation_provider_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.policy.credential_egress_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.secure_capability_host_benchmark.policy.claim_boundary.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.secure_capability_host_benchmark.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.secure_capability_host_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.computer_use_benchmark ? (
+                          <div className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">Computer-use benchmark</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.benchmark_posture.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.computer_use_benchmark.summary.active_failure_count} active failures`,
+                                  `${operatorBenchmarkProof.computer_use_benchmark.summary.dimension_count} dimensions`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.browser_replay_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.desktop_action_state.replace(/_/g, " "),
+                                  operatorBenchmarkProof.computer_use_benchmark.summary.cross_surface_receipt_state.replace(/_/g, " "),
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  operatorBenchmarkProof.computer_use_benchmark.policy.browser_task_replay_policy.replace(/_/g, " "),
+                                  operatorBenchmarkProof.computer_use_benchmark.policy.desktop_action_replay_policy.replace(/_/g, " "),
+                                  `${operatorBenchmarkProof.computer_use_benchmark.policy.receipt_surfaces.length} receipt surfaces`,
+                                ].join(" · ")}
+                              </div>
+                              {operatorBenchmarkProof.computer_use_benchmark.failure_report.slice(0, 2).map((failure) => (
+                                <div key={`${failure.type}:${failure.summary}`} className="cockpit-operator-note">
+                                  {[failure.type.replace(/_/g, " "), failure.summary, failure.reason.replace(/_/g, " ")].filter(Boolean).join(" · ")}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {operatorBenchmarkProof.suites.map((suite) => (
+                          <div key={suite.name} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{suite.label}</div>
+                              <div className="cockpit-operator-note">
+                                {[suite.benchmark_axis.replace(/_/g, " "), `${suite.scenario_count} scenarios`].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{suite.operator_summary}</div>
+                              <div className="cockpit-operator-note">{suite.remaining_gap}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Benchmark proof summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Guardian memory controls">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">guardian memory controls</span>
+                      <span className="cockpit-operator-link">{guardianMemoryControlSummary ?? "summary unavailable"}</span>
+                    </div>
+                    {guardianMemoryLiveControl ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${guardianMemoryLiveControl.summary.stale_candidate_count} stale evidence`,
+                            `${guardianMemoryLiveControl.summary.action_receipt_count} live receipts`,
+                            guardianMemoryLiveControl.summary.claim_boundary.replace(/_/g, " "),
+                          ].join(" · ")}
+                        </div>
+                        {guardianMemoryLiveControl.memory_candidates.slice(0, 4).map((memory) => (
+                          <div key={memory.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{memory.summary || memory.content || memory.kind}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  memory.kind.replace(/_/g, " "),
+                                  memory.status.replace(/_/g, " "),
+                                  `outcome ${memory.learning_outcome.replace(/_/g, " ")}`,
+                                  memory.stale_evidence ? "stale evidence" : "fresh enough",
+                                  memory.rollback_available ? "rollback available" : "rollback gated",
+                                  `delete/export ${memory.delete_export_state.replace(/_/g, " ")}`,
+                                  `privacy ${memory.privacy_boundary.replace(/_/g, " ")}`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-feedback-row">
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("review_outcome", { memoryId: memory.id }, "helpful")}
+                                >
+                                  Helpful
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("review_outcome", { memoryId: memory.id }, "harmful")}
+                                >
+                                  Harmful
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("decay_stale_evidence", { memoryId: memory.id })}
+                                >
+                                  Decay
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  disabled={!memory.rollback_available}
+                                  onClick={() => void runGuardianMemoryControl("rollback_memory", { memoryId: memory.id })}
+                                >
+                                  Rollback
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {guardianMemoryLiveControl.provider_controls.slice(0, 4).map((provider) => (
+                          <div key={provider.name} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{provider.name}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  provider.runtime_state.replace(/_/g, " "),
+                                  provider.control_state.replace(/_/g, " "),
+                                  provider.retrieval_allowed ? "retrieval allowed" : "retrieval blocked",
+                                  provider.writeback_allowed ? "writeback allowed" : "writeback blocked",
+                                  provider.advisory_only ? "advisory only" : "canonical risk",
+                                  "runtime-local control",
+                                ].join(" · ")}
+                              </div>
+                              {provider.notes.length ? (
+                                <div className="cockpit-operator-note">{provider.notes.slice(0, 2).join(" · ")}</div>
+                              ) : null}
+                              <div className="cockpit-feedback-row">
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("quarantine_provider", { providerName: provider.name })}
+                                >
+                                  Quarantine
+                                </button>
+                                <button
+                                  type="button"
+                                  className="cockpit-feedback-button"
+                                  onClick={() => void runGuardianMemoryControl("reinstate_provider", { providerName: provider.name })}
+                                >
+                                  Reinstate
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {guardianMemoryLiveControl.action_receipts.slice(0, 3).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{receipt.action.replace(/_/g, " ")}</div>
+                              <div className="cockpit-operator-note">
+                                {[receipt.target_kind, receipt.outcome.replace(/_/g, " "), receipt.risk_level, receipt.created_at ? formatAge(receipt.created_at) : null].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{receipt.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    ) : null}
+                    {operatorM6MemorySuperiority ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `confidence ${operatorM6MemorySuperiority.summary.memory_confidence.replace(/_/g, " ")}`,
+                            `posture ${operatorM6MemorySuperiority.summary.action_posture.replace(/_/g, " ")}`,
+                            `${operatorM6MemorySuperiority.summary.superseded_memory_count} corrected/superseded`,
+                            `${operatorM6MemorySuperiority.summary.archived_memory_count} forgotten/archived`,
+                            `${operatorM6MemorySuperiority.summary.source_receipt_count} source receipts`,
+                            `${operatorM6MemorySuperiority.summary.privacy_boundary_count} privacy boundaries`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">
+                          {operatorM6MemorySuperiority.summary.claim_boundary.replace(/_/g, " ")}
+                        </div>
+                        {operatorM6MemorySuperiority.behavior_receipts.slice(0, 2).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">
+                                {receipt.changed ? "Memory changed behavior" : "Memory behavior unchanged"}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  receipt.changed_dimensions.length ? receipt.changed_dimensions.map((item) => item.replace(/_/g, " ")).join(", ") : "no changed dimension",
+                                  `intent ${receipt.intent_resolution.replace(/_/g, " ")}`,
+                                  `confidence ${receipt.memory_confidence.replace(/_/g, " ")}`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {receipt.evidence.length ? receipt.evidence.slice(0, 3).join(" · ") : receipt.receipt_contract.replace(/_/g, " ")}
+                              </div>
+                              {receipt.diagnostics.length ? (
+                                <div className="cockpit-operator-note">{receipt.diagnostics.slice(0, 2).join(" · ")}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM6MemorySuperiority.memory_records.slice(0, 5).map((memory) => (
+                          <div key={memory.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{memory.summary || memory.content || memory.kind}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  memory.kind.replace(/_/g, " "),
+                                  memory.status.replace(/_/g, " "),
+                                  memory.control.pinned ? "pinned" : null,
+                                  memory.control.corrected ? "corrected" : null,
+                                  memory.control.forgotten ? "forgotten" : null,
+                                  memory.conflict.superseded_reason ? `conflict ${memory.conflict.superseded_reason}` : null,
+                                  memory.conflict.archived_reason ? `stale ${memory.conflict.archived_reason}` : null,
+                                  `privacy ${memory.control.privacy_boundary.replace(/_/g, " ")}`,
+                                  memory.control.provider_writeback_allowed ? "provider writeback allowed" : "provider writeback blocked",
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  `${memory.provenance.source_count} sources`,
+                                  memory.provenance.source_types.length ? memory.provenance.source_types.join(", ") : "source type pending",
+                                  memory.provenance.has_source_receipt ? "source receipt" : "no source receipt",
+                                  memory.last_confirmed_at ? `confirmed ${formatAge(memory.last_confirmed_at)}` : `updated ${formatAge(memory.updated_at)}`,
+                                ].join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM6MemorySuperiority.control_receipts.slice(0, 4).map((receipt) => (
+                          <div key={receipt.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{`memory ${receipt.action}`}</div>
+                              <div className="cockpit-operator-note">
+                                {[receipt.event_type.replace(/[_.]/g, " "), receipt.risk_level, receipt.created_at ? formatAge(receipt.created_at) : null].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">{receipt.summary}</div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM6MemorySuperiority.memory_records.length === 0 && operatorM6MemorySuperiority.control_receipts.length === 0 ? (
+                          <div className="cockpit-empty">No guardian memory decisions or control receipts are available yet.</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Guardian memory controls unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Active triage">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">active triage</span>
+                      <span className="cockpit-operator-link">{operatorTriageEntries.length} requiring action</span>
+                    </div>
+                    {operatorTriageEntries.map((entry) => {
+                      const triageWorkflow = entry.workflow ?? null;
+                      const latestBranch = triageWorkflow ? workflowLatestBranchRun(triageWorkflow) : null;
+                      const bestContinuation = triageWorkflow ? workflowBestContinuationRun(triageWorkflow) : null;
+                      const latestFailureContext = triageWorkflow ? workflowLatestFailureContext(triageWorkflow) : null;
+                      const failedStep = triageWorkflow ? failedWorkflowStep(triageWorkflow) : null;
+                      const hasCurrentOutput = triageWorkflow ? workflowPrimaryOutputPath(triageWorkflow) : null;
+                      const bestContinuationOutput = bestContinuation ? workflowPrimaryOutputPath(bestContinuation) : null;
+                      const hasDistinctBestContinuation = triageWorkflow && bestContinuation
+                        ? (bestContinuation.runIdentity ?? bestContinuation.id) !== (triageWorkflow.runIdentity ?? triageWorkflow.id)
+                        : false;
+                      return (
+                      <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          aria-label={`Inspect ${entry.label}`}
+                          onClick={() => inspectOperatorTriageEntry(entry)}
+                        >
+                          <div className="cockpit-value">{entry.label}</div>
+                          <div className="cockpit-operator-note">{entry.detail}</div>
+                          <div className="cockpit-operator-note">{entry.meta}</div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {entry.continueMessage && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Continue ${entry.label}`}
+                              onClick={() => continueOperatorTriageEntry(entry)}
+                            >
+                              continue
+                            </button>
+                          )}
+                          {entry.repairDraft && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft ${entry.draftActionLabel ?? "repair"} for ${entry.label}`}
+                              onClick={() => draftOperatorTriageRepair(entry)}
+                            >
+                              {`draft ${entry.draftActionLabel ?? "repair"}`}
+                            </button>
+                          )}
+                          {triageWorkflow && hasCurrentOutput && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Use latest output for ${entry.label}`}
+                              onClick={() => queueWorkflowOutputContext(triageWorkflow)}
+                            >
+                              use output
+                            </button>
+                          )}
+                          {triageWorkflow && latestFailureContext && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Use failure context for ${entry.label}`}
+                              onClick={() => queueWorkflowLatestFailureContext(triageWorkflow)}
+                            >
+                              use failure
+                            </button>
+                          )}
+                          {triageWorkflow?.retryFromStepDraft && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Retry step for ${entry.label}`}
+                              onClick={() => void queueLiveWorkflowResumePlan(triageWorkflow, {
+                                action: "retry",
+                                stepId: triageWorkflow.resumeFromStep,
+                                fallbackDraft: triageWorkflow.retryFromStepDraft,
+                                label: entry.label,
+                              })}
+                            >
+                              retry step
+                            </button>
+                          )}
+                          {triageWorkflow && triageWorkflow.replayAllowed === false && triageWorkflow.replayRecommendedActions?.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Repair replay for ${entry.label}`}
+                              onClick={() => void repairWorkflowReplay(triageWorkflow)}
+                            >
+                              repair replay
+                            </button>
+                          ) : null}
+                          {triageWorkflow && failedStep?.recoveryActions?.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Repair step for ${entry.label}`}
+                              onClick={() => void runCapabilityActions(
+                                readActionList(failedStep.recoveryActions),
+                                `${triageWorkflow.workflowName} ${failedStep.id}`,
+                              )}
+                            >
+                              repair step
+                            </button>
+                          ) : null}
+                          {triageWorkflow && hasDistinctBestContinuation && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open best continuation for ${entry.label}`}
+                              onClick={() => inspectWorkflowBestContinuation(triageWorkflow)}
+                            >
+                              open best
+                            </button>
+                          )}
+                          {triageWorkflow && hasDistinctBestContinuation && bestContinuation && workflowCanContinue(bestContinuation) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Continue best continuation for ${entry.label}`}
+                              onClick={() => continueWorkflowBestContinuation(triageWorkflow)}
+                            >
+                              continue best
+                            </button>
+                          )}
+                          {triageWorkflow && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft next step for ${entry.label}`}
+                              onClick={() => queueWorkflowFamilyPlan(triageWorkflow)}
+                            >
+                              draft next step
+                            </button>
+                          )}
+                          {triageWorkflow && hasCurrentOutput && hasDistinctBestContinuation && bestContinuationOutput && bestContinuationOutput !== hasCurrentOutput && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Compare best continuation for ${entry.label}`}
+                              onClick={() => queueWorkflowBestContinuationComparison(triageWorkflow)}
+                            >
+                              compare best
+                            </button>
+                          )}
+                          {entry.approval && (
+                            <>
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Approve ${entry.label}`}
+                                onClick={() => approveOperatorTriageEntry(entry)}
+                              >
+                                approve
+                              </button>
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Deny ${entry.label}`}
+                                onClick={() => void handleApprovalDecision(entry.approval!, "deny")}
+                              >
+                                deny
+                              </button>
+                            </>
+                          )}
+                          {triageWorkflow && latestBranch && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Inspect latest branch for ${entry.label}`}
+                              onClick={() => inspectLatestWorkflowBranch(triageWorkflow)}
+                            >
+                              latest branch
+                            </button>
+                          )}
+                          {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open thread for ${entry.label}`}
+                              onClick={() => openOperatorTriageThread(entry)}
+                            >
+                              open thread
+                            </button>
+                          )}
+                          {entry.route && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open desktop shell for ${entry.label}`}
+                              onClick={() => inspectOperatorTriageEntry(entry)}
+                            >
+                              desktop shell
+                            </button>
+                          )}
+                          {entry.recoveryAction && !entry.route && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open operator surface for ${entry.label}`}
+                              onClick={() => inspectOperatorTriageEntry(entry)}
+                            >
+                              operator
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      );
+                    })}
+                    {operatorTriageEntries.length === 0 && (
+                      <div className="cockpit-empty">No active workflows, approvals, queued guardian items, or reach failures need action.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="M5 operating layer">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">M5 operating layer</span>
+                      <span className="cockpit-operator-link">
+                        {operatorM5OperatingLayer
+                          ? `${operatorM5OperatingLayer.summary.work_item_count} work items · ${operatorM5OperatingLayer.summary.scheduled_job_count} jobs · ${operatorM5OperatingLayer.summary.delegation_partition_count} delegations`
+                          : "summary unavailable"}
+                      </span>
+                    </div>
+                    {operatorM5OperatingLayer ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorM5OperatingLayer.summary.operator_status.replace(/_/g, " "),
+                            `${operatorM5OperatingLayer.summary.active_work_count} active`,
+                            `${operatorM5OperatingLayer.summary.paused_work_count} paused`,
+                            `${operatorM5OperatingLayer.summary.awaiting_approval_count} awaiting approval`,
+                            `${operatorM5OperatingLayer.summary.failed_work_count} failed`,
+                            `${operatorM5OperatingLayer.summary.repair_ready_count} repair-ready`,
+                            `${operatorM5OperatingLayer.summary.checkpoint_ready_count} checkpoint-ready`,
+                            `${operatorM5OperatingLayer.summary.branch_ready_count} branch-ready`,
+                            `${operatorM5OperatingLayer.summary.durable_run_receipt_count} run receipts`,
+                          ].join(" · ")}
+                        </div>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            operatorM5OperatingLayer.summary.claim_boundary.replace(/_/g, " "),
+                            operatorM5OperatingLayer.missing_trigger_classes.length
+                              ? `future triggers: ${operatorM5OperatingLayer.missing_trigger_classes.join(", ")}`
+                              : "trigger classes represented",
+                          ].join(" · ")}
+                        </div>
+                        {operatorM5OperatingLayer.work_queue.slice(0, 5).map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <button
+                              type="button"
+                              className="cockpit-operator-details cockpit-operator-details--button"
+                              aria-label={`Inspect M5 work item ${entry.label}`}
+                              onClick={() => setSelectedInspector({
+                                kind: "operator",
+                                entity: {
+                                  entityType: "activity_item",
+                                  name: entry.label,
+                                  meta: `${entry.kind} · ${entry.status} · ${entry.priority}`,
+                                  summary: entry.detail,
+                                  details: entry as unknown as Record<string, unknown>,
+                                },
+                              })}
+                            >
+                              <div className="cockpit-value">{entry.label}</div>
+                              <div className="cockpit-operator-note">{entry.detail || entry.kind}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  entry.status.replace(/_/g, " "),
+                                  entry.checkpoint_ready ? "checkpoint" : null,
+                                  entry.repair_ready ? "repair" : null,
+                                  entry.branch_ready ? "branch" : null,
+                                  entry.delegation_ready ? "delegation" : null,
+                                  entry.approval_required ? "approval" : null,
+                                  entry.actions.join(", "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                            </button>
+                            <div className="cockpit-operator-actions">
+                              {entry.continue_message ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Continue M5 work item ${entry.label}`}
+                                  onClick={() => queueComposerDraft(entry.continue_message ?? "")}
+                                >
+                                  continue
+                                </button>
+                              ) : null}
+                              {entry.thread_id && canOpenLedgerThread(entry.thread_id, sessionId, knownSessionIds) ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Open thread for M5 work item ${entry.label}`}
+                                  onClick={() => void openThread(entry.thread_id)}
+                                >
+                                  open thread
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM5OperatingLayer.jobs.slice(0, 4).map((job) => (
+                          <div key={job.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{job.name}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  job.enabled ? "enabled" : "paused",
+                                  job.trigger_label,
+                                  job.action_label,
+                                  job.last_outcome ? `last ${job.last_outcome}` : "not run yet",
+                                  job.run_count > 0 ? `${job.run_count} runs` : null,
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  job.last_approval_id ? `approval ${shortIdentifier(job.last_approval_id)}` : null,
+                                  job.last_error ? `error ${job.last_error}` : null,
+                                  job.lifecycle_controls.length ? `controls ${job.lifecycle_controls.join(", ")}` : null,
+                                  job.audit_receipts.length ? `${job.audit_receipts.length} receipts` : null,
+                                ].filter(Boolean).join(" · ") || "No run receipt yet."}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM5OperatingLayer.delegations.slice(0, 4).map((delegation) => (
+                          <div key={delegation.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{delegation.specialist}</div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  delegation.status.replace(/_/g, " "),
+                                  delegation.risk_level,
+                                  delegation.trust_partition.mode.replace(/_/g, " "),
+                                  delegation.trust_partition.blocked ? "blocked" : "available",
+                                  `${delegation.delegated_tool_names.length} tools`,
+                                ].join(" · ")}
+                              </div>
+                              <div className="cockpit-operator-note">
+                                {[
+                                  delegation.task_summary,
+                                  delegation.execution_boundaries.join(", "),
+                                  delegation.review_state.replace(/_/g, " "),
+                                ].filter(Boolean).join(" · ")}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {operatorM5OperatingLayer.work_queue.length === 0 && operatorM5OperatingLayer.jobs.length === 0 && (
+                          <div className="cockpit-empty">No supervised M5 jobs, routines, or delegated work are surfaced yet.</div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">M5 operating layer summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Workflow orchestration">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">workflow orchestration</span>
+                      <span className="cockpit-operator-link">
+                        {operatorWorkflowOrchestration
+                          ? `${operatorWorkflowOrchestration.summary.workflow_count} workflows · ${operatorWorkflowOrchestration.summary.tracked_sessions} sessions · ${operatorWorkflowOrchestration.summary.compacted_workflows} compacted`
+                          : "summary unavailable"}
+                      </span>
+                    </div>
+                    {operatorWorkflowOrchestration ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${operatorWorkflowOrchestration.summary.active_workflows} active`,
+                            `${operatorWorkflowOrchestration.summary.awaiting_approval_workflows} awaiting approval`,
+                            `${operatorWorkflowOrchestration.summary.blocked_workflows} blocked`,
+                            `${operatorWorkflowOrchestration.summary.recoverable_workflows} recoverable`,
+                            `${operatorWorkflowOrchestration.summary.long_running_workflows} long-running`,
+                            `${operatorWorkflowOrchestration.summary.total_step_count} steps`,
+                            operatorWorkflowOrchestration.summary.compacted_step_count > 0
+                              ? `${operatorWorkflowOrchestration.summary.compacted_step_count} compacted`
+                              : null,
+                            operatorWorkflowOrchestration.summary.repair_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.repair_ready_workflows} repair-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.branch_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.branch_ready_workflows} branch-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.anticipatory_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.anticipatory_ready_workflows} anticipatory-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.backup_branch_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.backup_branch_ready_workflows} backup-branch ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.fidelity_watch_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.fidelity_watch_workflows} fidelity-watch`
+                              : null,
+                            operatorWorkflowOrchestration.summary.output_debugger_ready_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.output_debugger_ready_workflows} debugger-ready`
+                              : null,
+                            operatorWorkflowOrchestration.summary.stalled_workflows > 0
+                              ? `${operatorWorkflowOrchestration.summary.stalled_workflows} stalled`
+                              : null,
+                            operatorWorkflowOrchestration.summary.attention_sessions > 0
+                              ? `${operatorWorkflowOrchestration.summary.attention_sessions} attention sessions`
+                              : null,
+                          ].filter(Boolean).join(" · ")}
+                        </div>
+                        {operatorWorkflowOrchestrationEntries.map((entry) => {
+                          const stepFocusSummary = [
+                            entry.leadStepFocus?.kind ? formatContinuityLabel(entry.leadStepFocus.kind) : null,
+                            entry.leadStepFocus?.tool ? `tool ${entry.leadStepFocus.tool}` : null,
+                            entry.leadStepFocus?.summary ?? entry.leadStepFocus?.error_summary ?? entry.leadStepFocus?.recovery_hint ?? null,
+                          ].filter(Boolean).join(" · ");
+                          return (
+                            <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                              <button
+                                type="button"
+                                className="cockpit-operator-details cockpit-operator-details--button"
+                                aria-label={`Inspect workflow orchestration for ${entry.threadLabel}`}
+                                onClick={() => inspectOperatorWorkflowOrchestrationEntry(entry)}
+                              >
+                                <div className="cockpit-value">{entry.threadLabel}</div>
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    entry.leadWorkflowName ? `${entry.leadWorkflowName}` : null,
+                                    entry.leadStatus ? formatContinuityLabel(entry.leadStatus) : null,
+                                    entry.leadSummary,
+                                  ].filter(Boolean).join(" · ")}
+                                </div>
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    `${entry.workflowCount} workflows`,
+                                    entry.activeWorkflows > 0 ? `${entry.activeWorkflows} active` : null,
+                                    entry.awaitingApprovalWorkflows > 0 ? `${entry.awaitingApprovalWorkflows} awaiting approval` : null,
+                                    entry.blockedWorkflows > 0 ? `${entry.blockedWorkflows} blocked` : null,
+                                    entry.recoverableWorkflows > 0 ? `${entry.recoverableWorkflows} recoverable` : null,
+                                    entry.longRunningWorkflowCount > 0 ? `${entry.longRunningWorkflowCount} long-running` : null,
+                                    entry.totalStepCount > 0 ? `${entry.totalStepCount} steps` : null,
+                                    entry.compactedStepCount > 0 ? `${entry.compactedStepCount} compacted` : null,
+                                    entry.artifactCount > 0 ? `${entry.artifactCount} artifacts` : null,
+                                    entry.latestUpdatedAt ? formatAge(entry.latestUpdatedAt) : null,
+                                  ].filter(Boolean).join(" · ")}
+                                </div>
+                                <div className="cockpit-operator-note">
+                                  {entry.leadStateCapsule || "No workflow compaction capsule surfaced yet."}
+                                </div>
+                                <div className="cockpit-operator-note">
+                                  {[
+                                    entry.queuePosition > 0 ? `queue #${entry.queuePosition}` : null,
+                                    entry.queueState ? `queue ${formatContinuityLabel(entry.queueState)}` : null,
+                                    entry.leadRecommendedRecoveryPath
+                                      ? `next ${formatContinuityLabel(entry.leadRecommendedRecoveryPath)}`
+                                      : null,
+                                    entry.repairReadyWorkflows > 0 ? `${entry.repairReadyWorkflows} repair-ready` : null,
+                                    entry.branchReadyWorkflows > 0 ? `${entry.branchReadyWorkflows} branch-ready` : null,
+                                    entry.anticipatoryReadyWorkflows > 0 ? `${entry.anticipatoryReadyWorkflows} anticipatory-ready` : null,
+                                    entry.backupBranchReadyWorkflows > 0 ? `${entry.backupBranchReadyWorkflows} backup-branch ready` : null,
+                                    entry.fidelityWatchWorkflows > 0 ? `${entry.fidelityWatchWorkflows} fidelity-watch` : null,
+                                    entry.outputDebuggerReadyWorkflows > 0 ? `${entry.outputDebuggerReadyWorkflows} debugger-ready` : null,
+                                    entry.stalledWorkflows > 0 ? `${entry.stalledWorkflows} stalled` : null,
+                                  ].filter(Boolean).join(" · ") || "No queue-state workflow recovery surfaced yet."}
+                                </div>
+                                {entry.attentionSummary ? (
+                                  <div className="cockpit-operator-note">
+                                    {entry.attentionSummary}
+                                  </div>
+                                ) : null}
+                                {entry.anticipatorySummary ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.anticipatoryRiskLevel ? `anticipatory ${formatContinuityLabel(entry.anticipatoryRiskLevel)}` : null,
+                                      entry.anticipatorySummary,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
+                                {entry.queueReason ? (
+                                  <div className="cockpit-operator-note">
+                                    {entry.queueReason}
+                                  </div>
+                                ) : null}
+                                {entry.recentStepLabels.length > 0 ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.visibleStepCount > 0 && entry.totalStepCount > 0
+                                        ? `visible steps ${entry.visibleStepCount}/${entry.totalStepCount}`
+                                        : null,
+                                      entry.recentStepLabels.join(" · "),
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
+                                <div className="cockpit-operator-note">
+                                  {stepFocusSummary || "No step-level workflow focus surfaced yet."}
+                                </div>
+                                {entry.condensationFidelitySummary ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.condensationFidelityState ? `fidelity ${formatContinuityLabel(entry.condensationFidelityState)}` : null,
+                                      entry.condensationFidelitySummary,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
+                                {(entry.outputPath || entry.leadRelatedOutputPaths.length > 0) ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.outputPath ? `output ${entry.outputPath}` : null,
+                                      entry.leadRelatedOutputPaths.length > 0
+                                        ? `related ${entry.leadRelatedOutputPaths.join(" · ")}`
+                                        : null,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
+                                {(entry.leadOutputHistory.length > 0 || entry.leadLatestBranchSummary) ? (
+                                  <div className="cockpit-operator-note">
+                                    {[
+                                      entry.leadOutputHistory.length > 0
+                                        ? `${entry.leadOutputHistory.length} history outputs`
+                                        : null,
+                                      entry.leadLatestBranchSummary
+                                        ? `latest branch ${entry.leadLatestBranchSummary}`
+                                        : null,
+                                    ].filter(Boolean).join(" · ")}
+                                  </div>
+                                ) : null}
+                              </button>
+                              <div className="cockpit-operator-actions">
+                                {entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Inspect workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => inspectOperatorWorkflowOrchestrationEntry(entry)}
+                                  >
+                                    inspect
+                                  </button>
+                                )}
+                                {(entry.continueMessage || (entry.workflow && workflowCanContinue(entry.workflow))) && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Continue workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => continueOperatorWorkflowOrchestrationEntry(entry)}
+                                  >
+                                    continue
+                                  </button>
+                                )}
+                                {entry.outputPath && entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Use latest output for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                                  >
+                                    use output
+                                  </button>
+                                )}
+                                {entry.latestFailure && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Use failure context for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowStepContext(entry.latestFailure!.workflow, entry.latestFailure!.step)}
+                                  >
+                                    use failure
+                                  </button>
+                                )}
+                                {entry.latestFailure?.step.recoveryActions?.length ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Repair workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => void runCapabilityActions(
+                                      readActionList(entry.latestFailure?.step.recoveryActions),
+                                      `${entry.leadWorkflowName ?? "workflow"} ${entry.latestFailure?.step.id ?? "repair"}`,
+                                    )}
+                                  >
+                                    repair
+                                  </button>
+                                ) : null}
+                                {entry.workflow?.retryFromStepDraft && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Retry step for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => void queueLiveWorkflowResumePlan(entry.workflow, {
+                                      action: "retry",
+                                      stepId: entry.workflow?.resumeFromStep,
+                                      fallbackDraft: entry.workflow?.retryFromStepDraft,
+                                      label: `workflow orchestration ${entry.threadLabel}`,
+                                    })}
+                                  >
+                                    retry step
+                                  </button>
+                                )}
+                                {entry.latestBranchWorkflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Open latest branch for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => inspectWorkflowRun(entry.latestBranchWorkflow)}
+                                  >
+                                    open branch
+                                  </button>
+                                )}
+                                {entry.workflow && entry.latestBranchWorkflow && entry.compareOutputPath && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Compare branch output for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowOutputComparison(entry.workflow, entry.latestBranchWorkflow, entry.compareOutputPath)}
+                                  >
+                                    compare output
+                                  </button>
+                                )}
+                                {entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Redirect workflow orchestration for ${entry.threadLabel}`}
+                                    onClick={() => redirectOperatorWorkflowOrchestrationEntry(entry)}
+                                  >
+                                    redirect
+                                  </button>
+                                )}
+                                {entry.queueDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Plan queue focus for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationFocus(entry)}
+                                  >
+                                    queue focus
+                                  </button>
+                                ) : null}
+                                {entry.handoffDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft handoff for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationHandoff(entry)}
+                                  >
+                                    handoff
+                                  </button>
+                                ) : null}
+                                {entry.backupBranchDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft backup branch for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationBackupBranch(entry)}
+                                  >
+                                    backup branch
+                                  </button>
+                                ) : null}
+                                {entry.anticipatoryRepairDraft ? (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft anticipatory repair for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueOperatorWorkflowOrchestrationPreRepair(entry)}
+                                  >
+                                    pre-repair
+                                  </button>
+                                ) : null}
+                                {entry.workflow && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Draft next step for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                                  >
+                                    draft next step
+                                  </button>
+                                )}
+                                {entry.threadId && (
+                                  <button
+                                    type="button"
+                                    className="cockpit-operator-button"
+                                    aria-label={`Open thread for workflow orchestration ${entry.threadLabel}`}
+                                    onClick={() => openOperatorWorkflowOrchestrationThread(entry)}
+                                  >
+                                    open thread
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {operatorWorkflowOrchestrationEntries.length === 0 && (
+                          <div className="cockpit-empty">No multi-session workflow orchestration is available yet.</div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Workflow orchestration summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Background continuity">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">background continuity</span>
+                      <span className="cockpit-operator-link">{backgroundContinuitySummary ?? "summary unavailable"}</span>
+                    </div>
+                    {operatorBackgroundSessions && operatorEngineeringMemory && operatorContinuityGraph ? (
+                      <>
+                        <div className="cockpit-sublist-item">
+                          {[
+                            `${operatorBackgroundSessions.summary.sessions_with_branch_handoff} handoff-ready`,
+                            `${operatorBackgroundSessions.summary.sessions_with_active_workflows} active sessions`,
+                            `${operatorEngineeringMemory.summary.repository_bundle_count} repos`,
+                            `${operatorEngineeringMemory.summary.pull_request_bundle_count} prs`,
+                            `${operatorEngineeringMemory.summary.work_item_bundle_count} work items`,
+                            operatorContinuityGraph.summary.recommended_focus
+                              ? `focus ${operatorContinuityGraph.summary.recommended_focus}`
+                              : null,
+                          ].filter(Boolean).join(" · ")}
+                        </div>
+                        {operatorBackgroundSupervisionEntries.map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <button
+                              type="button"
+                              className="cockpit-operator-details cockpit-operator-details--button"
+                              aria-label={`Inspect background continuity for ${entry.title}`}
+                              onClick={() => inspectOperatorBackgroundSupervisionEntry(entry)}
+                              disabled={!entry.workflow}
+                            >
+                              <div className="cockpit-value">{entry.title}</div>
+                              <div className="cockpit-operator-note">{entry.detail || "Background handoff is ready for inspection."}</div>
+                              <div className="cockpit-operator-note">{entry.meta}</div>
+                            </button>
+                            <div className="cockpit-operator-actions">
+                              {entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Inspect background continuity for ${entry.title}`}
+                                  onClick={() => inspectOperatorBackgroundSupervisionEntry(entry)}
+                                >
+                                  inspect
+                                </button>
+                              )}
+                              {(entry.continueMessage || (entry.workflow && workflowCanContinue(entry.workflow))) && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Continue background continuity for ${entry.title}`}
+                                  onClick={() => continueOperatorBackgroundSupervisionEntry(entry)}
+                                >
+                                  continue
+                                </button>
+                              )}
+                              {entry.outputPath && entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Use latest output for background continuity ${entry.title}`}
+                                  onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                                >
+                                  use output
+                                </button>
+                              )}
+                              {entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Draft next step for background continuity ${entry.title}`}
+                                  onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                                >
+                                  draft next step
+                                </button>
+                              )}
+                              {entry.latestBranch && entry.workflow && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Inspect latest branch for background continuity ${entry.title}`}
+                                  onClick={() => inspectLatestWorkflowBranch(entry.workflow)}
+                                >
+                                  latest branch
+                                </button>
+                              )}
+                              {entry.threadId && (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Open thread for background continuity ${entry.title}`}
+                                  onClick={() => openOperatorBackgroundSupervisionThread(entry)}
+                                >
+                                  open thread
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorEngineeringMemoryEntries.map((entry) => (
+                          <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                            <div className="cockpit-operator-details">
+                              <div className="cockpit-value">{entry.reference}</div>
+                              <div className="cockpit-operator-note">{entry.detail || "Engineering memory bundle"}</div>
+                              <div className="cockpit-operator-note">{entry.meta}</div>
+                            </div>
+                            <div className="cockpit-operator-actions">
+                              {entry.continueMessage ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Continue engineering memory for ${entry.reference}`}
+                                  onClick={() => continueOperatorEngineeringMemoryEntry(entry)}
+                                >
+                                  continue
+                                </button>
+                              ) : null}
+                              {entry.threadId ? (
+                                <button
+                                  type="button"
+                                  className="cockpit-operator-button"
+                                  aria-label={`Open thread for engineering memory ${entry.reference}`}
+                                  onClick={() => openOperatorEngineeringMemoryThread(entry)}
+                                >
+                                  open thread
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                        {operatorBackgroundSupervisionEntries.length === 0 && operatorEngineeringMemoryEntries.length === 0 ? (
+                          <div className="cockpit-empty">No background supervision or engineering-memory handoff is available yet.</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="cockpit-empty">Background continuity summary unavailable.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Workflow supervision">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">workflow supervision</span>
+                      <span className="cockpit-operator-link">{operatorWorkflowEntries.length} tracked</span>
+                    </div>
+                    {operatorWorkflowEntries.map((entry) => {
+                      const hasDistinctBestContinuation = entry.bestContinuation
+                        ? (entry.bestContinuation.runIdentity ?? entry.bestContinuation.id) !== (entry.workflow.runIdentity ?? entry.workflow.id)
+                        : false;
+                      const bestContinuationOutput = entry.bestContinuation ? workflowPrimaryOutputPath(entry.bestContinuation) : null;
+                      const latestFailure = entry.latestFailure;
+                      return (
+                        <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                          <button
+                            type="button"
+                            className="cockpit-operator-details cockpit-operator-details--button"
+                            aria-label={`Inspect workflow supervision for ${entry.workflow.workflowName}`}
+                            onClick={() => inspectOperatorWorkflowEntry(entry)}
+                          >
+                            <div className="cockpit-value">{entry.label}</div>
+                            <div className="cockpit-operator-note">{entry.detail}</div>
+                            <div className="cockpit-operator-note">
+                              {entry.historySummary.length > 0 ? entry.historySummary : "history just started"}
+                            </div>
+                            <div className="cockpit-operator-note">
+                              {[entry.branchSummary, entry.meta].filter(Boolean).join(" · ")}
+                            </div>
+                          </button>
+                          <div className="cockpit-operator-actions">
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Inspect workflow supervision for ${entry.workflow.workflowName}`}
+                              onClick={() => inspectOperatorWorkflowEntry(entry)}
+                            >
+                              inspect
+                            </button>
+                            {workflowCanContinue(entry.workflow) && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Continue workflow supervision for ${entry.workflow.workflowName}`}
+                                onClick={() => continueOperatorWorkflowEntry(entry)}
+                              >
+                                continue
+                              </button>
+                            )}
+                            {entry.outputPath && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Use latest output for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueWorkflowOutputContext(entry.workflow)}
+                              >
+                                use output
+                              </button>
+                            )}
+                            {latestFailure && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Use failure context for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueWorkflowStepContext(latestFailure.workflow, latestFailure.step)}
+                              >
+                                use failure
+                              </button>
+                            )}
+                            {entry.workflow.retryFromStepDraft && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Retry step for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => void queueLiveWorkflowResumePlan(entry.workflow, {
+                                  action: "retry",
+                                  stepId: entry.workflow.resumeFromStep,
+                                  fallbackDraft: entry.workflow.retryFromStepDraft,
+                                  label: `workflow supervision ${entry.workflow.workflowName}`,
+                                })}
+                              >
+                                retry step
+                              </button>
+                            )}
+                            {entry.workflow.replayAllowed === false && entry.workflow.replayRecommendedActions?.length ? (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Repair replay for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => void repairWorkflowReplay(entry.workflow)}
+                              >
+                                repair replay
+                              </button>
+                            ) : null}
+                            {latestFailure?.step.recoveryActions?.length ? (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Repair step for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => void runCapabilityActions(
+                                  readActionList(latestFailure.step.recoveryActions),
+                                  `${latestFailure.workflow.workflowName} ${latestFailure.step.id}`,
+                                )}
+                              >
+                                repair step
+                              </button>
+                            ) : null}
+                            {entry.latestBranch && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Inspect latest branch for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => inspectLatestWorkflowBranch(entry.workflow)}
+                              >
+                                latest branch
+                              </button>
+                            )}
+                            {hasDistinctBestContinuation && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Open best continuation for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => inspectWorkflowBestContinuation(entry.workflow)}
+                              >
+                                open best
+                              </button>
+                            )}
+                            {hasDistinctBestContinuation && entry.bestContinuation && workflowCanContinue(entry.bestContinuation) && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Continue best continuation for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => continueWorkflowBestContinuation(entry.workflow)}
+                              >
+                                continue best
+                              </button>
+                            )}
+                            {entry.outputPath && hasDistinctBestContinuation && bestContinuationOutput && bestContinuationOutput !== entry.outputPath && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Compare best continuation for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => queueWorkflowBestContinuationComparison(entry.workflow)}
+                              >
+                                compare best
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft next step for workflow supervision ${entry.workflow.workflowName}`}
+                              onClick={() => queueWorkflowFamilyPlan(entry.workflow)}
+                            >
+                              draft next step
+                            </button>
+                            {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                aria-label={`Open thread for workflow supervision ${entry.workflow.workflowName}`}
+                                onClick={() => openOperatorWorkflowThread(entry)}
+                              >
+                                open thread
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {operatorWorkflowEntries.length === 0 && (
+                      <div className="cockpit-empty">No recent workflow runs are available for supervision.</div>
+                    )}
+                  </section>
+
+                  <section className="cockpit-operator-section" aria-label="Evidence shortcuts">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">evidence shortcuts</span>
+                      <span className="cockpit-operator-link">{operatorEvidenceEntries.length} surfaced</span>
+                    </div>
+                    {operatorEvidenceEntries.map((entry) => (
+                      <div key={entry.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          aria-label={`Inspect ${entry.label}`}
+                          onClick={() => inspectOperatorEvidenceEntry(entry)}
+                        >
+                          <div className="cockpit-value">{entry.label}</div>
+                          <div className="cockpit-operator-note">{entry.detail}</div>
+                          <div className="cockpit-operator-note">{entry.meta}</div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {(entry.artifact || entry.approval?.resume_message) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Draft next step for ${entry.label}`}
+                              onClick={() => draftOperatorEvidenceEntry(entry)}
+                            >
+                              draft
+                            </button>
+                          )}
+                          {entry.approval && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Approve ${entry.label}`}
+                              onClick={() => void handleApprovalDecision(entry.approval!, "approve")}
+                            >
+                              approve
+                            </button>
+                          )}
+                          {entry.threadId && canOpenLedgerThread(entry.threadId, sessionId, knownSessionIds) && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Open thread for ${entry.label}`}
+                              onClick={() => void openThread(entry.threadId)}
+                            >
+                              open thread
+                            </button>
+                          )}
+                          {entry.trace?.toolUsed && entry.audit && (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              aria-label={`Inspect audit for ${entry.label}`}
+                              onClick={() => setSelectedInspector({ kind: "audit", event: entry.audit! })}
+                            >
+                              audit
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {operatorEvidenceEntries.length === 0 && (
+                      <div className="cockpit-empty">No artifact, trace, or approval evidence needs surfacing yet.</div>
+                    )}
+                  </section>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">imported capability reach</span>
+                      <span className="cockpit-operator-link">{importedCapabilityFamilies.length} families</span>
+                    </div>
+                    {importedCapabilityFamilies.map((family) => (
+                      <div key={family.type} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType: "extension_manifest",
+                                name: family.label,
+                                meta: `${family.total} entries · ${family.packages.length} packages`,
+                                summary: family.entries[0]?.contribution.description ?? `${family.label} imported through the extension platform.`,
+                                details: {
+                                  family: family.type,
+                                  ready: family.ready,
+                                  attention: family.attention,
+                                  approval: family.approval,
+                                  packages: family.packages,
+                                  entries: family.entries.map((entry) => ({
+                                    package_id: entry.packageId,
+                                    package_label: entry.packageLabel,
+                                    type: entry.contribution.type,
+                                    name: entry.contribution.name,
+                                    status: entry.contribution.status,
+                                    health: entry.contribution.health,
+                                    permission_profile: entry.contribution.permission_profile,
+                                    capability_contract: entry.contribution.capability_contract,
+                                  })),
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{family.label}</div>
+                          <div className="cockpit-operator-note">
+                            {family.total} active
+                            {family.ready ? ` · ${family.ready} ready` : ""}
+                            {family.installed > family.total ? ` · ${family.installed - family.total} inactive` : ""}
+                            {family.attention ? ` · ${family.attention} attention` : ""}
+                            {family.approval ? ` · ${family.approval} approval` : ""}
+                            {family.contractCount ? ` · ${family.contractCount} contracts` : ""}
+                            {family.packages.length ? ` · ${family.packages.join(", ")}` : ""}
+                          </div>
+                        </button>
+                      </div>
+                    ))}
+                    {importedCapabilityFamilies.length === 0 && (
+                      <div className="cockpit-empty">No packaged reach or imported capability families are active yet.</div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">extension boundaries</span>
+                      <span className="cockpit-operator-link">{extensionGovernanceQueue.length} requiring attention</span>
+                    </div>
+                    {extensionGovernanceQueue.map((item) => (
+                      <div key={item.packageId} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: buildExtensionManifestEntity(item.packageInfo),
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{item.label}</div>
+                          <div className="cockpit-operator-note">
+                            {item.riskLevel} risk · {item.detail}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          <button
+                            type="button"
+                            className="cockpit-operator-button"
+                            onClick={() => {
+                              setStudioSelectedId(`extension:${item.packageId}`);
+                              setStudioOpen(true);
+                            }}
+                          >
+                            inspect
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {extensionGovernanceQueue.length === 0 && (
+                      <div className="cockpit-empty">No extension approval, permission, or connector issues in the current workspace.</div>
                     )}
                   </div>
 
@@ -6118,13 +17491,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
                   <div className="cockpit-operator-section">
                     <div className="cockpit-operator-row">
-                      <span className="cockpit-key">installable now</span>
-                      <span className="cockpit-operator-link">
-                        {catalogItems.filter((item) => !item.installed).length} missing
-                      </span>
+                      <span className="cockpit-key">marketplace flows</span>
+                      <span className="cockpit-operator-link">{marketplaceFlowSummary || "0/0 ready"}</span>
                     </div>
-                    {catalogItems.filter((item) => !item.installed).map((item) => (
-                      <div key={`${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
+                    {marketplaceFlows.slice(0, 6).map((flow) => (
+                      <div key={flow.id} className="cockpit-operator-row cockpit-operator-row--entry">
                         <button
                           type="button"
                           className="cockpit-operator-details cockpit-operator-details--button"
@@ -6132,14 +17503,202 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             setSelectedInspector({
                               kind: "operator",
                               entity: {
-                                entityType: item.type === "skill" ? "skill" : "mcp",
+                                entityType: flow.kind === "starter_pack" ? "starter_pack" : "extension_manifest",
+                                name: flow.label,
+                                meta: `${flow.kind.replace("_", " ")} · ${flow.availability}`,
+                                summary: flow.summary,
+                                details: {
+                                  detail: flow.detail,
+                                  ready_count: flow.ready_count,
+                                  total_count: flow.total_count,
+                                  blocking_reasons: flow.blocking_reasons ?? [],
+                                  install_items: flow.install_items ?? [],
+                                  skills: flow.skills ?? [],
+                                  workflows: flow.workflows ?? [],
+                                  related_runbooks: flow.related_runbooks ?? [],
+                                  contribution_types: flow.contribution_types ?? [],
+                                  trust: flow.trust ?? "",
+                                  version_line: flow.version_line ?? "",
+                                  installed_version: flow.installed_version ?? "",
+                                  update_available: flow.update_available ?? false,
+                                  compatibility: flow.compatibility ?? null,
+                                  publisher: flow.publisher ?? null,
+                                  diagnostics_summary: flow.diagnostics_summary ?? null,
+                                  recommended_actions: flow.recommended_actions ?? [],
+                                },
+                              },
+                            })
+                          }
+                        >
+                          <div className="cockpit-value">{flow.label}</div>
+                          <div className="cockpit-operator-note">
+                            {[flow.detail, flow.summary].filter(Boolean).join(" · ")}
+                          </div>
+                        </button>
+                        <div className="cockpit-operator-actions">
+                          {flow.primary_action ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityAction(flow.primary_action ?? null)}
+                            >
+                              {flow.primary_action.label}
+                            </button>
+                          ) : null}
+                          {flow.recommended_actions?.length ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void runCapabilityActions(flow.recommended_actions ?? [], flow.label)}
+                            >
+                              repair
+                            </button>
+                          ) : null}
+                          {flow.draft_command ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => queueComposerDraft(flow.draft_command ?? "")}
+                            >
+                              draft
+                            </button>
+                          ) : null}
+                          {flow.kind === "extension_pack" && flow.catalog_id && flow.installed ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${flow.catalog_id}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                    {marketplaceFlows.length === 0 && (
+                      <div className="cockpit-empty">No marketplace flows composed yet.</div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">extension health</span>
+                      <button
+                        type="button"
+                        className="cockpit-operator-link"
+                        onClick={() => setStudioOpen(true)}
+                      >
+                        studio
+                      </button>
+                    </div>
+                    <div className="cockpit-sublist-item">{extensionHealthSummary}</div>
+                    {extensionPackagesNeedingAttention.slice(0, 6).map((extensionPackage) => {
+                      const catalogItem = catalogExtensionItemsById.get(extensionPackage.id) ?? null;
+                      return (
+                        <div key={extensionPackage.id} className="cockpit-operator-row cockpit-operator-row--entry">
+                          <button
+                            type="button"
+                            className="cockpit-operator-details cockpit-operator-details--button"
+                            onClick={() =>
+                              setSelectedInspector({
+                                kind: "operator",
+                                entity: buildExtensionManifestEntity(extensionPackage),
+                              })
+                            }
+                          >
+                            <div className="cockpit-value">{extensionPackage.display_name}</div>
+                            <div className="cockpit-operator-note">
+                              {[
+                                extensionPackage.version ?? null,
+                                catalogItem?.update_available && catalogItem.version
+                                  ? `${catalogItem.installed_version ?? extensionPackage.version ?? "installed"} -> ${catalogItem.version}`
+                                  : null,
+                                formatExtensionCompatibilityLabel(extensionPackage.compatibility),
+                                formatExtensionDiagnosticsSummary(extensionPackage.diagnostics_summary),
+                                formatExtensionGovernanceSummary(extensionPackage),
+                                formatExtensionContractSummary(extensionPackage),
+                                formatExtensionPublisherLabel(extensionPackage.publisher),
+                              ].filter(Boolean).join(" · ")}
+                            </div>
+                          </button>
+                          <div className="cockpit-operator-actions">
+                            {catalogItem?.update_available ? (
+                              <button
+                                type="button"
+                                className="cockpit-operator-button"
+                                onClick={() => void installCatalogItem(catalogItem)}
+                              >
+                                update
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${extensionPackage.id}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => queueComposerDraft(buildExtensionPackageReviewDraft(extensionPackage, catalogItem))}
+                            >
+                              draft
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {extensionPackagesNeedingAttention.length === 0 && (
+                      <div className="cockpit-empty">Installed extension packages are healthy.</div>
+                    )}
+                  </div>
+
+                  <div className="cockpit-operator-section">
+                    <div className="cockpit-operator-row">
+                      <span className="cockpit-key">installable now</span>
+                      <span className="cockpit-operator-link">{installableCatalogSummary}</span>
+                    </div>
+                    {installableCatalogItems.map((item) => (
+                      <div key={item.catalog_id ?? `${item.type}:${item.name}`} className="cockpit-operator-row cockpit-operator-row--entry">
+                        <button
+                          type="button"
+                          className="cockpit-operator-details cockpit-operator-details--button"
+                          onClick={() =>
+                            setSelectedInspector({
+                              kind: "operator",
+                              entity: {
+                                entityType:
+                                  item.type === "skill"
+                                    ? "skill"
+                                    : item.type === "mcp_server"
+                                      ? "mcp"
+                                      : "extension_manifest",
                                 name: item.name,
-                                meta: `install ${item.type.replace("_", " ")}`,
+                                meta: `${item.installed && item.update_available ? "update" : "install"} ${item.type.replace("_", " ")}`,
                                 summary: item.description,
                                 details: {
+                                  catalog_id: item.catalog_id ?? item.name,
                                   category: item.category ?? "",
                                   bundled: item.bundled ?? false,
                                   missing_tools: item.missing_tools ?? [],
+                                  contribution_types: item.contribution_types ?? [],
+                                  trust: item.trust ?? "",
+                                  version: item.version ?? "",
+                                  version_line: item.version_line ?? "",
+                                  installed_version: item.installed_version ?? "",
+                                  update_available: item.update_available ?? false,
+                                  compatibility: item.compatibility ?? null,
+                                  publisher: item.publisher ?? null,
+                                  status: item.status ?? "ready",
+                                  doctor_ok: item.doctor_ok ?? true,
+                                  issues: item.issues ?? [],
+                                  load_errors: item.load_errors ?? [],
+                                  diagnostics_summary: item.diagnostics_summary ?? null,
                                 },
                               },
                             })
@@ -6147,6 +17706,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         >
                           <div className="cockpit-value">{item.name}</div>
                           <div className="cockpit-operator-note">{item.description}</div>
+                          {item.type === "extension_pack" ? (
+                            <div className="cockpit-operator-note">
+                              {[
+                                item.installed && item.update_available
+                                  ? `${item.installed_version ?? "installed"} -> ${item.version ?? "candidate"}`
+                                  : item.version ?? null,
+                                formatExtensionPublisherLabel(item.publisher),
+                                item.trust ? `trust ${item.trust}` : null,
+                                formatExtensionCompatibilityLabel(item.compatibility),
+                                formatExtensionDiagnosticsSummary(item.diagnostics_summary),
+                              ].filter(Boolean).join(" · ")}
+                            </div>
+                          ) : null}
                         </button>
                         <div className="cockpit-operator-actions">
                           <button
@@ -6154,8 +17726,19 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             className="cockpit-operator-button"
                             onClick={() => void installCatalogItem(item)}
                           >
-                            install
+                            {item.installed && item.update_available ? "update" : "install"}
                           </button>
+                          {item.type === "extension_pack" && item.installed ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => openExtensionStudio(
+                                studioEntries.find((entry) => entry.id === `extension:${item.catalog_id ?? item.name}`) ?? null,
+                              )}
+                            >
+                              studio
+                            </button>
+                          ) : null}
                           {item.recommended_actions?.length ? (
                             <button
                               type="button"
@@ -6498,6 +18081,41 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 </div>
                 <div className="cockpit-studio-sidebar-group">
                   <div className="cockpit-operator-row">
+                    <span className="cockpit-key">new skill pack</span>
+                    <span className="cockpit-row-age">workspace scaffold</span>
+                  </div>
+                  <input
+                    className="cockpit-input"
+                    aria-label="New extension package name"
+                    value={studioScaffoldName}
+                    onChange={(event) => setStudioScaffoldName(event.target.value)}
+                    placeholder="research-pack"
+                  />
+                  <input
+                    className="cockpit-input"
+                    aria-label="New extension display name"
+                    value={studioScaffoldDisplayName}
+                    onChange={(event) => setStudioScaffoldDisplayName(event.target.value)}
+                    placeholder="Research Pack"
+                  />
+                  <div className="cockpit-feedback-row">
+                    <button
+                      className="cockpit-feedback-button"
+                      onClick={() => void scaffoldStudioSkillPack()}
+                      disabled={
+                        !studioScaffoldName.trim()
+                        || studioBusy === "extension-scaffold"
+                        || studioBusy === "extension-install"
+                        || studioBusy === "extension-validate"
+                        || studioBusy === "extension-update"
+                      }
+                    >
+                      Scaffold skill pack
+                    </button>
+                  </div>
+                </div>
+                <div className="cockpit-studio-sidebar-group">
+                  <div className="cockpit-operator-row">
                     <span className="cockpit-key">package path</span>
                     <span className="cockpit-row-age">install / validate</span>
                   </div>
@@ -6543,6 +18161,24 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   </div>
                   {studioPackageStatus ? (
                     <div className="cockpit-sublist-item">{studioPackageStatus}</div>
+                  ) : null}
+                  {studioPackagePreview ? (
+                    <>
+                      <div className="cockpit-sublist-item">
+                        {formatLifecyclePlanSummary(studioPackagePreview)
+                          ?? `${studioPackagePreview.display_name} · ${studioPackagePreview.version ?? "unknown version"}`}
+                      </div>
+                      {formatExtensionCompatibilityLabel(studioPackagePreview.compatibility) ? (
+                        <div className="cockpit-sublist-item">
+                          {formatExtensionCompatibilityLabel(studioPackagePreview.compatibility)}
+                        </div>
+                      ) : null}
+                      {formatExtensionDiagnosticsSummary(studioPackagePreview.diagnostics_summary) ? (
+                        <div className="cockpit-sublist-item">
+                          {formatExtensionDiagnosticsSummary(studioPackagePreview.diagnostics_summary)}
+                        </div>
+                      ) : null}
+                    </>
                   ) : null}
                 </div>
                 {studioSidebarSections.packages.map((group) => (
@@ -6715,6 +18351,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                         <div className="cockpit-key">package state</div>
                         <div className="cockpit-value">
                           {selectedExtensionPackage.status}
+                          {selectedExtensionPackage.version ? ` · ${selectedExtensionPackage.version}` : ""}
+                          {selectedExtensionPackage.version_line ? ` · line ${selectedExtensionPackage.version_line}` : ""}
                           {selectedExtensionPackage.enabled_scope !== "none"
                             ? ` · ${selectedExtensionPackage.enabled === false ? "disabled" : "enabled"}`
                             : ""}
@@ -6723,6 +18361,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                             : ""}
                           {selectedExtensionPackage.passive_contribution_types.length
                             ? ` · passive ${selectedExtensionPackage.passive_contribution_types.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.compatibility ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">compatibility</div>
+                        <div className="cockpit-value">
+                          {formatExtensionCompatibilityLabel(selectedExtensionPackage.compatibility)}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedStudioEntry.entityType === "extension_manifest" && selectedExtensionPackage?.diagnostics_summary ? (
+                      <div className="cockpit-inspector-stack-row">
+                        <div className="cockpit-key">diagnostics</div>
+                        <div className="cockpit-value">
+                          {formatExtensionDiagnosticsSummary(selectedExtensionPackage.diagnostics_summary)}
+                          {selectedExtensionPackage.diagnostics_summary.highlighted_messages.length
+                            ? ` · ${selectedExtensionPackage.diagnostics_summary.highlighted_messages.join(" · ")}`
                             : ""}
                         </div>
                       </div>

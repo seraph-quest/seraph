@@ -3,8 +3,12 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from config.settings import settings
 from src.audit.repository import audit_repository
 from src.tools.browser_tool import browse_webpage
+from src.tools.browser_tool import _route_guarded_browser_request
 
 
 class _ImmediateFuture:
@@ -24,6 +28,17 @@ class _ImmediateExecutor:
 
     def submit(self, fn, *args, **kwargs):
         return _ImmediateFuture(fn(*args, **kwargs))
+
+
+@pytest.fixture(autouse=True)
+def reset_browser_site_policy():
+    original_allowlist = settings.browser_site_allowlist
+    original_blocklist = settings.browser_site_blocklist
+    settings.browser_site_allowlist = ""
+    settings.browser_site_blocklist = ""
+    yield
+    settings.browser_site_allowlist = original_allowlist
+    settings.browser_site_blocklist = original_blocklist
 
 
 def test_browse_webpage_logs_blocked_runtime_audit(async_db):
@@ -59,6 +74,64 @@ def test_browse_webpage_logs_success_runtime_audit(async_db):
     assert events[0]["tool_name"] == "browser:playwright"
     assert events[0]["details"]["hostname"] == "example.com"
     assert events[0]["details"]["action"] == "extract"
+
+
+def test_browse_webpage_blocks_site_policy_domain(async_db):
+    settings.browser_site_blocklist = "example.com"
+
+    result = browse_webpage("https://docs.example.com/guide")
+
+    assert "blocked by site policy" in result.lower()
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "integration_blocked"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["tool_name"] == "browser:playwright"
+    assert events[0]["details"]["hostname"] == "docs.example.com"
+    assert events[0]["details"]["site_policy_reason"] == "blocklisted_domain"
+    assert events[0]["details"]["site_policy_rule"] == "example.com"
+
+
+def test_browse_webpage_blocks_private_dns_resolution_preflight(async_db):
+    with patch(
+        "src.security.site_policy.socket.getaddrinfo",
+        return_value=[(None, None, None, None, ("10.0.0.11", 0))],
+    ):
+        result = browse_webpage("https://public-looking.example/docs")
+
+    assert "internal/private" in result.lower()
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=5)
+        return [e for e in events if e["event_type"] == "integration_blocked"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["site_policy_reason"] == "internal_private"
+    assert events[0]["details"]["resolved_addresses"] == ["10.0.0.11"]
+
+
+def test_browser_route_guard_blocks_internal_subrequest():
+    route = AsyncMock()
+    request = type("Request", (), {"url": "http://127.0.0.1/secret.js"})()
+
+    asyncio.run(_route_guarded_browser_request(route, request))
+
+    route.abort.assert_awaited_once()
+    route.continue_.assert_not_called()
+
+
+def test_browser_route_guard_allows_external_subrequest():
+    route = AsyncMock()
+    request = type("Request", (), {"url": "https://cdn.example.com/app.js"})()
+
+    asyncio.run(_route_guarded_browser_request(route, request))
+
+    route.continue_.assert_awaited_once()
+    route.abort.assert_not_called()
 
 
 def test_browse_webpage_logs_timeout_runtime_audit(async_db):

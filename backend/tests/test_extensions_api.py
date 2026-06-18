@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -35,7 +35,7 @@ def _write_installable_extension(
         f"display_name: {display_name}\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -50,6 +50,9 @@ def _write_installable_extension(
         "    - starter-packs/local-pack.json\n"
         "permissions:\n"
         "  tools: [read_file]\n"
+        "  execution_boundaries: [workspace_read]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_read]\n"
         "  network: false\n",
         encoding="utf-8",
     )
@@ -100,8 +103,8 @@ def _write_installable_extension(
     return package_dir
 
 
-def _write_high_risk_extension(root: Path) -> Path:
-    package_dir = root / "high-risk-pack"
+def _write_high_risk_extension(root: Path, *, package_name: str = "high-risk-pack") -> Path:
+    package_dir = root / package_name
     (package_dir / "workflows").mkdir(parents=True)
     (package_dir / "manifest.yaml").write_text(
         "id: seraph.high-risk-pack\n"
@@ -109,7 +112,7 @@ def _write_high_risk_extension(root: Path) -> Path:
         "display_name: High Risk Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -118,6 +121,9 @@ def _write_high_risk_extension(root: Path) -> Path:
         "    - workflows/write-note.md\n"
         "permissions:\n"
         "  tools: [write_file]\n"
+        "  execution_boundaries: [workspace_write]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_write]\n"
         "  network: false\n",
         encoding="utf-8",
     )
@@ -135,6 +141,66 @@ def _write_high_risk_extension(root: Path) -> Path:
         "      content: approved\n"
         "---\n\n"
         "Write a note.\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_multi_high_risk_extension(root: Path) -> Path:
+    package_dir = root / "multi-high-risk-pack"
+    (package_dir / "workflows").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.multi-high-risk-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Multi High Risk Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  workflows:\n"
+        "    - workflows/write-note-a.md\n"
+        "    - workflows/write-note-b.md\n"
+        "permissions:\n"
+        "  tools: [write_file]\n"
+        "  execution_boundaries: [workspace_write]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_write]\n"
+        "  network: false\n",
+        encoding="utf-8",
+    )
+    (package_dir / "workflows" / "write-note-a.md").write_text(
+        "---\n"
+        "name: write-note-a\n"
+        "description: Write note A into the workspace\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/high-risk-a.md\n"
+        "      content: approved-a\n"
+        "---\n\n"
+        "Write note A.\n",
+        encoding="utf-8",
+    )
+    (package_dir / "workflows" / "write-note-b.md").write_text(
+        "---\n"
+        "name: write-note-b\n"
+        "description: Write note B into the workspace\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/high-risk-b.md\n"
+        "      content: approved-b\n"
+        "---\n\n"
+        "Write note B.\n",
         encoding="utf-8",
     )
     return package_dir
@@ -158,7 +224,7 @@ def _write_mcp_connector_extension(
         "display_name: Test Connector\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -166,6 +232,8 @@ def _write_mcp_connector_extension(
         "  mcp_servers:\n"
         "    - mcp/github.json\n"
         "permissions:\n"
+        "  execution_boundaries: [external_mcp]\n"
+        "  audit_events: [mcp_request]\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -183,6 +251,54 @@ def _write_mcp_connector_extension(
     return package_dir
 
 
+def _write_multi_mcp_connector_extension(root: Path) -> Path:
+    package_dir = root / "multi-connector-pack"
+    (package_dir / "mcp").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.multi-connector-pack\n"
+        "version: 2026.3.21\n"
+        "display_name: Multi Connector Pack\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  mcp_servers:\n"
+        "    - mcp/github-primary.json\n"
+        "    - mcp/github-secondary.json\n"
+        "permissions:\n"
+        "  execution_boundaries: [external_mcp]\n"
+        "  audit_events: [mcp_request]\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "mcp" / "github-primary.json").write_text(
+        "{\n"
+        '  "name": "github-primary",\n'
+        '  "url": "https://example.test/mcp-primary",\n'
+        '  "description": "Primary packaged GitHub MCP",\n'
+        '  "headers": {"Authorization": "Bearer ${GITHUB_PRIMARY_TOKEN}"},\n'
+        '  "auth_hint": "Set GITHUB_PRIMARY_TOKEN before enabling the connector",\n'
+        '  "transport": "streamable-http"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    (package_dir / "mcp" / "github-secondary.json").write_text(
+        "{\n"
+        '  "name": "github-secondary",\n'
+        '  "url": "https://example.test/mcp-secondary",\n'
+        '  "description": "Secondary packaged GitHub MCP",\n'
+        '  "headers": {"Authorization": "Bearer ${GITHUB_SECONDARY_TOKEN}"},\n'
+        '  "auth_hint": "Set GITHUB_SECONDARY_TOKEN before enabling the connector",\n'
+        '  "transport": "streamable-http"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_managed_connector_extension(root: Path) -> Path:
     package_dir = root / "managed-connector-pack"
     (package_dir / "connectors" / "managed").mkdir(parents=True)
@@ -192,7 +308,7 @@ def _write_managed_connector_extension(root: Path) -> Path:
         "display_name: Managed GitHub\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -200,6 +316,7 @@ def _write_managed_connector_extension(root: Path) -> Path:
         "  managed_connectors:\n"
         "    - connectors/managed/github.yaml\n"
         "permissions:\n"
+        "  execution_boundaries: []\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -236,7 +353,7 @@ def _write_mixed_managed_connector_extension(root: Path) -> Path:
         "display_name: Mixed Managed\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -247,6 +364,9 @@ def _write_mixed_managed_connector_extension(root: Path) -> Path:
         "    - connectors/managed/github.yaml\n"
         "permissions:\n"
         "  tools: [read_file]\n"
+        "  execution_boundaries: [workspace_read]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_read]\n"
         "  network: true\n",
         encoding="utf-8",
     )
@@ -289,7 +409,7 @@ def _write_observer_extension(root: Path) -> Path:
         "display_name: Calendar Observer\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -310,6 +430,108 @@ def _write_observer_extension(root: Path) -> Path:
     return package_dir
 
 
+def _write_wave2_extension(root: Path) -> Path:
+    package_dir = root / "wave2-pack"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    (package_dir / "context").mkdir()
+    (package_dir / "speech").mkdir()
+    (package_dir / "automation").mkdir()
+    (package_dir / "connectors" / "browser").mkdir(parents=True)
+    (package_dir / "connectors" / "messaging").mkdir()
+    (package_dir / "connectors" / "nodes").mkdir()
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.wave2-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: Wave 2 Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "permissions:\n"
+        "  tools: [read_file]\n"
+        "  execution_boundaries: [workspace_read, secret_management]\n"
+        "  data_access: [workspace_files]\n"
+        "  audit_events: [filesystem_read, secret_management]\n"
+        "  network: true\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/research.yaml\n"
+        "  context_packs:\n"
+        "    - context/research.yaml\n"
+        "  speech_profiles:\n"
+        "    - speech/voice.yaml\n"
+        "  automation_triggers:\n"
+        "    - automation/daily-brief.yaml\n"
+        "  browser_providers:\n"
+        "    - connectors/browser/browserbase.yaml\n"
+        "  messaging_connectors:\n"
+        "    - connectors/messaging/telegram.yaml\n"
+        "  node_adapters:\n"
+        "    - connectors/nodes/companion.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "research.yaml").write_text(
+        "name: research\ninclude_tools:\n  - read_file\ncapabilities:\n  - analysis\n",
+        encoding="utf-8",
+    )
+    (package_dir / "context" / "research.yaml").write_text(
+        "name: research\ninstructions: Keep context tight.\ndomains:\n  - research\n",
+        encoding="utf-8",
+    )
+    (package_dir / "speech" / "voice.yaml").write_text(
+        "name: narrator\nprovider: openai\nsupports_tts: true\nvoice: alloy\n",
+        encoding="utf-8",
+    )
+    (package_dir / "automation" / "daily-brief.yaml").write_text(
+        "name: daily-brief\ntrigger_type: webhook\nendpoint: /api/automation/webhooks/daily-brief\nconfig_fields:\n  - key: signing_secret\n    label: Signing Secret\n    input: password\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
+        "name: browserbase\nprovider_kind: browserbase\nconfig_fields:\n  - key: api_key\n    label: API Key\n    input: password\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "messaging" / "telegram.yaml").write_text(
+        "name: telegram\nplatform: telegram\ndelivery_modes:\n  - dm\nconfig_fields:\n  - key: bot_token\n    label: Bot Token\n    input: password\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "nodes" / "companion.yaml").write_text(
+        "name: companion\nadapter_kind: companion\nconfig_fields:\n  - key: node_url\n    label: Node URL\n    input: url\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_toolset_boundary_extension(root: Path, *, boundary: str, network: bool = False) -> Path:
+    package_dir = root / f"toolset-{boundary.replace('_', '-')}"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    network_literal = "true" if network else "false"
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.toolset-boundary-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: Toolset Boundary Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "permissions:\n"
+        f"  execution_boundaries: [{boundary}]\n"
+        f"  network: {network_literal}\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/boundary.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "boundary.yaml").write_text(
+        f"name: boundary\nexecution_boundaries:\n  - {boundary}\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
 def _write_invalid_observer_extension(root: Path) -> Path:
     package_dir = root / "invalid-observer-pack"
     (package_dir / "observers" / "definitions").mkdir(parents=True)
@@ -319,7 +541,7 @@ def _write_invalid_observer_extension(root: Path) -> Path:
         "display_name: Invalid Observer\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -348,7 +570,7 @@ def _write_channel_adapter_extension(root: Path) -> Path:
         "display_name: Native Channel\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -376,7 +598,7 @@ def _write_invalid_channel_adapter_extension(root: Path) -> Path:
         "display_name: Invalid Channel\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -388,6 +610,69 @@ def _write_invalid_channel_adapter_extension(root: Path) -> Path:
     (package_dir / "channels" / "native.yaml").write_text(
         "name: invalid-native\n"
         "description: Missing transport\n"
+        "enabled: true\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_invalid_planned_connector_extension(root: Path) -> Path:
+    package_dir = root / "invalid-planned-pack"
+    (package_dir / "automation").mkdir(parents=True)
+    (package_dir / "connectors" / "nodes").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.invalid-planned\n"
+        "version: 2026.3.24\n"
+        "display_name: Invalid Planned Connectors\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  automation_triggers:\n"
+        "    - automation/trigger.yaml\n"
+        "  node_adapters:\n"
+        "    - connectors/nodes/adapter.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "automation" / "trigger.yaml").write_text(
+        "name: broken-trigger\n"
+        "description: Missing trigger type.\n",
+        encoding="utf-8",
+    )
+    (package_dir / "connectors" / "nodes" / "adapter.yaml").write_text(
+        "name: broken-node\n"
+        "description: Missing adapter kind.\n",
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def _write_duplicate_automation_extension(root: Path, *, package_name: str, extension_id: str) -> Path:
+    package_dir = root / package_name
+    (package_dir / "automation").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        f"id: {extension_id}\n"
+        "version: 2026.3.24\n"
+        "display_name: Duplicate Automation\n"
+        "kind: connector-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  automation_triggers:\n"
+        "    - automation/shared.yaml\n",
+        encoding="utf-8",
+    )
+    (package_dir / "automation" / "shared.yaml").write_text(
+        "name: shared-hook\n"
+        "description: Duplicate shared webhook.\n"
+        "trigger_type: webhook\n"
+        "endpoint: /api/automation/webhooks/shared-hook\n"
         "enabled: true\n",
         encoding="utf-8",
     )
@@ -524,6 +809,21 @@ async def test_list_extensions_includes_bundled_core_capabilities(client, extens
     assert bundled["location"] == "bundled"
     assert bundled["removable"] is False
     assert bundled["enable_supported"] is True
+    assert bundled["version_line"] == ".".join(str(bundled["version"]).split(".")[:2])
+    assert bundled["compatibility"]["compatible"] is True
+    assert bundled["diagnostics_summary"]["issue_count"] == 0
+    skill_contribution = next(
+        item
+        for item in bundled["contributions"]
+        if item["type"] == "skills" and item.get("name") == "web-briefing"
+    )
+    contract = skill_contribution["capability_contract"]
+    assert contract["schema_version"] == "2026-05-04.m1"
+    assert contract["family"] == "skill"
+    assert contract["trust_class"] == "seraph_bundled"
+    assert contract["provenance"]["extension_id"] == "seraph.core-capabilities"
+    assert "web_search" in contract["permissions"]["required"]["tools"]
+    assert contract["enforcement"]["status"] == "accepted"
     managed = next(item for item in payload["extensions"] if item["id"] == "seraph.core-managed-connectors")
     assert managed["location"] == "bundled"
     assert managed["enable_supported"] is True
@@ -541,6 +841,10 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
     assert payload["extension_id"] == "seraph.test-installable"
     assert payload["ok"] is True
     assert isinstance(payload["package_digest"], str)
+    assert payload["version_line"] == "2026.3"
+    assert payload["compatibility"]["compatible"] is True
+    assert payload["diagnostics_summary"]["issue_count"] == 0
+    assert payload["diagnostics_summary"]["load_error_count"] == 0
     assert payload["permissions"]["tools"] == ["read_file"]
     assert payload["permission_summary"]["required"]["tools"] == ["read_file"]
     assert payload["approval_profile"]["requires_lifecycle_approval"] is False
@@ -548,6 +852,128 @@ async def test_validate_extension_package_path_returns_manifest_report(client, t
     assert log_event.await_args.kwargs["integration_type"] == "extension"
     assert log_event.await_args.kwargs["outcome"] == "succeeded"
     assert log_event.await_args.kwargs["details"]["status"] == "validated"
+
+
+@pytest.mark.asyncio
+async def test_extensions_diagnostics_endpoint_summarizes_package_health(client, extension_runtime):
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file"), SimpleNamespace(name="web_search"), SimpleNamespace(name="write_file"), SimpleNamespace(name="http_request")], ["web-briefing"], "approval"),
+    ):
+        response = await client.get("/api/extensions/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total"] >= 1
+    core = next(item for item in payload["extensions"] if item["id"] == "seraph.core-capabilities")
+    assert core["compatibility"]["compatible"] is True
+    assert core["diagnostics_summary"]["issue_count"] == 0
+    assert "permission_summary" in core
+    assert "connector_summary" in core
+
+
+@pytest.mark.asyncio
+async def test_scaffold_extension_package_creates_workspace_skill_pack(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:
+        response = await client.post(
+            "/api/extensions/scaffold",
+            json={
+                "package_name": "skill-lab",
+                "display_name": "Skill Lab",
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "scaffolded"
+    assert payload["path"].endswith("/extensions/skill-lab")
+    assert "manifest.yaml" in payload["created_files"]
+    assert "skills/skill-lab.md" in payload["created_files"]
+    assert payload["preview"]["extension_id"] == "seraph.skill-lab"
+    assert payload["preview"]["ok"] is True
+    assert Path(extension_runtime, "extensions", "skill-lab", "manifest.yaml").is_file()
+    assert log_event.await_count == 1
+    assert log_event.await_args.kwargs["outcome"] == "succeeded"
+    assert log_event.await_args.kwargs["details"]["status"] == "scaffold"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_extension_package_rejects_existing_workspace_package(client, extension_runtime):
+    existing_root = Path(extension_runtime, "extensions", "skill-lab")
+    existing_root.mkdir(parents=True)
+    (existing_root / "manifest.yaml").write_text("id: seraph.existing\n", encoding="utf-8")
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:
+        response = await client.post(
+            "/api/extensions/scaffold",
+            json={
+                "package_name": "skill-lab",
+                "display_name": "Skill Lab",
+            },
+        )
+
+    assert response.status_code == 409
+    assert "manifest already exists" in response.json()["detail"]
+    assert log_event.await_count == 1
+    assert log_event.await_args.kwargs["outcome"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_extension_package_quotes_display_name_for_frontmatter(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        response = await client.post(
+            "/api/extensions/scaffold",
+            json={
+                "package_name": "quoted-pack",
+                "display_name": "Quoted: Pack",
+                "contributions": ["skills", "workflows"],
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "scaffolded"
+    assert payload["preview"]["ok"] is True
+
+    skill_file = Path(extension_runtime, "extensions", "quoted-pack", "skills", "quoted-pack.md").read_text(encoding="utf-8")
+    workflow_file = Path(extension_runtime, "extensions", "quoted-pack", "workflows", "quoted-pack.md").read_text(encoding="utf-8")
+    assert 'description: "Quoted: Pack skill"' in skill_file
+    assert 'description: "Quoted: Pack workflow"' in workflow_file
+    assert "name: quoted-pack" in workflow_file
+
+
+@pytest.mark.asyncio
+async def test_validate_extension_reports_lifecycle_approval_for_boundary_only_toolset(client, tmp_path):
+    package_dir = _write_toolset_boundary_extension(tmp_path, boundary="secret_read")
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["approval_profile"]["requires_lifecycle_approval"] is True
+    assert "secret_read" in payload["approval_profile"]["lifecycle_boundaries"]
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+
+    assert install_response.status_code == 409
+    assert install_response.json()["detail"]["type"] == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_validate_extension_reports_network_for_boundary_only_toolset(client, tmp_path):
+    package_dir = _write_toolset_boundary_extension(tmp_path, boundary="external_read", network=False)
+
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        response = await client.post("/api/extensions/validate", json={"path": str(package_dir)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["permission_summary"]["required"]["network"] is True
+    assert payload["permission_summary"]["missing"]["network"] is True
 
 
 @pytest.mark.asyncio
@@ -595,6 +1021,14 @@ async def test_install_and_enable_high_risk_extension_require_approval(client, e
         installed = install_response.json()["extension"]
         assert installed["approval_profile"]["requires_lifecycle_approval"] is True
         assert "workspace_write" in installed["approval_profile"]["lifecycle_boundaries"]
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        disable_detail = disable_response.json()["detail"]
+        assert disable_detail["type"] == "approval_required"
+
+        approve_disable = await client.post(f"/api/approvals/{disable_detail['approval_id']}/approve")
+        assert approve_disable.status_code == 200
 
         disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
         assert disable_response.status_code == 200
@@ -651,6 +1085,144 @@ async def test_install_high_risk_extension_requires_new_approval_if_package_chan
         assert install_response.status_code == 409
         second_approval_id = install_response.json()["detail"]["approval_id"]
         assert second_approval_id != first_approval_id
+
+
+@pytest.mark.asyncio
+async def test_remove_high_risk_extension_requires_approval(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 409
+        remove_detail = remove_response.json()["detail"]
+        assert remove_detail["type"] == "approval_required"
+
+        approve_remove = await client.post(f"/api/approvals/{remove_detail['approval_id']}/approve")
+        assert approve_remove.status_code == 200
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 200
+        assert not (extension_runtime / "extensions" / "seraph-high-risk-pack").exists()
+
+
+@pytest.mark.asyncio
+async def test_remove_high_risk_extension_requires_new_approval_if_package_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 409
+        first_remove_approval_id = remove_response.json()["detail"]["approval_id"]
+
+        approve_remove = await client.post(f"/api/approvals/{first_remove_approval_id}/approve")
+        assert approve_remove.status_code == 200
+
+        installed_workflow = extension_runtime / "extensions" / "seraph-high-risk-pack" / "workflows" / "write-note.md"
+        installed_workflow.write_text(
+            "---\n"
+            "name: write-note\n"
+            "description: Write a changed note into the workspace\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/high-risk.md\n"
+            "      content: changed-before-remove\n"
+            "---\n\n"
+            "Write a changed note.\n",
+            encoding="utf-8",
+        )
+
+        remove_response = await client.delete("/api/extensions/seraph.high-risk-pack")
+        assert remove_response.status_code == 409
+        second_remove_approval_id = remove_response.json()["detail"]["approval_id"]
+        assert second_remove_approval_id != first_remove_approval_id
+
+
+@pytest.mark.asyncio
+async def test_disable_high_risk_extension_requires_new_approval_if_package_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        first_disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{first_disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        installed_root = extension_runtime / "extensions" / "seraph-high-risk-pack"
+        (installed_root / "workflows" / "write-note.md").write_text(
+            "---\n"
+            "name: write-note\n"
+            "description: Write a changed note into the workspace\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/high-risk.md\n"
+            "      content: changed-after-disable-approval\n"
+            "---\n\n"
+            "Write a changed note.\n",
+            encoding="utf-8",
+        )
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        second_disable_approval_id = disable_response.json()["detail"]["approval_id"]
+        assert second_disable_approval_id != first_disable_approval_id
 
 
 @pytest.mark.asyncio
@@ -792,6 +1364,195 @@ async def test_install_rejects_workspace_replacement_and_update_replaces_package
 
 
 @pytest.mark.asyncio
+async def test_update_records_lifecycle_snapshot_and_rollback_restores_previous_package(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+    updated_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-update",
+        version="2026.4.01",
+        workflow_description="Updated local installable workflow",
+        workflow_content="Use the updated local workflow.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+        assert update_response.json()["extension"]["version"] == "2026.4.01"
+
+        lifecycle_response = await client.get("/api/extensions/seraph.test-installable/lifecycle")
+        assert lifecycle_response.status_code == 200
+        lifecycle = lifecycle_response.json()
+        assert lifecycle["rollback"]["available"] is True
+        snapshot = lifecycle["rollback"]["snapshots"][0]
+        assert snapshot["version"] == "2026.3.21"
+        assert Path(snapshot["path"]).is_dir()
+        assert lifecycle["diagnostics"]["vulnerability_state"] == "unknown"
+        assert lifecycle["diagnostics"]["sbom_state"] == "unknown"
+
+        rollback_response = await client.post(
+            "/api/extensions/seraph.test-installable/rollback",
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert rollback_response.status_code == 200
+        payload = rollback_response.json()
+        assert payload["status"] == "rolled_back"
+        assert payload["extension"]["version"] == "2026.3.21"
+        assert payload["receipt"]["action"] == "rollback"
+
+        source_response = await client.get(
+            "/api/extensions/seraph.test-installable/source",
+            params={"reference": "workflows/local-workflow.md"},
+        )
+        assert source_response.status_code == 200
+        assert "Local installable workflow" in source_response.json()["content"]
+        assert "Updated local installable workflow" not in source_response.json()["content"]
+
+
+@pytest.mark.asyncio
+async def test_generic_update_rejects_downgrade_without_explicit_control(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path, version="2026.4.01")
+    downgrade_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-downgrade",
+        version="2026.3.21",
+        workflow_description="Older local installable workflow",
+        workflow_content="Use the older local workflow.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(downgrade_package_dir)})
+        assert update_response.status_code == 422
+        assert "downgrade requires explicit downgrade lifecycle control" in update_response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_rollback_approval_scope_is_bound_to_snapshot_target(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+    updated_package_dir = _write_high_risk_extension(tmp_path, package_name="high-risk-pack-update")
+    (updated_package_dir / "manifest.yaml").write_text(
+        (updated_package_dir / "manifest.yaml").read_text(encoding="utf-8").replace(
+            "version: 2026.3.21",
+            "version: 2026.4.01",
+        ),
+        encoding="utf-8",
+    )
+    (updated_package_dir / "workflows" / "write-note.md").write_text(
+        "---\n"
+        "name: write-note\n"
+        "description: Updated high risk workflow\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments:\n"
+        "      file_path: notes/high-risk-updated.md\n"
+        "      content: approved-updated\n"
+        "---\n\n"
+        "Write an updated note.\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+        assert (await client.post(f"/api/approvals/{install_approval_id}/approve")).status_code == 200
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 409
+        update_approval_id = update_response.json()["detail"]["approval_id"]
+        assert (await client.post(f"/api/approvals/{update_approval_id}/approve")).status_code == 200
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+
+        lifecycle_response = await client.get("/api/extensions/seraph.high-risk-pack/lifecycle")
+        snapshot = lifecycle_response.json()["rollback"]["snapshots"][0]
+        rollback_response = await client.post(
+            "/api/extensions/seraph.high-risk-pack/rollback",
+            json={"snapshot_id": snapshot["id"]},
+        )
+        assert rollback_response.status_code == 409
+        detail = rollback_response.json()["detail"]
+        assert detail["type"] == "approval_required"
+        assert detail["approval_scope"]["target"]["type"] == "rollback_snapshot"
+        assert detail["approval_scope"]["target"]["reference"] == snapshot["id"]
+        assert detail["approval_scope"]["rollback_scope"]["snapshot_id"] == snapshot["id"]
+        assert detail["approval_scope"]["rollback_scope"]["restored_digest"] == snapshot["digest"]
+
+
+@pytest.mark.asyncio
+async def test_quarantine_blocks_enable_until_reentry_review_clears_state(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        quarantine_response = await client.post(
+            "/api/extensions/seraph.test-installable/quarantine",
+            json={"reason": "suspicious update", "actor": "cockpit"},
+        )
+        assert quarantine_response.status_code == 200
+        quarantine_payload = quarantine_response.json()
+        assert quarantine_payload["status"] == "quarantined"
+        assert quarantine_payload["extension"]["status"] == "quarantined"
+        assert quarantine_payload["quarantine"]["active"] is True
+        assert skill_manager.get_skill("local-skill").enabled is False
+        assert workflow_manager.get_workflow("local-workflow").enabled is False
+
+        enable_response = await client.post("/api/extensions/seraph.test-installable/enable")
+        assert enable_response.status_code == 422
+        assert "requires re-entry review" in enable_response.json()["detail"]
+
+        reentry_response = await client.post(
+            "/api/extensions/seraph.test-installable/reentry",
+            json={"reason": "manual review passed", "actor": "cockpit"},
+        )
+        assert reentry_response.status_code == 200
+        reentry_payload = reentry_response.json()
+        assert reentry_payload["status"] == "reentry_cleared"
+        assert reentry_payload["quarantine"]["active"] is False
+        assert reentry_payload["extension"]["status"] == "ready"
+
+        enable_response = await client.post("/api/extensions/seraph.test-installable/enable")
+        assert enable_response.status_code == 200
+        assert enable_response.json()["extension"]["enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_validate_and_install_allow_workspace_override_for_bundled_extension(client, extension_runtime, tmp_path):
     package_dir = _write_installable_extension(
         tmp_path,
@@ -854,7 +1615,7 @@ async def test_enable_rejects_degraded_extension_with_permission_mismatch(client
             "display_name: Test Installable\n"
             "kind: capability-pack\n"
             "compatibility:\n"
-            "  seraph: \">=2026.3.19\"\n"
+            "  seraph: \">=2026.4.10\"\n"
             "publisher:\n"
             "  name: Seraph\n"
             "trust: local\n"
@@ -913,6 +1674,13 @@ async def test_enable_rejects_degraded_extension_with_invalid_workflow_before_ap
             "---\n",
             encoding="utf-8",
         )
+
+        disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
+        assert disable_response.status_code == 409
+        disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
 
         disable_response = await client.post("/api/extensions/seraph.high-risk-pack/disable")
         assert disable_response.status_code == 200
@@ -975,10 +1743,24 @@ async def test_install_toggle_and_remove_workspace_connector_extension(client, e
         connect_mock.assert_called_once()
 
         disable_response = await client.post("/api/extensions/seraph.test-connector/disable")
+        assert disable_response.status_code == 409
+        disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        disable_response = await client.post("/api/extensions/seraph.test-connector/disable")
         assert disable_response.status_code == 200
         assert disable_response.json()["extension"]["enabled"] is False
         assert mcp_manager._config["github-packaged"]["enabled"] is False
         disconnect_mock.assert_called_once()
+
+        remove_response = await client.delete("/api/extensions/seraph.test-connector")
+        assert remove_response.status_code == 409
+        remove_approval_id = remove_response.json()["detail"]["approval_id"]
+
+        approve_remove = await client.post(f"/api/approvals/{remove_approval_id}/approve")
+        assert approve_remove.status_code == 200
 
         remove_response = await client.delete("/api/extensions/seraph.test-connector")
         assert remove_response.status_code == 200
@@ -1175,6 +1957,204 @@ async def test_install_and_configure_workspace_managed_connector_extension(clien
         remove_response = await client.delete("/api/extensions/seraph.managed-github")
         assert remove_response.status_code == 200
         assert not (extension_runtime / "extensions" / "seraph-managed-github").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_configure_and_toggle_wave2_contribution_surfaces(client, extension_runtime, tmp_path):
+    package_dir = _write_wave2_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        approval_detail = install_response.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+
+        approve_response = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve_response.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        installed = install_response.json()["extension"]
+        assert installed["id"] == "seraph.wave2-pack"
+        assert installed["configurable"] is True
+        assert installed["config_scope"] == "metadata_and_connector_configs"
+        assert installed["toggleable_contribution_types"] == [
+            "automation_triggers",
+            "browser_providers",
+            "messaging_connectors",
+            "node_adapters",
+        ]
+        assert installed["passive_contribution_types"] == [
+            "toolset_presets",
+            "context_packs",
+            "speech_profiles",
+        ]
+
+        toolset = next(item for item in installed["contributions"] if item["type"] == "toolset_presets")
+        context_pack = next(item for item in installed["contributions"] if item["type"] == "context_packs")
+        speech_profile = next(item for item in installed["contributions"] if item["type"] == "speech_profiles")
+        assert toolset["include_tools"] == ["read_file"]
+        assert context_pack["domains"] == ["research"]
+        assert speech_profile["supports_tts"] is True
+
+        connectors_response = await client.get("/api/extensions/seraph.wave2-pack/connectors")
+        assert connectors_response.status_code == 200
+        connectors = {item["type"]: item for item in connectors_response.json()["connectors"]}
+        assert connectors["browser_providers"]["status"] == "requires_config"
+        assert connectors["automation_triggers"]["status"] == "requires_config"
+        assert connectors["messaging_connectors"]["status"] == "requires_config"
+        assert connectors["node_adapters"]["status"] == "requires_config"
+
+        invalid_secret_config = {
+            "messaging_connectors": {"telegram": {"bot_token": None}}
+        }
+        invalid_secret_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": invalid_secret_config},
+        )
+        assert invalid_secret_response.status_code == 409
+        invalid_secret_detail = invalid_secret_response.json()["detail"]
+        assert invalid_secret_detail["type"] == "approval_required"
+
+        approve_invalid_secret = await client.post(
+            f"/api/approvals/{invalid_secret_detail['approval_id']}/approve"
+        )
+        assert approve_invalid_secret.status_code == 200
+
+        invalid_secret_retry = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": invalid_secret_config},
+        )
+        assert invalid_secret_retry.status_code == 422
+        assert "missing required config field 'bot_token'" in invalid_secret_retry.json()["detail"]
+
+        enable_before_config = await client.post(
+            "/api/extensions/seraph.wave2-pack/connectors/enabled",
+            json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},
+        )
+        assert enable_before_config.status_code == 422
+        assert "requires valid configuration" in enable_before_config.json()["detail"]
+
+        configure_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    "browser_providers": {"browserbase": {"api_key": "secret"}},
+                    "messaging_connectors": {"telegram": {"bot_token": "secret"}},
+                    "automation_triggers": {"daily-brief": {"signing_secret": "secret"}},
+                    "node_adapters": {"companion": {"node_url": "https://nodes.example.test"}},
+                }
+            },
+        )
+        assert configure_response.status_code == 409
+        configure_approval_id = configure_response.json()["detail"]["approval_id"]
+        approve_response = await client.post(f"/api/approvals/{configure_approval_id}/approve")
+        assert approve_response.status_code == 200
+
+        configure_response = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    "browser_providers": {"browserbase": {"api_key": "secret"}},
+                    "messaging_connectors": {"telegram": {"bot_token": "secret"}},
+                    "automation_triggers": {"daily-brief": {"signing_secret": "secret"}},
+                    "node_adapters": {"companion": {"node_url": "https://nodes.example.test"}},
+                }
+            },
+        )
+        assert configure_response.status_code == 200
+        configured = configure_response.json()["extension"]
+        configured_connectors = {
+            item["type"]: item
+            for item in configured["contributions"]
+            if item["type"] in connectors
+        }
+        assert configured_connectors["browser_providers"]["configured"] is True
+        assert configured_connectors["browser_providers"]["status"] == "disabled"
+        assert configured_connectors["messaging_connectors"]["config_keys"] == ["bot_token"]
+        assert configured_connectors["automation_triggers"]["config_keys"] == ["signing_secret"]
+        assert configured_connectors["node_adapters"]["config_keys"] == ["node_url"]
+
+        redacted_reconfigure = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={"config": configured["config"]},
+        )
+        assert redacted_reconfigure.status_code == 200
+
+        changed_node_url = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    **configured["config"],
+                    "node_adapters": {
+                        "companion": {"node_url": "https://nodes-2.example.test"},
+                    },
+                }
+            },
+        )
+        assert changed_node_url.status_code == 409
+        changed_node_url_detail = changed_node_url.json()["detail"]
+        assert changed_node_url_detail["type"] == "approval_required"
+        assert changed_node_url_detail["approval_scope"]["config_scope"]["config_types"] == ["node_adapters"]
+        assert changed_node_url_detail["approval_scope"]["config_scope"]["changed_target_count"] == 1
+
+        approve_changed_node_url = await client.post(
+            f"/api/approvals/{changed_node_url_detail['approval_id']}/approve"
+        )
+        assert approve_changed_node_url.status_code == 200
+
+        changed_node_url = await client.post(
+            "/api/extensions/seraph.wave2-pack/configure",
+            json={
+                "config": {
+                    **configured["config"],
+                    "node_adapters": {
+                        "companion": {"node_url": "https://nodes-2.example.test"},
+                    },
+                }
+            },
+        )
+        assert changed_node_url.status_code == 200
+        reconfigured = changed_node_url.json()["extension"]
+        assert reconfigured["config"]["node_adapters"]["companion"]["node_url"] == "https://nodes-2.example.test"
+
+        enable_browser = await client.post(
+            "/api/extensions/seraph.wave2-pack/connectors/enabled",
+            json={"reference": "connectors/browser/browserbase.yaml", "enabled": True},
+        )
+        assert enable_browser.status_code == 200
+        browser_connector = enable_browser.json()["connector"]
+        assert browser_connector["status"] == "planned"
+        assert browser_connector["health"]["supports_configure"] is True
+        assert browser_connector["health"]["supports_enable"] is True
+
+        enable_extension = await client.post("/api/extensions/seraph.wave2-pack/enable")
+        assert enable_extension.status_code == 409
+        enable_extension_detail = enable_extension.json()["detail"]
+        assert enable_extension_detail["type"] == "approval_required"
+        enable_extension_approval_id = enable_extension_detail["approval_id"]
+        approve_enable_extension = await client.post(
+            f"/api/approvals/{enable_extension_approval_id}/approve"
+        )
+        assert approve_enable_extension.status_code == 200
+
+        enable_extension = await client.post("/api/extensions/seraph.wave2-pack/enable")
+        assert enable_extension.status_code == 200
+        enabled_extension = enable_extension.json()["extension"]
+        enabled_connectors = {
+            item["type"]: item
+            for item in enabled_extension["contributions"]
+            if item["type"] in connectors
+        }
+        assert all(enabled_connectors[item]["enabled"] is True for item in enabled_connectors)
+        assert enabled_connectors["automation_triggers"]["status"] == "planned"
+        assert enabled_connectors["node_adapters"]["status"] == "planned"
 
 
 @pytest.mark.asyncio
@@ -1401,10 +2381,110 @@ async def test_extension_connector_enable_endpoint_controls_packaged_mcp_runtime
             "/api/extensions/seraph.test-connector/connectors/enabled",
             json={"reference": "mcp/github.json", "enabled": False},
         )
+        assert disable_response.status_code == 409
+        disable_approval_id = disable_response.json()["detail"]["approval_id"]
+
+        approve_disable = await client.post(f"/api/approvals/{disable_approval_id}/approve")
+        assert approve_disable.status_code == 200
+
+        disable_response = await client.post(
+            "/api/extensions/seraph.test-connector/connectors/enabled",
+            json={"reference": "mcp/github.json", "enabled": False},
+        )
         assert disable_response.status_code == 200
         assert disable_response.json()["status"] == "disabled"
         assert mcp_manager._config["github-packaged"]["enabled"] is False
         assert disconnect_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_connector_lifecycle_approval_is_scoped_to_each_packaged_connector_target(client, extension_runtime, tmp_path):
+    package_dir = _write_multi_mcp_connector_extension(tmp_path)
+
+    with patch(
+        "src.extensions.lifecycle.get_base_tools_and_active_skills",
+        return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+    ), patch(
+        "src.api.extensions.log_integration_event",
+        AsyncMock(),
+    ), patch.object(
+        mcp_manager,
+        "connect",
+    ) as connect_mock, patch.object(
+        mcp_manager,
+        "disconnect",
+    ) as disconnect_mock:
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        enable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": True},
+        )
+        assert enable_primary.status_code == 409
+        primary_approval_id = enable_primary.json()["detail"]["approval_id"]
+
+        approve_primary = await client.post(f"/api/approvals/{primary_approval_id}/approve")
+        assert approve_primary.status_code == 200
+
+        enable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": True},
+        )
+        assert enable_primary.status_code == 200
+        assert enable_primary.json()["connector"]["name"] == "github-primary"
+        assert connect_mock.call_count == 1
+
+        enable_secondary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-secondary.json", "enabled": True},
+        )
+        assert enable_secondary.status_code == 409
+        secondary_approval_id = enable_secondary.json()["detail"]["approval_id"]
+        assert secondary_approval_id != primary_approval_id
+
+        approve_secondary = await client.post(f"/api/approvals/{secondary_approval_id}/approve")
+        assert approve_secondary.status_code == 200
+
+        enable_secondary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-secondary.json", "enabled": True},
+        )
+        assert enable_secondary.status_code == 200
+        assert enable_secondary.json()["connector"]["name"] == "github-secondary"
+        assert connect_mock.call_count == 2
+
+        disable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": False},
+        )
+        assert disable_primary.status_code == 409
+        disable_primary_approval_id = disable_primary.json()["detail"]["approval_id"]
+
+        approve_disable_primary = await client.post(f"/api/approvals/{disable_primary_approval_id}/approve")
+        assert approve_disable_primary.status_code == 200
+
+        disable_primary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-primary.json", "enabled": False},
+        )
+        assert disable_primary.status_code == 200
+        assert disable_primary.json()["connector"]["name"] == "github-primary"
+        assert disconnect_mock.call_count == 1
+
+        disable_secondary = await client.post(
+            "/api/extensions/seraph.multi-connector-pack/connectors/enabled",
+            json={"reference": "mcp/github-secondary.json", "enabled": False},
+        )
+        assert disable_secondary.status_code == 409
+        assert disable_secondary.json()["detail"]["approval_id"] != disable_primary_approval_id
 
 
 @pytest.mark.asyncio
@@ -1847,6 +2927,213 @@ async def test_invalid_channel_adapter_surfaces_invalid_status_in_extension_payl
 
 
 @pytest.mark.asyncio
+async def test_invalid_planned_connectors_surface_invalid_status_in_extension_payload(client, extension_runtime):
+    _write_invalid_planned_connector_extension(extension_runtime / "extensions")
+
+    response = await client.get("/api/extensions")
+
+    assert response.status_code == 200
+    extensions = {item["id"]: item for item in response.json()["extensions"]}
+    invalid_extension = extensions["seraph.invalid-planned"]
+    connectors = {item["type"]: item for item in invalid_extension["contributions"]}
+
+    assert connectors["automation_triggers"]["status"] == "invalid"
+    assert connectors["automation_triggers"]["health"]["state"] == "invalid"
+    assert connectors["node_adapters"]["status"] == "invalid"
+    assert connectors["node_adapters"]["health"]["state"] == "invalid"
+    assert invalid_extension["doctor_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_automation_trigger_name_invalidates_all_colliding_definitions(client, extension_runtime):
+    _write_duplicate_automation_extension(
+        extension_runtime / "extensions",
+        package_name="dup-automation-a",
+        extension_id="seraph.dup-automation-a",
+    )
+    _write_duplicate_automation_extension(
+        extension_runtime / "extensions",
+        package_name="dup-automation-b",
+        extension_id="seraph.dup-automation-b",
+    )
+
+    responses = [
+        await client.get("/api/extensions/seraph.dup-automation-a"),
+        await client.get("/api/extensions/seraph.dup-automation-b"),
+    ]
+
+    for response in responses:
+        assert response.status_code == 200
+        extension = response.json()["extension"]
+        trigger = next(item for item in extension["contributions"] if item["type"] == "automation_triggers")
+        assert trigger["status"] == "invalid"
+        assert trigger["health"]["state"] == "invalid"
+        assert "conflicts with" in trigger["health"]["summary"]
+        assert any(error["phase"] == "duplicate-automation_trigger-name" for error in extension["load_errors"])
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_defaults_surface_active_adapters(client, extension_runtime):
+    with (
+        patch("src.observer.manager.context_manager.is_daemon_connected", return_value=False),
+        patch("src.scheduler.connection_manager.ws_manager._connections", set()),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    bindings = {item["route"]: item for item in payload["bindings"]}
+    transport_statuses = {item["transport"]: item for item in payload["transport_statuses"]}
+    route_statuses = {item["route"]: item for item in payload["route_statuses"]}
+
+    assert payload["supported_transports"] == ["websocket", "native_notification"]
+    assert payload["active_transports"] == ["native_notification", "websocket"]
+    assert {item["transport"] for item in payload["active_adapters"]} == {
+        "websocket",
+        "native_notification",
+    }
+    assert bindings["live_delivery"]["primary_transport"] == "websocket"
+    assert bindings["live_delivery"]["fallback_transport"] == "native_notification"
+    assert bindings["alert_delivery"]["primary_transport"] == "native_notification"
+    assert transport_statuses["websocket"]["status"] == "waiting_for_browser"
+    assert transport_statuses["native_notification"]["status"] == "daemon_offline"
+    assert route_statuses["live_delivery"]["status"] == "unavailable"
+    assert route_statuses["live_delivery"]["failure_reason"] == "waiting_for_browser+daemon_offline"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_runtime_status_tolerates_non_scalar_mock_state(client, extension_runtime):
+    mock_ws_manager = MagicMock()
+    mock_ws_manager.active_count = MagicMock()
+
+    with (
+        patch("src.observer.manager.context_manager.is_daemon_connected", return_value=MagicMock()),
+        patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    transport_statuses = {item["transport"]: item for item in payload["transport_statuses"]}
+    route_statuses = {item["route"]: item for item in payload["route_statuses"]}
+
+    assert transport_statuses["websocket"]["status"] == "waiting_for_browser"
+    assert transport_statuses["native_notification"]["status"] == "daemon_offline"
+    assert route_statuses["live_delivery"]["status"] == "unavailable"
+    assert route_statuses["live_delivery"]["failure_reason"] == "waiting_for_browser+daemon_offline"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_defaults_to_builtin_transports_when_no_channel_adapters_are_active(client, extension_runtime):
+    snapshot = MagicMock()
+    snapshot.list_contributions.return_value = [MagicMock()]
+    registry_instance = MagicMock()
+    registry_instance.snapshot.return_value = snapshot
+
+    with (
+        patch("src.api.extensions.ExtensionRegistry", return_value=registry_instance),
+        patch("src.api.extensions.select_active_channel_adapters", return_value=[]),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_transports"] == ["native_notification", "websocket"]
+    assert {item["transport"] for item in payload["active_adapters"]} == {
+        "websocket",
+        "native_notification",
+    }
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_keeps_builtin_transport_for_unclaimed_route(client, extension_runtime):
+    snapshot = MagicMock()
+    snapshot.list_contributions.return_value = [MagicMock()]
+    registry_instance = MagicMock()
+    registry_instance.snapshot.return_value = snapshot
+
+    with (
+        patch("src.api.extensions.ExtensionRegistry", return_value=registry_instance),
+        patch(
+            "src.api.extensions.select_active_channel_adapters",
+            return_value=[
+                type(
+                    "Adapter",
+                    (),
+                    {
+                        "extension_id": "seraph.custom-native",
+                        "name": "custom-native",
+                        "transport": "native_notification",
+                        "reference": "channels/native.yaml",
+                    },
+                )()
+            ],
+        ),
+    ):
+        response = await client.get("/api/extensions/channel-routing")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_transports"] == ["native_notification", "websocket"]
+    assert {item["transport"] for item in payload["active_adapters"]} == {
+        "websocket",
+        "native_notification",
+    }
+    websocket_adapter = next(item for item in payload["active_adapters"] if item["transport"] == "websocket")
+    assert websocket_adapter["extension_id"] == "seraph.builtin-channel-adapters"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_update_persists_custom_bindings(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        update_response = await client.put(
+            "/api/extensions/channel-routing",
+            json={
+                "bindings": {
+                    "live_delivery": {
+                        "primary_transport": "native_notification",
+                        "fallback_transport": "websocket",
+                    },
+                    "bundle_delivery": {
+                        "primary_transport": "native_notification",
+                    },
+                }
+            },
+        )
+
+    assert update_response.status_code == 200
+    updated = {item["route"]: item for item in update_response.json()["bindings"]}
+    assert updated["live_delivery"]["primary_transport"] == "native_notification"
+    assert updated["live_delivery"]["fallback_transport"] == "websocket"
+    assert updated["bundle_delivery"]["primary_transport"] == "native_notification"
+    assert updated["bundle_delivery"]["fallback_transport"] is None
+
+    reread_response = await client.get("/api/extensions/channel-routing")
+    assert reread_response.status_code == 200
+    reread = {item["route"]: item for item in reread_response.json()["bindings"]}
+    assert reread["live_delivery"]["primary_transport"] == "native_notification"
+    assert reread["bundle_delivery"]["primary_transport"] == "native_notification"
+
+
+@pytest.mark.asyncio
+async def test_channel_routing_update_rejects_unknown_routes_and_transports(client, extension_runtime):
+    with patch("src.api.extensions.log_integration_event", AsyncMock()):
+        invalid_route = await client.put(
+            "/api/extensions/channel-routing",
+            json={"bindings": {"unknown_route": {"primary_transport": "websocket"}}},
+        )
+        invalid_transport = await client.put(
+            "/api/extensions/channel-routing",
+            json={"bindings": {"live_delivery": {"primary_transport": "email"}}},
+        )
+
+    assert invalid_route.status_code == 422
+    assert "Unknown channel route" in invalid_route.json()["detail"]
+    assert invalid_transport.status_code == 422
+    assert "Unsupported channel route transport" in invalid_transport.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_extension_connector_test_endpoint_returns_observer_and_channel_health(client, extension_runtime, tmp_path):
     observer_package = _write_observer_extension(tmp_path)
     channel_package = _write_channel_adapter_extension(tmp_path)
@@ -1966,7 +3253,7 @@ async def test_workspace_extension_source_save_updates_package_members(client, e
                     "display_name: Test Installable Updated\n"
                     "kind: capability-pack\n"
                     "compatibility:\n"
-                    "  seraph: \">=2026.3.19\"\n"
+                    "  seraph: \">=2026.4.10\"\n"
                     "publisher:\n"
                     "  name: Seraph\n"
                     "trust: local\n"
@@ -1982,6 +3269,9 @@ async def test_workspace_extension_source_save_updates_package_members(client, e
                     "    - starter-packs/local-pack.json\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -1990,6 +3280,262 @@ async def test_workspace_extension_source_save_updates_package_members(client, e
         manifest_payload = manifest_response.json()
         assert manifest_payload["extension"]["display_name"] == "Test Installable Updated"
         assert manifest_payload["validation"]["manifest"]["version"] == "2026.3.22"
+
+
+@pytest.mark.asyncio
+async def test_high_risk_extension_source_save_requires_lifecycle_approval(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        save_response = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert save_response.status_code == 409
+        approval_detail = save_response.json()["detail"]
+        assert approval_detail["type"] == "approval_required"
+        assert approval_detail["approval_scope"]["target"]["reference"] == "workflows/write-note.md"
+        assert approval_detail["approval_scope"]["source_scope"]["reference"] == "workflows/write-note.md"
+        assert approval_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+        assert approval_detail["approval_scope"]["source_scope"]["current_content_hash"]
+        assert (
+            approval_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+            != approval_detail["approval_scope"]["source_scope"]["current_content_hash"]
+        )
+
+        approve_save = await client.post(f"/api/approvals/{approval_detail['approval_id']}/approve")
+        assert approve_save.status_code == 200
+
+        save_response = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert save_response.status_code == 200
+        assert save_response.json()["validation"]["workflow"]["name"] == "write-note"
+
+
+@pytest.mark.asyncio
+async def test_high_risk_extension_source_save_requires_new_approval_if_package_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        first_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert first_save.status_code == 409
+        first_approval_id = first_save.json()["detail"]["approval_id"]
+
+        approve_save = await client.post(f"/api/approvals/{first_approval_id}/approve")
+        assert approve_save.status_code == 200
+
+        installed_root = extension_runtime / "extensions" / "seraph-high-risk-pack"
+        (installed_root / "workflows" / "write-note.md").write_text(
+            "---\n"
+            "name: write-note\n"
+            "description: Drifted high-risk workflow\n"
+            "requires:\n"
+            "  tools: [write_file]\n"
+            "steps:\n"
+            "  - id: save\n"
+            "    tool: write_file\n"
+            "    arguments:\n"
+            "      file_path: notes/high-risk-drifted.md\n"
+            "      content: drifted\n"
+            "---\n\n"
+            "Write a drifted note.\n",
+            encoding="utf-8",
+        )
+
+        second_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow again\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated-again.md\n"
+                    "      content: updated-again\n"
+                    "---\n\n"
+                    "Write another updated note.\n"
+                ),
+            },
+        )
+        assert second_save.status_code == 409
+        second_approval_id = second_save.json()["detail"]["approval_id"]
+        assert second_approval_id != first_approval_id
+
+
+@pytest.mark.asyncio
+async def test_high_risk_source_save_requires_new_approval_if_requested_content_changes(client, extension_runtime, tmp_path):
+    package_dir = _write_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        first_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Updated high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-updated.md\n"
+                    "      content: updated\n"
+                    "---\n\n"
+                    "Write an updated note.\n"
+                ),
+            },
+        )
+        assert first_save.status_code == 409
+        first_detail = first_save.json()["detail"]
+
+        approve_save = await client.post(f"/api/approvals/{first_detail['approval_id']}/approve")
+        assert approve_save.status_code == 200
+
+        second_save = await client.post(
+            "/api/extensions/seraph.high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note.md",
+                "content": (
+                    "---\n"
+                    "name: write-note\n"
+                    "description: Alternate high-risk workflow\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-alt.md\n"
+                    "      content: alternate\n"
+                    "---\n\n"
+                    "Write an alternate note.\n"
+                ),
+            },
+        )
+        assert second_save.status_code == 409
+        second_detail = second_save.json()["detail"]
+        assert second_detail["approval_id"] != first_detail["approval_id"]
+        assert (
+            second_detail["approval_scope"]["source_scope"]["current_content_hash"]
+            == first_detail["approval_scope"]["source_scope"]["current_content_hash"]
+        )
+        assert (
+            second_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+            != first_detail["approval_scope"]["source_scope"]["requested_content_hash"]
+        )
 
 
 @pytest.mark.asyncio
@@ -2028,6 +3574,9 @@ async def test_manifest_source_save_rejects_unloadable_package_updates(client, e
                     "    - skills/local-skill.md\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -2078,6 +3627,9 @@ async def test_manifest_source_save_validates_manifest_yml_aliases(client, exten
                     "    - skills/local-skill.md\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -2125,7 +3677,7 @@ async def test_broken_workspace_manifest_can_be_loaded_and_repaired_via_source_a
                     "display_name: Repaired Installable\n"
                     "kind: capability-pack\n"
                     "compatibility:\n"
-                    "  seraph: \">=2026.3.19\"\n"
+                    "  seraph: \">=2026.4.10\"\n"
                     "publisher:\n"
                     "  name: Seraph\n"
                     "trust: local\n"
@@ -2140,6 +3692,9 @@ async def test_broken_workspace_manifest_can_be_loaded_and_repaired_via_source_a
                     "    - starter-packs/local-pack.json\n"
                     "permissions:\n"
                     "  tools: [read_file]\n"
+                    "  execution_boundaries: [workspace_read]\n"
+                    "  data_access: [workspace_files]\n"
+                    "  audit_events: [filesystem_read]\n"
                     "  network: false\n"
                 ),
             },
@@ -2412,6 +3967,103 @@ async def test_workflow_source_save_allows_cross_package_references(client, exte
 
         assert response.status_code == 200
         assert response.json()["validation"]["workflow"]["name"] == "local-workflow"
+
+
+@pytest.mark.asyncio
+async def test_high_risk_source_save_approval_is_scoped_to_each_target(client, extension_runtime, tmp_path):
+    package_dir = _write_multi_high_risk_extension(tmp_path)
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="write_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 409
+        install_approval_id = install_response.json()["detail"]["approval_id"]
+
+        approve_install = await client.post(f"/api/approvals/{install_approval_id}/approve")
+        assert approve_install.status_code == 200
+
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+
+        primary_save = await client.post(
+            "/api/extensions/seraph.multi-high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note-a.md",
+                "content": (
+                    "---\n"
+                    "name: write-note-a\n"
+                    "description: Updated high-risk workflow A\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-a-updated.md\n"
+                    "      content: updated-a\n"
+                    "---\n\n"
+                    "Write updated note A.\n"
+                ),
+            },
+        )
+        assert primary_save.status_code == 409
+        primary_approval_id = primary_save.json()["detail"]["approval_id"]
+
+        approve_primary = await client.post(f"/api/approvals/{primary_approval_id}/approve")
+        assert approve_primary.status_code == 200
+
+        primary_save = await client.post(
+            "/api/extensions/seraph.multi-high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note-a.md",
+                "content": (
+                    "---\n"
+                    "name: write-note-a\n"
+                    "description: Updated high-risk workflow A\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-a-updated.md\n"
+                    "      content: updated-a\n"
+                    "---\n\n"
+                    "Write updated note A.\n"
+                ),
+            },
+        )
+        assert primary_save.status_code == 200
+
+        secondary_save = await client.post(
+            "/api/extensions/seraph.multi-high-risk-pack/source",
+            json={
+                "reference": "workflows/write-note-b.md",
+                "content": (
+                    "---\n"
+                    "name: write-note-b\n"
+                    "description: Updated high-risk workflow B\n"
+                    "requires:\n"
+                    "  tools: [write_file]\n"
+                    "steps:\n"
+                    "  - id: save\n"
+                    "    tool: write_file\n"
+                    "    arguments:\n"
+                    "      file_path: notes/high-risk-b-updated.md\n"
+                    "      content: updated-b\n"
+                    "---\n\n"
+                    "Write updated note B.\n"
+                ),
+            },
+        )
+        assert secondary_save.status_code == 409
+        secondary_approval_id = secondary_save.json()["detail"]["approval_id"]
+        assert secondary_approval_id != primary_approval_id
 
 
 @pytest.mark.asyncio

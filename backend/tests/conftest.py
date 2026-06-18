@@ -1,10 +1,12 @@
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -15,6 +17,10 @@ os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 
 from src.app import create_app
 from src.llm_runtime import _reset_target_health
+from src.db.engine import _ensure_search_indexes
+from src.memory.flush import _reset_memory_flush_state
+from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
+from src.utils.background import drain_tracked_tasks
 
 # Every place get_session is imported — use the local attribute name.
 _PATCH_TARGETS = [
@@ -23,13 +29,20 @@ _PATCH_TARGETS = [
     "src.approval.repository.get_session",
     "src.goals.repository.get_session",
     "src.audit.repository.get_session",
-    "src.api.profile.get_db",  # aliased: `import get_session as get_db`
+    "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
     "src.scheduler.jobs.memory_consolidation.get_session",
+    "src.scheduler.scheduled_jobs.get_session",
     "src.observer.insight_queue.get_session",
     "src.guardian.feedback.get_session",
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
+    "src.memory.repository.get_session",
+    "src.memory.decay.get_session",
+    "src.memory.flush.get_session",
+    "src.memory.hybrid_retrieval.get_session",
+    "src.workflows.durable_state.get_session",
+    "src.workflows.production_workflow_guarantees.get_session",
 ]
 
 
@@ -47,10 +60,18 @@ async def async_db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await _ensure_search_indexes(conn)
 
     @asynccontextmanager
     async def _get_session():
@@ -70,9 +91,17 @@ async def async_db():
 
     yield _get_session
 
-    for p in patches:
-        p.stop()
-    await engine.dispose()
+    teardown_error: Exception | None = None
+    try:
+        await drain_tracked_tasks(timeout_seconds=5.0)
+    except Exception as exc:
+        teardown_error = exc
+    finally:
+        for p in patches:
+            p.stop()
+        await engine.dispose()
+    if teardown_error is not None:
+        raise teardown_error
 
 
 # ── App / HTTP client fixtures ──────────────────────────
@@ -102,3 +131,22 @@ def reset_llm_target_health():
     _reset_target_health()
     yield
     _reset_target_health()
+
+
+@pytest.fixture(autouse=True)
+def reset_bounded_snapshot_cache():
+    _reset_bounded_guardian_snapshot_cache()
+    yield
+    _reset_bounded_guardian_snapshot_cache()
+
+
+@pytest.fixture(autouse=True)
+def reset_memory_flush_cache():
+    _reset_memory_flush_state()
+    yield
+    _reset_memory_flush_state()
+
+
+@pytest.fixture(autouse=True)
+def ensure_test_workspace_dir():
+    Path(os.environ["WORKSPACE_DIR"]).mkdir(parents=True, exist_ok=True)

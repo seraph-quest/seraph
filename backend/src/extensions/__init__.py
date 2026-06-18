@@ -21,6 +21,12 @@ from .doctor import (
     doctor_extension,
     doctor_snapshot,
 )
+from .capability_contract import (
+    CAPABILITY_CONTRACT_SCHEMA_VERSION,
+    CONTRACT_VERSION,
+    build_capability_contract,
+    build_native_tool_contract,
+)
 from .layout import (
     CONTRIBUTION_LAYOUTS,
     MANIFEST_FILENAMES,
@@ -56,8 +62,12 @@ __all__ = [
     "ExtensionRegistry",
     "ExtensionRegistrySnapshot",
     "CONTRIBUTION_LAYOUTS",
+    "CAPABILITY_CONTRACT_SCHEMA_VERSION",
+    "CONTRACT_VERSION",
     "MANIFEST_FILENAMES",
     "ScaffoldedExtensionPackage",
+    "build_capability_contract",
+    "build_native_tool_contract",
     "doctor_extension",
     "doctor_snapshot",
     "extension_registry",

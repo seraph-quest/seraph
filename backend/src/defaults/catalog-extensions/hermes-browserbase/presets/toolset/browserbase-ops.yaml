@@ -1,0 +1,11 @@
+name: browserbase-ops
+description: Operator preset for Browserbase-style provider setup plus local-fallback browser sessions and snapshots.
+include_tools:
+  - browse_webpage
+  - browser_session
+capabilities:
+  - staged_remote_provider
+  - local_fallback
+  - session_snapshots
+execution_boundaries:
+  - external_read

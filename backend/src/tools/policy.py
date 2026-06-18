@@ -9,6 +9,37 @@ TOOL_POLICY_MODES = ("safe", "balanced", "full")
 DEFAULT_TOOL_POLICY_MODE = "full"
 MCP_POLICY_MODES = ("disabled", "approval", "full")
 DEFAULT_MCP_POLICY_MODE = "full"
+_SECRET_REF_FIELD_CANDIDATES = (
+    "headers",
+    "authorization",
+    "auth_header",
+    "api_key",
+    "token",
+    "bearer_token",
+    "password",
+    "secret_ref",
+)
+
+
+def _get_explicit_instance_attr(obj: object | None, attr_name: str) -> object | None:
+    """Read only explicitly assigned instance attributes, avoiding dynamic mock chains."""
+    if obj is None:
+        return None
+    try:
+        instance_dict = vars(obj)
+    except TypeError:
+        instance_dict = None
+    if isinstance(instance_dict, dict) and attr_name in instance_dict:
+        return instance_dict[attr_name]
+    slots = getattr(type(obj), "__slots__", ())
+    if isinstance(slots, str):
+        slots = (slots,)
+    if attr_name in slots:
+        try:
+            return object.__getattribute__(obj, attr_name)
+        except AttributeError:
+            return None
+    return None
 
 
 def normalize_tool_policy_mode(mode: str | None) -> str:
@@ -78,10 +109,28 @@ def get_tool_risk_level(tool_name: str, *, is_mcp: bool = False) -> str:
     return "low"
 
 
-def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False) -> list[str]:
+def get_tool_approval_behavior(tool_name: str, *, is_mcp: bool = False) -> str:
+    """Return the default approval behavior for a tool outside MCP approval-mode overrides."""
+    if is_mcp:
+        return "high_risk_mode"
+
+    metadata = get_tool_metadata(tool_name)
+    explicit_behavior = metadata.get("approval_behavior") if isinstance(metadata, dict) else None
+    if explicit_behavior in {"never", "high_risk_mode", "always"}:
+        return explicit_behavior
+    if get_tool_risk_level(tool_name, is_mcp=is_mcp) == "high":
+        return "high_risk_mode"
+    return "never"
+
+
+def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False, tool: object | None = None) -> list[str]:
     """Return the execution-boundary tags for a tool."""
     if is_mcp:
-        return ["external_mcp"]
+        boundaries = ["external_mcp"]
+        source_context = get_tool_source_context(tool)
+        if isinstance(source_context, dict) and bool(source_context.get("authenticated_source")):
+            boundaries.append("authenticated_external_source")
+        return boundaries
 
     metadata = get_tool_metadata(tool_name)
     if metadata is None:
@@ -93,15 +142,122 @@ def get_tool_execution_boundaries(tool_name: str, *, is_mcp: bool = False) -> li
     return [str(boundary) for boundary in boundaries]
 
 
-def tool_accepts_secret_refs(tool_name: str, *, is_mcp: bool = False) -> bool:
+def tool_accepts_secret_refs(tool_name: str, *, is_mcp: bool = False, tool: object | None = None) -> bool:
     """Return whether a tool is allowed to receive resolved secret references."""
     if is_mcp:
-        return True
+        return bool(get_tool_secret_ref_fields(tool_name, is_mcp=True, tool=tool))
 
     metadata = get_tool_metadata(tool_name)
     if metadata is None:
         return False
     return bool(metadata.get("accepts_secret_refs", False))
+
+
+def get_tool_secret_ref_fields(tool_name: str, *, is_mcp: bool = False, tool: object | None = None) -> list[str]:
+    """Return the allowlisted top-level fields that may contain secret refs."""
+    if is_mcp:
+        explicit_fields = _get_explicit_instance_attr(tool, "seraph_secret_ref_fields")
+        normalized = _normalize_secret_ref_fields(explicit_fields)
+        if normalized:
+            return normalized
+        return _infer_secret_ref_fields_from_inputs(_read_tool_inputs(tool))
+
+    metadata = get_tool_metadata(tool_name)
+    if metadata is None or not bool(metadata.get("accepts_secret_refs", False)):
+        return []
+    normalized = _normalize_secret_ref_fields(metadata.get("secret_ref_fields"))
+    if normalized:
+        return normalized
+    return _infer_secret_ref_fields_from_inputs(_read_tool_inputs(tool))
+
+
+def get_tool_source_context(tool: object | None) -> dict[str, object] | None:
+    """Return the first MCP source context visible through wrapper layers."""
+    current = tool
+    visited_ids: set[int] = set()
+    while current is not None:
+        current_id = id(current)
+        if current_id in visited_ids:
+            break
+        visited_ids.add(current_id)
+        source_context = _get_explicit_instance_attr(current, "seraph_source_context")
+        if isinstance(source_context, dict):
+            return source_context
+        current = _get_explicit_instance_attr(current, "wrapped_tool")
+    return None
+
+
+def get_tool_credential_egress_policy(
+    tool_name: str,
+    *,
+    is_mcp: bool = False,
+    tool: object | None = None,
+) -> dict[str, object] | None:
+    """Return the credential-egress policy visible through tool wrapper layers."""
+    if not is_mcp:
+        return None
+    source_context = get_tool_source_context(tool)
+    if not isinstance(source_context, dict):
+        return None
+    policy = source_context.get("credential_egress_policy")
+    if not isinstance(policy, dict):
+        return None
+    mode = str(policy.get("mode") or "").strip()
+    transport = str(policy.get("transport") or "").strip()
+    allowed_hosts = [
+        str(item).strip()
+        for item in list(policy.get("allowed_hosts") or [])
+        if str(item).strip()
+    ]
+    if not any([mode, transport, allowed_hosts]):
+        return None
+    return {
+        "mode": mode or "unknown",
+        "transport": transport or "unknown",
+        "allowed_hosts": sorted(dict.fromkeys(allowed_hosts)),
+    }
+
+
+def _normalize_secret_ref_fields(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        field_name = item.strip()
+        if not field_name or field_name in seen:
+            continue
+        normalized.append(field_name)
+        seen.add(field_name)
+    return normalized
+
+
+def _infer_secret_ref_fields_from_inputs(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    allowed: list[str] = []
+    seen: set[str] = set()
+    for key in value:
+        if not isinstance(key, str):
+            continue
+        field_name = key.strip()
+        if not field_name:
+            continue
+        normalized_key = field_name.lower()
+        if normalized_key not in _SECRET_REF_FIELD_CANDIDATES or field_name in seen:
+            continue
+        allowed.append(field_name)
+        seen.add(field_name)
+    return allowed
+
+
+def _read_tool_inputs(tool: object | None) -> object:
+    explicit_inputs = _get_explicit_instance_attr(tool, "inputs")
+    if explicit_inputs is not None:
+        return explicit_inputs
+    return getattr(tool, "inputs", None)
 
 
 def get_current_tool_policy_mode() -> str:

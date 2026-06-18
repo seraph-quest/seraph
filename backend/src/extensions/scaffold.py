@@ -15,12 +15,43 @@ from .doctor import ExtensionDoctorReport, doctor_snapshot
 from .layout import CONTRIBUTION_LAYOUTS
 from .manifest import ExtensionKind, ExtensionTrust
 from .registry import ExtensionRegistry
+from src.tools.policy import get_tool_execution_boundaries
 
-_DEFAULT_CONTRIBUTIONS: tuple[str, ...] = ("skills",)
+_DEFAULT_CAPABILITY_CONTRIBUTIONS: tuple[str, ...] = ("skills",)
+_DEFAULT_CONNECTOR_CONTRIBUTIONS: tuple[str, ...] = ("managed_connectors",)
 
 _DEFAULT_TOOL_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "skills": (),
     "workflows": ("read_file",),
+    "toolset_presets": ("read_file",),
+}
+
+_DEFAULT_DATA_ACCESS_BY_BOUNDARY: dict[str, str] = {
+    "workspace_read": "workspace_files",
+    "workspace_write": "workspace_files",
+}
+
+_DEFAULT_AUDIT_BY_BOUNDARY: dict[str, str] = {
+    "workspace_read": "filesystem_read",
+    "workspace_write": "filesystem_write",
+    "external_read": "external_fetch",
+    "external_mcp": "mcp_request",
+    "secret_management": "secret_management",
+}
+
+_NETWORKED_SCAFFOLD_CONTRIBUTIONS = {
+    "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
+}
+
+_CONNECTOR_SCAFFOLD_CONTRIBUTIONS = {
+    "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
+    "node_adapters",
 }
 
 _SUPPORTED_SCAFFOLD_CONTRIBUTIONS = {
@@ -29,8 +60,16 @@ _SUPPORTED_SCAFFOLD_CONTRIBUTIONS = {
     "runbooks",
     "starter_packs",
     "provider_presets",
+    "toolset_presets",
     "prompt_packs",
+    "context_packs",
     "scheduled_routines",
+    "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
+    "speech_profiles",
+    "node_adapters",
 }
 
 
@@ -55,7 +94,7 @@ def _placeholder_skill(slug: str, display_name: str) -> str:
     return (
         "---\n"
         f"name: {slug}\n"
-        f"description: {display_name} skill\n"
+        f"description: {json.dumps(f'{display_name} skill')}\n"
         "requires:\n"
         "  tools: []\n"
         "user_invocable: true\n"
@@ -67,8 +106,8 @@ def _placeholder_skill(slug: str, display_name: str) -> str:
 def _placeholder_workflow(slug: str, display_name: str) -> str:
     return (
         "---\n"
-        f"name: {display_name}\n"
-        f"description: {display_name} workflow\n"
+        f"name: {slug}\n"
+        f"description: {json.dumps(f'{display_name} workflow')}\n"
         "requires:\n"
         "  tools: [read_file]\n"
         "inputs:\n"
@@ -130,7 +169,30 @@ _PLACEHOLDER_BUILDERS: dict[str, tuple[str, Callable[[str, str], str]]] = {
             }
         ),
     ),
+    "toolset_presets": (
+        "presets/toolset/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} toolset preset",
+                "mode": "balanced",
+                "include_tools": ["read_file"],
+                "capabilities": ["analysis"],
+            }
+        ),
+    ),
     "prompt_packs": ("prompts/{slug}.md", _placeholder_prompt),
+    "context_packs": (
+        "context/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} context pack",
+                "instructions": f"Describe how {display_name} should shape guardian context.",
+                "domains": [slug],
+            }
+        ),
+    ),
     "scheduled_routines": (
         "routines/{slug}.yaml",
         lambda slug, display_name: _placeholder_yaml(
@@ -138,6 +200,83 @@ _PLACEHOLDER_BUILDERS: dict[str, tuple[str, Callable[[str, str], str]]] = {
                 "name": slug,
                 "label": display_name,
                 "schedule": "0 9 * * 1-5",
+            }
+        ),
+    ),
+    "managed_connectors": (
+        "connectors/managed/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "provider": slug,
+                "description": f"{display_name} managed connector",
+                "auth_kind": "api_key",
+                "config_fields": [
+                    {"key": "api_base_url", "label": "API Base URL", "required": False, "input": "url"},
+                ],
+            }
+        ),
+    ),
+    "automation_triggers": (
+        "automation/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} automation trigger",
+                "trigger_type": "cron",
+                "schedule": "0 9 * * 1-5",
+            }
+        ),
+    ),
+    "browser_providers": (
+        "connectors/browser/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} browser provider",
+                "provider_kind": "remote_cdp",
+                "config_fields": [
+                    {"key": "ws_endpoint", "label": "CDP Endpoint", "input": "url"},
+                ],
+            }
+        ),
+    ),
+    "messaging_connectors": (
+        "connectors/messaging/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} messaging connector",
+                "platform": "telegram",
+                "delivery_modes": ["dm"],
+                "config_fields": [
+                    {"key": "bot_token", "label": "Bot Token", "input": "password"},
+                ],
+            }
+        ),
+    ),
+    "speech_profiles": (
+        "speech/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} speech profile",
+                "provider": "openai",
+                "voice": "alloy",
+                "supports_tts": True,
+            }
+        ),
+    ),
+    "node_adapters": (
+        "connectors/nodes/{slug}.yaml",
+        lambda slug, display_name: _placeholder_yaml(
+            {
+                "name": slug,
+                "description": f"{display_name} node adapter",
+                "adapter_kind": "companion",
+                "config_fields": [
+                    {"key": "node_url", "label": "Node URL", "input": "url"},
+                ],
             }
         ),
     ),
@@ -153,19 +292,27 @@ def scaffold_extension_package(
     trust: str = "local",
     contributions: list[str] | None = None,
     version: str | None = None,
-    seraph_compatibility: str = ">=2026.3.19",
+    seraph_compatibility: str = ">=2026.4.10",
     publisher_name: str = "Seraph",
 ) -> ScaffoldedExtensionPackage:
     package_path = Path(package_root)
     parsed_kind = ExtensionKind(kind)
-    if parsed_kind != ExtensionKind.CAPABILITY_PACK:
-        raise ValueError("connector-pack scaffolding is deferred to the connector migration slices")
     ExtensionTrust(trust)
 
-    selected_contributions = list(contributions or _DEFAULT_CONTRIBUTIONS)
+    default_contributions = (
+        _DEFAULT_CAPABILITY_CONTRIBUTIONS
+        if parsed_kind == ExtensionKind.CAPABILITY_PACK
+        else _DEFAULT_CONNECTOR_CONTRIBUTIONS
+    )
+    selected_contributions = list(contributions or default_contributions)
     for contribution_type in selected_contributions:
         if contribution_type not in _SUPPORTED_SCAFFOLD_CONTRIBUTIONS:
             raise ValueError(f"unsupported scaffold contribution type: {contribution_type}")
+    if parsed_kind == ExtensionKind.CONNECTOR_PACK and not any(
+        contribution_type in _CONNECTOR_SCAFFOLD_CONTRIBUTIONS for contribution_type in selected_contributions
+    ):
+        supported = ", ".join(sorted(_CONNECTOR_SCAFFOLD_CONTRIBUTIONS))
+        raise ValueError(f"connector-pack scaffolds must include at least one connector contribution: {supported}")
 
     package_path.mkdir(parents=True, exist_ok=True)
     manifest_path = package_path / "manifest.yaml"
@@ -176,6 +323,9 @@ def scaffold_extension_package(
     created_files: list[Path] = []
     manifest_contributions: dict[str, list[str]] = {}
     required_tools: list[str] = []
+    required_boundaries: list[str] = []
+    data_access: list[str] = []
+    audit_events: list[str] = []
 
     for contribution_type in selected_contributions:
         template_path, builder = _PLACEHOLDER_BUILDERS[contribution_type]
@@ -189,6 +339,19 @@ def scaffold_extension_package(
         for tool_name in _DEFAULT_TOOL_PERMISSIONS.get(contribution_type, ()):
             if tool_name not in required_tools:
                 required_tools.append(tool_name)
+            for boundary in get_tool_execution_boundaries(tool_name):
+                if boundary not in required_boundaries:
+                    required_boundaries.append(boundary)
+                access = _DEFAULT_DATA_ACCESS_BY_BOUNDARY.get(boundary)
+                if access and access not in data_access:
+                    data_access.append(access)
+                audit_event = _DEFAULT_AUDIT_BY_BOUNDARY.get(boundary)
+                if audit_event and audit_event not in audit_events:
+                    audit_events.append(audit_event)
+        if contribution_type in _NETWORKED_SCAFFOLD_CONTRIBUTIONS and "secret_management" not in required_boundaries:
+            required_boundaries.append("secret_management")
+            if "secret_management" not in audit_events:
+                audit_events.append("secret_management")
 
     manifest_payload = {
         "id": extension_id,
@@ -201,7 +364,13 @@ def scaffold_extension_package(
         "contributes": manifest_contributions,
         "permissions": {
             "tools": required_tools,
-            "network": False,
+            "execution_boundaries": required_boundaries,
+            "data_access": data_access,
+            "audit_events": audit_events,
+            "network": any(
+                contribution_type in _NETWORKED_SCAFFOLD_CONTRIBUTIONS
+                for contribution_type in selected_contributions
+            ),
         },
     }
     manifest_path.write_text(yaml.safe_dump(manifest_payload, sort_keys=False), encoding="utf-8")

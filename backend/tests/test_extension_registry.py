@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from src.extensions.channels import select_active_channel_adapters
+from src.extensions.lifecycle import _contribution_payload
 from src.extensions.observers import select_active_observer_definitions
 from src.extensions.registry import ExtensionRegistry
 
@@ -15,7 +16,7 @@ version: 2026.3.21
 display_name: Research Briefing
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: bundled
@@ -42,7 +43,165 @@ contributes:
     assert extension is not None
     assert extension.source == "manifest"
     assert {item.contribution_type for item in extension.contributions} == {"skills", "workflows"}
-    assert extension.metadata["compatibility"] == ">=2026.3.19"
+    assert extension.metadata["compatibility"] == ">=2026.4.10"
+
+
+def test_contribution_payload_surfaces_rejected_capability_contract(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "contract-pack"
+    (pack_dir / "workflows").mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.contract-pack
+version: 2026.5.4
+display_name: Contract Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflows:
+    - workflows/write-note.md
+permissions:
+  tools: []
+  network: false
+""".strip(),
+        encoding="utf-8",
+    )
+    (pack_dir / "workflows" / "write-note.md").write_text(
+        "---\n"
+        "name: write-note\n"
+        "description: Write note\n"
+        "requires:\n"
+        "  tools: [write_file]\n"
+        "steps:\n"
+        "  - id: save\n"
+        "    tool: write_file\n"
+        "    arguments: {}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    extension = snapshot.get_extension("seraph.contract-pack")
+    assert extension is not None
+
+    payload = _contribution_payload(
+        extension,
+        extension.contributions[0],
+        indexes={},
+        state_entry={},
+    )
+
+    assert payload["status"] == "rejected"
+    assert payload["runtime_ready"] is False
+    assert payload["capability_contract"]["permissions"]["missing"]["tools"] == ["write_file"]
+    assert payload["capability_enforcement"]["reason"]
+
+
+def test_registry_enriches_wave2_contribution_metadata(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "guardian-reach"
+    (pack_dir / "presets" / "toolset").mkdir(parents=True)
+    (pack_dir / "context").mkdir()
+    (pack_dir / "prompts").mkdir()
+    (pack_dir / "automation").mkdir()
+    (pack_dir / "connectors" / "browser").mkdir(parents=True)
+    (pack_dir / "connectors" / "messaging").mkdir()
+    (pack_dir / "speech").mkdir()
+    (pack_dir / "connectors" / "nodes").mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.guardian-reach
+version: 2026.3.23
+display_name: Guardian Reach
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+permissions:
+  tools: [read_file]
+  network: true
+contributes:
+  toolset_presets:
+    - presets/toolset/research.yaml
+  context_packs:
+    - context/research.yaml
+  prompt_packs:
+    - prompts/review.md
+  automation_triggers:
+    - automation/daily-brief.yaml
+  browser_providers:
+    - connectors/browser/browserbase.yaml
+  messaging_connectors:
+    - connectors/messaging/telegram.yaml
+  speech_profiles:
+    - speech/voice.yaml
+  node_adapters:
+    - connectors/nodes/companion.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (pack_dir / "presets" / "toolset" / "research.yaml").write_text(
+        "name: research\ninclude_tools:\n  - read_file\ncapabilities:\n  - analysis\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "context" / "research.yaml").write_text(
+        "name: research\ninstructions: Keep context tight.\ndomains:\n  - research\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "prompts" / "review.md").write_text(
+        "# Review Prompt\n\nUse this pack when reviewing artifacts.\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "automation" / "daily-brief.yaml").write_text(
+        "name: daily-brief\ntrigger_type: webhook\nendpoint: /api/automation/webhooks/daily-brief\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "connectors" / "browser" / "browserbase.yaml").write_text(
+        "name: browserbase\nprovider_kind: browserbase\nconfig_fields:\n  - key: api_key\n    label: API Key\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "connectors" / "messaging" / "telegram.yaml").write_text(
+        "name: telegram\nplatform: telegram\ndelivery_modes:\n  - dm\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "speech" / "voice.yaml").write_text(
+        "name: narrator\nprovider: openai\nsupports_tts: true\nvoice: alloy\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "connectors" / "nodes" / "companion.yaml").write_text(
+        "name: companion\nadapter_kind: companion\nconfig_fields:\n  - key: node_url\n    label: Node URL\n    input: url\n",
+        encoding="utf-8",
+    )
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+
+    extension = snapshot.get_extension("seraph.guardian-reach")
+    assert extension is not None
+    contributions = {item.contribution_type: item.metadata for item in extension.contributions}
+    assert contributions["toolset_presets"]["include_tools"] == ["read_file"]
+    assert contributions["context_packs"]["domains"] == ["research"]
+    assert contributions["prompt_packs"]["name"] == "review-prompt"
+    assert contributions["prompt_packs"]["title"] == "Review Prompt"
+    assert contributions["automation_triggers"]["requires_network"] is True
+    assert contributions["automation_triggers"]["endpoint"] == "/api/automation/webhooks/daily-brief"
+    assert contributions["automation_triggers"]["config_fields"][0]["key"] == "signing_secret"
+    assert contributions["browser_providers"]["provider_kind"] == "browserbase"
+    assert contributions["messaging_connectors"]["platform"] == "telegram"
+    assert contributions["speech_profiles"]["supports_tts"] is True
+    assert contributions["node_adapters"]["requires_daemon"] is True
 
 
 def test_registry_records_invalid_manifest_errors(tmp_path: Path):
@@ -55,7 +214,7 @@ version: 2026.3.21
 display_name: Bad
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -79,6 +238,26 @@ contributes:
     assert len(snapshot.load_errors) == 1
     assert snapshot.load_errors[0].phase == "manifest"
     assert "connector surface" in snapshot.load_errors[0].message
+
+
+def test_registry_records_unreadable_manifest_errors(tmp_path: Path):
+    bad_dir = tmp_path / "extensions" / "bad-utf8"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "manifest.yaml").write_bytes(b"\xff\xfe\x00")
+
+    registry = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+
+    snapshot = registry.snapshot()
+
+    assert snapshot.extensions == []
+    assert len(snapshot.load_errors) == 1
+    assert snapshot.load_errors[0].phase == "manifest"
+    assert "not valid UTF-8" in snapshot.load_errors[0].message
 
 
 def test_registry_records_incompatible_manifest_as_load_error(tmp_path: Path):
@@ -107,7 +286,7 @@ contributes:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -115,7 +294,7 @@ contributes:
     assert snapshot.extensions == []
     assert len(snapshot.load_errors) == 1
     assert snapshot.load_errors[0].phase == "compatibility"
-    assert "current runtime is 2026.3.19" in snapshot.load_errors[0].message
+    assert "current runtime is 2026.4.10" in snapshot.load_errors[0].message
 
 
 def test_registry_synthesizes_legacy_skill_and_workflow_sources(tmp_path: Path):
@@ -267,7 +446,7 @@ version: 2026.3.21
 display_name: Research Briefing
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -283,13 +462,62 @@ contributes:
         skill_dirs=[str(skills_dir)],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
 
     assert snapshot.get_extension("seraph.research-briefing") is not None
     assert not any(item.id.startswith("legacy.skills.") for item in snapshot.extensions)
+
+
+def test_registry_ignores_nested_contribution_manifests(tmp_path: Path):
+    pack_dir = tmp_path / "extensions" / "research-pack"
+    (pack_dir / "skills" / "examples").mkdir(parents=True)
+    (pack_dir / "manifest.yaml").write_text(
+        """
+id: seraph.research-pack
+version: 2026.3.23
+display_name: Research Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/research.md
+""".strip(),
+        encoding="utf-8",
+    )
+    (pack_dir / "skills" / "examples" / "manifest.yaml").write_text(
+        """
+id: seraph.nested-example
+version: 2026.3.23
+display_name: Nested Example
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  skills:
+    - skills/example.md
+""".strip(),
+        encoding="utf-8",
+    )
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+
+    assert snapshot.get_extension("seraph.research-pack") is not None
+    assert snapshot.get_extension("seraph.nested-example") is None
 
 
 def test_registry_prefers_manifest_backed_mcp_entries_over_matching_legacy_runtime(tmp_path: Path):
@@ -303,7 +531,7 @@ version: 2026.3.21
 display_name: Connector Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -341,7 +569,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=StubMCPRuntime(),
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -351,6 +579,232 @@ permissions:
     assert extension.contributions[0].metadata["name"] == "github"
     assert extension.contributions[0].metadata["url"] == "https://example.test/mcp"
     assert not any(item.id.startswith("legacy.mcp-runtime.") for item in snapshot.extensions)
+
+
+def test_registry_duplicate_extension_ids_follow_manifest_root_precedence(tmp_path: Path):
+    workspace_root = tmp_path / "workspace-roots"
+    bundled_root = tmp_path / "bundled-roots"
+    for root, label in ((workspace_root, "Workspace"), (bundled_root, "Bundled")):
+        pack_dir = root / "duplicate-pack"
+        (pack_dir / "context").mkdir(parents=True)
+        (pack_dir / "manifest.yaml").write_text(
+            f"""
+id: seraph.duplicate-pack
+version: 2026.3.23
+display_name: {label} Duplicate
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  context_packs:
+    - context/research.yaml
+""".strip(),
+            encoding="utf-8",
+        )
+        (pack_dir / "context" / "research.yaml").write_text(
+            f"name: research\ninstructions: keep {label.lower()} first\n",
+            encoding="utf-8",
+        )
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(workspace_root), str(bundled_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+
+    extension = snapshot.get_extension("seraph.duplicate-pack")
+    assert extension is not None
+    assert extension.display_name == "Workspace Duplicate"
+    assert extension.metadata["manifest_root_index"] == 0
+
+
+def test_registry_enriches_workflow_metadata_after_conflict_resolution(tmp_path: Path):
+    extensions_root = tmp_path / "extensions"
+
+    winner_canvas_dir = extensions_root / "canvas-a"
+    (winner_canvas_dir / "canvas").mkdir(parents=True)
+    (winner_canvas_dir / "manifest.yaml").write_text(
+        """
+id: seraph.canvas-a
+version: 2026.3.24
+display_name: A Canvas Winner
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  canvas_outputs:
+    - canvas/guardian-board.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (winner_canvas_dir / "canvas" / "guardian-board.yaml").write_text(
+        """
+name: guardian-board
+title: Winner Board
+description: Preferred board.
+surface_kind: board
+sections:
+  - Summary
+  - Steps
+""".strip(),
+        encoding="utf-8",
+    )
+
+    loser_canvas_dir = extensions_root / "canvas-z"
+    (loser_canvas_dir / "canvas").mkdir(parents=True)
+    (loser_canvas_dir / "manifest.yaml").write_text(
+        """
+id: seraph.canvas-z
+version: 2026.3.24
+display_name: Z Canvas Loser
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  canvas_outputs:
+    - canvas/guardian-board.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (loser_canvas_dir / "canvas" / "guardian-board.yaml").write_text(
+        """
+name: guardian-board
+title: Loser Board
+description: Losing board.
+surface_kind: board
+sections:
+  - Wrong
+""".strip(),
+        encoding="utf-8",
+    )
+
+    winner_runtime_dir = extensions_root / "runtime-a"
+    (winner_runtime_dir / "runtimes").mkdir(parents=True)
+    (winner_runtime_dir / "manifest.yaml").write_text(
+        """
+id: seraph.runtime-a
+version: 2026.3.24
+display_name: A Runtime Winner
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflow_runtimes:
+    - runtimes/openprose.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (winner_runtime_dir / "runtimes" / "openprose.yaml").write_text(
+        """
+name: openprose
+engine_kind: openprose
+description: Preferred runtime.
+delegation_mode: inline
+checkpoint_policy: step
+structured_output: true
+default_output_surface: guardian-board
+""".strip(),
+        encoding="utf-8",
+    )
+
+    loser_runtime_dir = extensions_root / "runtime-z"
+    (loser_runtime_dir / "runtimes").mkdir(parents=True)
+    (loser_runtime_dir / "manifest.yaml").write_text(
+        """
+id: seraph.runtime-z
+version: 2026.3.24
+display_name: Z Runtime Loser
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflow_runtimes:
+    - runtimes/openprose.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+    (loser_runtime_dir / "runtimes" / "openprose.yaml").write_text(
+        """
+name: openprose
+engine_kind: openprose
+description: Losing runtime.
+delegation_mode: inline
+checkpoint_policy: step
+structured_output: true
+default_output_surface: wrong-board
+""".strip(),
+        encoding="utf-8",
+    )
+
+    workflow_dir = extensions_root / "workflow-pack"
+    (workflow_dir / "workflows").mkdir(parents=True)
+    (workflow_dir / "manifest.yaml").write_text(
+        """
+id: seraph.workflow-pack
+version: 2026.3.24
+display_name: Workflow Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  workflows:
+    - workflows/runtime-aware.md
+permissions:
+  tools: [web_search]
+""".strip(),
+        encoding="utf-8",
+    )
+    (workflow_dir / "workflows" / "runtime-aware.md").write_text(
+        "---\n"
+        "name: runtime-aware\n"
+        "description: Runtime-aware workflow\n"
+        "runtime_profile: openprose\n"
+        "requires:\n"
+        "  tools: [web_search]\n"
+        "steps:\n"
+        "  - id: search\n"
+        "    tool: web_search\n"
+        "    arguments: {}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(extensions_root)],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+
+    extension = snapshot.get_extension("seraph.workflow-pack")
+    assert extension is not None
+    workflow_contribution = next(
+        contribution
+        for contribution in extension.contributions
+        if contribution.contribution_type == "workflows"
+    )
+    assert workflow_contribution.metadata["effective_output_surface"] == "guardian-board"
+    assert workflow_contribution.metadata["output_surface_title"] == "Winner Board"
+    assert workflow_contribution.metadata["output_surface_sections"] == ["Summary", "Steps"]
 
 
 def test_registry_enriches_manifest_backed_managed_connector_metadata(tmp_path: Path):
@@ -364,7 +818,7 @@ version: 2026.3.21
 display_name: Managed GitHub
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -402,7 +856,7 @@ config_fields:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -430,7 +884,7 @@ version: 2026.3.21
 display_name: Core Observer Sources
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -457,7 +911,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -487,7 +941,7 @@ version: 2026.3.21
 display_name: Workspace Calendar
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -516,7 +970,7 @@ version: 2026.3.21
 display_name: Core Observer Sources
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: bundled
@@ -543,7 +997,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -565,7 +1019,7 @@ version: 2026.3.21
 display_name: Core Channel Adapters
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -590,7 +1044,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -620,7 +1074,7 @@ version: 2026.3.21
 display_name: Workspace Channel
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -647,7 +1101,7 @@ version: 2026.3.21
 display_name: Core Channel Adapters
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: bundled
@@ -672,7 +1126,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()
@@ -697,7 +1151,7 @@ version: 2026.3.21
 display_name: Escape Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -716,7 +1170,7 @@ contributes:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.3.19",
+        seraph_version="2026.4.10",
     )
 
     snapshot = registry.snapshot()

@@ -4,7 +4,8 @@ When delegation mode is enabled, the root orchestrator delegates to domain-speci
 specialist agents rather than calling tools directly. Each specialist has a focused
 tool set and tuned temperature for its domain.
 
-Tier 1 (built-in): memory_keeper, goal_planner, web_researcher, file_worker
+Tier 1 (built-in): memory_keeper, vault_keeper, goal_planner, web_researcher,
+file_worker
 Tier 2 (dynamic): one specialist per connected MCP server
 """
 
@@ -28,21 +29,24 @@ from src.workflows.manager import workflow_manager
 TOOL_DOMAINS: dict[str, str] = {
     "view_soul": "memory",
     "update_soul": "memory",
-    "store_secret": "memory",
-    "get_secret": "memory",
-    "get_secret_ref": "memory",
-    "list_secrets": "memory",
-    "delete_secret": "memory",
+    "store_secret": "vault",
+    "get_secret": "vault",
+    "get_secret_ref": "vault",
+    "list_secrets": "vault",
+    "delete_secret": "vault",
     "create_goal": "goals",
     "update_goal": "goals",
     "get_goals": "goals",
     "get_goal_progress": "goals",
     "web_search": "research",
     "browse_webpage": "research",
+    "browser_session": "research",
     "read_file": "files",
     "write_file": "files",
+    "preview_workspace_patch": "files",
+    "apply_workspace_patch": "files",
     "fill_template": "files",
-    "shell_execute": "files",
+    "execute_code": "files",
 }
 
 # Reverse index: domain → list of tool names
@@ -60,6 +64,15 @@ SPECIALIST_CONFIGS: dict[str, dict] = {
             "the guardian record sections (identity, values, priorities, preferences)."
         ),
         "temperature": 0.5,
+        "max_steps": 3,
+    },
+    "vault_keeper": {
+        "domain": "vault",
+        "description": (
+            "Handles privileged secret and credential operations. Use for storing, "
+            "listing, deleting, or issuing opaque references for vault-managed secrets."
+        ),
+        "temperature": 0.2,
         "max_steps": 3,
     },
     "goal_planner": {
@@ -155,6 +168,14 @@ def create_memory_keeper(tools_by_name: dict) -> ToolCallingAgent | None:
     return create_specialist("memory_keeper", cfg["description"], tools, cfg["temperature"], cfg["max_steps"])
 
 
+def create_vault_keeper(tools_by_name: dict) -> ToolCallingAgent | None:
+    cfg = SPECIALIST_CONFIGS["vault_keeper"]
+    tools = [tools_by_name[n] for n in DOMAIN_TOOLS["vault"] if n in tools_by_name]
+    if not tools:
+        return None
+    return create_specialist("vault_keeper", cfg["description"], tools, cfg["temperature"], cfg["max_steps"])
+
+
 def create_goal_planner(tools_by_name: dict) -> ToolCallingAgent | None:
     cfg = SPECIALIST_CONFIGS["goal_planner"]
     tools = [tools_by_name[n] for n in DOMAIN_TOOLS["goals"] if n in tools_by_name]
@@ -194,6 +215,68 @@ def create_mcp_specialist(
     return create_specialist(name, description, tools, temperature=0.3, max_steps=6)
 
 
+def list_specialist_descriptors(
+    available_tools: list,
+    *,
+    tool_mode: str | None = None,
+    mcp_mode: str | None = None,
+) -> list[dict[str, str]]:
+    """Return lightweight specialist metadata without instantiating agents/models."""
+    mode = tool_mode or get_current_tool_policy_mode()
+    effective_mcp_mode = mcp_mode or get_current_mcp_policy_mode()
+    available_tool_names = {getattr(tool, "name", "") for tool in available_tools}
+
+    descriptors: list[dict[str, str]] = []
+    for specialist_name in (
+        "memory_keeper",
+        "vault_keeper",
+        "goal_planner",
+        "web_researcher",
+        "file_worker",
+    ):
+        domain = SPECIALIST_CONFIGS[specialist_name]["domain"]
+        if any(tool_name in available_tool_names for tool_name in DOMAIN_TOOLS.get(domain, [])):
+            descriptors.append(
+                {
+                    "name": specialist_name,
+                    "description": SPECIALIST_CONFIGS[specialist_name]["description"],
+                }
+            )
+
+    server_configs = mcp_manager.get_config()
+    for server_info in server_configs:
+        name = str(server_info.get("name") or "")
+        if not name or not mcp_manager.is_connected(name):
+            continue
+        filtered_server_tools = filter_tools(
+            mcp_manager.get_server_tools(name),
+            mode,
+            is_mcp=True,
+            mcp_mode=effective_mcp_mode,
+        )
+        if not filtered_server_tools:
+            continue
+        description = str(server_info.get("description") or "").strip()
+        if not description:
+            tool_names = [getattr(tool, "name", str(tool)) for tool in filtered_server_tools]
+            description = f"MCP server '{name}' with tools: {', '.join(tool_names)}"
+        descriptors.append(
+            {
+                "name": mcp_specialist_runtime_path(name),
+                "description": description,
+            }
+        )
+
+    if any(name.startswith("workflow_") for name in available_tool_names):
+        descriptors.append(
+            {
+                "name": "workflow_runner",
+                "description": WORKFLOW_RUNNER_CONFIG["description"],
+            }
+        )
+    return descriptors
+
+
 # --- Build all specialists ---
 
 def build_all_specialists() -> list[ToolCallingAgent]:
@@ -206,13 +289,20 @@ def build_all_specialists() -> list[ToolCallingAgent]:
             wrap_tools_for_secret_refs(filter_tools(discover_tools(), mode))
         )
     )
+    all_tools = [tool for tool in all_tools if tool.name != "delegate_task"]
     tools_by_name = {t.name: t for t in all_tools}
 
     specialists: list[ToolCallingAgent] = []
     executable_tools: list = list(all_tools)
 
     # Tier 1: built-in specialists
-    for factory in (create_memory_keeper, create_goal_planner, create_web_researcher, create_file_worker):
+    for factory in (
+        create_memory_keeper,
+        create_vault_keeper,
+        create_goal_planner,
+        create_web_researcher,
+        create_file_worker,
+    ):
         agent = factory(tools_by_name)
         if agent is not None:
             specialists.append(agent)

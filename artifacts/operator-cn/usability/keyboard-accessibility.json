@@ -1,0 +1,8 @@
+{
+  "study_id": "cn-usability-keyboard-accessibility",
+  "receipt_class": "independent_usability_accessibility",
+  "reviewer_attestation": "accessibility_reviewer_not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "independent_accessibility_review_fixture",
+  "result": "keyboard_only_recovery_and_audit_path_completed_with_visible_residual_blocker"
+}

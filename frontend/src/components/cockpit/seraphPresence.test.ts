@@ -9,6 +9,15 @@ describe("deriveSeraphPresenceState", () => {
       animationState: "idle",
       isAgentBusy: false,
       pendingApprovalCount: 2,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 0,
+      attentionImportedFamilyCount: 0,
+      attentionPresenceSurfaceCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: null,
       recentTraceTool: null,
       latestResponseRole: null,
@@ -28,6 +37,15 @@ describe("deriveSeraphPresenceState", () => {
       animationState: "casting",
       isAgentBusy: true,
       pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 0,
+      attentionImportedFamilyCount: 0,
+      attentionPresenceSurfaceCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: "step",
       recentTraceTool: "write_file",
       latestResponseRole: null,
@@ -47,6 +65,15 @@ describe("deriveSeraphPresenceState", () => {
       animationState: "idle",
       isAgentBusy: false,
       pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 0,
+      attentionImportedFamilyCount: 0,
+      attentionPresenceSurfaceCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: null,
       recentTraceTool: null,
       latestResponseRole: null,
@@ -60,12 +87,49 @@ describe("deriveSeraphPresenceState", () => {
     expect(descriptor.tone).toBe("error");
   });
 
+  it("treats degraded continuity reach as a fault even without data-quality errors", () => {
+    const descriptor = deriveSeraphPresenceState({
+      connectionStatus: "connected",
+      animationState: "idle",
+      isAgentBusy: false,
+      pendingApprovalCount: 0,
+      pendingNotificationCount: 1,
+      queuedInsightCount: 0,
+      degradedRouteCount: 2,
+      degradedSourceAdapterCount: 1,
+      attentionImportedFamilyCount: 1,
+      attentionPresenceSurfaceCount: 1,
+      actionableThreadCount: 1,
+      continuityHealth: "degraded",
+      recommendedFocus: "Live delivery",
+      recentTraceRole: null,
+      recentTraceTool: null,
+      latestResponseRole: null,
+      ambientState: "idle",
+      dataQuality: "good",
+      recentInterventionCount: 0,
+      operatorStatus: null,
+    });
+
+    expect(descriptor.state).toBe("error");
+    expect(descriptor.detail).toContain("Cross-surface reach");
+  });
+
   it("falls back to idle when linked and quiet", () => {
     const descriptor = deriveSeraphPresenceState({
       connectionStatus: "connected",
       animationState: "idle",
       isAgentBusy: false,
       pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 0,
+      attentionImportedFamilyCount: 0,
+      attentionPresenceSurfaceCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
       recentTraceRole: null,
       recentTraceTool: null,
       latestResponseRole: null,
@@ -77,5 +141,33 @@ describe("deriveSeraphPresenceState", () => {
 
     expect(descriptor.state).toBe("idle");
     expect(descriptor.tone).toBe("neutral");
+  });
+
+  it("treats degraded typed adapters as proactive follow-through work when continuity is otherwise healthy", () => {
+    const descriptor = deriveSeraphPresenceState({
+      connectionStatus: "connected",
+      animationState: "idle",
+      isAgentBusy: false,
+      pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 1,
+      attentionImportedFamilyCount: 1,
+      attentionPresenceSurfaceCount: 1,
+      actionableThreadCount: 0,
+      continuityHealth: "attention",
+      recommendedFocus: "github-managed",
+      recentTraceRole: null,
+      recentTraceTool: null,
+      latestResponseRole: null,
+      ambientState: "idle",
+      dataQuality: "good",
+      recentInterventionCount: 0,
+      operatorStatus: null,
+    });
+
+    expect(descriptor.state).toBe("proactive");
+    expect(descriptor.detail).toContain("github-managed");
   });
 });

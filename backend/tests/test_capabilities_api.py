@@ -1,8 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from httpx import ASGITransport, AsyncClient
+from fastapi import HTTPException
 import pytest
 
+from src.api.capabilities import _explicit_runbook_entries, _runbook_labels_by_starter_pack
+from src.app import create_app
 from src.observer.context import CurrentContext
 from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
 
@@ -26,7 +30,7 @@ def _setup_manifest_pack_and_runbook_managers(tmp_path):
         "display_name: Research Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -222,8 +226,369 @@ def test_attach_workflow_actions_uses_extension_enable_for_packaged_disabled_wor
     ]
 
 
+def test_mcp_status_list_exposes_packaged_toolset_presets(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    package_dir = workspace_dir / "extensions" / "github-pack"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.github-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: GitHub Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/github-operator.yaml\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "github-operator.yaml").write_text(
+        "name: github-operator\n"
+        "description: GitHub MCP operator preset\n"
+        "include_mcp_servers:\n"
+        "  - github\n"
+        "execution_boundaries:\n"
+        "  - external_mcp\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("src.api.capabilities.settings.workspace_dir", str(workspace_dir)),
+        patch(
+            "src.api.capabilities.mcp_manager.get_config",
+            return_value=[
+                {
+                    "name": "github",
+                    "enabled": True,
+                    "status": "connected",
+                    "tool_count": 2,
+                    "description": "GitHub MCP",
+                }
+            ],
+        ),
+        patch(
+            "src.api.capabilities.mcp_manager.get_server_tools",
+            return_value=[
+                SimpleNamespace(name="github_list_issues"),
+                SimpleNamespace(name="github_get_pull_request"),
+            ],
+        ),
+    ):
+        from src.api.capabilities import _mcp_status_list
+
+        servers = _mcp_status_list("full")
+
+    assert servers[0]["tool_names"] == ["github_get_pull_request", "github_list_issues"]
+    assert servers[0]["toolset_presets"] == [
+        {
+            "name": "github-operator",
+            "description": "GitHub MCP operator preset",
+            "reference": "presets/toolset/github-operator.yaml",
+            "extension_id": "seraph.github-pack",
+            "extension_display_name": "GitHub Pack",
+        }
+    ]
+
+
+def test_tool_status_list_exposes_native_capability_contract():
+    from src.api.capabilities import _tool_status_list
+
+    tools = {item["name"]: item for item in _tool_status_list("safe")}
+
+    contract = tools["read_file"]["capability_contract"]
+    assert contract["schema_version"] == "2026-05-04.m1"
+    assert contract["family"] == "native_tool"
+    assert contract["trust_class"] == "seraph_bundled"
+    assert contract["permissions"]["required"]["execution_boundaries"] == ["workspace_read"]
+    assert contract["execution"]["operation_modes"] == ["inspect"]
+    assert contract["execution"]["artifact_contract"]["receipt_required"] is True
+    assert contract["preflight"]["ready"] is True
+
+    patch_contract = tools["apply_workspace_patch"]["capability_contract"]
+    assert patch_contract["permissions"]["required"]["execution_boundaries"] == ["workspace_read", "workspace_write"]
+    assert patch_contract["execution"]["operation_modes"] == ["preview", "mutate"]
+    assert "guarded_reapply" in patch_contract["execution"]["recovery_actions"]
+
+    blocked_contract = tools["write_file"]["capability_contract"]
+    assert blocked_contract["preflight"]["ready"] is False
+    assert blocked_contract["preflight"]["blocking_reasons"] == ["tool_policy_safe"]
+
+
+def test_doctor_reports_missing_mcp_server_reference_for_toolset_preset(tmp_path):
+    package_dir = tmp_path / "extensions" / "github-pack"
+    (package_dir / "presets" / "toolset").mkdir(parents=True)
+    (package_dir / "manifest.yaml").write_text(
+        "id: seraph.github-pack\n"
+        "version: 2026.3.23\n"
+        "display_name: GitHub Pack\n"
+        "kind: capability-pack\n"
+        "compatibility:\n"
+        "  seraph: \">=2026.4.10\"\n"
+        "publisher:\n"
+        "  name: Seraph\n"
+        "trust: local\n"
+        "contributes:\n"
+        "  toolset_presets:\n"
+        "    - presets/toolset/github-operator.yaml\n"
+        "permissions:\n"
+        "  network: true\n",
+        encoding="utf-8",
+    )
+    (package_dir / "presets" / "toolset" / "github-operator.yaml").write_text(
+        "name: github-operator\n"
+        "description: GitHub MCP operator preset\n"
+        "include_mcp_servers:\n"
+        "  - github-typo\n"
+        "execution_boundaries:\n"
+        "  - external_mcp\n",
+        encoding="utf-8",
+    )
+
+    from src.extensions.doctor import doctor_snapshot
+    from src.extensions.registry import ExtensionRegistry
+
+    snapshot = ExtensionRegistry(
+        manifest_roots=[str(tmp_path / "extensions")],
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    report = doctor_snapshot(snapshot)
+
+    result = next(item for item in report.results if item.extension_id == "seraph.github-pack")
+    assert any(issue.code == "missing_mcp_server_reference" for issue in result.issues)
+
+
 @pytest.mark.asyncio
-async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs(client):
+async def test_capabilities_overview_includes_catalog_extension_packs():
+    catalog_payload = {
+        "skills": [],
+        "mcp_servers": [],
+        "extension_packages": [
+            {
+                "name": "Hermes Session Memory",
+                "catalog_id": "seraph.hermes-session-memory",
+                "type": "extension_pack",
+                "description": "Optional Hermes-style session recall and checklist skills.",
+                "category": "capability-pack",
+                "installed": False,
+                "bundled": True,
+                "trust": "bundled",
+                "version": "2026.3.23",
+                "installed_version": None,
+                "update_available": False,
+                "contribution_types": ["context_packs", "skills"],
+            }
+        ],
+    }
+
+    with (
+        patch("src.api.capabilities.load_catalog_items", return_value=catalog_payload),
+        patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
+        patch("src.api.capabilities._tool_status_list", return_value=[]),
+        patch("src.api.capabilities._skill_status_map", return_value=([], {})),
+        patch("src.api.capabilities._workflow_status_map", return_value=([], {})),
+        patch("src.api.capabilities._mcp_status_list", return_value=[]),
+        patch("src.api.capabilities._starter_pack_statuses", return_value=[]),
+        patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
+        patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/api/capabilities/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["catalog_items"] == [
+        {
+            "name": "Hermes Session Memory",
+            "catalog_id": "seraph.hermes-session-memory",
+            "type": "extension_pack",
+            "description": "Optional Hermes-style session recall and checklist skills.",
+            "category": "capability-pack",
+            "bundled": True,
+            "installed": False,
+            "update_available": False,
+            "version": "2026.3.23",
+            "version_line": None,
+            "installed_version": None,
+            "compatibility": None,
+            "publisher": None,
+            "trust": "bundled",
+            "contribution_types": ["context_packs", "skills"],
+            "status": "ready",
+            "doctor_ok": True,
+            "issues": [],
+            "load_errors": [],
+            "diagnostics_summary": None,
+            "recommended_actions": [
+                {
+                    "type": "install_catalog_item",
+                    "label": "Install pack",
+                    "name": "seraph.hermes-session-memory",
+                }
+            ],
+        }
+    ]
+    assert payload["recommendations"] == [
+        {
+            "id": "catalog-extension:seraph.hermes-session-memory",
+            "label": "Install pack Hermes Session Memory",
+            "description": "Optional Hermes-style session recall and checklist skills.",
+            "action": {
+                "type": "install_catalog_item",
+                "label": "Install pack",
+                "name": "seraph.hermes-session-memory",
+            },
+        }
+    ]
+    assert payload["marketplace_flows"] == [
+        {
+            "id": "extension-pack:seraph.hermes-session-memory",
+            "label": "Hermes Session Memory",
+            "kind": "extension_pack",
+            "availability": "ready",
+            "summary": "Optional Hermes-style session recall and checklist skills.",
+            "detail": "trust bundled · 2 contribution types",
+            "ready_count": 1,
+            "total_count": 1,
+            "primary_action": {
+                "type": "install_catalog_item",
+                "label": "Install pack",
+                "name": "seraph.hermes-session-memory",
+            },
+            "recommended_actions": [
+                {
+                    "type": "install_catalog_item",
+                    "label": "Install pack",
+                    "name": "seraph.hermes-session-memory",
+                }
+            ],
+            "draft_command": None,
+            "blocking_reasons": [],
+            "install_items": [],
+            "skills": [],
+            "workflows": [],
+            "related_runbooks": [],
+            "catalog_id": "seraph.hermes-session-memory",
+            "installed": False,
+            "update_available": False,
+            "version": "2026.3.23",
+            "version_line": None,
+            "installed_version": None,
+            "contribution_types": ["context_packs", "skills"],
+            "trust": "bundled",
+            "publisher": None,
+            "compatibility": None,
+            "diagnostics_summary": None,
+            "status": "ready",
+        }
+    ]
+
+
+def test_explicit_runbook_entries_preserve_starter_pack_linkage():
+    entries, _, _ = _explicit_runbook_entries(
+        [
+            {
+                "id": "runbook:research-briefing",
+                "title": "Research Briefing",
+                "summary": "Run the packaged research workflow.",
+                "starter_pack": "research-briefing",
+            }
+        ],
+        workflows_by_name={},
+        starter_packs_by_name={
+            "research-briefing": {
+                "name": "research-briefing",
+                "availability": "ready",
+                "recommended_actions": [],
+                "sample_prompt": "Research the latest release notes",
+            }
+        },
+    )
+
+    assert entries[0]["starter_pack_name"] == "research-briefing"
+    assert _runbook_labels_by_starter_pack(entries) == {
+        "research-briefing": ["Research Briefing"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_surfaces_extension_pack_update_by_catalog_id():
+    catalog_payload = {
+        "skills": [],
+        "mcp_servers": [],
+        "extension_packages": [
+            {
+                "name": "Hermes Session Memory",
+                "catalog_id": "seraph.hermes-session-memory",
+                "type": "extension_pack",
+                "description": "Optional Hermes-style session recall and checklist skills.",
+                "category": "capability-pack",
+                "installed": True,
+                "bundled": True,
+                "trust": "bundled",
+                "version": "2026.3.23",
+                "installed_version": "2026.3.20",
+                "update_available": True,
+                "contribution_types": ["context_packs", "skills"],
+                "status": "ready",
+                "doctor_ok": True,
+                "issues": [],
+                "load_errors": [],
+            }
+        ],
+    }
+
+    with (
+        patch("src.api.capabilities.load_catalog_items", return_value=catalog_payload),
+        patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
+        patch("src.api.capabilities._tool_status_list", return_value=[]),
+        patch("src.api.capabilities._skill_status_map", return_value=([], {})),
+        patch("src.api.capabilities._workflow_status_map", return_value=([], {})),
+        patch("src.api.capabilities._mcp_status_list", return_value=[]),
+        patch("src.api.capabilities._starter_pack_statuses", return_value=[]),
+        patch("src.api.capabilities._load_explicit_runbooks", return_value=[]),
+        patch("src.api.capabilities.get_base_tools_and_active_skills", return_value=([], [], "disabled")),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/api/capabilities/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["catalog_items"][0]["recommended_actions"] == [
+        {
+            "type": "install_catalog_item",
+            "label": "Update pack",
+            "name": "seraph.hermes-session-memory",
+        }
+    ]
+    assert payload["recommendations"] == [
+        {
+            "id": "catalog-extension:seraph.hermes-session-memory",
+            "label": "Update pack Hermes Session Memory",
+            "description": "Optional Hermes-style session recall and checklist skills.",
+            "action": {
+                "type": "install_catalog_item",
+                "label": "Update pack",
+                "name": "seraph.hermes-session-memory",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -257,7 +622,7 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
                 {
                     "name": "daily-standup",
                     "description": "Standup",
-                    "requires_tools": ["shell_execute"],
+                    "requires_tools": ["execute_code"],
                     "user_invocable": True,
                     "enabled": False,
                     "file_path": "/tmp/daily-standup.md",
@@ -319,7 +684,11 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
             ],
         ),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -327,10 +696,10 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
     assert payload["mcp_policy_mode"] == "approval"
     assert payload["approval_mode"] == "high_risk"
 
-    shell_tool = next(tool for tool in payload["native_tools"] if tool["name"] == "shell_execute")
-    assert shell_tool["availability"] == "blocked"
-    assert shell_tool["blocked_reason"] == "tool_policy_balanced"
-    assert shell_tool["recommended_actions"][0]["type"] == "set_tool_policy"
+    execute_code_tool = next(tool for tool in payload["native_tools"] if tool["name"] == "execute_code")
+    assert execute_code_tool["availability"] == "blocked"
+    assert execute_code_tool["blocked_reason"] == "tool_policy_balanced"
+    assert execute_code_tool["recommended_actions"][0]["type"] == "set_tool_policy"
 
     web_briefing = next(skill for skill in payload["skills"] if skill["name"] == "web-briefing")
     assert web_briefing["availability"] == "blocked"
@@ -363,7 +732,6 @@ async def test_capabilities_overview_aggregates_blocked_states_and_starter_packs
 
 @pytest.mark.asyncio
 async def test_capabilities_overview_includes_manifest_starter_pack_and_explicit_runbook(
-    client,
     _setup_manifest_pack_and_runbook_managers,
 ):
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
@@ -421,7 +789,11 @@ async def test_capabilities_overview_includes_manifest_starter_pack_and_explicit
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -452,6 +824,7 @@ async def test_activate_starter_pack_enables_seeded_assets(client):
     with (
         patch("src.api.capabilities.skill_manager.get_skill", return_value=None),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=None),
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
         patch("src.api.capabilities._ensure_bundled_workflow_available", return_value=True),
         patch("src.api.capabilities.workflow_manager.reload", return_value=[]),
@@ -494,6 +867,7 @@ async def test_activate_manifest_backed_starter_pack_works(client, _setup_manife
     with (
         patch("src.api.capabilities.skill_manager.get_skill", return_value=None),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=SimpleNamespace(name="web-brief-to-file")),
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect) as install_item,
         patch("src.api.capabilities.skill_manager.enable", return_value=True) as enable_skill,
         patch("src.api.capabilities.workflow_manager.enable", return_value=True) as enable_workflow,
@@ -576,6 +950,7 @@ async def test_activate_bundled_core_capability_pack_uses_manifest_runtime(_setu
         return {"ok": False, "status": "not_found", "name": name, "type": "unknown", "bundled": False}
 
     with (
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
         patch(
             "src.api.capabilities.get_base_tools_and_active_skills",
@@ -619,6 +994,7 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
 
     try:
         with (
+            patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
             patch(
                 "src.api.capabilities.install_catalog_item_by_name",
                 side_effect=real_install_catalog_item_by_name,
@@ -656,6 +1032,87 @@ async def test_activate_bundled_core_capability_pack_uses_real_catalog_install(_
     assert [call.args[0] for call in install_item.call_args_list] == ["http-request"]
 
 
+@pytest.mark.asyncio
+async def test_activate_starter_pack_requires_catalog_install_approval(client):
+    with (
+        patch(
+            "src.api.capabilities.require_catalog_install_approval",
+            AsyncMock(side_effect=HTTPException(status_code=409, detail={"type": "approval_required", "approval_id": "approval-catalog-install"})),
+        ),
+        patch("src.api.capabilities.install_catalog_item_by_name") as install_item,
+    ):
+        resp = await client.post("/api/capabilities/starter-packs/research-briefing/activate")
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["type"] == "approval_required"
+    install_item.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_activate_starter_pack_preflights_all_approvals_without_consuming_them(client):
+    from src.api.capabilities import _activate_starter_pack_by_name
+
+    events: list[tuple[str, str, bool | None]] = []
+
+    async def approval_side_effect(name: str, *, consume: bool = True):
+        events.append(("approval", name, consume))
+
+    def install_side_effect(name: str):
+        events.append(("install", name, None))
+        return {"ok": True, "status": "installed", "name": name, "type": "mcp_server", "bundled": True}
+
+    with (
+        patch(
+            "src.api.capabilities._load_starter_packs",
+            return_value=[
+                {
+                    "name": "privileged-pack",
+                    "label": "Privileged Pack",
+                    "description": "",
+                    "skills": [],
+                    "workflows": [],
+                    "install_items": ["alpha", "beta"],
+                }
+            ],
+        ),
+        patch(
+            "src.api.capabilities.require_catalog_install_approval",
+            AsyncMock(side_effect=approval_side_effect),
+        ),
+        patch("src.api.capabilities.install_catalog_item_by_name", side_effect=install_side_effect),
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            return_value={
+                "starter_packs": [
+                    {
+                        "name": "privileged-pack",
+                        "availability": "ready",
+                        "missing_install_items": [],
+                        "blocked_skills": [],
+                        "blocked_workflows": [],
+                    }
+                ]
+            },
+        ),
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        payload = await _activate_starter_pack_by_name("privileged-pack")
+
+    assert payload["status"] == "activated"
+    assert payload["installed_catalog_items"] == [
+        {"name": "alpha", "type": "mcp_server", "status": "installed"},
+        {"name": "beta", "type": "mcp_server", "status": "installed"},
+    ]
+    assert events == [
+        ("approval", "alpha", False),
+        ("approval", "beta", False),
+        ("approval", "alpha", True),
+        ("install", "alpha", None),
+        ("approval", "beta", True),
+        ("install", "beta", None),
+    ]
+
+
 def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_path):
     from src.api.capabilities import _ensure_bundled_workflow_available
     from src.workflows.manager import workflow_manager
@@ -672,7 +1129,7 @@ def test_ensure_bundled_workflow_available_preserves_existing_manager_roots(tmp_
         "display_name: Local Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.3.19\"\n"
+        "  seraph: \">=2026.4.10\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: local\n"
@@ -730,6 +1187,7 @@ async def test_activate_starter_pack_reports_degraded_when_enable_fails(client):
     with (
         patch("src.api.capabilities.skill_manager.get_skill", return_value=SimpleNamespace(name="web-briefing")),
         patch("src.api.capabilities.workflow_manager.get_workflow", return_value=SimpleNamespace(name="web-brief-to-file")),
+        patch("src.api.capabilities.require_catalog_install_approval", AsyncMock()),
         patch("src.api.capabilities.skill_manager.enable", return_value=False),
         patch("src.api.capabilities.workflow_manager.enable", return_value=True),
         patch(
@@ -756,7 +1214,7 @@ async def test_activate_starter_pack_reports_degraded_when_enable_fails(client):
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_workflows(client):
+async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_workflows():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -798,7 +1256,11 @@ async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_work
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -817,7 +1279,7 @@ async def test_capabilities_overview_runbooks_publish_preflight_for_blocked_work
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_counts_missing_install_items_in_pack_availability(client):
+async def test_capabilities_overview_counts_missing_install_items_in_pack_availability():
     ctx = CurrentContext(tool_policy_mode="full", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -867,7 +1329,11 @@ async def test_capabilities_overview_counts_missing_install_items_in_pack_availa
         ),
         patch("src.api.capabilities.mcp_manager.get_config", return_value=[]),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -877,6 +1343,13 @@ async def test_capabilities_overview_counts_missing_install_items_in_pack_availa
     assert research_pack["missing_install_items"] == ["http-request"]
     assert research_pack["availability"] == "partial"
     assert any(action["type"] == "install_catalog_item" for action in research_pack["recommended_actions"])
+    research_flow = next(flow for flow in payload["marketplace_flows"] if flow["id"] == "starter-pack:research-briefing")
+    assert research_flow["kind"] == "starter_pack"
+    assert research_flow["availability"] == "partial"
+    assert research_flow["ready_count"] == 2
+    assert research_flow["total_count"] == 3
+    assert research_flow["related_runbooks"] == ["Research Briefing"]
+    assert research_flow["blocking_reasons"] == ["missing install item: http-request"]
 
 
 @pytest.mark.asyncio
@@ -923,8 +1396,8 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
     workflow_payload = workflow_resp.json()
     assert workflow_payload["availability"] == "blocked"
     assert workflow_payload["blocking_reasons"] == ["missing tool: write_file"]
-    assert workflow_payload["can_autorepair"] is True
-    assert workflow_payload["autorepair_actions"][0]["type"] == "set_tool_policy"
+    assert workflow_payload["can_autorepair"] is False
+    assert workflow_payload["autorepair_actions"] == []
     assert workflow_payload["parameter_schema"]["file_path"]["type"] == "string"
     assert workflow_payload["doctor_plan"]["repair_actions"][0]["type"] == "set_tool_policy"
 
@@ -934,12 +1407,13 @@ async def test_capability_preflight_returns_workflow_and_runbook_repair_metadata
     assert runbook_payload["blocking_reasons"] == ["missing tool: write_file"]
     assert runbook_payload["risk_level"] == "medium"
     assert runbook_payload["execution_boundaries"] == ["external_read", "workspace_write"]
-    assert runbook_payload["autorepair_actions"][0]["type"] == "set_tool_policy"
+    assert runbook_payload["can_autorepair"] is False
+    assert runbook_payload["autorepair_actions"] == []
     assert runbook_payload["doctor_plan"]["command_preview"]
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_tool_policy_blocks(client):
+async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_tool_policy_blocks():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -987,7 +1461,11 @@ async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
@@ -997,7 +1475,7 @@ async def test_capabilities_overview_skips_noop_starter_pack_recommendation_for_
 
 
 @pytest.mark.asyncio
-async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks(client):
+async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks():
     ctx = CurrentContext(tool_policy_mode="balanced", mcp_policy_mode="approval", approval_mode="high_risk")
     with (
         patch(
@@ -1011,7 +1489,7 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
                 {
                     "name": "daily-standup",
                     "description": "Generate a quick standup",
-                    "requires_tools": ["shell_execute"],
+                    "requires_tools": ["execute_code"],
                     "user_invocable": True,
                     "enabled": True,
                     "file_path": "/tmp/daily-standup.md",
@@ -1058,20 +1536,24 @@ async def test_capabilities_overview_repairs_starter_pack_skill_only_tool_blocks
         patch("src.api.capabilities.load_catalog_items", return_value={"skills": [], "mcp_servers": []}),
         patch("src.api.capabilities.catalog_skill_by_name", return_value={}),
     ):
-        resp = await client.get("/api/capabilities/overview")
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+        ) as client:
+            resp = await client.get("/api/capabilities/overview")
 
     assert resp.status_code == 200
     payload = resp.json()
     pack = payload["starter_packs"][0]
     assert pack["name"] == "daily-operator-rhythm"
     assert pack["blocked_skills"][0]["name"] == "daily-standup"
-    assert pack["blocked_skills"][0]["missing_tools"] == ["shell_execute"]
+    assert pack["blocked_skills"][0]["missing_tools"] == ["execute_code"]
     assert any(action["type"] == "set_tool_policy" and action["mode"] == "full" for action in pack["recommended_actions"])
     assert not any(action["type"] == "activate_starter_pack" for action in pack["recommended_actions"])
 
 
 @pytest.mark.asyncio
-async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
+async def test_capability_bootstrap_leaves_policy_changes_manual(client):
     blocked_preflight = {
         "target_type": "workflow",
         "name": "web-brief-to-file",
@@ -1084,7 +1566,109 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
         "parameter_schema": {"query": {"type": "string"}},
         "risk_level": "medium",
         "execution_boundaries": ["external_read", "workspace_write"],
-        "autorepair_actions": [{"type": "set_tool_policy", "label": "Set tool policy to full", "mode": "full"}],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": False,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"workflows_ready": 1}},
+                {"summary": {"workflows_ready": 1}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, blocked_preflight],
+        ),
+        patch("src.api.capabilities._apply_safe_capability_action", AsyncMock()) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()) as log_event,
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "workflow", "name": "web-brief-to-file"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "blocked"
+    assert payload["ready"] is False
+    assert payload["availability"] == "blocked"
+    assert payload["applied_actions"] == []
+    assert payload["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["command"] is None
+    assert payload["doctor_plan"]["command_ready"] is False
+    assert payload["doctor_plan"]["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["overview"]["summary"]["workflows_ready"] == 1
+    apply_action.assert_not_awaited()
+    log_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_leaves_mcp_enable_actions_manual(client):
+    blocked_preflight = {
+        "target_type": "runbook",
+        "name": "starter-pack:research-briefing",
+        "label": "Research briefing",
+        "description": "Repair MCP dependency",
+        "availability": "blocked",
+        "blocking_reasons": ["mcp server browser disabled"],
+        "recommended_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph".',
+        "parameter_schema": {},
+        "risk_level": "medium",
+        "execution_boundaries": ["capability_activation"],
+        "autorepair_actions": [],
+        "can_autorepair": False,
+        "ready": False,
+    }
+
+    with (
+        patch(
+            "src.api.capabilities._build_capability_overview",
+            side_effect=[
+                {"summary": {"mcp_servers_ready": 0}},
+                {"summary": {"mcp_servers_ready": 0}},
+            ],
+        ),
+        patch(
+            "src.api.capabilities._capability_preflight_payload",
+            side_effect=[blocked_preflight, blocked_preflight],
+        ),
+        patch("src.api.capabilities._apply_safe_capability_action", AsyncMock()) as apply_action,
+        patch("src.api.capabilities.log_integration_event", AsyncMock()),
+    ):
+        resp = await client.post(
+            "/api/capabilities/bootstrap",
+            json={"target_type": "runbook", "name": "starter-pack:research-briefing"},
+        )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "blocked"
+    assert payload["applied_actions"] == []
+    assert payload["manual_actions"] == blocked_preflight["recommended_actions"]
+    assert payload["doctor_plan"]["manual_actions"] == blocked_preflight["recommended_actions"]
+    apply_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capability_bootstrap_can_apply_low_risk_toggle_actions(client):
+    blocked_preflight = {
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Enable a disabled workflow",
+        "availability": "disabled",
+        "blocking_reasons": ["workflow disabled"],
+        "recommended_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "parameter_schema": {"query": {"type": "string"}},
+        "risk_level": "medium",
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "autorepair_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
         "can_autorepair": True,
         "ready": False,
     }
@@ -1102,9 +1686,9 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
         patch(
             "src.api.capabilities._build_capability_overview",
             side_effect=[
+                {"summary": {"workflows_ready": 0}},
                 {"summary": {"workflows_ready": 1}},
-                {"summary": {"workflows_ready": 2}},
-                {"summary": {"workflows_ready": 2}},
+                {"summary": {"workflows_ready": 1}},
             ],
         ),
         patch(
@@ -1113,7 +1697,7 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
         ),
         patch(
             "src.api.capabilities._apply_safe_capability_action",
-            return_value={"type": "set_tool_policy", "mode": "full", "status": "applied"},
+            return_value={"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "applied"},
         ) as apply_action,
         patch("src.api.capabilities.log_integration_event", AsyncMock()) as log_event,
     ):
@@ -1127,73 +1711,66 @@ async def test_capability_bootstrap_applies_safe_actions_until_ready(client):
     assert payload["status"] == "ready"
     assert payload["ready"] is True
     assert payload["availability"] == "ready"
-    assert payload["applied_actions"] == [{"type": "set_tool_policy", "mode": "full", "status": "applied"}]
+    assert payload["applied_actions"] == [{"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "applied"}]
     assert payload["manual_actions"] == []
     assert payload["command"] == blocked_preflight["command"]
     assert payload["doctor_plan"]["command_ready"] is True
-    assert payload["doctor_plan"]["applied_actions"][0]["type"] == "set_tool_policy"
-    assert payload["overview"]["summary"]["workflows_ready"] == 2
+    assert payload["doctor_plan"]["applied_actions"][0]["type"] == "toggle_workflow"
+    assert payload["overview"]["summary"]["workflows_ready"] == 1
     apply_action.assert_awaited_once()
     log_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_capability_bootstrap_can_apply_mcp_toggle_actions(client):
+async def test_capability_bootstrap_does_not_reclassify_low_risk_actions_as_manual_after_failed_apply(client):
     blocked_preflight = {
-        "target_type": "runbook",
-        "name": "starter-pack:research-briefing",
-        "label": "Research briefing",
-        "description": "Repair MCP dependency",
-        "availability": "blocked",
-        "blocking_reasons": ["mcp server browser disabled"],
-        "recommended_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
-        "command": 'Run workflow "web-brief-to-file" with query="seraph".',
-        "parameter_schema": {},
+        "target_type": "workflow",
+        "name": "web-brief-to-file",
+        "label": "Run web-brief-to-file",
+        "description": "Enable a disabled workflow",
+        "availability": "disabled",
+        "blocking_reasons": ["workflow disabled"],
+        "recommended_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
+        "command": 'Run workflow "web-brief-to-file" with query="seraph", file_path="notes/brief.md".',
+        "parameter_schema": {"query": {"type": "string"}},
         "risk_level": "medium",
-        "execution_boundaries": ["capability_activation"],
-        "autorepair_actions": [{"type": "toggle_mcp_server", "label": "Enable server", "name": "browser", "enabled": True}],
+        "execution_boundaries": ["external_read", "workspace_write"],
+        "autorepair_actions": [{"type": "toggle_workflow", "label": "Enable workflow", "name": "web-brief-to-file", "enabled": True}],
         "can_autorepair": True,
         "ready": False,
-    }
-    ready_preflight = {
-        **blocked_preflight,
-        "availability": "ready",
-        "blocking_reasons": [],
-        "recommended_actions": [],
-        "autorepair_actions": [],
-        "can_autorepair": False,
-        "ready": True,
     }
 
     with (
         patch(
             "src.api.capabilities._build_capability_overview",
             side_effect=[
-                {"summary": {"mcp_servers_ready": 0}},
-                {"summary": {"mcp_servers_ready": 1}},
-                {"summary": {"mcp_servers_ready": 1}},
+                {"summary": {"workflows_ready": 0}},
+                {"summary": {"workflows_ready": 0}},
+                {"summary": {"workflows_ready": 0}},
             ],
         ),
         patch(
             "src.api.capabilities._capability_preflight_payload",
-            side_effect=[blocked_preflight, ready_preflight],
+            side_effect=[blocked_preflight, blocked_preflight],
         ),
         patch(
             "src.api.capabilities._apply_safe_capability_action",
-            return_value={"type": "toggle_mcp_server", "name": "browser", "enabled": True, "status": "applied"},
+            return_value={"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "failed"},
         ) as apply_action,
         patch("src.api.capabilities.log_integration_event", AsyncMock()),
     ):
         resp = await client.post(
             "/api/capabilities/bootstrap",
-            json={"target_type": "runbook", "name": "starter-pack:research-briefing"},
+            json={"target_type": "workflow", "name": "web-brief-to-file"},
         )
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["status"] == "ready"
-    assert payload["applied_actions"][0]["type"] == "toggle_mcp_server"
-    assert payload["doctor_plan"]["applied_actions"][0]["type"] == "toggle_mcp_server"
+    assert payload["status"] == "blocked"
+    assert payload["applied_actions"] == [{"type": "toggle_workflow", "name": "web-brief-to-file", "enabled": True, "status": "failed"}]
+    assert payload["manual_actions"] == []
+    assert payload["doctor_plan"]["manual_actions"] == []
+    assert payload["doctor_plan"]["applied_actions"][0]["status"] == "failed"
     apply_action.assert_awaited_once()
 
 

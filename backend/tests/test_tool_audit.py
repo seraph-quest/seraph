@@ -6,14 +6,17 @@ from smolagents import Tool
 
 from config.settings import settings
 from src.agent.onboarding import create_onboarding_agent
+from src.agent.session import session_manager
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.observer.context import CurrentContext
 from src.tools.audit import AuditedTool, wrap_tools_for_audit
+from src.tools.secret_ref_tools import wrap_tools_for_secret_refs
+from src.tools.todo_tool import todo
 
 
 class DummyEchoTool(Tool):
-    name = "shell_execute"
+    name = "execute_code"
     description = "Dummy echo tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
@@ -23,7 +26,7 @@ class DummyEchoTool(Tool):
 
 
 class DummyFailTool(Tool):
-    name = "shell_execute"
+    name = "execute_code"
     description = "Dummy failing tool"
     inputs = {"code": {"type": "string", "description": "Code to run"}}
     output_type = "string"
@@ -57,6 +60,61 @@ class DummyWorkflowLikeTool(Tool):
         )
 
 
+class DummyAuthenticatedMCPFailTool(Tool):
+    name = "mcp_fetch_repo"
+    description = "Dummy authenticated MCP failure"
+    inputs = {"query": {"type": "string", "description": "Query"}}
+    output_type = "string"
+
+    def __init__(self):
+        super().__init__()
+        self.seraph_source_context = {
+            "server_name": "github",
+            "authenticated_source": True,
+        }
+        self.is_initialized = True
+
+    def forward(self, query: str) -> str:
+        raise RuntimeError(f"failed:{query}")
+
+    def get_audit_failure_payload(self, arguments, error):
+        return (
+            "mcp_fetch_repo failed for authenticated source",
+            {
+                "source_context": dict(self.seraph_source_context),
+                "arguments": {"query": arguments["query"]},
+                "error": str(error),
+            },
+        )
+
+
+class DummyAuthenticatedMCPDefaultAuditTool(Tool):
+    name = "mcp_fetch_repo"
+    description = "Dummy authenticated MCP tool with default audit payloads"
+    inputs = {"query": {"type": "string", "description": "Query"}}
+    output_type = "string"
+
+    def __init__(self):
+        super().__init__()
+        self.seraph_source_context = {
+            "server_name": "github",
+            "authenticated_source": True,
+            "credential_sources": ["header:authorization"],
+        }
+        self.is_initialized = True
+
+    def forward(self, query: str) -> str:
+        return f"ok:{query}"
+
+    def get_approval_context(self, _arguments):
+        return {
+            "execution_boundaries": ["external_mcp", "authenticated_external_source"],
+            "authenticated_source": True,
+            "server_name": "github",
+            "credential_sources": ["header:authorization"],
+        }
+
+
 def _tool_context() -> CurrentContext:
     return CurrentContext(tool_policy_mode="full", mcp_policy_mode="full")
 
@@ -80,7 +138,7 @@ def test_audited_tool_logs_call_and_result(async_db):
     tool_results = [e for e in events if e["event_type"] == "tool_result"]
     assert len(tool_calls) == 1
     assert len(tool_results) == 1
-    assert tool_calls[0]["tool_name"] == "shell_execute"
+    assert tool_calls[0]["tool_name"] == "execute_code"
     assert tool_results[0]["details"]["content_redacted"] is True
 
 
@@ -104,7 +162,7 @@ def test_audited_tool_logs_failure(async_db):
     tool_failures = [e for e in events if e["event_type"] == "tool_failed"]
     assert len(tool_calls) == 1
     assert len(tool_failures) == 1
-    assert tool_failures[0]["tool_name"] == "shell_execute"
+    assert tool_failures[0]["tool_name"] == "execute_code"
     assert tool_failures[0]["details"]["error"] == "failed:print('hi')"
 
 
@@ -130,6 +188,37 @@ def test_audited_tool_uses_custom_result_payload(async_db):
     assert tool_result["details"]["step_tools"] == ["web_search", "write_file"]
 
 
+def test_audited_todo_tool_redacts_tool_call_arguments(async_db):
+    asyncio.run(session_manager.get_or_create("s1"))
+    tool = wrap_tools_for_audit([todo])[0]
+    tokens = set_runtime_context("s1", "off")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            tool(action="set", items="alpha-secret-value\nbeta-secret-value")
+    finally:
+        reset_runtime_context(tokens)
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return events
+
+    events = asyncio.run(_fetch())
+    todo_events = [
+        event
+        for event in events
+        if event["tool_name"] == "todo" and event["event_type"] in {"tool_call", "tool_result"}
+    ]
+    assert len(todo_events) == 2
+    for event in todo_events:
+        assert "alpha-secret-value" not in event["summary"]
+        assert "beta-secret-value" not in event["summary"]
+        assert event["details"]["arguments"]["action"] == "set"
+        assert event["details"]["arguments"]["item_count"] == 2
+        assert event["details"]["arguments"]["items_redacted"] is True
+        assert "items" not in event["details"]["arguments"]
+
+
 def test_audited_tool_logging_fails_open(async_db):
     tool = wrap_tools_for_audit([DummyEchoTool()])[0]
     tokens = set_runtime_context("s1", "high_risk")
@@ -142,11 +231,100 @@ def test_audited_tool_logging_fails_open(async_db):
         reset_runtime_context(tokens)
 
 
+def test_secret_ref_wrapper_preserves_authenticated_mcp_failure_audit_payload(async_db):
+    tool = wrap_tools_for_audit(
+        wrap_tools_for_secret_refs([DummyAuthenticatedMCPFailTool()]),
+        treat_all_as_mcp=True,
+    )[0]
+    tokens = set_runtime_context("s1", "high_risk")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            with pytest.raises(RuntimeError, match="failed:repo"):
+                tool(query="repo")
+    finally:
+        reset_runtime_context(tokens)
+
+    events = asyncio.run(audit_repository.list_events(limit=10))
+    failure = next(e for e in events if e["event_type"] == "tool_failed" and e["tool_name"] == "mcp_fetch_repo")
+    assert failure["summary"] == "mcp_fetch_repo failed for authenticated source"
+    assert failure["details"]["source_context"]["authenticated_source"] is True
+
+
+def test_audited_tool_defaults_include_authenticated_source_context(async_db):
+    tool = wrap_tools_for_audit(
+        wrap_tools_for_secret_refs([DummyAuthenticatedMCPDefaultAuditTool()]),
+        treat_all_as_mcp=True,
+    )[0]
+    tokens = set_runtime_context("s1", "high_risk")
+
+    try:
+        with patch("src.tools.policy.context_manager.get_context", return_value=_tool_context()):
+            assert tool(query="repo") == "ok:repo"
+    finally:
+        reset_runtime_context(tokens)
+
+    events = asyncio.run(audit_repository.list_events(limit=10))
+    call = next(e for e in events if e["event_type"] == "tool_call" and e["tool_name"] == "mcp_fetch_repo")
+    result = next(e for e in events if e["event_type"] == "tool_result" and e["tool_name"] == "mcp_fetch_repo")
+    assert call["details"]["source_context"]["authenticated_source"] is True
+    assert call["details"]["approval_context"]["execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+    ]
+    assert result["details"]["source_context"]["credential_sources"] == ["header:authorization"]
+    assert result["details"]["approval_context"]["authenticated_source"] is True
+
+
 def test_onboarding_agent_uses_audited_tools():
     agent = create_onboarding_agent()
 
     for tool_name in ("view_soul", "update_soul", "create_goal", "get_goals"):
         assert isinstance(agent.tools[tool_name], AuditedTool)
+
+
+def test_onboarding_agent_instructions_clarify_tool_scope():
+    agent = create_onboarding_agent()
+
+    assert "Do NOT imply these are Seraph's only capabilities" in agent.instructions
+    assert "Tools available in this onboarding mode" in agent.instructions
+
+
+def test_onboarding_agent_enables_browser_for_explicit_user_link():
+    agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
+
+    assert isinstance(agent.tools["browse_webpage"], AuditedTool)
+    assert "You may inspect only the exact URL(s) below" in agent.instructions
+    assert "`https://example.com/about`" in agent.instructions
+    assert "Do not search the web" in agent.instructions
+
+
+def test_onboarding_agent_keeps_browser_disabled_without_explicit_link():
+    agent = create_onboarding_agent("I work in climate software and want better weekly planning.")
+
+    assert "browse_webpage" not in agent.tools
+    assert "Explicit webpage access for this onboarding turn" not in agent.instructions
+
+
+def test_onboarding_agent_browser_scope_is_runtime_enforced():
+    agent = create_onboarding_agent("Review https://example.com/about during onboarding.")
+
+    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse:
+        assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+        assert "limited to the exact URL" in agent.tools["browse_webpage"](
+            url="https://example.com/elsewhere"
+        )
+
+    mock_browse.assert_called_once_with("https://example.com/about", action="extract")
+
+
+def test_onboarding_agent_normalizes_quoted_explicit_urls():
+    agent = create_onboarding_agent('Review "https://example.com/about".')
+
+    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="about page") as mock_browse:
+        assert agent.tools["browse_webpage"](url="https://example.com/about") == "about page"
+
+    mock_browse.assert_called_once_with("https://example.com/about", action="extract")
 
 
 @patch("src.agent.onboarding.LiteLLMModel")

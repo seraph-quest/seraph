@@ -3,7 +3,7 @@ version: 2026.3.21
 display_name: Research Pack
 kind: capability-pack
 compatibility:
-  seraph: '>=2026.3.19'
+  seraph: '>=2026.4.10'
 publisher:
   name: Seraph
 trust: local
@@ -17,4 +17,10 @@ contributes:
 permissions:
   tools:
   - read_file
+  execution_boundaries:
+  - workspace_read
+  data_access:
+  - workspace_files
+  audit_events:
+  - filesystem_read
   network: false

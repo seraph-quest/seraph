@@ -15,6 +15,15 @@ export interface SeraphPresenceSnapshot {
   animationState: AgentAnimationState;
   isAgentBusy: boolean;
   pendingApprovalCount: number;
+  pendingNotificationCount: number;
+  queuedInsightCount: number;
+  degradedRouteCount: number;
+  degradedSourceAdapterCount: number;
+  attentionImportedFamilyCount: number;
+  attentionPresenceSurfaceCount: number;
+  actionableThreadCount: number;
+  continuityHealth?: string | null;
+  recommendedFocus?: string | null;
   recentTraceRole?: MessageRole | null;
   recentTraceTool?: string | null;
   latestResponseRole?: MessageRole | null;
@@ -65,11 +74,14 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
     snapshot.recentTraceRole === "error"
     || containsAny(snapshot.operatorStatus, ["error", "failed", "fault"])
     || containsAny(snapshot.dataQuality, ["degraded", "failed", "outage"])
+    || snapshot.continuityHealth === "degraded"
   ) {
     return {
       state: "error",
       label: "Degraded",
-      detail: "Seraph is running with a degraded seam or recent execution failure.",
+      detail: snapshot.continuityHealth === "degraded"
+        ? "Cross-surface reach, imported capability surfaces, or continuity needs operator repair."
+        : "Seraph is running with a degraded seam or recent execution failure.",
       tone: "error",
       cadenceMs: 520,
     };
@@ -116,14 +128,22 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
   }
 
   if (
-    snapshot.latestResponseRole === "proactive"
+    snapshot.actionableThreadCount > 0
+    || snapshot.pendingNotificationCount > 0
+    || snapshot.queuedInsightCount > 0
+    || snapshot.degradedSourceAdapterCount > 0
+    || snapshot.attentionImportedFamilyCount > 0
+    || snapshot.attentionPresenceSurfaceCount > 0
+    || snapshot.latestResponseRole === "proactive"
     || snapshot.ambientState === "has_insight"
     || snapshot.recentInterventionCount > 0
   ) {
     return {
       state: "proactive",
       label: "Advisory",
-      detail: "Guardian continuity and proactive guidance are active.",
+      detail: snapshot.recommendedFocus
+        ? `Cross-surface follow-up is waiting on ${snapshot.recommendedFocus}.`
+        : "Guardian continuity and proactive guidance are active.",
       tone: "success",
       cadenceMs: 760,
     };

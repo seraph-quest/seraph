@@ -6,6 +6,7 @@ import os
 
 from src.extensions.permissions import evaluate_tool_permissions
 from src.extensions.registry import ExtensionRegistry, ExtensionRegistrySnapshot
+from src.native_tools.registry import canonical_tool_name
 from src.skills.loader import Skill, scan_skill_paths
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ class SkillManager:
 
     def get_active_skills(self, available_tools: list[str]) -> list[Skill]:
         """Return enabled skills whose tool requirements are met."""
-        tool_set = set(available_tools)
+        tool_set = {canonical_tool_name(name) for name in available_tools}
         snapshot = self._snapshot()
         extensions_by_id = {extension.id: extension for extension in snapshot.extensions}
         result = []
@@ -183,7 +184,7 @@ class SkillManager:
             if not permission_profile["ok"]:
                 continue
             if skill.requires_tools and not all(
-                t in tool_set for t in skill.requires_tools
+                canonical_tool_name(t) in tool_set for t in skill.requires_tools
             ):
                 continue
             result.append(skill)

@@ -6,7 +6,7 @@
 
 ## Paired Research
 
-- primary design docs: [01. Guardian Thesis](/research/guardian-thesis), [02. Human Model And Memory](/research/human-model-and-memory), and [11. Superiority Program](/research/superiority-program)
+- primary design docs: [01. Guardian Thesis](/research/guardian-thesis), [02. Human Model And Memory](/research/human-model-and-memory), [11. Superiority Program](/research/superiority-program), and [14. Seraph Memory SOTA Roadmap](/research/seraph-memory-sota-roadmap)
 - synthesis context: [00. Research Synthesis](/research)
 
 ## Shipped On `develop`
@@ -25,23 +25,1117 @@
 - [x] second-layer salience calibration that promotes aligned active-work signals and allows grounded high-salience nudges to bypass generic high-interruption bundling outside focus mode
 - [x] deeper guardian behavioral eval coverage that proves grounded high-salience delivery versus degraded-confidence defer behavior at the delivery gate
 - [x] deeper guardian behavioral eval coverage that proves strategist tick can combine learned delivery bias, native delivery, and continuity-state visibility in one deterministic contract
-- [x] guardian world model that now carries current focus, active commitments, active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, corroboration sources, continuity threads, open loops or pressure, recent execution pressure, focus alignment, and intervention receptivity inside guardian state
+- [x] guardian world model that now carries current focus, focus provenance, active commitments, active projects, active constraints, recurring patterns, active routines, collaborators, recurring obligations, project timelines, memory signals, corroboration sources, continuity threads, open loops or pressure, recent execution pressure, focus alignment, intervention receptivity, and explicit judgment-risk notes inside guardian state
 - [x] guardian state now also carries learned communication guidance derived from recent intervention outcomes, including timing, suppression, blocked-state, and thread-preference bias, instead of only raw outcome history
 - [x] guardian world-model receptivity and intervention policy can now learn blocked-state async handling instead of only direct/native/timing bias
+- [x] contradiction-aware world-model confidence now carries focus provenance and explicit judgment risks, and live guardian learning now resolves the strongest global, thread, project, or thread-plus-project signal before policy-time arbitration against durable procedural memory
+- [x] long-horizon guardian learning now prioritizes live-project supporting context across collaborators, obligations, routines, and timeline recall, treats stale execution pressure as a first-class contradiction against the live project anchor, lowers receptivity further when negative intervention trends line up with that conflicting execution evidence, and tracks multi-day plus scheduled outcome spread so guardian state can surface explicit goal-alignment, routine, and collaborator watchpoints instead of only short-window bias summaries
+- [x] long-horizon guardian learning now also feeds abstention policy directly: repeated multi-day negative outcomes can bundle or defer low-urgency guidance, unstable scheduled outcomes can defer routine check-ins, and guardian state surfaces those abstention and scheduled-deferral pressures explicitly instead of leaving them implicit in raw outcome counts
+- [x] guardian state now also prioritizes live-project cross-thread continuity from recent sessions, carries matching recent-thread commitments into `next_up` and dominant-thread synthesis, and surfaces explicit follow-through risk when open project commitments and recent execution setbacks line up on the same live project
+- [x] guardian world-model synthesis now also ranks competing projects from observer, recent-session, memory, and execution evidence, prefers stronger cross-source project anchors over passive list order, preserves richer canonical project labels, and surfaces explicit ambiguity or drift risks when project evidence stays split
+- [x] guardian learning diagnostics now also surface explicit live-versus-procedural bias conflicts, tell the operator when fresh live outcomes are overruling older procedural guidance versus when procedural memory is still overriding live outcomes, and add a conservative judgment guardrail when competing project anchors line up with negative intervention trends
+- [x] additive memory-provider extensibility now exposes extension-backed provider inventory, lifecycle-managed provider config/toggle surfaces, additive retrieval integration, provider-backed user/project modeling augmentation, query-matched canonical project hints that can selectively activate provider-backed user modeling even when live recent-project state is sparse, a provider-neutral adapter model with per-capability sync-policy contracts, a machine-readable canonical-memory contract, explicit provenance taxonomy, stale-provider-evidence suppression, usefulness-ranked provider diagnostics with explicit provenance lines inside guardian state, explicit canonical-memory reconciliation diagnostics through the memory API and guardian state, post-canonical provider writeback guardrails that suppress duplicate, low-quality, or project-anchorless project-scoped canonical memories before additive mirroring, capability-state governance, canonical-memory ownership rules, and clean fallback when an external provider is unavailable
+- [x] guardian world-model synthesis now also exposes an explicit user-model substrate with inferred interruption, communication, thread, and cadence preferences, grounded-versus-partial user-model confidence, and evidence-backed preference-inference diagnostics instead of leaving those judgments implicit inside raw constraints plus learning bias text
+- [x] guardian state now also exposes explicit intent-uncertainty diagnostics with `clarify`, `proceed_with_caution`, or `defer_or_clarify` recommendations when ambiguous referents, split project anchors, split preference evidence, or degraded observer confidence make a confident intervention unsafe
+- [x] guardian state now also emits explicit judgment-proof lines for split project evidence, split interaction-style evidence, ambiguous referents, and degraded observer grounding so the canonical guardian prompt carries compact proof of why a judgment is conservative
+- [x] the operator guardian-state surface now exposes that same confidence, intent-resolution, judgment-proof, judgment-risk, and next-step contract directly in the cockpit instead of leaving operators on raw observer fields while the canonical guardian state stays internal
+- [x] guardian memory now also ships a named `guardian_memory_quality` benchmark suite with reasoning-heavy engineering-memory retrieval checks over workflow, approval, audit, artifact, and repo or PR continuity bundles, contradiction-aware recall ranking, explicit selective-forgetting diagnostics, operator-visible memory benchmark and failure-report surfaces, and CI-gated regression proof instead of leaving memory quality implied by flat runtime scenario lists
+- [x] additive memory providers now also pass a stricter pre-context quality gate: provider manifests expose declaration policy, provider hits must carry evidence IDs, confidence, provenance, privacy boundary, freshness, conflict behavior, and suppression rules before entering guardian context, noisy/stale/unsafe/authority-drifting evidence is suppressed with receipts, provider-returned secret echoes are redacted, and `/api/operator/memory-provider-quality-gate` plus the `memory_provider_quality_gate` suite pin the deterministic proof without claiming live external-memory superiority
+- [x] guardian judgment now also ships an explicit restraint contract: the canonical guardian state carries action posture, restraint reasons, inspectable user-model evidence facets, and user-model benchmark diagnostics; the operator guardian-state surface exposes those fields directly; and a named `guardian_user_model_restraint` benchmark suite proves continuity-aware user modeling, ambiguity-aware clarification, and restraint-before-action behavior instead of leaving clarify-first judgment as prompt folklore
+- [x] guardian-safe voice/media now also has a named deterministic proof gate: `guardian_safe_multimodal_voice` requires any voice, speech, browser-vision, image/media-analysis, or media-delivery capability family to justify timing, accessibility, situational-awareness, or intervention-quality value before it can be treated as useful guardian reach
+- [x] guardian learning arbitration now also has a named v2 proof gate: `guardian_learning_arbitration_v2` and `/api/operator/guardian-learning-arbitration` cover act, defer, bundle, clarify, approval, and stay-silent outcomes across stale memory, conflicting provider/workflow evidence, ambiguous referents, degraded observer confidence, unsafe capability context, and repeated negative outcomes without claiming guardian-intelligence superiority
+- [x] live guardian-learning and memory-provider outcome proof now has Batch BZ receipts: `live_guardian_learning_quality`, `guardian_intervention_outcome_cohorts`, `memory_provider_ecosystem_maturity_v1`, `canonical_memory_reconciliation_v2`, `provider_usefulness_regression`, and `/api/operator/live-guardian-learning-quality` expose typed outcome cohorts, false-positive and false-negative learning receipts, stale-evidence decay, provider usefulness/degradation/quarantine, canonical precedence, advisory writeback, deletion/export receipts, and provider usefulness regressions without claiming guardian-intelligence superiority, solved learning, memory superiority, memory-provider parity, or live human-outcome superiority
+- [x] live human-outcome and causal guardian-learning proof now has Batch CF receipts: `live_human_outcome_quality_study`, `guardian_learning_causal_attribution`, `memory_provider_live_regression_monitor`, and `/api/operator/live-human-outcome-learning-proof` expose consent-aware anonymized recorded-live outcome cohorts, correction/harm/follow-through receipts, residual bias and coverage limits, counterfactual causal-attribution receipts, reversible learning changes, stale-evidence decay, provider usefulness deltas, privacy regression monitoring, and quarantine without claiming guardian-intelligence superiority, solved live learning, memory superiority, memory-provider parity, or live human-outcome superiority
+- [x] independent guardian-learning outcome and memory-provider parity-matrix proof now has Batch CM receipts: `independent_outcome_cohort_review`, `task_scoped_causal_learning`, `memory_provider_parity_matrix`, and `/api/operator/independent-learning-memory-parity` expose independent evaluator metadata, sample and power rationale, consent/anonymization, adverse-event review, bounded outcome claims, task-scoped counterfactual causal receipts, confounder boundaries, rollback authority, canonical/advisory memory-provider comparison, privacy-regression quarantine, delete/export receipts, and blocked claims without claiming guardian-intelligence superiority, solved live learning, live human-outcome superiority, memory superiority, full memory-provider parity, production readiness, or full parity
+- [x] longitudinal guardian-learning and memory-provider outcome operations now have Batch CV receipts: `longitudinal_guardian_outcome_study`, `named_baseline_memory_comparison`, `learning_safety_monitor_v2`, and `/api/operator/longitudinal-guardian-outcomes` expose 60-plus day outcome windows, task families, named baseline source/version/limitations, pressure-only baseline comparison, independent evaluator protocol, consent/withdrawal/anonymization, adverse-event review, reversible learning-policy deltas, rollback authority, canonical/advisory provider comparison, stale-behavior blocking, privacy-regression quarantine, delete/export propagation, provider reinstatement review, safe redacted receipts, and blocked claims without claiming guardian-intelligence superiority, solved live learning, solved long-term learning, live human-outcome superiority, memory superiority, full memory-provider parity, named baseline wins, production readiness, or full parity
+- [x] generalized guardian-outcome and memory-provider parity proof now has Batch DD receipts: `generalized_guardian_outcome_study_v1`, `full_memory_provider_parity_matrix_v1`, `causal_learning_outcome_thresholds_v1`, `memory_baseline_comparison_v1`, and `/api/operator/generalized-guardian-outcomes` expose predeclared act/defer/bundle/clarify/approval/stay-silent/recovery/follow-through outcome protocols, independent evaluator metadata, consent/withdrawal/anonymization, fairness and adverse-event review, expanded provider dimension matrices, causal threshold gates, current-source-limited pressure baselines, redacted receipts, and blocked claims without claiming guardian-intelligence superiority, solved learning, live-human-outcome superiority, memory superiority, full memory-provider parity, named baseline wins, production readiness, or full parity
+- [x] governed self-evolution can now turn explicit objectives and trace observations into eval-scored review candidates for declarative capability assets while keeping the resulting changes bounded, reviewable, and outside live guardian self-modification, with explicit change-summary and review-risk receipts carried into the saved proposal and PR draft
+- [x] governed self-improvement now also blocks obvious preference-collapse drift, carries explicit canary-only and rollback-ready benchmark-gate receipts on saved candidates, and exposes a dedicated operator-visible governed-improvement benchmark surface with recent saved proposal receipts instead of treating candidate generation alone as proof
 
 ## Working On Now
 
-- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the corroboration-aware world-model and richer thread-guidance pass shipped
+- [x] this workstream remains central in the repo-wide horizon through stronger learning quality after the corroboration-aware world-model and scoped procedural-guidance pass shipped
 - [x] the `observer-salience-and-confidence-model` foundation is now shipped on `develop`
-- [x] the first multi-signal learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
+- [x] the current evidence-weighted learning layer and first salience-calibration pass are now shipped, and the next major gap is deeper modeling plus richer long-horizon learning rather than more missing observer fields
 - [x] `world-model-memory-fusion-v9`, `guardian-learning-policy-v9`, and `guardian-behavioral-evals-v9` are now represented in the shipped batch, so the next gap shifts to project-graph quality, longer-horizon learning, and stronger cross-thread policy adaptation rather than more missing first-pass structure
 
 ## Still To Do On `develop`
 
-- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, and corroboration-source grounding
-- [ ] stronger learning loops based on intervention outcomes beyond the first multi-signal delivery/channel/escalation plus phrasing/cadence/timing/suppression/blocked-state/thread layer
+- [ ] richer human world modeling that goes beyond the new project/routine/collaborator/obligation/timeline-aware world-model layer plus active blockers, next-up, dominant-thread synthesis, memory buckets, focus-provenance tracking, the explicit user-model confidence or preference-inference or evidence-facet substrate, the new action-posture plus restraint-reason contract, stale-support and stale-execution contradiction grounding, and contradiction-aware confidence downgrades
+- [ ] stronger learning loops based on generalized outcome-superiority evidence beyond Batch DD bounded generalized outcome/provider-matrix receipts, plus broader provider/live-workload coverage beyond the current evidence-weighted scoped delivery/channel/escalation/timing/suppression/blocked-state layer, global-thread-project live-signal resolution pass, live-versus-durable arbitration pass, live-versus-procedural conflict diagnostics, negative-trend-plus-execution-and-anchor ambiguity guardrail, multi-day and scheduled-outcome watchpoint pass, cross-thread commitment carryover pass, guardian user-model/restraint benchmark proof, first multi-project arbitration pass, Batch BZ typed outcome/provider regression receipts, Batch CF live-regression monitors, Batch CM independent outcome/memory-provider parity-matrix receipts, Batch CV longitudinal outcome/safety receipts, and Batch DD generalized outcome/provider-matrix receipts
 - [ ] stronger salience calibration and confidence quality beyond the first aligned-work/high-salience pass
 - [ ] stronger linkage between guardian state, execution choices, and feedback-driven policy adaptation
+- [ ] deeper memory-provider use beyond the shipped additive retrieval, additive user/project modeling, stale/usefulness-ranked provider diagnostics, guarded post-canonical writeback, inventory/governance layer, the pre-context provider quality gate, the guardian-memory benchmark plus contradiction-aware selective-forgetting proof, Batch BZ provider usefulness/degradation/quarantine plus canonical reconciliation receipts, Batch CF live-regression monitors, Batch CM dimension-scoped provider parity matrix, Batch CV longitudinal provider-operation receipts, and Batch DD expanded provider-matrix receipts, especially broader ecosystem coverage, live-provider attestation, richer provider-specific quality tuning, stronger long-horizon usefulness diagnostics, and exact claim-ledger permission before any memory-superiority or full provider-parity wording
+
+## Memory Upgrade Program Record
+
+The upgraded memory system is now complete through Batches A, B, and C.
+This section preserves the delivered batch structure as implementation history and architecture context.
+Active follow-up work should be tracked through GitHub issues, PRs, and the GitHub Project rather than extending this file into a task tracker.
+
+The delivered shape stayed split into three implementation batches:
+
+### Batch A: Structured memory foundation
+
+- `memory-eval-harness-v1`
+- `typed-memory-schema-v1`
+- `memory-kinds-and-provenance-v1`
+- `entity-and-project-linking-v1`
+- `bounded-memory-snapshots-v1`
+
+### Batch B: Episodic and observer-driven retrieval
+
+- `episodic-memory-events-v1`
+- `observer-episodic-fusion-v1`
+- `session-search-fts-and-event-index-v1`
+- `hybrid-memory-retrieval-v1`
+- `guardian-state-retrieval-planner-v1`
+
+### Batch C: Learning, consolidation, and decay
+
+- `memory-flush-lifecycle-hooks-v1`
+- `multi-stage-memory-consolidation-v1`
+- `soul-projection-and-structured-profile-v1`
+- `procedural-memory-from-outcomes-v1`
+- `memory-decay-contradiction-and-archive-v1`
+- `guardian-memory-behavioral-evals-v1`
+
+The batch split is the right implementation shape because the dependencies are real:
+
+- Batch A creates the durable typed substrate
+- Batch B turns sessions and observer signals into usable episodic recall
+- Batch C makes that memory updateable, policy-relevant, and behaviorally testable
+
+Each internal slice in these memory batches should close with:
+
+- targeted validation commands
+- a subagent review pass for bugs, regressions, and misleading claims
+- a short implementation log entry in this document before the slice is treated as complete
+
+## Batch A Review Log
+
+This section records the landed Batch A slices and their validation and review receipts.
+
+### `memory-eval-harness-v1`
+
+- scope:
+  - expanded `backend/src/evals/harness.py` with deterministic memory-behavior scenarios for linked commitment recall, linked collaborator recall, bounded snapshot stability, and supersession filtering
+  - taught the eval harness DB patch helpers about `src.memory.repository.get_session` and cleared the bounded snapshot cache around each scenario so the new memory scenarios run in isolated process state
+  - updated the existing session-consolidation evals so they still represent a clean successful dual-write path under the new structured-memory substrate instead of tripping `partially_succeeded` from mock-only vector writes
+  - extended `backend/tests/test_eval_harness.py` so the aggregate runtime-eval contracts now assert the new memory scenario details directly
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/evals/harness.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_eval_harness.py -q`
+- subagent review:
+  - reviewer: `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`)
+  - initial findings:
+    - the first linked commitment and collaborator scenarios could still pass from the generic structured kind buckets, so they did not actually prove the project-linked recall path
+    - the first bounded snapshot scenario built the “new session” state without creating that session first, so it could fall back to the global snapshot lane instead of exercising real per-session freezing
+    - the compactness check was measured before later memory changes landed, which made the “remains compact after later changes” claim weaker than intended
+  - fixed before the slice stayed marked complete:
+    - seeded higher-importance unrelated commitments and collaborators, captured a baseline no-active-project structured bundle, and then asserted the Atlas-linked items only reappear once active-project linking is in play
+    - created a real `snapshot-new` session before the fresh-state build and asserted that the scenario uses an actual session record
+    - moved the bounded line-count check to the post-change states so the compactness contract is evaluated after later memory writes land
+    - narrowed the commitment-continuity scenario description so it now claims only the memory-context recall behavior that the eval actually proves
+  - final recheck:
+    - no remaining material issue was found after the linked-recall proof, real-session snapshot path, and wording fixes
+
+### `typed-memory-schema-v1`
+
+- scope:
+  - added structured SQLite memory tables and enums for typed memories, entities, sources, edges, and snapshots
+  - added `memory_repository` CRUD helpers for entities, memories, edges, and snapshots
+  - made session consolidation dual-write into the structured store while keeping the existing vector path alive
+  - enabled SQLite foreign-key enforcement in both runtime and test engines
+- validation:
+  - `python3 -m py_compile backend/src/db/engine.py backend/src/db/models.py backend/src/memory/repository.py backend/src/memory/consolidator.py backend/tests/conftest.py backend/tests/test_db_engine.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_consolidator.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_memory_repository.py backend/tests/test_consolidation_reliability.py backend/tests/test_vector_store.py backend/tests/test_guardian_state.py -q`
+- subagent review:
+  - reviewer: `Euclid` (`019d24ad-f0fa-7700-af86-85b79cd7aea5`)
+  - initial findings:
+    - legacy `category -> kind` backfill was missing
+    - dual-write inconsistencies were reported as clean success
+    - SQLite foreign keys were declared but not enforced
+    - the substrate exposed richer kinds and links than the live writer actually used
+  - fixed before commit:
+    - backfilled legacy `kind` values from `category`
+    - changed consolidation audit outcome to `background_task_partially_succeeded` when vector and structured writes diverge
+    - added foreign-key PRAGMA setup to runtime and tests
+    - added tests for legacy backfill, partial-success audit reporting, and enforced entity links
+  - deferred to later Batch A slices:
+    - richer memory kinds beyond the legacy four writer buckets
+    - entity and project linking in the live writer
+    - bounded snapshot generation and consumption
+
+### `memory-kinds-and-provenance-v1`
+
+- scope:
+  - added `backend/src/memory/types.py` to normalize kind/category mapping, bucket mapping, and consolidation payload parsing
+  - upgraded session consolidation to accept typed memory objects with kind, summary, confidence, importance, and last-confirmed provenance while remaining backward-compatible with the legacy four lists
+  - started feeding richer structured memory kinds into guardian state and the world model instead of dropping everything back to coarse vector categories
+- validation:
+  - `python3 -m py_compile backend/src/memory/types.py backend/src/memory/consolidator.py backend/src/memory/repository.py backend/src/guardian/state.py backend/src/guardian/world_model.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_consolidation_reliability.py -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_consolidator.py backend/tests/test_memory_repository.py backend/tests/test_consolidation_reliability.py -q`
+- review notes:
+  - local regression caught and fixed before commit:
+    - project-memory enrichment briefly leaked execution-pressure lines into `world_model.active_projects`; the final slice keeps those lines in `project_state` while `active_projects` stays project-only
+  - subagent review:
+    - reviewer: `Ptolemy` (`019d24c7-9a43-7860-8b66-b5d77adc3187`)
+    - findings:
+      - caught the `project_state` / `active_projects` regression while guardian-state tests were failing
+      - flagged that richer kinds still collapse through the vector category lane, so only the structured bundle preserves typed recall behavior for now
+    - fixed before the slice stayed marked complete:
+      - separated `active_project_signals` from `project_state` so execution-pressure lines stay out of `active_projects`
+  - secondary review:
+    - reviewer: `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
+    - findings:
+      - confirmed the structured-memory bundle does change runtime behavior even though the vector layer still uses coarse categories
+      - requested a typed `commitment` / `project` test to prove structured kinds survive while vector writes keep coarse categories
+    - fixed after review:
+      - added a typed project-and-commitment consolidation test that proves structured `kind` values are preserved while vector writes still route through coarse `fact` / `goal` categories
+  - deferred to later Batch A slices:
+    - project/entity linking still relies on names embedded in metadata, not real entity ids
+    - the vector recall path still uses coarse categories until Batch B hybrid retrieval work lands
+    - bounded snapshot generation still does not project this richer memory into a stable session-start snapshot
+
+### `entity-and-project-linking-v1`
+
+- scope:
+  - added `backend/src/memory/linking.py` to resolve conservative subject and project entity links during typed consolidation writes
+  - extended `memory_repository` with exact or alias entity resolution plus linked-memory lookup by project or subject ids
+  - upgraded guardian-state synthesis to boost project-linked structured memories for currently active projects instead of relying only on global importance ordering
+  - kept the runtime claim narrow: subject-side entity ids are now stored, but live guardian recall currently consumes project-linked recall only
+- validation:
+  - `python3 -m py_compile backend/src/memory/linking.py backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py -q`
+- subagent review:
+  - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+  - initial findings:
+    - entity linking had moved outside the per-item structured-write fault boundary, which would have let a single link failure abort the whole consolidation run
+    - the runtime slice only consumes project-linked recall today, so broader “entity recall” wording would overstate what is live
+    - the original tests proved project-link persistence but not the collaborator subject-link path
+    - project-linked recall could still fragment when a project memory landed without an explicit `project` field and the observer only exposed a shorter active-project token
+  - fixed before the slice stayed marked complete:
+    - moved `resolve_memory_links(...)` back inside the per-item structured-write `try` block so link failures are counted as partial writes instead of aborting the whole run
+    - added a consolidation test that forces entity-link failure and proves the audit outcome stays `background_task_partially_succeeded`
+    - added collaborator-link assertions so subject and project ids are both exercised in tests
+    - added a conservative unique project-token fallback in entity resolution plus a guardian-state test that proves `Atlas` can still resolve linked memories stored under `Atlas launch` when that match is unique
+  - final recheck:
+    - no remaining high-severity issue was found after the fault-isolation and unique-project-fallback fixes
+  - deferred to later slices:
+    - guardian-state recall still does not consume subject-side entity ids, only project-linked ids
+    - richer entity-driven retrieval beyond active-project boosts belongs in the later hybrid retrieval planner work
+  - aggregate PR follow-up:
+    - external PR review caught that project linking was also injecting memory summaries as project aliases, which could merge unrelated projects that share generic summaries
+    - fixed on the branch by removing summary-derived aliases from project entity creation and adding a regression test that proves two projects with the same summary still resolve to different project entities
+    - subagent recheck:
+      - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+      - result: no material findings after the alias-removal fix, regression test, and wording update
+
+### `bounded-memory-snapshots-v1`
+
+- scope:
+  - added `backend/src/memory/snapshots.py` to build a compact bounded guardian snapshot from soul identity plus structured memory kinds
+  - refreshes that snapshot after consolidation so durable semantic changes project into the always-on guardian prefix without rebuilding it ad hoc every call
+  - changed guardian-state synthesis to use a session-frozen bounded snapshot plus a live todo overlay, with structured-memory recomputation as the degraded fallback if snapshot load or save fails
+  - keyed the in-process session freeze by session lifecycle (`session_id + created_at`) so reused session ids do not keep serving stale bounded recall
+- validation:
+  - `python3 -m py_compile backend/src/memory/snapshots.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/conftest.py backend/tests/test_memory_snapshots.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_snapshots.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py -q`
+- subagent review:
+  - reviewer: `Laplace` (`019d24da-bfeb-7360-8b3a-6e9bcef8fcb7`)
+  - initial findings:
+    - the first cut reused one global snapshot blindly, so it was neither fresh on new sessions nor stable against unrelated snapshot churn
+    - the degraded path fell back to soul-only lines and silently dropped structured bounded recall when snapshot IO failed
+    - the first session-freeze pass still needed an invalidation path for reused session ids in the same process
+  - fixed before the slice stayed marked complete:
+    - `get_or_create_bounded_guardian_snapshot(...)` now recomputes source hash against live soul and structured memory, refreshes stale global snapshots, and freezes the resolved content per session
+    - guardian-state fallback now recomputes bounded recall from structured memory via `render_bounded_guardian_snapshot(...)` instead of collapsing to soul-only memory
+    - the session cache key now includes the session lifecycle (`created_at`) so deleting and recreating the same session id invalidates the frozen snapshot
+    - added tests for stale snapshot refresh, per-session freeze, session-id reuse invalidation, consolidation-triggered snapshot refresh, and structured-memory fallback when snapshot load fails
+  - final recheck:
+    - no remaining high-severity or medium-severity issue was reported after the session-lifecycle and degraded-fallback fixes
+  - deferred to later slices:
+    - snapshot promotion still runs from consolidation boundaries; broader lifecycle hooks near compaction and workflow boundaries belong in the later flush-lifecycle slice
+    - bounded snapshot contents are still semantic-only and do not yet include procedural memory or episodic recall planning
+
+## Batch B Review Log
+
+This section records the landed Batch B slices and their validation and review receipts.
+
+### `episodic-memory-events-v1`
+
+- scope:
+  - added a structured `memory_episodes` table plus `MemoryEpisodeType` so Seraph now has a first-class episodic substrate alongside semantic memory
+  - extended `memory_repository` with typed episode create and list helpers, including filtering by session, entity links, and episode type
+  - added a first live automatic writer path in `SessionManager.add_message(...)` that mirrors session `user` and `assistant` messages into `conversation` episodes and session `step` messages into `tool` or `workflow` episodes
+  - made episodic capture fail open so message persistence does not regress if the episodic write path fails
+  - updated session deletion to remove episodes linked either by `session_id` or `source_message_id` before message teardown so the new foreign keys do not block cleanup
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/models.py backend/src/memory/repository.py backend/src/memory/episodes.py backend/src/agent/session.py backend/tests/test_memory_episodes.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_episodes.py backend/tests/test_session.py backend/tests/test_memory_repository.py backend/tests/test_session_search_tool.py backend/tests/test_db_engine.py -q`
+- subagent review:
+  - reviewer: `Euclid` (`019d24ad-f0fa-7700-af86-85b79cd7aea5`)
+  - initial findings:
+    - episodic capture was inside the same message transaction without a fail-open boundary, so an episode-write failure could roll back chat message persistence
+    - session deletion only cleaned up episodes by `session_id`, so episodes linked only by `source_message_id` could block message or session deletion under foreign-key enforcement
+    - the first implementation wording needed to stay narrow because the live automatic writer path only emitted `conversation`, `tool`, and `workflow` episodes, while `decision` and `observer` remained substrate-ready types
+  - fixed before the slice stayed marked complete:
+    - wrapped episodic writes in a nested fail-open boundary so message persistence survives episodic-write failures
+    - updated session deletion to remove episodes matched either by `session_id` or by the deleted messages' `source_message_id`
+    - added regression tests for fail-open episode writes and for deletion of episodes linked only through `source_message_id`
+    - narrowed the scope wording so the live writer claims match the implemented automatic event types
+  - final recheck:
+    - reviewer: `Kierkegaard` (`019d2516-65dc-7820-8201-8123b496dcc9`)
+    - result: no material findings after the fail-open fix, the deletion fix, and the narrowed scope wording
+  - deferred to later Batch B slices:
+    - automatic observer-transition writes still belong to `observer-episodic-fusion-v1`
+    - decision-oriented episodic writes still need dedicated runtime hooks rather than only schema or repository support
+    - episodic retrieval and ranking still belong to the later FTS, hybrid-retrieval, and retrieval-planner slices
+
+### `observer-episodic-fusion-v1`
+
+- scope:
+  - extended `CurrentContext` with `active_project` so observer state carries explicit project focus instead of only goals plus window text
+  - added `backend/src/memory/observer_episodes.py` to derive conservative `observer` episodes for project, focus, and activity transitions with explicit provenance metadata
+  - taught `ContextManager.refresh()` to load the most recent screen-derived project, persist observer transitions into episodic memory, and fail open if that write path breaks
+  - added runtime-audit details for `active_project` and `observer_transition_count` so the observer refresh log shows what transition memory was produced
+  - added regression coverage for duplicate-suppression, write-failure survival, project-clear transitions, and audit details
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/tests/test_observer_manager.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_observer_manager.py backend/tests/test_memory_episodes.py -q`
+- subagent review:
+  - reviewer: `Volta` (`019d24d3-df48-7700-9943-e69cbfaf93aa`)
+  - initial findings:
+    - observer transition writes were not atomic, so a refresh could partially commit episodes while still reporting `observer_transition_count == 0` after an exception path
+    - project exit transitions were skipped because the first cut only wrote project episodes when the new project name was non-empty
+  - fixed before the slice stayed marked complete:
+    - changed observer transition persistence to build one payload list and write it through `memory_repository.create_episode_batch(...)` so each refresh commits observer episodes atomically
+    - added project-clear transition support, including reuse of the prior project entity when focus drops from a project to none
+    - added regression tests for observer write failure, project-clear transitions, and runtime-audit transition details
+  - recheck attempts:
+    - follow-up reviewer threads were started with `Arendt`, `Fermat`, and `Kierkegaard`, but those tool runs stalled before returning findings, so the completion record relies on the fixed `Volta` findings plus targeted regression validation instead of claiming an unreturned clean review
+  - deferred to later Batch B slices:
+    - observer episodes are still lexical/temporal substrate only; retrieval and ranking belong to the later FTS and hybrid retrieval slices
+    - richer observer-event semantics beyond project, focus, and blocked-state activity transitions still belong to later observer-memory refinement work
+  - aggregate PR follow-up:
+    - external PR review caught that observer transition writes could create a new project entity from a shortened observer label like `Atlas`, which would fragment recall away from existing memories linked to `Atlas launch`
+    - fixed on the branch by resolving observer project labels through existing project-entity lookup first, including the unique-token project fallback, before creating a new entity only when nothing resolves
+    - added a regression test that proves observer episodes reuse the existing `Atlas launch` project entity when the observer reports `Atlas`
+
+### `session-search-fts-and-event-index-v1`
+
+- scope:
+  - added a SQLite `session_recall_fts` index that backfills existing rows and stays updated through triggers on sessions, user or assistant messages, and non-conversation episodic events
+  - upgraded `SessionManager.search_sessions(...)` to use the FTS index for normal text queries while keeping a bounded LIKE fallback for punctuation-heavy queries such as `%` and `_`
+  - expanded session recall so workflow and tool episodes can appear as `event` matches instead of limiting recall to titles plus user-facing chat messages
+  - kept session result ordering stable by ranking candidate hits with FTS first and then ordering sessions by conversation recency rather than todo churn or title-update timestamps
+  - added regression coverage for FTS backfill, episodic event hits, and title-update refresh behavior
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/tests/conftest.py backend/tests/test_db_engine.py backend/tests/test_session.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py -q`
+- review notes:
+  - local regression caught and fixed before the slice stayed complete:
+    - the first FTS cut indexed conversation episodes alongside the original chat messages, which let ordinary message searches surface `event` hits for the same text
+    - fixed by keeping the FTS event lane limited to non-conversation episodic rows, so chat recall stays on the message lane while workflow or tool recall still uses the event lane
+  - subagent review:
+    - reviewer thread: `Dalton` (`019d24c9-0610-7102-a84f-a58874fb38f9`)
+    - result: the review thread stalled before returning findings, so the completion record relies on targeted regression validation plus the locally caught conversation-versus-event indexing regression above
+  - deferred to later Batch B slices:
+    - session recall is now lexical plus episodic, but cross-store hybrid ranking with semantic memory still belongs to `hybrid-memory-retrieval-v1`
+    - query-type routing between session recall and guardian-state memory assembly still belongs to `guardian-state-retrieval-planner-v1`
+  - aggregate PR follow-up:
+    - external PR review caught that the LIKE fallback path only searched user and assistant messages, so episodic event recall disappeared for punctuation-heavy or FTS-ineligible queries
+    - fixed on the branch by teaching the fallback path to search non-conversation episodic events as well, mirroring the event coverage of the FTS path
+    - added a regression test that proves `upload?` still returns the workflow event match through the fallback lane
+
+### `hybrid-memory-retrieval-v1`
+
+- scope:
+  - added `backend/src/memory/hybrid_retrieval.py` as a reusable retriever that combines lexical structured-memory hits, project-linked boosts, episodic hits, vector-store hits, dedupe, and reranking into one bounded memory bundle
+  - kept the retriever independent from guardian-state wiring so the later planner slice can consume one tested retrieval backbone instead of reimplementing ranking logic in multiple places
+  - added regression coverage for mixed semantic plus episodic plus vector recall, project-linked surfacing without lexical query overlap, and degraded-vector fallback behavior
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/hybrid_retrieval.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/conftest.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_repository.py backend/tests/test_memory_episodes.py -q`
+- review notes:
+  - local regressions caught and fixed before the slice stayed complete:
+    - the new retriever module initially bypassed the in-memory test DB because `src.memory.hybrid_retrieval.get_session` was not included in the shared test patch targets
+    - recency scoring initially mixed naive and timezone-aware datetimes, which broke ranking during test execution
+    - fixed by patching the new module into `backend/tests/conftest.py` and normalizing datetimes inside the hybrid recency scorer before ranking
+  - subagent review:
+    - reviewer thread: `Laplace` (`019d24da-bfeb-7360-8b3a-6e9bcef8fcb7`)
+    - result: the review thread stalled before returning findings, so the completion record relies on the targeted hybrid-retrieval test suite plus the local regressions above
+  - deferred to later Batch B slices:
+    - the retriever exists, but guardian-state still uses the older memory assembly path until `guardian-state-retrieval-planner-v1` lands
+    - procedural-memory routing still belongs to Batch C because outcome-derived procedural memory is not a live retrieval lane yet
+
+### `guardian-state-retrieval-planner-v1`
+
+- scope:
+  - added `backend/src/memory/retrieval_planner.py` so guardian-state memory assembly now flows through one planner instead of splitting structured-memory assembly and query-time recall across separate code paths
+  - moved structured semantic bundle assembly out of `backend/src/guardian/state.py` and into the planner, keeping project-linked semantic boosts while layering hybrid semantic plus episodic recall on top
+  - updated guardian-state synthesis to split semantic recall into `Relevant memories:` and episodic recall into `Relevant episodes:` so temporal questions can surface event history without flattening everything into one generic memory block
+  - added a temporal-query guardian-state regression test that proves Atlas project memory still lands in semantic recall while a linked workflow failure lands in episodic recall for a `yesterday`-style question
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_hybrid_memory_retrieval.py -q`
+- review notes:
+  - broader validation boundary observed:
+    - `backend/tests/test_strategist_tick.py::test_strategist_tick_binds_runtime_context_for_tool_audit` still fails because the expected `tool_call` audit event with `session_id == "scheduler:strategist_tick"` is not emitted
+    - that check does not exercise the new retrieval-planner path directly, so it is recorded as an unrelated runtime-audit seam rather than treated as a blocker for this Batch B slice
+  - subagent review:
+    - reviewer thread: `Kuhn` (`019d2539-795c-7f02-ab99-8db767c17dd2`)
+    - result: the review thread stalled before returning findings, so the completion record relies on the targeted guardian-state plus hybrid-retrieval validation above and the explicit strategist-audit boundary note instead of claiming an unreturned clean review
+  - deferred to Batch C:
+    - procedural-memory routing still belongs to the outcome-learning batch because outcome-derived procedural memory is not a live retrieval lane yet
+    - planner-driven routing into policy- or delivery-specific memory lanes should wait until procedural memory exists instead of inventing a hollow extra lane now
+
+### Batch B Aggregate Validation
+
+- targeted validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/db/engine.py backend/src/agent/session.py backend/src/observer/context.py backend/src/memory/observer_episodes.py backend/src/observer/manager.py backend/src/memory/hybrid_retrieval.py backend/src/memory/retrieval_planner.py backend/src/guardian/state.py backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py backend/tests/test_memory_repository.py -q`
+  - `cd docs && npm run build`
+- broader validation boundary:
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -v`
+  - result: `1209 passed, 35 failed`
+  - the failures cluster in approval wrapping, runtime audit or session-context propagation, eval harness, goal-tree orphan handling, scheduled-job runtime context, and tool-audit paths; the Batch B memory suite above remained green
+  - the already observed strategist audit-context failure remains part of that broader unrelated failure set rather than a new retrieval-planner regression
+- PR review follow-up:
+  - a follow-up subagent review was started with `Einstein` (`019d2695-7bf7-7b10-97dd-6145a50ea090`) for the observer-entity reuse and fallback-event-search fixes
+  - that review thread stalled before returning findings, so the review record relies on the targeted regression tests for `backend/tests/test_observer_manager.py` and `backend/tests/test_session.py` instead of claiming an unreturned clean review
+
+## Batch C Review Log
+
+This section records the landed Batch C slices and their validation and review receipts.
+
+### `memory-flush-lifecycle-hooks-v1`
+
+- scope:
+  - added `backend/src/memory/flush.py` as the centralized lifecycle flush entrypoint with session-fingerprint dedupe plus in-flight overlap protection so repeated triggers do not double-write the same unchanged session
+  - routed chat-response flushes, websocket-response flushes, and scheduler catch-up flushes through that helper instead of scheduling raw consolidation calls directly
+  - added pre-compaction flushing from the session history path when the context window is about to require a middle summary, while explicitly preventing recursive self-triggering from the consolidator history read
+  - added session-end flushing before session teardown and workflow-completion flushing on successful workflow completion, and carried trigger plus workflow metadata into consolidation audit records
+  - tightened scheduler telemetry so it records visited sessions separately from sessions that actually flushed instead of overstating consolidation count
+  - follow-up hardening on the same branch now caches flush fingerprints only after clean or skipped consolidation outcomes, so non-primary lifecycle hooks can perform a real first flush or retry after a failed or partial consolidation instead of silently treating the session state as already flushed
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/flush.py backend/src/memory/consolidator.py backend/src/agent/context_window.py backend/src/agent/session.py backend/src/api/chat.py backend/src/api/ws.py backend/src/scheduler/jobs/memory_consolidation.py backend/src/workflows/manager.py backend/tests/conftest.py backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_context_window.py backend/tests/test_workflows.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py -q`
+- subagent review:
+  - reviewer: `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`)
+  - review target: bug risk, regression risk, concurrency issues, and misleading implementation claims around the new lifecycle flush path
+  - initial findings:
+    - non-primary lifecycle hooks could not perform the first flush for a session because the helper currently arms `session_end`, `pre_compaction`, and `workflow_completed` only after a primary `post_response` or `scheduled_catchup` flush has happened
+    - overlapping flushes could race and double-write the same session state
+    - wording needed to stay explicit that workflow completion currently performs a synchronous full consolidation call, not a lightweight background flush
+    - scheduler telemetry originally counted visited sessions as consolidated sessions even when no flush happened
+  - fixed before the slice stayed marked complete:
+    - added in-flight fingerprint dedupe in `backend/src/memory/flush.py` so overlapping flush requests for the same session state collapse to one consolidation run
+    - changed scheduler telemetry to distinguish visited-session count from actual flush count
+    - narrowed the implementation wording in docs and review notes so the workflow hook is described as the synchronous consolidation path it actually is
+  - follow-up review fixes after the next slice landed:
+    - `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`) returned concrete findings showing that failed or partial consolidations were still poisoning the flush fingerprint cache and that the helper still blocked non-primary hooks when no earlier flush had armed the session
+    - the branch now propagates consolidation outcome back into `backend/src/memory/flush.py`, caches fingerprints only for `succeeded` or `skipped` runs, and allows `session_end`, `pre_compaction`, and `workflow_completed` to act as genuine first-flush or retry hooks for unchanged session state
+    - the same follow-up exposed a delete-path regression once `session_end` flushes became real, so `backend/src/agent/session.py` now deletes session-scoped audit events, approval requests, queued insights, and guardian interventions before removing the session row
+- deferred to later Batch C slices:
+  - this slice still runs the existing full consolidation path rather than a lighter staged capture or merge pipeline
+  - higher-salience capture, staged extraction, and merge-strengthen logic belong in `multi-stage-memory-consolidation-v1`
+
+### `multi-stage-memory-consolidation-v1`
+
+- scope:
+  - refactored `backend/src/memory/consolidator.py` into an explicit pipeline with `capture`, `extract`, `merge`, and `strengthen` stages under `backend/src/memory/pipeline/` instead of keeping all extraction and write behavior in one monolithic function
+  - added capture-stage source-message collection so structured memories can keep concrete message provenance instead of only a coarse session id
+  - added duplicate-aware structured memory merging in `backend/src/memory/repository.py` and `backend/src/memory/pipeline/merge.py` so exact repeated memories update confidence, importance, reinforcement, and source links instead of creating a new structured row and a new vector row every time
+  - kept the vector backend active for newly created semantic memories while intentionally skipping redundant vector writes when the pipeline merges into an existing durable memory row
+  - extended consolidation audit details with captured-source count plus created, merged, and source-link counts so the runtime can distinguish append-heavy runs from update-heavy runs
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/consolidator.py backend/src/memory/pipeline/__init__.py backend/src/memory/pipeline/capture.py backend/src/memory/pipeline/extract.py backend/src/memory/pipeline/merge.py backend/src/memory/pipeline/strengthen.py backend/src/agent/session.py backend/tests/test_memory_repository.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_flush.py backend/tests/test_session.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_memory_repository.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_session.py -q`
+- review notes:
+  - local regressions caught and fixed before the slice stayed complete:
+    - exact-duplicate merge initially failed on offset-naive vs offset-aware `last_confirmed_at` comparisons, which left reinforcement unchanged and prevented merge-path audit counts from moving
+    - moving link resolution into the pipeline briefly broke the existing `src.memory.consolidator.resolve_memory_links` patch seam used by tests, so the consolidator now passes the resolver into the pipeline explicitly instead of silently changing that surface
+    - the entity-link-failure path originally kept the old test expectation of a dangling vector write, but the staged pipeline now resolves links before vector writes on new memories; the final tests document that narrower and safer behavior honestly instead of claiming the old partial-write shape is still live
+  - subagent review:
+    - returned findings from `Nash` (`019d26bd-dbac-7c50-a42e-166ed2a9760c`) and `Pasteur` (`019d26bf-0675-7a91-bc77-de2ba2ef7e00`) showed that the first pipeline cut still had real correctness gaps:
+      - snapshot refresh failures crashed into the hard-failure path instead of staying partial because the old `partial_write_count` local was gone and the aggregate audit outcome ignored snapshot-only failures
+      - source capture pulled the oldest session window rather than the newest one, so long sessions could attribute new memories to stale early messages
+      - duplicate merge matching was entity-asymmetric, which blocked later backfill of missing links and also let an unlinked repeat merge into a linked row
+      - the primary source row for newly created memories used synthesized summary text under `source_type="session"`, which overstated true message provenance and suppressed later real message-source rows for the same `source_message_id`
+      - merge-path confirmations could not repair a previously missing `embedding_id`, so exact repeats would strengthen the structured row forever without restoring vector coverage
+    - fixed before this slice stayed marked complete on the branch:
+      - `backend/src/memory/consolidator.py` now returns explicit outcome metadata to the flush layer, counts snapshot refresh failure as a partial write, and keeps snapshot-only failure runs in `partially_succeeded` instead of crashing into `failed`
+      - `backend/src/memory/pipeline/capture.py` now reads the newest message window, not the oldest ascending page
+      - `backend/src/memory/repository.py` now matches linked extractions against same-id or unlinked rows while refusing to merge a later unlinked extraction into an already linked row, and it accepts explicit message-backed source snippets for primary provenance rows
+      - `backend/src/memory/pipeline/merge.py` now drops the zero-overlap fallback, counts source links only when a real message match exists, stores the primary source as an actual `message` source row with the message snippet, repairs missing embeddings on the merge path when a repeated confirmation can restore vector coverage, falls back to session-level provenance plus zero reinforcement delta when a same-session retry has no newly recorded evidence, and applies merge-strengthening plus merge-path provenance in one repository transaction so a failed provenance write cannot leave behind a stronger row that will strengthen again on retry
+      - `backend/src/agent/session.py` now deletes the extra session-scoped rows that became reachable once `session_end` flushes were allowed to run for real before session teardown
+    - review status still open:
+      - the follow-up request to `Hooke` (`019d26ad-c3f0-7b50-9557-62a094b50b6c`) did not return before this log update, so the recorded review evidence is the two returned subagent findings plus the targeted regressions above rather than an invented clean review
+    - final recheck:
+      - `Aquinas` (`019d26ce-8df7-73e2-9586-b3a068c6883c`) reviewed the finished follow-up changes after the retry-idempotence, session-provenance fallback, and atomic merge-provenance fixes landed and reported no material findings
+  - remaining limitation carried forward intentionally:
+    - this slice merges exact duplicate memories by kind plus normalized summary/content and strengthens them with added provenance, but it does not yet perform contradiction detection, semantic dedupe, or supersession across near-duplicate statements
+- deferred to later Batch C slices:
+  - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+  - the soul surface is still file-backed rather than a projection from structured identity state
+  - outcome-derived procedural memory is still separate from this consolidation pipeline until the later procedural-memory slice lands
+
+### `soul-projection-and-structured-profile-v1`
+
+- scope:
+  - added `backend/src/profile/service.py` as the structured profile service for the singleton user record instead of leaving profile creation, onboarding state, and soul access split across API handlers and file utilities
+  - moved `soul.md` rendering and parsing into `backend/src/memory/soul.py` so the file becomes a readable projection surface while `user_profiles.preferences_json` plus `user_profiles.soul_text` hold the structured durable state underneath it
+  - updated `/api/user/profile` to return `soul_sections` and `soul_text` from the structured profile snapshot instead of exposing only a thin onboarding payload
+  - routed guardian-state synthesis and session consolidation through `sync_soul_file_to_profile()` before they read soul context, and routed consolidation soul writes through `update_profile_soul_section()` so durable soul updates land in the structured profile before they are projected back out to disk
+  - hardened projection sync so a missing `soul.md` is recreated from the stored profile state, and the stale-file guard now uses a soul-specific timestamp stored inside the structured payload instead of the generic profile `updated_at`
+  - changed section updates to optimistic compare-and-swap writes on `preferences_json`, so concurrent soul updates retry against the latest structured state instead of silently dropping one section change
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/soul.py backend/src/profile/service.py backend/src/api/profile.py backend/src/memory/consolidator.py backend/src/guardian/state.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_consolidator.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py -q`
+- local regressions fixed before subagent review:
+  - the first structured-profile cut left `read_soul()` falling back to defaults when `soul.md` was missing even if the profile already had stored identity state, so sync now re-projects the file from the structured profile before guardian-state or consolidation reads it again
+  - the first sync cut could also let an older projection file overwrite newer structured state, so the profile now tracks the last projected hash plus a soul-specific update timestamp and restores structured state only when the on-disk file is older than that soul-specific marker
+- subagent review:
+  - `Chandrasekhar` (`019d26f3-954e-7db0-b9a8-9bae53a629e9`) returned two concrete findings after the initial slice commit:
+    - the stale-file guard was incorrectly using `profile.updated_at`, so unrelated onboarding writes could mark a newer manual `soul.md` edit as stale and overwrite it from older structured state
+    - concurrent `update_profile_soul_section()` calls could lose updates because each writer rewrote the full structured blob from one stale base state
+  - fixed before the slice stayed marked complete on the branch:
+    - the structured soul payload now stores its own soul-specific update timestamp, and sync compares file age against that marker instead of the generic profile row timestamp
+    - `backend/src/profile/service.py` now updates soul sections through an optimistic compare-and-swap loop keyed on the current `preferences_json`, so conflicting writers retry from the latest structured state instead of erasing each other
+- deferred to later Batch C slices:
+  - outcome-derived procedural memory still needs its own explicit durable representation and retrieval lane instead of living only inside guardian feedback heuristics
+  - contradiction cleanup and archival still belong to `memory-decay-contradiction-and-archive-v1`
+
+### `procedural-memory-from-outcomes-v1`
+
+- scope:
+  - added `MemoryKind.procedural` in `backend/src/db/models.py` and mapped it through `backend/src/memory/types.py` so outcome-derived lessons become first-class durable memory instead of piggybacking on generic preference text
+  - added `backend/src/memory/procedural.py` to materialize `GuardianLearningSignal` into scoped procedural memories for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread lessons
+  - added `memory_repository.sync_scoped_memory()` in `backend/src/memory/repository.py` so one lesson scope updates in place across retries, reactivates archived rows when the lesson returns, archives the row when the signal goes neutral, and now persists a deterministic `scope_key` with a unique SQLite index plus retry path so same-scope procedural writes stay deduplicated across workers instead of only inside one event loop
+  - refreshed procedural memories from guardian feedback writes in `backend/src/guardian/feedback.py`, so explicit user feedback and failed outcomes update the durable lesson lane instead of leaving that learning only in ephemeral scoring logic; the follow-up fix now also recomputes lessons when an intervention moves from `failed` back to a non-failed outcome
+  - surfaced procedural memories through the retrieval planner, hybrid retrieval, bounded snapshot, and guardian world model in `backend/src/memory/retrieval_planner.py`, `backend/src/memory/hybrid_retrieval.py`, `backend/src/memory/snapshots.py`, and `backend/src/guardian/world_model.py`, with procedural guidance now rendering the actual rule text instead of opaque lesson labels and allowing more than two active lessons to surface at once
+  - feedback-driven procedural refresh now invalidates the per-session bounded snapshot cache and rebuilds the shared bounded snapshot so the same session does not keep stale delivery guidance after new feedback lands
+- validation:
+  - initial slice boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/db/models.py backend/src/memory/types.py backend/src/memory/repository.py backend/src/memory/procedural.py backend/src/guardian/feedback.py backend/src/memory/retrieval_planner.py backend/src/memory/snapshots.py backend/src/guardian/world_model.py backend/tests/test_guardian_feedback.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py -q`
+  - review-fix boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/memory/repository.py backend/src/memory/procedural.py backend/src/memory/hybrid_retrieval.py backend/src/memory/retrieval_planner.py backend/src/memory/snapshots.py backend/src/guardian/feedback.py backend/src/guardian/world_model.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local regressions fixed before the slice stayed complete:
+  - the new guardian-feedback tests initially created interventions against missing sessions, which violated the `guardian_interventions.session_id` foreign key and masked the actual procedural-memory assertions until the fixture setup was corrected
+- subagent review:
+  - `Galileo` (`019d2703-6e72-7b83-9d77-11c2bbc72165`) and `Rawls` (`019d2704-d877-7511-a4d5-ddcc014569d1`) returned concrete findings after the first slice commit:
+    - procedural memories were surfaced through summary-first rendering, so prompts saw labels like `Advisory timing lesson` instead of the actual learned rule text
+    - procedural refresh wrote the durable row but did not invalidate or rebuild the session-bounded snapshot cache, so an ongoing session could keep stale delivery guidance after feedback landed
+    - lesson text in `backend/src/memory/procedural.py` was hardcoded to advisory wording even when the intervention type was something else
+    - `sync_scoped_memory()` could create duplicate same-scope procedural rows under concurrent refreshes because it did not serialize the read-then-insert path
+    - outcome corrections from `failed` back to a non-failed state could leave stale failure-driven lessons behind because only new `failed` outcomes triggered recomputation
+    - procedural surfacing was capped too tightly, so only two lessons could reach retrieval and world-model context even when more were active
+  - fixed before the slice stayed marked complete on the branch:
+    - procedural memories now store and surface actionable rule text, and procedural rendering paths prefer the rule content over opaque labels
+    - guardian feedback refresh now invalidates the bounded snapshot cache and refreshes the shared bounded snapshot after procedural-memory updates
+    - lesson builders now render intervention-type-specific wording instead of hardcoding advisory-only language
+    - `backend/src/memory/repository.py` now serializes same-scope procedural writes with a per-scope async lock to keep concurrent refreshes from duplicating rows
+    - `update_outcome()` now recomputes procedural lessons when an intervention enters or exits the `failed` state
+    - structured memory and bounded snapshot surfacing now allow more than two procedural lessons without crowding out the whole bundle
+  - recheck status:
+    - `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) returned one remaining medium finding after the first repair pass: the same-scope dedupe was still only process-local because it relied on an in-memory async lock
+    - the branch now adds a durable `scope_key` column plus a unique partial index on `(kind, scope_key)` in `backend/src/db/models.py` and `backend/src/db/engine.py`, and `backend/src/memory/repository.py` now retries scoped inserts after `IntegrityError` by loading the winning row and updating it in place
+    - a final recheck request was sent back to `Kepler` after the DB-backed dedupe path landed; if that response does not return before the aggregate Batch C PR is opened, the PR notes should say exactly that instead of implying a clean reply that never arrived
+- deferred to later Batch C slices:
+  - delivery planning still reads the live `GuardianLearningSignal` heuristics directly; this slice makes those lessons durable and prompt-visible, but direct policy-time retrieval from procedural memory should land with the later learning-quality follow-through
+  - contradiction cleanup and supersession-aware archival still belong to `memory-decay-contradiction-and-archive-v1`
+
+### `memory-decay-contradiction-and-archive-v1`
+
+- scope:
+  - added `backend/src/memory/decay.py` so Batch C now has an explicit decay-maintenance pass that detects conservative contradiction pairs for comparable active memories, marks losing rows `superseded`, writes contradiction plus supersession metadata, and materializes `contradicts` and `supersedes` edges instead of leaving stale memories active forever
+  - added staleness decay windows by memory kind, with confidence and reinforcement step-downs plus archival metadata once a memory becomes both old enough and weak enough to stop competing with fresher context
+  - wired decay maintenance into `backend/src/memory/consolidator.py` after memory persistence and soul updates, so each consolidation pass now refreshes long-term memory health before bounded snapshots are rebuilt; the consolidation audit payload now records contradiction, superseded, decayed, and archived counts plus whether maintenance itself failed
+  - extended `backend/src/memory/repository.py` with edge dedupe and `list_edges()`, so repeated maintenance runs do not fan out duplicate relationship rows when the same contradiction or supersession is seen again
+  - tightened `backend/src/memory/hybrid_retrieval.py` so vector hits are filtered back through active structured-memory status before they can reach guardian context, which prevents archived or superseded embeddings from reappearing after decay has already invalidated the source row
+- validation:
+  - initial slice boundary:
+    - `backend/.venv/bin/python -m py_compile backend/src/memory/decay.py backend/src/memory/hybrid_retrieval.py backend/src/memory/consolidator.py backend/src/memory/repository.py backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py backend/tests/conftest.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py -q`
+  - broader adjacent-memory boundary:
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_decay.py backend/tests/test_memory_repository.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_snapshots.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local regressions fixed before the slice stayed complete:
+  - the first decay test run was accidentally using the real SQLite file instead of the in-memory test database because `src.memory.decay.get_session` was missing from the shared patch target list in `backend/tests/conftest.py`
+  - the first vector-status filter only dropped stale vector hits when at least one active structured-memory ID was still present, so a vector-only result set made entirely of archived or superseded rows could still leak stale text back into hybrid retrieval until the filter was tightened and regression-covered
+  - the first contradiction-polarity pass treated `helpful` as present inside `not helpful`, and it relied on summary-first text that could drop the polarity cue entirely, so contradictory communication-preference memories could survive decay until cue matching was hardened and the heuristic started reading combined summary-plus-content text
+  - subagent review:
+  - `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) was asked to review the completed slice for bugs, regressions, and false claims, but that review thread stalled before returning findings
+  - `Ampere` (`019d29d6-6450-7203-ac60-87ba7e9bfd83`) returned two concrete findings after the initial slice commit:
+    - terminal stale memories could get stuck active forever because `decay_step = 4` saturated the step function while confidence and reinforcement only decayed when the step number increased
+    - same-entity contradictions with short wording, like `Prefers Slack` versus `Avoid Slack`, could stay active together because contradiction detection still required two overlapping anchor tokens even when the memories already shared a linked entity
+  - fixed before the slice stayed marked complete on the branch:
+    - terminal stale rows now continue decaying one pass at a time after step 4 until archival thresholds are reached, and `backend/tests/test_memory_decay.py` now covers repeated maintenance runs so high-confidence stale rows cannot remain active indefinitely
+    - same-entity contradictions now require only one anchor overlap instead of two, so short linked preference reversals are superseded correctly without loosening the broader non-entity contradiction check
+  - recheck status:
+    - `Ampere` rechecked the follow-up patch and reported no material findings after the step-4 and short-contradiction fixes landed
+  - late follow-up review:
+    - `Bernoulli` later returned four additional findings against the already-committed slice:
+      - the structured-status filter in `backend/src/memory/hybrid_retrieval.py` was matching vector hit IDs against `Memory.id` instead of `Memory.embedding_id`, which meant valid active vector hits could be dropped while the tests were still faking vector IDs with structured memory IDs
+      - even after the ID fix, stale vector text could still leak when an active memory and a superseded memory shared the same deduplicated `embedding_id`, because the vector filter was not checking whether the returned text still matched any active structured row for that embedding
+      - the contradiction heuristic in `backend/src/memory/decay.py` was too broad for same-entity project state because generic polarity cues like `active` could make coexisting project memories look contradictory once the overlap threshold had been relaxed
+      - the first polarity narrowing over-corrected by dropping `active` and `available` globally, which hid concise state reversals like `Atlas service is active` versus `Atlas service is paused`
+      - refreshed memories could keep stale `decay_step` metadata after `merge_memory(...)`, which let reconfirmed rows skip normal future decay stages
+      - `source_link_count` was underreporting session-level provenance because the merge pipeline only counted message-linked sources, not fallback session sources
+    - fixed after the late review:
+      - vector-status filtering now matches active structured rows primarily through `embedding_id` and keeps an `id` fallback only for tolerance, and it now drops hits whose returned text no longer matches any active structured row for that embedding so stale shared-embedding text cannot resurface through vector search
+      - contradiction matching now limits one-token shared-entity reversals to `preference` plus `communication_preference`, while ambiguous cues like `active` and `available` only count for very short anchor sets so concise state reversals are still caught without turning broader project-state updates into false contradictions
+      - `merge_memory(...)` now clears stale decay metadata when a newer `last_confirmed_at` reconfirms a memory, and the decay regression suite now proves that refreshed memories re-enter normal decay stages later instead of getting stuck with stale step metadata
+      - the merge pipeline now counts both message and session provenance rows in `source_link_count`, and the consolidator coverage was updated so session-only provenance no longer looks like zero linked sources
+  - residual risk:
+    - `Ampere` also noted that concurrent decay workers can still race on direct edge creation inside `backend/src/memory/decay.py`; that remains recorded as residual risk for this slice rather than a blocker because the shipped contract here is stale-memory suppression and contradiction cleanup, not cross-worker edge-uniqueness hardening
+- deferred to later Batch C slices:
+  - behavioral proof that the new decay and adaptation rules change end-to-end guardian behavior still belongs to `guardian-memory-behavioral-evals-v1`
+
+### `guardian-memory-behavioral-evals-v1`
+
+- scope:
+  - expanded `backend/src/evals/harness.py` with `memory_decay_contradiction_cleanup_behavior`, which proves the decay-maintenance path supersedes contradictory project memory, keeps superseded embeddings out of hybrid retrieval, and keeps guardian-state memory context focused on the winning project state
+  - added `procedural_memory_adaptation_behavior` so the eval harness now proves feedback-derived procedural memory can refresh same-session bounded context and surface the learned rule text back into guardian memory context without waiting for a new session
+  - registered both scenarios in the runtime-eval catalog so they show up in `--list` output and can be run independently from the rest of the harness instead of being trapped inside one monolithic all-scenarios contract
+  - extended `backend/tests/test_eval_harness.py` with scenario-list assertions and a focused `test_memory_runtime_eval_scenarios_expose_expected_details()` boundary that validates just the two new memory scenarios and their returned details
+- validation:
+  - `backend/.venv/bin/python -m py_compile backend/src/evals/harness.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details -q`
+  - `cd backend && PYTHONPATH=. .venv/bin/python -m src.evals.harness --scenario memory_decay_contradiction_cleanup_behavior --scenario procedural_memory_adaptation_behavior --indent 2`
+- follow-up validation after late review findings:
+  - `backend/.venv/bin/python -m py_compile backend/src/memory/hybrid_retrieval.py backend/src/memory/decay.py backend/src/memory/repository.py backend/src/memory/pipeline/merge.py backend/src/evals/harness.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_decay.py backend/tests/test_consolidator.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_memory_decay.py backend/tests/test_consolidator.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details -q`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_repository.py backend/tests/test_memory_decay.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- local validation notes:
+  - the broader `backend/tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios` contract is green again after patching the remaining DB seam imports used by flush helpers
+  - the broader `backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` contract now also passes after aligning the legacy guardian-state and world-model expectations with the current harness output, where the `guardian_state_synthesis` scenario runs with degraded memory confidence and zero memory signals while the world-model scenario now reflects the dominant continuity thread rather than a seeded memory-signal list
+- subagent review:
+  - `Archimedes` (`019d29e0-d2a1-7a61-ab08-37edf377f6bf`) and `Godel` (`019d29e2-fc4a-7510-9acb-e24b85f5d8fe`) both later returned concrete findings against the initial slice:
+    - the contradiction-cleanup eval could still pass if stale vector text leaked into guardian memory context because the first negative assertion only checked the shortened summary text rather than the rendered retrieval line
+    - the scenarios were still patching `src.memory.soul.read_soul`, even though `build_guardian_state()` now uses `src.profile.service.sync_soul_file_to_profile()`, so the first CLI run was not actually isolated from live profile projection
+    - the procedural-memory scenario was using `active_procedural_memory_count >= 5`, which tolerated duplicate procedural writes instead of guarding against them
+  - fixed after review:
+    - the contradiction-cleanup scenario now rejects both the summary form and the rendered vector-text form of the stale Atlas memory from guardian context, and its vector-hit fixture now uses embedding IDs that match the real vector-store contract
+    - both scenarios now patch `sync_soul_file_to_profile()` at the real profile seam instead of the obsolete soul reader seam, and the procedural-memory assertion now requires the exact expected active procedural count (`== 5`) instead of a permissive lower bound
+    - the older aggregate eval-harness boundaries were then rerun against the repaired seams, and the stale guardian-state plus world-model expectations were updated to match the current memory-degraded and continuity-thread-driven harness output instead of preserving older assumptions that no longer held
+  - final follow-up recheck:
+    - a fresh post-fix review request was sent to `Bernoulli` (`019d29d3-98b5-7692-a69f-8bcca1c760f3`) and `Godel` (`019d29e2-fc4a-7510-9acb-e24b85f5d8fe`) against the current uncommitted Batch C follow-up diff; neither response returned before the aggregate Batch C PR preparation, so the branch records the attempt and validation results rather than claiming a final clean reply that never arrived
+  - residual eval noise:
+    - the filtered CLI harness run no longer hits real soul projection, but this environment still emits unrelated `tiktoken` fallback tracebacks before the final JSON summary; that warning is recorded as residual harness noise rather than a blocker because the focused pytest boundary stays clean and the CLI JSON result still reports both scenarios passing
+
+### Batch C Aggregate Validation
+
+- targeted Batch C backend boundary:
+  - result: `178 passed`
+  - command:
+    - `backend/.venv/bin/python -m pytest backend/tests/test_memory_flush.py backend/tests/test_consolidator.py backend/tests/test_consolidation_reliability.py backend/tests/test_memory_repository.py backend/tests/test_memory_decay.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_memory_snapshots.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_soul.py backend/tests/test_profile.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_memory_runtime_eval_scenarios_expose_expected_details backend/tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details backend/tests/test_delivery.py backend/tests/test_intervention_policy.py -q`
+- docs build:
+  - result: clean
+  - command:
+    - `cd docs && npm run build`
+- fresh full backend sweep:
+  - result: `1244 passed, 50 failed`
+  - command:
+    - `cd backend && .venv/bin/python -m pytest -q`
+  - failure clusters outside the Batch C memory path:
+    - approval request foreign-key setup and approval-wrapped tool flows
+    - audit and runtime-context propagation through chat, tool audit, and process-tool surfaces
+    - goal-tree orphan and cascade deletion integrity
+    - scheduled-job execution, consolidation job wiring, and scheduler sync behavior
+    - websocket contract regressions
+    - onboarding continuity edge cases
+- aggregate PR follow-up after review and full-suite root-cause sweep:
+  - external PR review findings fixed on the branch:
+    - `backend/src/memory/flush.py` now fingerprints flush state from message-level state only, so title-only session edits do not retrigger consolidation or decay work
+    - `backend/src/memory/pipeline/extract.py` now strips and drops blank `soul_updates` keys before consolidation, so malformed LLM payloads cannot fail the whole run on empty section names
+  - full-suite root causes fixed before the branch was ready again:
+    - added `backend/src/db/session_refs.py` and wired session-ref backfill through approval, audit, guardian-feedback, todo, and scheduled-job write paths, then extended that fix to scheduled-job updates too
+    - restored the `src.scheduler.jobs.memory_consolidation.consolidate_session` seam so scheduler tests can still isolate scheduled consolidation behavior
+    - repaired the websocket test seam after the profile split by patching `src.profile.service.get_db` in the shared sync websocket client helper, which stopped onboarding state from leaking through the real profile store across tests
+    - fixed goal-tree deletion under enforced foreign keys by flushing descendant deletes in dependency order instead of relying on one batched self-referential delete
+    - kept exact caller session IDs in `ensure_sessions_exist(...)` instead of trimming them, which prevents phantom placeholder sessions like `"s1"` from being synthesized alongside a real `" s1 "` session row
+    - hardened the websocket drain-timeout path and the eval-harness timeout shim together so the runtime cleanup stays warning-free while the harness still emulates real `asyncio.wait_for(...)` behavior for both coroutines and task-like awaitables
+  - subagent review:
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) and `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) both caught the remaining goal-delete dependency bug before the final full-suite rerun
+    - `Zeno` also flagged the exact-session-id placeholder drift risk, and `Kepler` flagged the missing scheduled-job update backfill; both were fixed on the branch and regression-covered
+    - follow-up recheck:
+      - `Kepler` reported no further material findings after the goal-delete, exact-session-id, and scheduled-job-update fixes landed
+- final full backend sweep on the shipped implementation state:
+  - result: `1298 passed, 27 warnings`
+  - command:
+    - `backend/.venv/bin/python -m pytest backend/tests -q`
+  - residual warnings outside the Batch C follow-up diff:
+    - `backend/tests/test_activity_digest.py::TestActivityDigest::test_llm_timeout` still emits an unawaited local mock coroutine warning from the test’s timeout helper
+    - `backend/src/memory/vector_store.py` still emits existing `table_names()` deprecation warnings through the eval-harness and timeout boundaries
+- CI follow-up after GitHub Actions run `23605588259`:
+  - root cause:
+    - the remaining PR failures were not new memory-behavior regressions; they were teardown races where background `flush_session_memory(...)` tasks outlived test-scoped in-memory SQLite engines and hit closed databases during the eval-harness phase
+  - fixes:
+    - added `drain_tracked_tasks(...)` in `backend/src/utils/background.py` so tracked background work can be awaited explicitly at shutdown
+    - updated `backend/src/app.py`, `backend/tests/conftest.py`, and `backend/src/evals/harness.py` so shutdown and teardown now drain tracked background work before resource disposal, but still complete cleanup even if the drain path reports a stubborn-task failure
+    - added `backend/tests/test_background.py` to cover the normal pending-task path, cancellation of stalled work, and the explicit failure path for cancellation-resistant tasks
+  - subagent review:
+    - `Kepler` (`019d2710-ba96-73b1-948f-1df447c3e1e5`) caught two real issues during the first implementation attempt:
+      - the initial bounded drain still had an unbounded post-cancel wait
+      - the follow-up raise path aborted teardown before cleanup finished
+    - both issues were fixed before the final validation pass
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the final diff and reported no current concrete findings
+  - final CI-parity validation on the shipped implementation state:
+    - targeted subset:
+      - result: `11 passed, 24 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_background.py tests/test_eval_harness.py -q`
+    - full backend suite:
+      - result: `1301 passed, 27 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+- CI follow-up after GitHub Actions run `23608084293`:
+  - root cause:
+    - the remaining failure in `tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` came from deterministic harness drift, not a live memory regression
+    - the guardian-state and guardian-world-model eval scenarios had been patching `src.memory.vector_store.search_with_status`, but the real retrieval path used by `build_guardian_state(...)` resolves `search_with_status` from `src.memory.hybrid_retrieval`
+    - once the real retrieval seam was patched, the world-model scenario fixture was exposed as inconsistent with its assertions because it still injected semantic goal and pattern hits even though the asserted contract expected an observer, project, execution, and recent-session driven world model with no extra memory-signal section
+  - fixes:
+    - updated `backend/src/evals/harness.py` so the guardian-state and related scenarios patch `src.memory.hybrid_retrieval.search_with_status`, which is the seam actually exercised by the retrieval planner
+    - reset vector-store state at the scenario boundary in `backend/src/evals/harness.py` so eval runs do not inherit stale in-process vector state from earlier scenarios like `vector_store_runtime_audit`
+    - aligned the `guardian_world_model_behavior` fixture with its asserted contract by returning no semantic memories for that scenario, leaving the world model grounded by observer context, recent projects, recent execution, and recent sessions instead of duplicated memory-signal lines
+    - added a regression in `backend/tests/test_eval_harness.py` that runs `vector_store_runtime_audit` before `guardian_state_synthesis` and proves the guardian-state confidence remains `overall=partial` and `memory=degraded`
+  - subagent review:
+    - `Zeno` (`019d24e8-51f8-7402-b24e-82c872dd4813`) reviewed the current harness and test diff and reported no material findings
+  - final validation on the shipped implementation state:
+    - targeted subset:
+      - result: `3 passed`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_eval_harness.py::test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
+    - full backend suite:
+      - result: `1302 passed, 3 warnings`
+      - command:
+        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+
+### `procedural-memory-policy-routing-v1`
+
+- root cause addressed:
+  - Batch C made intervention lessons durable and prompt-visible, but the delivery gate and guardian-state learning guidance still read only the live `GuardianLearningSignal` heuristic window
+  - when that live window was neutral, the system could ignore durable procedural lessons that had already been written from prior outcomes and feedback
+- scope:
+  - added `memory_repository.list_memories_for_scope()` in `backend/src/memory/repository.py` so policy-time code can read active procedural memories by exact scope without reopening the broader retrieval planner
+  - added `backend/src/memory/procedural_guidance.py` to turn scoped procedural memories back into `GuardianLearningSignal`-compatible bias overrides for delivery, phrasing, cadence, channel, escalation, timing, blocked-state, suppression, and thread guidance, with the resolver now matching the stored `writer=guardian_feedback` scope instead of assuming the procedural-learning lane stays single-writer forever
+  - updated `backend/src/observer/delivery.py` so `decide_intervention(...)` and async-native surface selection use an effective learning signal that overlays durable procedural lessons onto the live heuristic signal, while audit details now record whether the decision came from heuristics alone or heuristics plus procedural memory
+  - updated `backend/src/guardian/state.py` so guardian-state synthesis and rendered learning guidance use the same effective guidance surface instead of dropping back to a neutral live signal when durable procedural lessons already exist
+  - added regression coverage in `backend/tests/test_memory_repository.py`, `backend/tests/test_delivery.py`, `backend/tests/test_guardian_state.py`, and `backend/tests/test_guardian_feedback.py` proving neutral live heuristics still pick up stored procedural channel, escalation, and blocked-state lessons and that foreign writers cannot contaminate the guidance resolver
+- validation:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/guardian/state.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py backend/tests/test_guardian_feedback.py`
+  - `cd backend && uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_guardian_state.py -q`
+    - result: `68 passed, 2 warnings`
+  - `cd backend && uv run pytest tests/test_guardian_feedback.py tests/test_intervention_policy.py -q`
+    - result: `32 passed`
+- hardening fix before the slice stayed complete:
+  - the first policy-time resolver only matched `memory_scope + intervention_type`, but the stored procedural lessons are scoped by `writer` as well
+  - that assumption would let a future non-guardian procedural writer override delivery or guardian-state guidance for the same lesson lane
+  - the resolver now requires `writer=guardian_feedback`, and `test_load_procedural_memory_guidance_ignores_other_writers()` proves the guidance lane stays isolated
+- follow-up validation after the writer-scope hardening:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py`
+  - `cd backend && uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_guardian_state.py tests/test_guardian_feedback.py tests/test_intervention_policy.py -q`
+    - result: `101 passed`
+- subagent review:
+  - `Kant` (`019d2bab-005c-74f3-a0fb-b68895b5f6ab`) returned two concrete findings against the first complete slice:
+    - procedural memory could flip a blocked-state or async-native advisory from `bundle` to `act`, but the live delivery path still followed the default live-route transport order and could deliver over websocket/browser even when the learned channel bias was `prefer_native_notification`
+    - scoped procedural-memory reads and the legacy-scope fallback inside `sync_scoped_memory()` both assumed `metadata_json` decoded to a dict, so a malformed legacy payload could raise `AttributeError` and silently disable the new guidance lane behind the existing exception swallow
+  - fixed after review:
+    - `backend/src/observer/delivery.py` now reorders the active transport order to put `native_notification` first when the effective learned channel bias is `prefer_native_notification`, and audit details record `transport_order_adjustment=learned_native_channel_preference`
+    - `backend/src/memory/repository.py` now skips non-dict decoded metadata payloads in both `list_memories_for_scope()` and the scoped-memory fallback matcher used by `sync_scoped_memory()`
+    - added `test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery()` and `test_list_memories_for_scope_skips_non_dict_metadata_payloads()` so both regressions stay covered
+  - `Tesla` (`019d2ba7-08b8-79f3-a4b2-e3e30cf2c8b4`) and `James` (`019d2ba9-a4dc-75a3-88df-2374f6bf93f0`) did not return findings before the follow-up validation finished
+- follow-up validation after subagent fixes:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/guardian/state.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py backend/tests/test_guardian_feedback.py`
+  - `cd backend && uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_guardian_state.py tests/test_guardian_feedback.py tests/test_intervention_policy.py -q`
+    - result: `103 passed`
+  - `cd docs && npm run build`
+    - result: clean
+- PR follow-up after review comment and CI failure:
+  - root cause addressed:
+    - `memory_repository.list_memories_for_scope()` still filtered only `kind` and `status` in SQL, then parsed and matched `metadata_json` in Python, so policy-time scoped reads could walk every active procedural memory before finding the requested scope
+    - learned native-notification rerouting changed `strategist_tick_learning_continuity_behavior` from a websocket delivery path to a native-notification delivery path, but the delivered audit payload did not expose transport counts for that native path and the eval still used the stale websocket-oriented `broadcast_delivered_connections` expectation
+  - fixes:
+    - `backend/src/memory/repository.py` now pushes scoped procedural-memory filtering into SQLite with `json_valid(...)`, object-shape checks, per-key `json_extract(...)`, and SQL-side limiting before the defensive Python metadata verification runs
+    - `backend/src/observer/delivery.py` now records `attempted_connections`, `delivered_connections`, and `failed_connections` for successful native-notification deliveries in both direct and queued-bundle paths so the delivery audit contract stays stable when routing moves off websocket
+    - `backend/src/evals/harness.py` and `backend/tests/test_eval_harness.py` now use the transport-agnostic `delivered_connections` field and expect `1` for the strategist continuity scenario because that learned path now delivers successfully over native notification
+    - `backend/tests/test_memory_repository.py` now also covers invalid JSON metadata payloads, not just non-dict decoded payloads, on the scoped-read path
+  - validation:
+    - `python3 -m py_compile backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/evals/harness.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_eval_harness.py`
+    - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
+      - result: `58 passed`
+  - review:
+    - GitHub review comment on PR `#232` correctly identified the policy-time Python scan in scoped procedural-memory reads
+    - internal subagent review sessions were started for this follow-up (`Schrodinger` `019d2e2b-1b27-7f32-bd1a-1cf3afab0ce8`, `Socrates` `019d2e2d-e8e5-7d12-9d88-31d6ae469539`, `Franklin` `019d2e2f-5dba-75e2-8026-5e4226ba6ca4`, `Mill` `019d2e30-7a86-7772-9078-54c6c7737d4a`) but they did not return findings before follow-up validation completed
+- residual risk:
+  - the overlay-order limitation recorded here was resolved later in Batch D by `guardian-learning-arbitration`; the remaining gap is stronger long-horizon intervention learning beyond the now evidence-weighted live-versus-durable arbitration layer
+
+### `guardian-learning-evidence-foundation`
+
+- root cause addressed:
+  - the codebase now has two policy-time learning sources: fresh `GuardianLearningSignal` heuristics and durable procedural memories
+  - before this slice, those sources exposed only bias labels, not a comparable evidence surface, so the next arbitration layer would have had to compare incomparable inputs
+- scope:
+  - added `backend/src/guardian/learning_evidence.py` as the shared evidence model for guardian-learning axes, including axis ordering, field mapping, confidence/data-quality normalization, recency scoring, and neutral evidence defaults
+  - extended `GuardianLearningSignal` in `backend/src/guardian/feedback.py` with per-axis evidence so live learning now exposes `support_count`, `recency_score`, `confidence_score`, `quality_score`, and `last_confirmed_at` alongside the existing bias fields
+  - extended `ProceduralMemoryGuidance` in `backend/src/memory/procedural_guidance.py` with the same per-axis evidence surface so durable procedural lessons can be compared without re-parsing ad hoc metadata at every policy call site
+  - updated `backend/src/memory/procedural.py` so persisted procedural lesson metadata follows the active-bias support counts already exposed on the live signal instead of drifting back to broader axis-level totals during memory sync
+  - added regressions in `backend/tests/test_guardian_feedback.py` covering live evidence exposure, partial stale procedural metadata, and live-versus-durable support-count parity for active guidance axes
+- local regression fixed before the slice was recorded:
+  - the first pass left the live and durable evidence surfaces internally inconsistent in the opposite direction: live `axis_evidence.support_count` correctly counted only rows that supported the currently selected bias, but `sync_learning_signal_memories()` still persisted broader axis-level `evidence_count` totals that could include newer rows pushing the other bias
+  - that meant the same learned delivery bias could report `support_count=2` in the live signal and then reappear as `evidence_count=3` after persistence, which would skew the next arbitration layer toward stale contradictory evidence
+  - fixed by teaching `backend/src/memory/procedural.py` to reuse the live axis-evidence support count when it exists, persisting both `support_count` and `evidence_count` from that active-bias surface, and having `backend/src/memory/procedural_guidance.py` prefer explicit `support_count` metadata while still tolerating older memories that only carry `evidence_count`
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/feedback.py backend/src/memory/procedural.py backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `21 passed`
+- subagent review:
+  - `Locke`, `Harvey`, and `Hypatia` returned concrete issues against the first `#240` implementation pass:
+    - native-channel and async-native evidence could still be inferred from generic positive rows without proof that the winning intervention actually used native delivery
+    - missing `transport` could still be treated as direct/browser evidence, which made delivery-axis lessons stronger than the runtime data justified
+    - procedural reads did not reliably fall back from malformed `support_count` metadata to legacy `evidence_count`
+    - durable procedural evidence was still reconstructing confidence, quality, and recency from memory-level fields instead of loading the same comparable evidence metadata the live signal exposed
+  - fixed by requiring explicit direct/native transport evidence, falling back from malformed `support_count` to legacy `evidence_count`, and persisting/loading explicit confidence, quality, weighted-support, and last-confirmed evidence metadata on procedural lessons
+
+### `guardian-learning-arbitration`
+
+- root cause addressed:
+  - policy-time learning guidance was still resolving conflicts by overlay order: if procedural memory had any non-neutral lesson, it could overwrite fresher live guardian-learning heuristics without proving that the durable lesson still had stronger evidence
+  - that kept delivery and guardian-state synthesis shallow even after the memory substrate could expose comparable evidence across live and durable sources
+- scope:
+  - added `backend/src/guardian/learning_arbitration.py` as the shared policy-time resolver that scores live and procedural evidence per axis using support count, confidence, quality, and recency, then resolves conflicts with explicit tie rules instead of simple overwrite order
+  - updated `backend/src/observer/delivery.py` so proactive delivery uses the arbitration result, records the effective learned biases after arbitration, and logs per-axis arbitration source, reason, and winning weight in the delivery audit details
+  - updated `backend/src/guardian/state.py` so guardian-state synthesis uses the same arbitration surface as delivery instead of a separate procedural overlay path
+  - hardened the `#240` evidence substrate underneath the resolver so live `support_count` remains directional to the currently selected bias, while durable procedural memories persist both `support_count` and broader `evidence_count` without collapsing them into the same field
+  - added unit coverage in `backend/tests/test_learning_arbitration.py` for stale-conflict, live-gap-fill, and missing-evidence paths, plus integration regressions in `backend/tests/test_delivery.py` and `backend/tests/test_guardian_state.py` proving stale procedural memory no longer overrides a stronger live signal at real policy call sites
+- local regression fixed while landing the slice:
+  - the first `#240` pass still let persistence flatten directional `support_count` into broader axis-level totals, which would have biased the new arbitration weights toward contradictory rows that supported the other bias
+  - fixed by teaching `backend/src/memory/procedural.py` to persist the live signal's directional `support_count` when available, while keeping `evidence_count` as the broader durability/confidence measure and having `backend/src/memory/procedural_guidance.py` prefer the explicit `support_count` on read
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_arbitration.py backend/src/guardian/feedback.py backend/src/guardian/learning_evidence.py backend/src/guardian/state.py backend/src/memory/procedural.py backend/src/observer/delivery.py backend/tests/test_learning_arbitration.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py::test_deliver_uses_procedural_memory_guidance_when_heuristic_signal_is_neutral backend/tests/test_delivery.py::test_deliver_prefers_native_transport_when_procedural_memory_promotes_async_delivery backend/tests/test_delivery.py::test_deliver_uses_live_signal_when_conflicting_procedural_memory_is_stale backend/tests/test_guardian_state.py::test_build_guardian_state_uses_procedural_memory_guidance_when_live_signal_is_neutral backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_live_learning_when_stale_memory_conflicts backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `30 passed`
+- subagent review:
+  - `Huygens` returned three concrete issues against the first `#237` implementation pass:
+    - guardian-state learning guidance still omitted the delivery axis even when arbitration had selected a non-neutral delivery bias
+    - guardian-state arbitration still hardcoded `intervention_type="advisory"` instead of using the requested intervention type
+    - arbitration provenance still labeled the effective guidance `heuristic_plus_procedural_memory` whenever procedural memory was active, even if live evidence won every contested axis
+  - fixed by rendering delivery guidance in guardian state, threading the requested intervention type through the guardian-state arbitration path, and deriving provenance from the actual selected-axis sources instead of from procedural-memory presence alone
+
+### `scoped-procedural-guidance-resolution`
+
+- root cause addressed:
+  - procedural guidance had already grown the ability to persist thread- and project-scoped lessons, but policy-time resolution was still unsafe in two ways:
+    - the candidate scope order could let broader project guidance resolve before tighter continuity-thread guidance when both existed
+    - the repository fallback path treated memories with extra scope keys as compatible with narrower scope queries, so a project-scoped memory could leak back into the global fallback lane
+- scope:
+  - updated `backend/src/memory/procedural_guidance.py` so candidate scope order is now `thread+project -> thread -> project -> global`, and the resolver selects the first tier with any active lessons before resolving the full guidance bundle from that tier
+  - updated `backend/src/memory/repository.py` so `list_memories_for_scope()` resolves by exact `scope_key` first and only uses the JSON field matcher as a legacy fallback, preventing project- or thread-scoped lessons from satisfying unrelated global fallback lookups
+  - added deterministic resolver coverage in `backend/tests/test_guardian_feedback.py` for thread-over-project precedence, first-nonempty-tier selection, and bundle isolation from broader scope tiers
+  - added delivery and guardian-state regressions in `backend/tests/test_delivery.py` and `backend/tests/test_guardian_state.py` proving the scoped resolver now changes real policy outcomes and learning guidance at the runtime call sites that already pass `session_id` and `active_project`
+- local regression fixed while landing the slice:
+  - the first fallback-order patch exposed that `list_memories_for_scope()` was only checking whether the requested keys were present, not whether the memory belonged to the exact same scoped lane
+  - that meant a request for global advisory timing guidance could still pick an `active_project=Atlas` memory during the global fallback step if the base keys matched
+  - fixed by querying exact `scope_key` matches first and only using the broader JSON matcher for older entries that do not carry the newer exact scope key
+- aggregate-PR follow-up before the slice can be treated as stable:
+  - root cause addressed:
+    - the first context-aware resolver still selected lessons per axis across every fallback tier, so a thread+project guidance bundle could inherit unrelated broader-scope lessons even after the resolver had found narrower Atlas-specific delivery and timing guidance
+    - that hybrid bundle was strong enough to change real policy outcomes back to `bundle`, which meant the scoped resolver was still leaking broader negative guidance into a narrower active context
+  - fixes:
+    - `backend/src/memory/procedural_guidance.py` now selects the first scope tier that has any active non-neutral lessons, then resolves the full guidance bundle only from that tier instead of mixing lessons across thread+project, thread, project, and global fallbacks
+    - `backend/src/memory/repository.py` now accepts `exact_scope_keys` for scoped reads so context fallback steps can require exact matches for `continuity_thread_id` and `active_project` before falling back to legacy JSON matching
+    - `backend/src/observer/delivery.py` now passes `session_id` and `ctx.active_project` into `load_procedural_memory_guidance(...)`, and `backend/src/db/models.py` plus `backend/src/guardian/feedback.py` now persist `active_project` on `GuardianIntervention` so scoped learning refreshes can actually write thread/project memories from live runtime context
+    - `backend/tests/test_guardian_feedback.py` now adds `test_load_procedural_memory_guidance_does_not_mix_broader_lessons_into_selected_scope()` so the resolver must keep scoped bundles isolated from broader fallback lessons
+  - validation:
+    - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+    - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_and_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_scope_over_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_selects_first_nonempty_scope_tier backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_scoped_thread_and_project_context backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_does_not_mix_broader_lessons_into_selected_scope backend/tests/test_guardian_feedback.py::test_feedback_refresh_writes_thread_and_project_scoped_memories backend/tests/test_delivery.py::test_deliver_prefers_scoped_project_and_thread_guidance_over_global_memory backend/tests/test_delivery.py::test_deliver_prefers_thread_scoped_procedural_guidance_over_project_or_global_scope backend/tests/test_delivery.py::test_deliver_prefers_context_scoped_guidance_over_conflicting_global_memory backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_scoped_project_guidance_over_global_memory backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_thread_scoped_procedural_guidance_over_project_scope backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_context_scoped_guidance_over_global_memory -q`
+      - result: `12 passed`
+- validation:
+  - `python3 -m py_compile backend/src/memory/procedural_guidance.py backend/src/memory/repository.py backend/tests/test_guardian_feedback.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_prefers_thread_scope_over_project_scope backend/tests/test_guardian_feedback.py::test_load_procedural_memory_guidance_selects_first_nonempty_scope_tier backend/tests/test_delivery.py::test_deliver_prefers_thread_scoped_procedural_guidance_over_project_or_global_scope backend/tests/test_guardian_state.py::test_build_guardian_state_prefers_thread_scoped_procedural_guidance_over_project_scope backend/tests/test_memory_repository.py::test_list_memories_for_scope_filters_procedural_memories backend/tests/test_memory_repository.py::test_list_memories_for_scope_skips_non_object_or_invalid_metadata_payloads -q`
+    - result: `6 passed`
+- subagent review:
+  - `Lorentz` flagged one hallucinated assumption in the first `#242` write-up: some test names and prose still read like per-axis hierarchical fallback, but the implemented resolver intentionally selects one scope tier and keeps that bundle isolated from broader lessons
+  - fixed by making the contract explicit in the tests and docs: candidate tiers are ordered `thread+project -> thread -> project -> global`, the first non-empty tier wins, and broader tiers do not backfill missing axes once a narrower tier is active
+- aggregate-PR follow-up after review:
+  - existing SQLite databases created before this slice did not have `guardian_interventions.active_project`, so upgraded runtimes could fail at first ORM read/write against that model
+  - fixed by teaching `backend/src/db/engine.py::_ensure_legacy_columns()` to add the missing `active_project` column and index on upgrade, with a regression in `backend/tests/test_db_engine.py`
+
+### `weighted-guardian-learning-support`
+
+- root cause addressed:
+  - even after `#240` and `#237`, live bias selection still relied too heavily on flat counts, and arbitration could still overvalue noisier higher-volume evidence over stronger lower-volume evidence
+  - the live outcome loop was also still manufacturing unsupported phrasing, cadence, and thread lessons from generic success/failure rows even though runtime never records which of those variants was actually used
+  - delivery-axis negatives were still transport-agnostic, so failed native notifications could be misread as evidence that browser/direct interruptions should be reduced
+- scope:
+  - updated `backend/src/guardian/feedback.py` so live bias selection now weights supporting interventions by guardian confidence, data quality, and outcome quality instead of comparing raw counts alone
+  - extended `GuardianLearningAxisEvidence` and procedural memory metadata with explicit `weighted_support`, then updated `backend/src/memory/procedural.py`, `backend/src/memory/procedural_guidance.py`, and `backend/src/guardian/learning_arbitration.py` so durable memories persist that value and policy-time arbitration actually scores conflicts from it
+  - strengthened timing, channel, and blocked-state evidence from successful direct/native delivery outcomes where the runtime data actually proves the chosen route worked
+  - stopped deriving phrasing, cadence, and thread biases from generic outcomes and stopped persisting those unsupported axes into procedural memory until runtime records the actual intervention variants explicitly
+  - tightened delivery negative evidence so only explicit direct-transport failures can teach `reduce_interruptions`; failed native notifications no longer create a fake direct-interruption lesson
+- local regressions fixed while landing the slice:
+  - procedural `weighted_support` was initially loaded correctly but still ignored by the arbitration scorer, so the final conflict resolver kept behaving like a raw-count system
+  - the first weighted branch still let generic outcomes manufacture phrasing/cadence/thread lessons and still counted native failures against the direct-delivery axis
+  - fixed by scoring support from `weighted_support` when present, neutralizing unsupported axes in the live loop and procedural sync path, and requiring explicit direct transport on the negative delivery side
+- aggregate-PR follow-up after review:
+  - `update_outcome(...)` was still refreshing procedural learning memories only for failure transitions, even though weighted positive evidence now also comes from successful `delivered` and `feedback_received` outcomes
+  - that meant live learning could strengthen from outcome-only async/direct successes while durable scoped procedural guidance stayed stale until explicit feedback arrived
+  - fixed by refreshing learning memories whenever outcome transitions enter or leave the success/failure states that the weighted evidence model actually uses, with a regression in `backend/tests/test_guardian_feedback.py`
+- aggregate-PR CI follow-up:
+  - the eval harness was still asserting the pre-Batch D policy contract in three places:
+    - `strategist_tick_learning_continuity_behavior` still expected learned generic feedback to force a delivered native-notification path
+    - `guardian_outcome_learning` still expected generic helpful/not-helpful rows to manufacture direct-delivery lessons instead of the now-supported suppression-only behavior
+    - `procedural_memory_adaptation_behavior` still expected the pre-Batch D active procedural-memory count
+  - the shipped policy is stricter now: generic feedback without explicit transport/runtime evidence no longer invents delivery/channel lessons, learned suppression can defer or queue instead of forcing live delivery, and the Batch D procedural layer leaves eight active procedural memories in the adaptation eval
+  - fixed by updating `backend/src/evals/harness.py` and `backend/tests/test_eval_harness.py` to assert the current evidence-weighted queue/defer behavior and the new procedural-memory count instead of the stale pre-Batch D contract
+- validation:
+  - `python3 -m py_compile backend/src/guardian/feedback.py backend/src/guardian/learning_arbitration.py backend/src/memory/procedural.py backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_learning_arbitration.py backend/tests/test_delivery.py backend/tests/test_guardian_state.py -q`
+    - result: `95 passed`
+- subagent review:
+  - `Lorentz` returned the main arbitration bug: `backend/src/guardian/learning_arbitration.py` was still deriving conflict weight from raw `support_count`, which made the new `learning_arbitration_mode=evidence_weighted` claim false for real disagreements
+  - `Epicurus` returned two grounded review findings:
+    - phrasing, cadence, and thread biases were still being inferred from generic outcomes even though the runtime never records which phrasing style, cadence strategy, or thread mode was used
+    - the negative side of the delivery axis still counted transport-agnostic failures, so bad native-notification outcomes could teach `reduce_interruptions` and then be persisted as a lesson about direct interruptions
+  - fixed by routing arbitration through `weighted_support`, neutralizing unsupported axes until explicit runtime instrumentation exists, and scoping negative delivery evidence to explicit direct transports only
+
+## Batch J Branch Review Log
+
+### `durable-world-model-evidence-fusion-v1`
+
+- scope:
+  - extended `backend/src/guardian/world_model.py` so `GuardianWorldModel` now records `focus_source` and `judgment_risks`, making guardian-state synthesis distinguish live observer focus from session or memory fallback and surface when the world model should stay cautious
+  - updated `backend/src/guardian/state.py` so world-model confidence no longer stays artificially grounded when focus is only inferred from history, when durable project recall conflicts with the live observer project, or when recent intervention outcomes skew negative enough to keep receptivity selective
+
+## Batch P Branch Review Log
+
+### `long-horizon-guardian-learning-v2`
+
+- root causes addressed:
+  - guardian-state synthesis was still treating collaborator, obligation, and timeline recall as flat memory buckets, so stale durable support context could stay ahead of live-project-aligned context and weaken judgment only after the operator manually inferred the mismatch
+  - recent execution pressure was visible in the world model, but it was not treated as a contradiction source against the live project anchor and it did not combine with negative intervention trends to make the guardian more selective
+- scope:
+  - updated `backend/src/guardian/world_model.py` so live-project anchors reprioritize collaborators, obligations, routines, and timeline recall before they feed project timelines, memory signals, and continuity threads
+  - taught `GuardianWorldModel` to surface explicit stale-support and stale-execution contradiction risks against the live project anchor instead of only project-label mismatch
+  - promoted recent execution pressure into open-loop and active-blocker synthesis so longer-horizon follow-through pressure stays visible in the world model instead of only the execution sidebar
+  - tightened intervention receptivity so negative outcome trends can drop from `medium` to `low` when the live project anchor is also contradicted by stale support or execution evidence
+  - extended `backend/src/evals/harness.py` and guardian-state tests so the deterministic guardian judgment contract now proves supporting-context mismatch, execution-context mismatch, and low-confidence defer behavior together
+- focused review:
+  - first real bug:
+    - the initial live-topic reprioritization only changed the raw memory lists, but `project_timeline`, `memory_signals`, and `continuity_threads` were still being built earlier from the pre-reordered lists, so the “prioritized live-project context” claim was false for timeline output
+    - fixed by moving those derived structures after the reprioritization step and pinning the regression in `backend/tests/test_guardian_state.py`
+  - second real bug:
+    - the first long-horizon execution-pressure patch pulled `execution_pressure` into `open_loops` and `active_blockers` before that variable was initialized, which broke the guardian-state suite immediately
+    - fixed by moving `execution_pressure = _extract_lines(recent_execution_summary, limit=3)` earlier so blocker/pressure synthesis and contradiction scoring share the same initialized evidence
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/guardian/state.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
+    - result: `28 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_main_lists_available_scenarios -q`
+    - result: `1 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+    - result: `passed`, with `includes_supporting_context_mismatch=true`, `includes_execution_context_mismatch=true`, and `decision_reason=low_guardian_confidence`
+
+## Batch Q Branch Review Log
+
+### `cross-thread-project-state-and-follow-through-v1`
+
+- root causes addressed:
+  - the world model already carried recent session summaries, but it was not treating live-project-matching recent threads as stronger continuity evidence than unrelated recent-session carryover
+  - execution setbacks were already visible in `execution_pressure`, but they were still detached from open project commitments, so the guardian could not surface explicit follow-through risk on the same live project
+- scope:
+  - updated `backend/src/guardian/world_model.py` so recent-session continuity is reprioritized by the live project anchor just like collaborator, obligation, and timeline context
+  - carried live-project-matching recent-thread continuity into commitments, `next_up`, dominant-thread selection, and project-state synthesis instead of leaving it buried in the recent-session summary block
+  - surfaced explicit follow-through risk when cross-thread commitments and recent execution setbacks both match the live project, and promoted that pressure into the world-model open-loop surface
+  - extended `backend/src/evals/harness.py` and guardian-state tests so the deterministic guardian world-model contract now proves cross-thread continuity matching and follow-through-risk exposure together
+- focused review:
+  - real bug found:
+    - the first Batch Q pass still treated `Investor brief` and `investor-brief` as different topics, so execution-pressure rows could fail to link back to the live project even when they were clearly about the same workflow
+    - fixed by normalizing non-alphanumeric separators in `backend/src/guardian/world_model.py::_normalize_topic(...)` before topic matching, which made the eval contract truthful instead of depending on punctuation luck
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
+    - result: `30 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_world_model_behavior --indent 0`
+    - result: `passed`, with `continuity_thread_matches_live_project=true` and `includes_follow_through_risk=true`
+  - added `guardian_judgment_behavior` to `backend/src/evals/harness.py` plus targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_strategist_tick.py` proving the new focus provenance, contradiction-aware confidence downgrade, and medium-urgency defer path
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/guardian/state.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py backend/tests/test_eval_harness.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_state.py backend/tests/test_strategist_tick.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details backend/tests/test_eval_harness.py::test_guardian_judgment_runtime_eval_exposes_conflict_suppression -q`
+    - result: `28 passed`
+- subagent review:
+  - reviewer: `Singer` (`019d3a5f-aefc-79f1-86fe-3f8ff454d587`)
+  - initial finding:
+    - the first project-mismatch downgrade was treating `get_recent_projects()` screen recency as recalled project context, so it could lower confidence from observer-timing skew instead of a true durable-recall conflict
+  - fixed before the slice stayed marked complete:
+    - split durable project recall from recent screen-project signals in `backend/src/guardian/world_model.py`, so only durable `project_memory` can trigger the recalled-project mismatch risk while recent project activity stays visible context
+    - updated the project-mismatch unit test and runtime eval fixture so the degraded path is now proven by durable project memory alone instead of `get_recent_projects()` noise
+  - final recheck:
+    - `Singer` reported no remaining material findings after the durable-recall mismatch fix and updated proof path
+
+## Batch R Branch Review Log
+
+### `multi-project-arbitration-and-cross-source-project-carryover-v1`
+
+- root causes addressed:
+  - project arbitration was still effectively list-ordered, so observer aliases, recent screen-project ordering, or whichever project string appeared first could outweigh broader cross-source evidence
+  - semantically identical labels like `Atlas` and `Atlas launch` were still treated as separate project competitors in ambiguity and active-project output, which made both risk reporting and project-state synthesis noisier than the actual evidence
+- scope:
+  - added scored project-candidate arbitration in `backend/src/guardian/world_model.py` so observer anchors, durable project memory, recent-session continuity, execution pressure, and supporting collaborator or obligation or timeline context all contribute to one ranked project view
+  - switched dominant-thread, project-state, and active-project synthesis to follow the preferred project anchor instead of raw list order, while still preserving explicit mismatch checks against the live observer project when that anchor loses
+  - added explicit project-anchor ambiguity and diverted-attention risks when evidence remains split across projects instead of pretending the top list item is grounded
+  - deduped semantic project aliases in active-project output so richer canonical project labels survive while short observer aliases stop showing up as fake extra projects
+  - extended guardian-state and eval-harness coverage to prove stronger cross-source project preference, ambiguity downgrades, and drift-risk exposure
+- focused review:
+  - first real bug:
+    - the initial ambiguity pass was too eager and downgraded otherwise grounded state from the passive `get_recent_projects()` list alone, without any corroborating recent-session, execution, or memory evidence
+    - fixed by requiring grounded cross-source competition before the ambiguity risk is emitted
+  - second real bug:
+    - the first semantic-dedup pass collapsed richer canonical labels like `Atlas launch` back to the shorter observer alias `Atlas`, which regressed project-linked memory surfaces and caused old tests to pass for the wrong representation
+    - fixed by preferring durable project-memory labels ahead of observer aliases in active-project synthesis while still deduping semantically overlapping variants
+- validation:
+  - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
+    - result: `32 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+    - result: `passed`, with `dominant_thread_prefers_hermes=true`, `project_state_includes_hermes_execution=true`, and `includes_project_anchor_drift=true`
+  - validation intentionally not claimed:
+    - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q -x`
+    - reason: this broad eval-harness assertion path continued to stall in this environment’s long-run path instead of returning a reliable pass/fail signal
+
+### `intervention-quality-learning-from-longer-horizon-outcomes-v1`
+
+- scope:
+  - added scoped live-learning resolution in `backend/src/guardian/feedback.py`, so guardian policy now resolves per-axis live evidence across `global`, `thread`, `project`, and `thread_project` lanes before comparing that guidance against durable procedural memory
+  - updated `backend/src/guardian/state.py` and `backend/src/observer/delivery.py` so both guardian-state synthesis and live delivery use the same scoped live-learning result instead of flattening everything through the global recent-feedback window
+  - aligned guardian-state recent-feedback summaries with the same dominant scope that is actually driving interruption behavior, and exposed `live_learning_scope` plus per-axis `live_learning_scope_axes` in delivery audit details
+  - added targeted regressions in `backend/tests/test_guardian_feedback.py`, `backend/tests/test_guardian_state.py`, and `backend/tests/test_delivery.py` proving project-specific negative outcome history can override unrelated global direct-delivery success
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/learning_arbitration.py backend/src/guardian/feedback.py backend/src/guardian/state.py backend/src/observer/delivery.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py`
+  - `backend/.venv/bin/python -m pytest backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_delivery.py backend/tests/test_eval_harness.py::test_main_lists_available_scenarios backend/tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details backend/tests/test_eval_harness.py::test_guardian_judgment_runtime_eval_exposes_conflict_suppression -q`
+    - result: `103 passed`
+- subagent review:
+  - reviewer: `Singer` (`019d3a5f-aefc-79f1-86fe-3f8ff454d587`)
+  - initial findings:
+    - the first scoped resolver could still report `effective_signal` counts from a scope that was not actually driving the selected behavioral axes, so audit and guardian-state summaries could misstate the evidence behind an interruption decision
+    - guardian-state recent-feedback summaries were still intersecting strictly on `session_id + active_project`, which could hide the broader project-only or thread-only outcomes that the new scoped resolver was already using
+  - fixed before the slice stayed marked complete:
+    - made dominant-scope selection prioritize the actual interruption-driving axes (`delivery`, `suppression`, `blocked_state`, and `timing`) before falling back to aggregate scope weight
+    - changed guardian-state feedback summarization to follow the same dominant scope that is actually driving the resolved live learning signal
+    - pinned both fixes in the state and delivery regression tests so the surfaced counts, friction wording, and audit scope stay aligned
+  - final recheck:
+    - `Singer` reported no remaining material findings after the dominant-scope and scoped-summary fixes
+
+- aggregate PR follow-up on `#254`:
+  - GitHub review caught that `backend/src/guardian/world_model.py` was still treating `current_event` as a non-observer focus source in the competing-project risk gate, which could incorrectly downgrade world-model confidence when multiple project signals were present without `active_project`
+  - the same review also caught that `backend/src/guardian/feedback.py` sorted live scope candidates by raw weight before the tie-tolerance branch ran, so `_SCOPE_WEIGHT_TIE_TOLERANCE` only changed the explanation string and never the selected scope
+  - fixed by treating `current_event` as a live observer focus anchor in the project-risk gate, and by applying tie selection across all near-tied live scope candidates before choosing the winning scope
+  - added regressions in `backend/tests/test_guardian_state.py` and `backend/tests/test_guardian_feedback.py` so current-event anchoring and near-tie scope specificity stay pinned
+
+## Batch N Branch Review Log
+
+### `additive-memory-provider-extensibility-v1`
+
+- scope:
+  - added manifest, layout, and registry support for extension-defined `memory_providers`, including canonical-memory ownership rules that keep guardian memory authoritative
+  - added `backend/src/memory/providers.py` so Seraph can inventory configured memory-provider adapters, expose runtime state to operators, and merge additive provider retrieval into memory planning without making providers canonical
+  - added `backend/src/api/memory.py` plus `/api/memory/providers` routing so operator surfaces can inspect configured provider state directly
+  - extended `backend/src/memory/retrieval_planner.py` so additive provider hits join semantic context and memory buckets on a separate `external_memory` lane, while provider failures degrade cleanly back to guardian-owned retrieval
+  - added regression coverage in `backend/tests/test_memory_providers.py` for provider inventory, route registration, additive retrieval merge, and provider-failure fallback
+- validation:
+  - `python3 -m py_compile backend/src/extensions/capability_contributions.py backend/src/extensions/layout.py backend/src/extensions/manifest.py backend/src/extensions/registry.py backend/src/memory/providers.py backend/src/memory/retrieval_planner.py backend/src/api/memory.py backend/src/api/router.py backend/tests/test_memory_providers.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_memory_providers.py -q`
+    - result: `4 passed`
+- local review notes:
+  - the first test helper wrote an extension manifest that required a future Seraph version (`>=2026.4.5`), so the registry correctly skipped the provider and the retrieval-lane assertions failed even though the runtime path itself was sound
+  - fixed by generating the test fixture manifest against the current backend runtime version instead of a future compatibility floor
+  - the first inventory endpoint test depended on the full shared app client fixture, which stalled in this environment before reaching the simple route contract under test
+  - fixed by validating the route contract directly through `src.api.memory.list_memory_providers()` and pinning separate router-registration coverage in `backend/tests/test_memory_providers.py`
+- subagent review:
+  - reviewer: `Parfit` (`019d5e35-6f63-72b0-84a1-9ab090b27da2`)
+  - findings:
+    - `memory_providers` were wired into manifest discovery but not into the normal extension lifecycle control plane, so list/configure/enable flows would have ignored them outside hand-edited state
+    - provider `health()` exceptions could still bubble out of inventory building and break normal memory retrieval instead of degrading cleanly to guardian-owned memory
+    - the parser was advertising `canonical_write_mode=read_through` even though the runtime only implemented additive retrieval
+  - fixed before the slice stayed marked complete:
+    - wired `memory_providers` through `backend/src/extensions/lifecycle.py` so extension connector listing, config writes, enable/disable flows, and package toggle targets now include memory providers
+    - wrapped provider health checks in `backend/src/memory/providers.py` and kept provider availability in diagnostics instead of globally downgrading canonical memory retrieval state
+    - narrowed the supported write mode to `additive_only` until a real read-through path exists
+
+## Batch AI Branch Review Log
+
+### `long-horizon-guardian-learning-and-intervention-quality-v3`
+
+- scope:
+  - extended `backend/src/guardian/feedback.py` and `backend/src/guardian/learning_evidence.py` so guardian learning tracks multi-day and scheduled outcome spread instead of only short-window outcome counts
+  - carried that spread into `backend/src/memory/procedural.py` and `backend/src/memory/procedural_guidance.py` so procedural recall can preserve the same longer-horizon evidence lanes
+  - upgraded `backend/src/guardian/world_model.py` so guardian state now surfaces explicit goal-alignment, routine, and collaborator watchpoints and lowers receptivity further when multi-day negative trends line up with conflicting support or execution evidence
+  - added targeted regressions in `backend/tests/test_guardian_feedback.py` and `backend/tests/test_guardian_state.py`, plus the new `guardian_long_horizon_learning_behavior` scenario in `backend/src/evals/harness.py`
+- validation:
+  - `python3 -m py_compile backend/src/guardian/learning_evidence.py backend/src/guardian/feedback.py backend/src/guardian/world_model.py backend/src/memory/procedural.py backend/src/memory/procedural_guidance.py backend/src/evals/harness.py backend/tests/test_guardian_feedback.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py backend/tests/test_capabilities_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_feedback.py tests/test_guardian_state.py -q -k "multi_day or long_horizon or watchpoint or guardian_world_model_behavior"`
+    - result: `4 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "test_main_lists_available_scenarios"`
+    - result: `1 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_capabilities_api.py -q -k "test_capabilities_overview_includes_catalog_extension_packs"`
+    - result: `1 passed`
+  - `cd docs && npm run build`
+- subagent review:
+  - reviewer: `Epicurus` (`019d6840-e266-72c2-85c2-0f73e114ba85`)
+  - findings:
+    - the first routine-watchpoint selector could let an unrelated obligation dominate the live project watchpoint just because it was listed first
+    - the new long-horizon eval seeded March 2026 interventions but still used wall-clock `now` during guardian-state synthesis, so the runtime scenario would have aged out over time
+  - fixed before the slice stayed marked complete:
+    - narrowed obligation priority in `backend/src/guardian/world_model.py` so obligations only outrank anchor timeline context when they are actually relevant to the live project/goals/event context
+    - patched `src.guardian.feedback._now` inside the eval scenario so the new long-horizon proof stays time-stable instead of drifting with wall-clock time
+  - local CI follow-up:
+    - fixed the live `develop` backend failure by updating `backend/tests/test_capabilities_api.py` to the current extension-pack payload shape; the failing shard was asserting the pre-AJ catalog contract and then cancelling sibling backend shards through fail-fast
+
+## Batch AQ Branch Review Log
+
+### `guardian-judgment-and-long-horizon-learning-quality-v4`
+
+- scope:
+  - extended `backend/src/guardian/world_model.py` so guardian state now ranks competing project context explicitly, exposes inspectable project-ranking diagnostics, and surfaces conservative stale-signal arbitration when recent execution/support evidence stays split across nearby anchors
+  - extended `backend/src/guardian/state.py` so guardian state now carries inspectable learning diagnostics summarizing the dominant live-learning scope, observed outcome spread, long-horizon day spread, and any procedural-memory overrides
+  - strengthened the guardian runtime eval details in `backend/src/evals/harness.py` so the world-model, judgment, and long-horizon scenarios expose the new ranking, stale-signal, and learning-diagnostic contracts directly
+  - folded the pre-batch backend CI repairs into the same branch by hardening observer continuity timestamp serialization and isolating the threaded operator runtime eval from unrelated continuity rows
+  - added targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_observer_api.py`
+- validation:
+  - `python3 -m py_compile backend/src/api/observer.py backend/src/evals/harness.py backend/src/guardian/state.py backend/src/guardian/world_model.py backend/tests/test_eval_harness.py backend/tests/test_guardian_state.py backend/tests/test_observer_api.py`
+  - `cd backend && .venv/bin/python -m pytest tests/test_observer_api.py -q -k "partial_namespace_items"`
+    - result: `1 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -k "prompt_block_exposes_confidence or project_anchor_ambiguity or ranks_anchor_context or learning_diagnostics"`
+    - result: `4 passed`
+  - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "test_main_lists_available_scenarios or test_run_runtime_evals_passes_group_1"`
+    - result: `2 passed`
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+    - result: passed
+  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_long_horizon_learning_behavior --indent 0`
+    - result: passed
+  - broad `tests/test_eval_harness.py` runtime-detail selection and broader guardian subsets still stalled in this environment, so they are intentionally not claimed here
+- subagent review:
+  - reviewer: `Peirce` (`019d6892-49a9-7f73-a231-1c24e90da129`)
+  - findings:
+    - the first stale-signal arbitration pass classified supporting context, execution pressure, and recent threads against the live observer project while phrasing the diagnostics as if they were classified against the preferred project anchor, which could produce self-contradictory arbitration output
+    - the observer continuity hardening only protected a subset of optional namespace attributes; recent intervention payloads still crashed or failed response validation when older items omitted several string fields
+  - fixed before the slice stayed marked complete:
+    - recomputed the stale-signal arbitration inputs in `backend/src/guardian/world_model.py` against the preferred anchor used by the arbitration layer, while leaving live-project conflict checks intact for judgment-risk scoring
+    - finished the observer continuity fail-soft conversion in `backend/src/api/observer.py` so partial intervention rows normalize missing string fields safely and still satisfy the response contract
+  - additional local fixes already folded into the slice:
+    - widened the competing-anchor arbitration threshold in `backend/src/guardian/world_model.py` so near-split project evidence now surfaces conservative arbitration instead of looking falsely settled
+    - corrected the new guardian-learning regression to use the real feedback repository API and durable timestamps instead of an over-simplified fixture shape
+    - aligned the long-horizon eval detail expectation in `backend/tests/test_eval_harness.py` with the shipped stronger receptivity downgrade (`low`) once multi-day negative trends and contradictory support line up
 
 ## Non-Goals
 

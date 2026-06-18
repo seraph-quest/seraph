@@ -1,0 +1,7 @@
+{
+  "name": "source-progress-review",
+  "label": "Source Progress Review",
+  "description": "Turn on a provider-neutral progress review for a repo, project, or focus area.",
+  "skills": ["source-progress-review"],
+  "sample_prompt": "Inspect the available source adapters, then review progress for the adapter-backed source work."
+}

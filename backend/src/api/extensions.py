@@ -2,42 +2,158 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from smolagents import MCPClient
 
+from config.settings import settings
 from src.approval.repository import approval_repository, fingerprint_tool_call
 from src.audit.runtime import log_integration_event
+from src.extensions.channel_routing import (
+    SUPPORTED_CHANNEL_ROUTE_TRANSPORTS,
+    list_channel_route_bindings,
+    route_runtime_statuses,
+    transport_runtime_status,
+    set_channel_route_binding,
+)
+from src.extensions.channels import select_active_channel_adapters
 from src.extensions.lifecycle import (
     configure_extension,
     disable_extension,
     enable_extension,
+    extension_lifecycle_status,
     get_extension,
     get_extension_connector,
     get_extension_source,
     install_extension_path,
     list_extension_connectors,
     list_extensions,
+    quarantine_extension,
+    record_extension_review,
+    reenter_extension,
     remove_extension,
+    rollback_extension,
     save_extension_source,
     set_extension_connector_enabled,
     update_extension_path,
     validate_extension_path,
 )
+from src.extensions.permissions import LIFECYCLE_APPROVAL_BOUNDARIES
+from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
+from src.extensions.scaffold import scaffold_extension_package
+from src.extensions.state import (
+    connector_enabled_overrides,
+    load_extension_state_payload,
+    save_extension_state_payload,
+)
+from src.native_tools.registry import canonical_tool_name
+from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
 from src.tools.mcp_manager import mcp_manager
 
 router = APIRouter()
+
+_BUILTIN_CHANNEL_ADAPTERS = (
+    {
+        "extension_id": "seraph.builtin-channel-adapters",
+        "name": "websocket",
+        "transport": "websocket",
+        "reference": "builtin:websocket",
+    },
+    {
+        "extension_id": "seraph.builtin-channel-adapters",
+        "name": "native-notification",
+        "transport": "native_notification",
+        "reference": "builtin:native_notification",
+    },
+)
+_REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
+_NEW_SECRET_CONFIG_SENTINEL = "__SERAPH_NEW_SECRET_VALUE__"
+
+
+def _content_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _lifecycle_fallback_preview(preview: dict[str, Any]) -> dict[str, Any]:
+    approval_profile = preview.get("approval_profile")
+    if isinstance(approval_profile, dict) and approval_profile.get("requires_lifecycle_approval"):
+        return preview
+
+    permissions = preview.get("permissions")
+    if not isinstance(permissions, dict):
+        return preview
+
+    boundaries: list[str] = []
+    for boundary in permissions.get("execution_boundaries", []) or []:
+        if isinstance(boundary, str) and boundary.strip() and boundary not in boundaries:
+            boundaries.append(boundary.strip())
+
+    risk_level = "low"
+    for raw_tool_name in permissions.get("tools", []) or []:
+        if not isinstance(raw_tool_name, str) or not raw_tool_name.strip():
+            continue
+        tool_name = canonical_tool_name(raw_tool_name)
+        if not tool_name:
+            continue
+        is_mcp = tool_name.startswith("mcp_")
+        for boundary in get_tool_execution_boundaries(tool_name, is_mcp=is_mcp):
+            if boundary not in boundaries:
+                boundaries.append(boundary)
+        tool_risk = get_tool_risk_level(tool_name, is_mcp=is_mcp)
+        if tool_risk == "high" or (tool_risk == "medium" and risk_level == "low"):
+            risk_level = tool_risk
+
+    lifecycle_boundaries = [
+        boundary
+        for boundary in boundaries
+        if boundary in LIFECYCLE_APPROVAL_BOUNDARIES
+    ]
+    if not lifecycle_boundaries:
+        return preview
+
+    if risk_level != "high":
+        risk_level = "high"
+    runtime_behavior = "mcp_policy" if "external_mcp" in boundaries else "high_risk"
+    requires_runtime_approval = runtime_behavior in {"mcp_policy", "high_risk"}
+    return {
+        **preview,
+        "approval_profile": {
+            "requires_runtime_approval": requires_runtime_approval,
+            "runtime_behavior": runtime_behavior,
+            "requires_lifecycle_approval": True,
+            "lifecycle_boundaries": lifecycle_boundaries,
+            "risk_level": risk_level,
+        },
+    }
 
 
 class ExtensionPathRequest(BaseModel):
     path: str
 
 
+class ExtensionScaffoldRequest(BaseModel):
+    package_name: str
+    display_name: str
+    extension_id: str | None = None
+    kind: str = "capability-pack"
+    contributions: list[str] = Field(default_factory=lambda: ["skills"])
+
+
 class ExtensionConfigRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtensionLifecycleReasonRequest(BaseModel):
+    reason: str = ""
+
+
+class ExtensionRollbackRequest(BaseModel):
+    snapshot_id: str | None = None
 
 
 class ExtensionSourceSaveRequest(BaseModel):
@@ -52,6 +168,82 @@ class ExtensionConnectorTestRequest(BaseModel):
 class ExtensionConnectorToggleRequest(BaseModel):
     reference: str
     enabled: bool
+
+
+class ChannelRoutingBindingUpdateRequest(BaseModel):
+    primary_transport: str
+    fallback_transport: str | None = None
+
+
+class ChannelRoutingUpdateRequest(BaseModel):
+    bindings: dict[str, ChannelRoutingBindingUpdateRequest] = Field(default_factory=dict)
+
+
+def _active_channel_adapter_payloads(state_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    state_by_id = state_payload.get("extensions")
+    snapshot = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    ).snapshot()
+    contributions = snapshot.list_contributions("channel_adapters")
+    adapters = select_active_channel_adapters(
+        contributions,
+        enabled_overrides=connector_enabled_overrides(state_by_id if isinstance(state_by_id, dict) else None),
+    )
+    payloads = [
+        {
+            "extension_id": item.extension_id,
+            "name": item.name,
+            "transport": item.transport,
+            "reference": item.reference,
+        }
+        for item in adapters
+    ]
+    active_transports = {
+        str(item.get("transport"))
+        for item in payloads
+        if isinstance(item.get("transport"), str) and str(item.get("transport")).strip()
+    }
+    for builtin in _BUILTIN_CHANNEL_ADAPTERS:
+        if builtin["transport"] in active_transports:
+            continue
+        payloads.append(dict(builtin))
+    return payloads
+
+
+def _channel_routing_response(state_payload: dict[str, Any]) -> dict[str, Any]:
+    adapters = _active_channel_adapter_payloads(state_payload)
+    from src.observer.manager import context_manager
+    from src.scheduler.connection_manager import ws_manager
+
+    active_transports = {item["transport"] for item in adapters}
+    transport_statuses = [
+        {
+            **transport_runtime_status(
+                transport,
+                active_transports=active_transports,
+                websocket_connection_count=ws_manager.active_count,
+                daemon_connected=context_manager.is_daemon_connected(),
+            ),
+            "adapter": next((item for item in adapters if item["transport"] == transport), None),
+        }
+        for transport in SUPPORTED_CHANNEL_ROUTE_TRANSPORTS
+    ]
+    return {
+        "bindings": [item.as_payload() for item in list_channel_route_bindings(state_payload)],
+        "supported_transports": list(SUPPORTED_CHANNEL_ROUTE_TRANSPORTS),
+        "active_transports": sorted(active_transports),
+        "active_adapters": adapters,
+        "transport_statuses": transport_statuses,
+        "route_statuses": route_runtime_statuses(
+            state_payload,
+            active_transports=active_transports,
+            websocket_connection_count=ws_manager.active_count,
+            daemon_connected=context_manager.is_daemon_connected(),
+        ),
+    }
 
 
 def _extension_issue_count(preview: dict[str, Any] | None) -> int:
@@ -133,19 +325,282 @@ async def _log_extension_lifecycle_event(
     )
 
 
-async def _require_extension_lifecycle_approval(action: str, preview: dict[str, Any]) -> None:
+def _scaffold_package_slug(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9-]+", "-", value.strip().lower()).strip("-")
+    if not normalized:
+        raise ValueError("package_name must contain at least one letter or number")
+    return normalized
+
+
+def _normalize_config_value_for_approval(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_config_value_for_approval(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list):
+        return [_normalize_config_value_for_approval(item) for item in value]
+    return value
+
+
+def _normalize_secret_value_for_approval(value: Any, *, incoming: bool) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value == _REDACTED_CONFIG_SENTINEL:
+            return _REDACTED_CONFIG_SENTINEL
+        if not value.strip():
+            return value
+        return _NEW_SECRET_CONFIG_SENTINEL if incoming else _REDACTED_CONFIG_SENTINEL
+    return _NEW_SECRET_CONFIG_SENTINEL if incoming else _REDACTED_CONFIG_SENTINEL
+
+
+def _normalize_config_entry_for_approval(
+    config_entry: dict[str, Any],
+    *,
+    allowed_keys: set[str],
+    secret_keys: set[str],
+    incoming: bool,
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in sorted(allowed_keys):
+        if key not in config_entry:
+            continue
+        value = config_entry.get(key)
+        if key in secret_keys:
+            normalized[key] = _normalize_secret_value_for_approval(value, incoming=incoming)
+        else:
+            normalized[key] = _normalize_config_value_for_approval(value)
+    return normalized
+
+
+def _configure_request_approval_context(
+    preview: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    approval_profile = preview.get("approval_profile")
+    if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
+        return None
+
+    contributions = preview.get("contributions")
+    if not isinstance(contributions, list) or not isinstance(config, dict):
+        return None
+
+    existing_config = preview.get("config")
+    if not isinstance(existing_config, dict):
+        existing_config = {}
+
+    requested_snapshot: dict[str, Any] = {}
+    current_snapshot: dict[str, Any] = {}
+
+    for contribution in contributions:
+        if not isinstance(contribution, dict):
+            continue
+        contribution_type = contribution.get("type")
+        contribution_name = contribution.get("name")
+        config_fields = contribution.get("config_fields")
+        if not isinstance(contribution_type, str) or not isinstance(contribution_name, str):
+            continue
+        if not isinstance(config_fields, list):
+            continue
+        contribution_configs = config.get(contribution_type)
+        if not isinstance(contribution_configs, dict):
+            continue
+        incoming_config = contribution_configs.get(contribution_name)
+        if not isinstance(incoming_config, dict):
+            continue
+        allowed_keys = {
+            key
+            for field in config_fields
+            if isinstance(field, dict)
+            for key in [field.get("key")]
+            if isinstance(key, str) and key
+        }
+        if not allowed_keys:
+            continue
+        secret_keys = {
+            key
+            for field in config_fields
+            if isinstance(field, dict) and str(field.get("input") or "") == "password"
+            for key in [field.get("key")]
+            if isinstance(key, str) and key
+        }
+        requested_keys = {key for key in incoming_config.keys() if key in allowed_keys}
+        if not requested_keys:
+            continue
+        normalized_requested = _normalize_config_entry_for_approval(
+            incoming_config,
+            allowed_keys=requested_keys,
+            secret_keys=secret_keys,
+            incoming=True,
+        )
+        if not normalized_requested:
+            continue
+        existing_type_config = existing_config.get(contribution_type)
+        existing_entry = (
+            existing_type_config.get(contribution_name)
+            if isinstance(existing_type_config, dict)
+            else None
+        )
+        normalized_current = _normalize_config_entry_for_approval(
+            existing_entry if isinstance(existing_entry, dict) else {},
+            allowed_keys=set(normalized_requested.keys()),
+            secret_keys=secret_keys,
+            incoming=False,
+        )
+        requested_snapshot.setdefault(contribution_type, {})[contribution_name] = normalized_requested
+        if normalized_current:
+            current_snapshot.setdefault(contribution_type, {})[contribution_name] = normalized_current
+
+    if not requested_snapshot or requested_snapshot == current_snapshot:
+        return None
+
+    return {
+        "requested_config": requested_snapshot,
+        "current_config": current_snapshot,
+    }
+
+
+def _source_save_request_approval_context(
+    source_preview: dict[str, Any],
+    *,
+    content: str,
+) -> dict[str, Any] | None:
+    extension = source_preview.get("extension")
+    approval_profile = extension.get("approval_profile") if isinstance(extension, dict) else None
+    if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
+        return None
+
+    reference = str(source_preview.get("reference") or "").strip()
+    current_content = str(source_preview.get("content") or "")
+    requested_hash = _content_hash(content)
+    current_hash = _content_hash(current_content)
+    if requested_hash == current_hash:
+        return None
+
+    validation = source_preview.get("validation")
+    valid = validation.get("valid") if isinstance(validation, dict) else None
+    return {
+        "target_reference": reference,
+        "current_content_hash": current_hash,
+        "requested_content_hash": requested_hash,
+        "current_line_count": len(current_content.splitlines()),
+        "requested_line_count": len(content.splitlines()),
+        "draft_valid": bool(valid) if valid is not None else None,
+    }
+
+
+def _approval_scope_summary(
+    preview: dict[str, Any],
+    *,
+    action: str,
+    lifecycle_boundaries: list[str],
+    fingerprint_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    scope = {
+        "action": action,
+        "extension_id": str(preview.get("id") or preview.get("extension_id") or ""),
+        "package_digest": preview.get("package_digest"),
+        "lifecycle_boundaries": lifecycle_boundaries,
+        "target": {
+            "type": str(preview.get("target_type") or ""),
+            "name": str(preview.get("target_name") or ""),
+            "reference": str(preview.get("target_reference") or preview.get("reference") or ""),
+        },
+    }
+    if not isinstance(fingerprint_context, dict):
+        return scope
+
+    requested_config = fingerprint_context.get("requested_config")
+    if isinstance(requested_config, dict) and requested_config:
+        current_config = (
+            fingerprint_context.get("current_config")
+            if isinstance(fingerprint_context.get("current_config"), dict)
+            else {}
+        )
+        changed_types: list[str] = []
+        changed_target_count = 0
+        for config_type, requested_targets in requested_config.items():
+            if not isinstance(requested_targets, dict):
+                continue
+            current_targets = current_config.get(config_type)
+            changed_targets = [
+                target_name
+                for target_name, requested_payload in requested_targets.items()
+                if requested_payload
+                != (
+                    current_targets.get(target_name)
+                    if isinstance(current_targets, dict)
+                    else None
+                )
+            ]
+            if changed_targets:
+                changed_types.append(str(config_type))
+                changed_target_count += len(changed_targets)
+        scope["config_scope"] = {
+            "config_types": sorted(changed_types),
+            "changed_target_count": changed_target_count,
+        }
+
+    requested_content_hash = fingerprint_context.get("requested_content_hash")
+    if isinstance(requested_content_hash, str) and requested_content_hash.strip():
+        scope["source_scope"] = {
+            "reference": str(
+                fingerprint_context.get("target_reference")
+                or scope["target"].get("reference")
+                or ""
+            ),
+            "current_content_hash": fingerprint_context.get("current_content_hash"),
+            "requested_content_hash": requested_content_hash,
+            "current_line_count": fingerprint_context.get("current_line_count"),
+            "requested_line_count": fingerprint_context.get("requested_line_count"),
+            "draft_valid": fingerprint_context.get("draft_valid"),
+        }
+    snapshot_id = fingerprint_context.get("snapshot_id")
+    if isinstance(snapshot_id, str) and snapshot_id.strip():
+        scope["rollback_scope"] = {
+            "snapshot_id": snapshot_id,
+            "restored_version": fingerprint_context.get("restored_version"),
+            "restored_digest": fingerprint_context.get("restored_digest"),
+            "snapshot_path_hash": fingerprint_context.get("snapshot_path_hash"),
+        }
+    return scope
+
+
+async def _require_extension_lifecycle_approval(
+    action: str,
+    preview: dict[str, Any],
+    *,
+    consume: bool = True,
+    fingerprint_context: dict[str, Any] | None = None,
+    summary_suffix: str | None = None,
+) -> None:
+    preview = _lifecycle_fallback_preview(preview)
     approval_profile = preview.get("approval_profile")
     if not isinstance(approval_profile, dict) or not approval_profile.get("requires_lifecycle_approval"):
         return
 
-    extension_id = str(preview.get("id") or preview.get("extension_id") or "")
-    display_name = str(preview.get("display_name") or extension_id or "extension")
-    tool_name = f"extension_{action}"
     lifecycle_boundaries = [
         str(boundary)
         for boundary in approval_profile.get("lifecycle_boundaries", [])
         if isinstance(boundary, str) and boundary.strip()
     ]
+    if action == "enable":
+        enable_boundaries = [
+            boundary
+            for boundary in lifecycle_boundaries
+            if boundary != "secret_management"
+        ]
+        if not enable_boundaries:
+            return
+        lifecycle_boundaries = enable_boundaries or lifecycle_boundaries
+
+    extension_id = str(preview.get("id") or preview.get("extension_id") or "")
+    display_name = str(preview.get("display_name") or extension_id or "extension")
+    target_reference = str(preview.get("target_reference") or preview.get("reference") or "")
+    target_name = str(preview.get("target_name") or preview.get("name") or "")
+    target_type = str(preview.get("target_type") or preview.get("type") or "")
+    tool_name = f"extension_{action}"
     arguments = {
         "extension_id": extension_id,
         "version": preview.get("version"),
@@ -154,33 +609,80 @@ async def _require_extension_lifecycle_approval(action: str, preview: dict[str, 
         "boundaries": lifecycle_boundaries,
         "permissions": preview.get("permissions"),
     }
+    if isinstance(fingerprint_context, dict):
+        arguments.update(fingerprint_context)
+    if target_reference:
+        arguments["target_reference"] = target_reference
+    if target_name:
+        arguments["target_name"] = target_name
+    if target_type:
+        arguments["target_type"] = target_type
     fingerprint = fingerprint_tool_call(tool_name, arguments)
-    if await approval_repository.consume_approved(
-        session_id=None,
-        tool_name=tool_name,
-        fingerprint=fingerprint,
-    ):
+    approval_satisfied = (
+        await approval_repository.consume_approved(
+            session_id=None,
+            tool_name=tool_name,
+            fingerprint=fingerprint,
+        )
+        if consume
+        else await approval_repository.has_approved(
+            session_id=None,
+            tool_name=tool_name,
+            fingerprint=fingerprint,
+        )
+    )
+    if approval_satisfied:
         return
 
     summary = (
-        f"{action.replace('_', ' ').title()} extension '{display_name}' "
-        f"with access to {', '.join(lifecycle_boundaries) or 'high-risk capabilities'}"
+        f"{action.replace('_', ' ').title()} extension "
+        f"'{display_name}'"
     )
+    if target_reference or target_name:
+        target_label = " / ".join(
+            part
+            for part in (
+                target_type.replace("_", " ").strip(),
+                target_name,
+                target_reference,
+            )
+            if part
+        )
+        summary = f"{summary} target '{target_label}'"
+    if summary_suffix:
+        summary = f"{summary} {summary_suffix.strip()}"
+    summary = (
+        f"{summary} with access to "
+        f"{', '.join(lifecycle_boundaries) or 'high-risk capabilities'}"
+    )
+    approval_scope = _approval_scope_summary(
+        preview,
+        action=action,
+        lifecycle_boundaries=lifecycle_boundaries,
+        fingerprint_context=fingerprint_context,
+    )
+    details = {
+        "extension_id": extension_id,
+        "extension_display_name": display_name,
+        "action": action,
+        "target_reference": target_reference or None,
+        "target_name": target_name or None,
+        "target_type": target_type or None,
+        "package_path": preview.get("root_path") or preview.get("path"),
+        "package_digest": preview.get("package_digest"),
+        "permissions": preview.get("permissions"),
+        "approval_profile": approval_profile,
+        "approval_scope": approval_scope,
+    }
+    if isinstance(fingerprint_context, dict):
+        details.update(fingerprint_context)
     request = await approval_repository.get_or_create_pending(
         session_id=None,
         tool_name=tool_name,
         risk_level=str(approval_profile.get("risk_level") or "high"),
         summary=summary,
         fingerprint=fingerprint,
-        details={
-            "extension_id": extension_id,
-            "extension_display_name": display_name,
-            "action": action,
-            "package_path": preview.get("root_path") or preview.get("path"),
-            "package_digest": preview.get("package_digest"),
-            "permissions": preview.get("permissions"),
-            "approval_profile": approval_profile,
-        },
+        details=details,
     )
     raise HTTPException(
         status_code=409,
@@ -193,6 +695,7 @@ async def _require_extension_lifecycle_approval(action: str, preview: dict[str, 
                 f"{summary}\n\n"
                 "Approve it first, then retry the extension action."
             ),
+            "approval_scope": approval_scope,
         },
     )
 
@@ -301,9 +804,118 @@ async def _test_extension_mcp_connector(connector: dict[str, Any]) -> dict[str, 
         }
 
 
+@router.post("/extensions/scaffold", status_code=201)
+async def scaffold_extension_package_in_workspace(req: ExtensionScaffoldRequest):
+    preview: dict[str, Any] | None = None
+    display_name = req.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="display_name must be non-empty")
+    try:
+        slug = _scaffold_package_slug(req.package_name)
+        extension_id = req.extension_id.strip() if isinstance(req.extension_id, str) and req.extension_id.strip() else f"seraph.{slug}"
+        package_root = Path(settings.workspace_dir) / "extensions" / slug
+        scaffold = scaffold_extension_package(
+            package_root,
+            extension_id=extension_id,
+            display_name=display_name,
+            kind=req.kind,
+            contributions=req.contributions,
+        )
+        preview = validate_extension_path(str(package_root))
+    except FileExistsError as exc:
+        await _log_extension_lifecycle_event(
+            action="scaffold",
+            outcome="failed",
+            path=str(Path(settings.workspace_dir) / "extensions" / req.package_name.strip()),
+            error=str(exc),
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="scaffold",
+            outcome="failed",
+            path=req.package_name,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await _log_extension_lifecycle_event(
+        action="scaffold",
+        outcome="succeeded",
+        preview=preview,
+        path=str(scaffold.package_root),
+        extra_details={
+            "created_file_count": len(scaffold.created_files),
+            "created_files": [str(path.relative_to(scaffold.package_root)) for path in scaffold.created_files],
+        },
+    )
+    return {
+        "status": "scaffolded" if preview.get("ok") else "scaffolded_invalid",
+        "path": str(scaffold.package_root),
+        "created_files": [str(path.relative_to(scaffold.package_root)) for path in scaffold.created_files],
+        "preview": preview,
+    }
+
+
 @router.get("/extensions")
 async def list_extension_packages():
     return list_extensions()
+
+
+@router.get("/extensions/diagnostics")
+async def get_extension_diagnostics():
+    payload = list_extensions()
+    extensions = payload.get("extensions", []) if isinstance(payload, dict) else []
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    return {
+        "summary": summary,
+        "extensions": [
+            {
+                "id": item.get("id"),
+                "display_name": item.get("display_name"),
+                "version": item.get("version"),
+                "version_line": item.get("version_line"),
+                "location": item.get("location"),
+                "status": item.get("status"),
+                "compatibility": item.get("compatibility"),
+                "diagnostics_summary": item.get("diagnostics_summary"),
+                "connector_summary": item.get("connector_summary"),
+                "permission_summary": item.get("permission_summary"),
+                "approval_profile": item.get("approval_profile"),
+            }
+            for item in extensions
+            if isinstance(item, dict)
+        ],
+    }
+
+
+@router.get("/extensions/channel-routing")
+async def get_channel_routing():
+    state_payload = load_extension_state_payload()
+    return _channel_routing_response(state_payload)
+
+
+@router.put("/extensions/channel-routing")
+async def update_channel_routing(req: ChannelRoutingUpdateRequest):
+    state_payload = load_extension_state_payload()
+    try:
+        for route, binding in req.bindings.items():
+            set_channel_route_binding(
+                state_payload,
+                route=route,
+                primary_transport=binding.primary_transport,
+                fallback_transport=binding.fallback_transport,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    save_extension_state_payload(state_payload)
+    await log_integration_event(
+        integration_type="channel_routing",
+        name="observer_delivery",
+        outcome="updated",
+        details={"routes": sorted(req.bindings.keys())},
+    )
+    return _channel_routing_response(state_payload)
 
 
 @router.get("/extensions/{extension_id}")
@@ -312,6 +924,188 @@ async def get_extension_package(extension_id: str):
         return {"extension": get_extension(extension_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+
+
+@router.get("/extensions/{extension_id}/lifecycle")
+async def get_extension_package_lifecycle(extension_id: str):
+    try:
+        return extension_lifecycle_status(extension_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+
+
+@router.post("/extensions/{extension_id}/review")
+async def review_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("review", preview)
+        result = record_extension_review(
+            extension_id,
+            reviewed_by="cockpit",
+            reason=req.reason,
+        )
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="review",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="review",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="review",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
+@router.post("/extensions/{extension_id}/quarantine")
+async def quarantine_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("quarantine", preview)
+        result = quarantine_extension(
+            extension_id,
+            reason=req.reason or "operator quarantine",
+            actor="cockpit",
+        )
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="quarantine",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="quarantine",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="quarantine",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
+@router.post("/extensions/{extension_id}/reentry")
+async def reenter_extension_package(extension_id: str, req: ExtensionLifecycleReasonRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("reentry", preview)
+        result = reenter_extension(
+            extension_id,
+            reviewed_by="cockpit",
+            reason=req.reason,
+        )
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="reentry",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="reentry",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="reentry",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
+
+
+@router.post("/extensions/{extension_id}/rollback")
+async def rollback_extension_package(extension_id: str, req: ExtensionRollbackRequest):
+    preview: dict[str, Any] | None = None
+    try:
+        preview = get_extension(extension_id)
+        lifecycle = extension_lifecycle_status(extension_id)
+        snapshots = lifecycle.get("rollback", {}).get("snapshots")
+        snapshot = next(
+            (
+                item for item in snapshots
+                if isinstance(item, dict)
+                and (not req.snapshot_id or item.get("id") == req.snapshot_id)
+            ),
+            None,
+        ) if isinstance(snapshots, list) else None
+        if not isinstance(snapshot, dict):
+            raise ValueError(f"extension '{extension_id}' has no rollback snapshot")
+        await _require_extension_lifecycle_approval(
+            "rollback",
+            {
+                **preview,
+                "target_reference": str(snapshot.get("id") or ""),
+                "target_name": str(snapshot.get("version") or "rollback snapshot"),
+                "target_type": "rollback_snapshot",
+            },
+            fingerprint_context={
+                "snapshot_id": snapshot.get("id"),
+                "restored_version": snapshot.get("version"),
+                "restored_digest": snapshot.get("digest"),
+                "snapshot_path_hash": _content_hash(str(snapshot.get("path") or "")),
+            },
+        )
+        result = rollback_extension(extension_id, snapshot_id=req.snapshot_id)
+    except KeyError as exc:
+        await _log_extension_lifecycle_event(
+            action="rollback",
+            outcome="failed",
+            path=extension_id,
+            error=f"Extension '{extension_id}' not found",
+        )
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
+    except ValueError as exc:
+        await _log_extension_lifecycle_event(
+            action="rollback",
+            outcome="failed",
+            preview=preview,
+            path=extension_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _log_extension_lifecycle_event(
+        action="rollback",
+        outcome="succeeded",
+        preview=result.get("extension"),
+        path=extension_id,
+        extra_details={"receipt_id": result.get("receipt", {}).get("id")},
+    )
+    return result
 
 
 @router.get("/extensions/{extension_id}/connectors")
@@ -362,12 +1156,55 @@ async def set_extension_package_connector_enabled(extension_id: str, req: Extens
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
+        target_connector = next(
+            (
+                contribution
+                for contribution in preview.get("contributions", [])
+                if isinstance(contribution, dict) and contribution.get("reference") == req.reference
+            ),
+            None,
+        )
+        if target_connector is None:
+            raise KeyError(req.reference)
+        permission_profile = target_connector.get("permission_profile")
+        connector_preview = {
+            **preview,
+            "target_reference": req.reference,
+            "target_name": target_connector.get("name"),
+            "target_type": target_connector.get("type"),
+            "approval_profile": {
+                "requires_runtime_approval": bool(
+                    isinstance(permission_profile, dict) and permission_profile.get("requires_approval")
+                ),
+                "runtime_behavior": (
+                    str(permission_profile.get("approval_behavior") or "never")
+                    if isinstance(permission_profile, dict)
+                    else "never"
+                ),
+                "requires_lifecycle_approval": bool(
+                    isinstance(permission_profile, dict)
+                    and permission_profile.get("lifecycle_approval_boundaries")
+                ),
+                "lifecycle_boundaries": (
+                    list(permission_profile.get("lifecycle_approval_boundaries", []))
+                    if isinstance(permission_profile, dict)
+                    else []
+                ),
+                "risk_level": (
+                    str(permission_profile.get("risk_level") or "low")
+                    if isinstance(permission_profile, dict)
+                    else "low"
+                ),
+            },
+        }
         if req.enabled:
             if preview.get("status") != "ready":
                 raise ValueError(
                     f"extension '{extension_id}' is degraded and cannot enable packaged connectors until validation issues are fixed"
                 )
-            await _require_extension_lifecycle_approval("enable", preview)
+            await _require_extension_lifecycle_approval("enable", connector_preview)
+        else:
+            await _require_extension_lifecycle_approval("disable", connector_preview)
         result = set_extension_connector_enabled(extension_id, req.reference, enabled=req.enabled)
     except KeyError as exc:
         detail = (
@@ -423,12 +1260,32 @@ async def get_extension_package_source(extension_id: str, reference: str):
 
 @router.post("/extensions/{extension_id}/source")
 async def save_extension_package_source(extension_id: str, req: ExtensionSourceSaveRequest):
+    preview: dict[str, Any] | None = None
     try:
+        source_preview = get_extension_source(extension_id, req.reference)
+        preview = source_preview.get("extension") if isinstance(source_preview, dict) else None
+        if isinstance(preview, dict):
+            approval_context = _source_save_request_approval_context(
+                source_preview,
+                content=req.content,
+            )
+            await _require_extension_lifecycle_approval(
+                "save_source",
+                {
+                    **preview,
+                    "target_reference": req.reference,
+                    "target_name": req.reference,
+                    "target_type": "source_file",
+                },
+                fingerprint_context=approval_context,
+                summary_suffix="for requested source changes",
+            )
         payload = save_extension_source(extension_id, req.reference, req.content)
     except KeyError as exc:
         await _log_extension_lifecycle_event(
             action="save_source",
             outcome="failed",
+            preview=preview,
             path=extension_id,
             error=f"Extension '{extension_id}' not found",
             extra_details={"reference": req.reference},
@@ -438,6 +1295,7 @@ async def save_extension_package_source(extension_id: str, req: ExtensionSourceS
         await _log_extension_lifecycle_event(
             action="save_source",
             outcome="failed",
+            preview=preview,
             path=extension_id,
             error=str(exc),
             extra_details={"reference": req.reference},
@@ -532,6 +1390,11 @@ async def update_extension_package(req: ExtensionPathRequest):
             raise ValueError(
                 f"extension '{extension_id}' is not updateable from this package path"
             )
+        if lifecycle_plan.get("version_relation") == "downgrade":
+            extension_id = preview.get("extension_id") or preview.get("id") or "extension"
+            raise ValueError(
+                f"extension '{extension_id}' downgrade requires explicit downgrade lifecycle control"
+            )
         await _require_extension_lifecycle_approval("update", preview)
         extension = update_extension_path(req.path)
     except KeyError as exc:
@@ -571,6 +1434,10 @@ async def enable_extension_package(extension_id: str):
     try:
         preview = get_extension(extension_id)
         if preview.get("status") != "ready":
+            if preview.get("status") == "quarantined":
+                raise ValueError(
+                    f"extension '{extension_id}' is quarantined and requires re-entry review before enable"
+                )
             raise ValueError(
                 f"extension '{extension_id}' is degraded and cannot be enabled until validation issues are fixed"
             )
@@ -608,7 +1475,10 @@ async def enable_extension_package(extension_id: str):
 
 @router.post("/extensions/{extension_id}/disable")
 async def disable_extension_package(extension_id: str):
+    preview: dict[str, Any] | None = None
     try:
+        preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("disable", preview)
         result = disable_extension(extension_id)
     except KeyError as exc:
         await _log_extension_lifecycle_event(
@@ -633,7 +1503,17 @@ async def disable_extension_package(extension_id: str):
 
 @router.post("/extensions/{extension_id}/configure")
 async def configure_extension_package(extension_id: str, req: ExtensionConfigRequest):
+    preview: dict[str, Any] | None = None
     try:
+        preview = get_extension(extension_id)
+        approval_context = _configure_request_approval_context(preview, req.config)
+        if approval_context is not None:
+            await _require_extension_lifecycle_approval(
+                "configure",
+                preview,
+                fingerprint_context=approval_context,
+                summary_suffix="for requested config changes",
+            )
         extension = configure_extension(extension_id, req.config)
     except KeyError as exc:
         await _log_extension_lifecycle_event(
@@ -656,7 +1536,7 @@ async def configure_extension_package(extension_id: str, req: ExtensionConfigReq
     await _log_extension_lifecycle_event(
         action="configure",
         outcome="succeeded",
-        preview=extension,
+        preview=extension or preview,
         path=extension_id,
         extra_details={"config_keys": sorted(req.config.keys())},
     )
@@ -668,6 +1548,7 @@ async def remove_extension_package(extension_id: str):
     preview: dict[str, Any] | None = None
     try:
         preview = get_extension(extension_id)
+        await _require_extension_lifecycle_approval("remove", preview)
         remove_extension(extension_id)
     except KeyError as exc:
         await _log_extension_lifecycle_event(

@@ -8,6 +8,7 @@ from sqlmodel import select, col
 
 from src.db.engine import get_session
 from src.db.models import AuditEvent
+from src.db.session_refs import ensure_sessions_exist
 
 
 class AuditRepository:
@@ -24,6 +25,7 @@ class AuditRepository:
         details: dict[str, Any] | None = None,
     ) -> AuditEvent:
         async with get_session() as db:
+            await ensure_sessions_exist(db, [session_id])
             event = AuditEvent(
                 session_id=session_id,
                 actor=actor,

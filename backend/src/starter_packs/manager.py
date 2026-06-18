@@ -175,6 +175,11 @@ class StarterPackManager:
     def get_pack(self, name: str) -> StarterPack | None:
         return next((pack for pack in self._packs if pack.name == name), None)
 
+    def reload(self) -> list[dict[str, Any]]:
+        if self._registry is not None:
+            self._reload_from_registry()
+        return self.list_packs()
+
     def get_diagnostics(self) -> dict[str, Any]:
         return {
             "starter_packs": self.list_packs(),

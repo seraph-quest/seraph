@@ -31,6 +31,8 @@ const sidebars: SidebarsConfig = {
         'docs-contract',
         'benchmark-status',
         'superiority-delivery',
+        'world-class-strategy-delivery',
+        'agent-parity-execution-roadmap',
       ],
     },
   ],

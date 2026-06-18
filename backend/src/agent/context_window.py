@@ -15,6 +15,7 @@ from src.llm_runtime import completion_with_fallback_sync
 logger = logging.getLogger(__name__)
 
 _summary_cache: dict[str, str] = {}
+_encoding_failure_logged = False
 
 
 @lru_cache(maxsize=1)
@@ -23,10 +24,15 @@ def _load_encoding():
 
 
 def _get_encoding():
+    global _encoding_failure_logged
     try:
         return _load_encoding()
     except Exception:
-        logger.warning("Failed to load tiktoken encoding, using approximate token counts", exc_info=True)
+        logger.warning(
+            "Failed to load tiktoken encoding, using approximate token counts",
+            exc_info=not _encoding_failure_logged,
+        )
+        _encoding_failure_logged = True
         return None
 
 
@@ -176,3 +182,24 @@ def build_context_window(
         _count_tokens(result),
     )
     return result
+
+
+def requires_middle_summary(
+    messages: list[dict],
+    token_budget: int | None = None,
+    keep_recent: int | None = None,
+    keep_first: int | None = None,
+) -> bool:
+    token_budget = token_budget if token_budget is not None else settings.context_window_token_budget
+    keep_recent = keep_recent if keep_recent is not None else settings.context_window_keep_recent
+    keep_first = keep_first if keep_first is not None else settings.context_window_keep_first
+
+    if not messages:
+        return False
+
+    if _count_tokens(_format_messages(messages)) <= token_budget:
+        return False
+
+    n = len(messages)
+    middle = messages[keep_first:max(keep_first, n - keep_recent)]
+    return bool(middle)

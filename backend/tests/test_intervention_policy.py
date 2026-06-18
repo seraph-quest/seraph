@@ -382,6 +382,55 @@ def test_decide_intervention_scheduled_overrides_low_confidence_guards():
     assert decision.delivery_decision.value == "deliver"
 
 
+def test_decide_intervention_bundles_on_long_horizon_negative_trend():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Repeat the same low-urgency reminder.",
+        urgency=3,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        salience_level="medium",
+        salience_reason="active_goals",
+        interruption_cost="medium",
+        learning_multi_day_positive_days=1,
+        learning_multi_day_negative_days=3,
+        learning_scheduled_positive_days=1,
+        learning_scheduled_negative_days=2,
+    )
+
+    assert decision.action == InterventionAction.bundle
+    assert decision.reason == "long_horizon_negative_trend"
+    assert decision.delivery_decision is not None
+    assert decision.delivery_decision.value == "queue"
+
+
+def test_decide_intervention_defers_scheduled_guidance_on_outcome_instability():
+    decision = decide_intervention(
+        message_type="proactive",
+        intervention_type="advisory",
+        content="Run the routine scheduled check-in.",
+        urgency=2,
+        user_state="available",
+        interruption_mode="balanced",
+        attention_budget_remaining=2,
+        is_scheduled=True,
+        guardian_confidence="grounded",
+        observer_confidence="grounded",
+        learning_multi_day_positive_days=1,
+        learning_multi_day_negative_days=3,
+        learning_scheduled_positive_days=1,
+        learning_scheduled_negative_days=2,
+    )
+
+    assert decision.action == InterventionAction.defer
+    assert decision.reason == "scheduled_outcome_instability"
+    assert decision.delivery_decision is None
+
+
 def test_decide_intervention_urgent_overrides_confidence_and_interruption_guards():
     decision = decide_intervention(
         message_type="proactive",

@@ -77,6 +77,19 @@ describe("DaemonStatus", () => {
             continuity_surface: "native_notification",
           },
         ],
+        reach: {
+          route_statuses: [
+            {
+              route: "live_delivery",
+              label: "Live delivery",
+              status: "fallback_active",
+              summary: "Live delivery is falling back to native notification because no live browser session is connected for websocket delivery.",
+              selected_transport: "native_notification",
+              selected_mode: "fallback",
+              repair_hint: "Keep a cockpit tab connected or route this delivery class to native notifications first.",
+            },
+          ],
+        },
       }),
     );
 
@@ -90,6 +103,9 @@ describe("DaemonStatus", () => {
     expect(screen.getByText("Native presence is connected. This is a test notification.")).toBeInTheDocument();
     expect(screen.getByText("Deferred bundle items")).toBeInTheDocument();
     expect(screen.getByText("Bundle this until the browser is back.")).toBeInTheDocument();
+    expect(screen.getByText("Delivery routing")).toBeInTheDocument();
+    expect(screen.getByText("Live delivery")).toBeInTheDocument();
+    expect(screen.getByText(/falling back to native notification/i)).toBeInTheDocument();
     expect(screen.getByText("Recent guardian continuity")).toBeInTheDocument();
     expect(screen.getByText("Desktop fallback is active.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();

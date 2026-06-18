@@ -9,15 +9,23 @@ from sqlmodel import select, col
 
 from src.db.engine import get_session
 from src.db.models import ApprovalRequest
+from src.db.session_refs import ensure_sessions_exist
 
 
-def fingerprint_tool_call(tool_name: str, arguments: dict[str, Any]) -> str:
+def fingerprint_tool_call(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    approval_context: dict[str, Any] | None = None,
+) -> str:
     """Build a stable fingerprint for a tool invocation."""
-    payload = json.dumps(
-        {"tool_name": tool_name, "arguments": arguments},
-        sort_keys=True,
-        default=str,
-    )
+    fingerprint_payload: dict[str, Any] = {
+        "tool_name": tool_name,
+        "arguments": arguments,
+    }
+    if isinstance(approval_context, dict) and approval_context:
+        fingerprint_payload["approval_context"] = approval_context
+    payload = json.dumps(fingerprint_payload, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -55,6 +63,7 @@ class ApprovalRepository:
                 summary=summary,
                 details_json=json.dumps(details) if details is not None else None,
             )
+            await ensure_sessions_exist(db, [session_id])
             db.add(request)
             await db.flush()
             db.expunge(request)
@@ -121,6 +130,24 @@ class ApprovalRepository:
             request.resolved_at = datetime.now(timezone.utc)
             db.add(request)
             return True
+
+    async def has_approved(
+        self,
+        *,
+        session_id: str | None,
+        tool_name: str,
+        fingerprint: str,
+    ) -> bool:
+        async with get_session() as db:
+            result = await db.execute(
+                select(ApprovalRequest)
+                .where(ApprovalRequest.session_id == session_id)
+                .where(ApprovalRequest.tool_name == tool_name)
+                .where(ApprovalRequest.fingerprint == fingerprint)
+                .where(ApprovalRequest.status == "approved")
+                .order_by(col(ApprovalRequest.created_at).desc())
+            )
+            return result.scalars().first() is not None
 
     async def list_pending(
         self,

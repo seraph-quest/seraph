@@ -1,12 +1,25 @@
 import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
 
+from config.settings import settings
 from src.audit.repository import audit_repository
-from src.tools.filesystem_tool import _safe_resolve, read_file, write_file
+from src.tools.filesystem_tool import _safe_resolve, apply_workspace_patch, preview_workspace_patch, read_file, write_file
 from src.tools.template_tool import fill_template
 from src.tools.web_search_tool import web_search
+
+
+@pytest.fixture(autouse=True)
+def reset_site_policy():
+    original_allowlist = settings.browser_site_allowlist
+    original_blocklist = settings.browser_site_blocklist
+    settings.browser_site_allowlist = ""
+    settings.browser_site_blocklist = ""
+    yield
+    settings.browser_site_allowlist = original_allowlist
+    settings.browser_site_blocklist = original_blocklist
 
 
 class TestFilesystemTool:
@@ -42,6 +55,21 @@ class TestFilesystemTool:
         read_result = read_file.forward("test.txt")
         assert read_result == "Hello, Seraph!"
 
+    def test_read_file_blocks_secret_like_workspace_path(self, tmp_path, monkeypatch, async_db):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / ".env").write_text("OPENROUTER_API_KEY=secret\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Secret-like workspace path blocked"):
+            read_file.forward(".env")
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_blocked"]
+
+        events = asyncio.run(_fetch())
+        assert events[0]["details"]["operation"] == "read"
+        assert "Secret-like workspace path" in events[0]["details"]["error"]
+
     def test_write_and_read_file_log_runtime_audit(self, tmp_path, monkeypatch, async_db):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         write_result = write_file.forward("test.txt", "Hello, Seraph!")
@@ -66,6 +94,90 @@ class TestFilesystemTool:
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
         write_file.forward("sub/dir/file.txt", "nested content")
         assert (tmp_path / "sub" / "dir" / "file.txt").read_text() == "nested content"
+
+    def test_preview_workspace_patch_returns_diff_without_writing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
+
+        receipt = json.loads(preview_workspace_patch.forward("notes.md", "beta", "gamma"))
+
+        assert receipt["applied"] is False
+        assert receipt["occurrence_count"] == 1
+        assert receipt["artifact_id"].startswith("art_")
+        assert receipt["artifact"]["artifact_type"] == "workspace_patch"
+        assert receipt["artifact"]["producer"] == "filesystem:preview_patch"
+        assert receipt["artifact"]["content_sha256"] == receipt["after_sha256"]
+        assert "+gamma" in receipt["diff"]
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    def test_apply_workspace_patch_writes_and_logs_receipt(self, tmp_path, monkeypatch, async_db):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
+
+        receipt = json.loads(apply_workspace_patch.forward("notes.md", "beta", "gamma"))
+
+        assert receipt["applied"] is True
+        assert receipt["artifact_id"].startswith("art_")
+        assert receipt["artifact"]["artifact_type"] == "workspace_patch"
+        assert receipt["artifact"]["producer"] == "filesystem:apply_patch"
+        assert receipt["artifact"]["trust_boundary"] == "workspace_write"
+        assert "rollback" in receipt["artifact"]["recovery_hint"].lower()
+        assert receipt["rollback"]["tool"] == "apply_workspace_patch"
+        assert receipt["before_hash_guarded"] is False
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\ngamma\n"
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        patch_event = next(e for e in events if e["details"]["operation"] == "apply_patch")
+        assert patch_event["tool_name"] == "filesystem:workspace"
+        assert patch_event["details"]["occurrence_count"] == 1
+        assert patch_event["details"]["before_sha256"] == receipt["before_sha256"]
+
+    def test_apply_workspace_patch_blocks_stale_before_hash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("alpha\nbeta\n", encoding="utf-8")
+        receipt = json.loads(preview_workspace_patch.forward("notes.md", "beta", "gamma"))
+        (tmp_path / "notes.md").write_text("alpha\nchanged elsewhere\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="expected_before_sha256"):
+            apply_workspace_patch.forward(
+                "notes.md",
+                "beta",
+                "gamma",
+                expected_before_sha256=receipt["before_sha256"],
+            )
+
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "alpha\nchanged elsewhere\n"
+
+    def test_workspace_patch_blocks_ambiguous_occurrences(self, tmp_path, monkeypatch, async_db):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("repeat\nrepeat\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Expected 1 occurrence"):
+            apply_workspace_patch.forward("notes.md", "repeat", "changed")
+
+        assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "repeat\nrepeat\n"
+
+    def test_workspace_patch_rejects_replace_all_semantics_until_supported(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "notes.md").write_text("repeat\nrepeat\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="expected_occurrences must be 1"):
+            preview_workspace_patch.forward("notes.md", "repeat", "changed", expected_occurrences=2)
+
+    def test_workspace_patch_blocks_secret_like_paths(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
+        (tmp_path / "id_rsa").write_text("PRIVATE KEY\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Secret-like workspace path blocked"):
+            preview_workspace_patch.forward("id_rsa", "PRIVATE", "PUBLIC")
+        with pytest.raises(ValueError, match="Secret-like workspace path blocked"):
+            apply_workspace_patch.forward("id_rsa", "PRIVATE", "PUBLIC")
+
+        assert (tmp_path / "id_rsa").read_text(encoding="utf-8") == "PRIVATE KEY\n"
 
     def test_read_file_not_a_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.tools.filesystem_tool.settings.workspace_dir", str(tmp_path))
@@ -285,3 +397,92 @@ class TestWebSearch:
         assert events
         assert events[0]["tool_name"] == "web_search:duckduckgo"
         assert events[0]["details"]["timeout_seconds"] == 15
+
+    def test_web_search_filters_site_policy_blocked_results(self, async_db):
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Blocked", "href": "https://blocked.example.com", "body": "Should not surface"},
+                    {"title": "Allowed", "href": "https://allowed.example.org", "body": "Safe result"},
+                ]
+
+        settings.browser_site_blocklist = "example.com"
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("search policy")
+
+        assert "Allowed" in result
+        assert "Blocked" not in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_succeeded"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["details"]["filtered_result_count"] == 1
+        assert events[0]["details"]["blocked_hostnames"] == ["blocked.example.com"]
+
+    def test_web_search_returns_no_allowed_results_when_allowlist_blocks_everything(self, async_db):
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Other", "href": "https://elsewhere.example.net", "body": "Nope"},
+                ]
+
+        settings.browser_site_allowlist = "allowed.example.org"
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("allowlisted search")
+
+        assert "No allowed results found" in result
+
+        async def _fetch():
+            events = await audit_repository.list_events(limit=5)
+            return [e for e in events if e["event_type"] == "integration_blocked"]
+
+        events = asyncio.run(_fetch())
+        assert events
+        assert events[0]["tool_name"] == "web_search:duckduckgo"
+        assert events[0]["details"]["filtered_result_count"] == 1
+        assert events[0]["details"]["blocked_reasons"] == ["not_allowlisted"]
+
+    def test_web_search_filters_missing_href_when_allowlist_active(self, async_db):
+        class MockDDGS:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def text(self, query, max_results=5):
+                return [
+                    {"title": "Missing URL", "href": "", "body": "Should not bypass policy"},
+                    {"title": "Allowed", "href": "https://allowed.example.org", "body": "Safe result"},
+                ]
+
+        settings.browser_site_allowlist = "allowed.example.org"
+        with patch("src.tools.web_search_tool.DDGS", MockDDGS):
+            result = web_search.forward("missing href")
+
+        assert "Allowed" in result
+        assert "Missing URL" not in result

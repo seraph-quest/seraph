@@ -11,6 +11,7 @@ from smolagents import ToolCall, ActionStep, FinalAnswerStep
 from smolagents.monitoring import Timing
 from starlette.testclient import TestClient
 
+from src.agent.exceptions import ClarificationRequired
 from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
@@ -236,6 +237,45 @@ class TestE2EConversation:
                             break
                     else:
                         raise AssertionError("Expected approval_required message")
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_missing_input_sends_clarification_required_message(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.side_effect = ClarificationRequired(
+                question="Which city should I check?",
+                reason="Weather depends on location.",
+                options=["Wroclaw", "Warsaw"],
+            )
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = ws.receive_text()
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = ws.receive_text()
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "what is the weather?",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = ws.receive_text()
+                        msg = json.loads(raw)
+                        if msg["type"] == "clarification_required":
+                            assert msg["question"] == "Which city should I check?"
+                            assert msg["reason"] == "Weather depends on location."
+                            assert msg["options"] == ["Wroclaw", "Warsaw"]
+                            assert "Which city should I check?" in msg["content"]
+                            break
+                    else:
+                        raise AssertionError("Expected clarification_required message")
         finally:
             stack.close()
             for p in patches:

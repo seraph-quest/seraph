@@ -9,6 +9,7 @@ import { describe, it, expect, vi } from "vitest";
 // We test the constants and behavior rather than the hook directly
 // since hooks require a React rendering context.
 import { WS_RECONNECT_DELAY_MS } from "../config/constants";
+import { buildClarificationMessage, resolveClarificationSessionId } from "./useWebSocket";
 
 describe("WS reconnection constants", () => {
   it("has a sensible initial reconnect delay", () => {
@@ -91,5 +92,39 @@ describe("session load ordering", () => {
     });
 
     expect(switchSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("clarification transport helpers", () => {
+  it("prefers the server-provided clarification session id", () => {
+    expect(
+      resolveClarificationSessionId({ session_id: "session-clarify" }, "fallback-session")
+    ).toBe("session-clarify");
+  });
+
+  it("builds a dedicated clarification chat message with options", () => {
+    const message = buildClarificationMessage({
+      message: "Which city should I check?",
+      question: "Which city should I check?",
+      reason: "Weather depends on location.",
+      options: ["Wroclaw", "Warsaw"],
+    }, "session-clarify");
+
+    expect(message.role).toBe("clarification");
+    expect(message.sessionId).toBe("session-clarify");
+    expect(message.clarificationQuestion).toBe("Which city should I check?");
+    expect(message.clarificationReason).toBe("Weather depends on location.");
+    expect(message.clarificationOptions).toEqual(["Wroclaw", "Warsaw"]);
+  });
+
+  it("falls back to websocket content when message is absent", () => {
+    const message = buildClarificationMessage({
+      content: "Which city should I check?",
+      question: "Which city should I check?",
+      reason: "Weather depends on location.",
+    }, "session-clarify");
+
+    expect(message.content).toBe("Which city should I check?");
+    expect(message.clarificationQuestion).toBe("Which city should I check?");
   });
 });

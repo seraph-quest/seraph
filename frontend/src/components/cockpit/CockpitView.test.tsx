@@ -16,6 +16,98 @@ function mockResponse(data: unknown, ok = true, status = ok ? 200 : 500) {
   };
 }
 
+function emptyCapabilityOverview(overrides: Record<string, unknown> = {}) {
+  return {
+    tool_policy_mode: "balanced",
+    mcp_policy_mode: "approval",
+    approval_mode: "high_risk",
+    summary: {
+      native_tools_ready: 0,
+      native_tools_total: 0,
+      skills_ready: 0,
+      skills_total: 0,
+      workflows_ready: 0,
+      workflows_total: 0,
+      starter_packs_ready: 0,
+      starter_packs_total: 0,
+      mcp_servers_ready: 0,
+      mcp_servers_total: 0,
+    },
+    native_tools: [],
+    skills: [],
+    workflows: [],
+    mcp_servers: [],
+    starter_packs: [],
+    catalog_items: [],
+    recommendations: [],
+    runbooks: [],
+    marketplace_flows: [],
+    ...overrides,
+  };
+}
+
+function mockCockpitBaselineFetch(
+  fetchMock: ReturnType<typeof vi.fn>,
+  options: {
+    capabilities?: Record<string, unknown>;
+    extensions?: Record<string, unknown>;
+    browserProviders?: Record<string, unknown>;
+    browserSessions?: Record<string, unknown>;
+  },
+) {
+  fetchMock.mockImplementation((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/goals/dashboard")) {
+      return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+    }
+    if (url.includes("/api/runtime/status")) {
+      return Promise.resolve(mockResponse({
+        version: "test",
+        build_id: "test",
+        provider: "test",
+        model: "test",
+        model_label: "test",
+      }));
+    }
+    if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+    if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+    if (url.includes("/api/observer/continuity")) {
+      return Promise.resolve(mockResponse({
+        daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+        notifications: [],
+        queued_insights: [],
+        queued_insight_count: 0,
+        recent_interventions: [],
+        reach: { route_statuses: [] },
+      }));
+    }
+    if (url.includes("/api/capabilities/overview")) {
+      return Promise.resolve(mockResponse(options.capabilities ?? emptyCapabilityOverview()));
+    }
+    if (url.includes("/api/browser/providers")) {
+      return Promise.resolve(mockResponse(options.browserProviders ?? { providers: [] }));
+    }
+    if (url.includes("/api/operator/browser-computer-use-control")) {
+      return Promise.resolve(mockResponse({
+        ...(options.browserProviders ?? { providers: [] }),
+        ...(options.browserSessions ?? { sessions: [] }),
+      }));
+    }
+    if (url.includes("/api/browser/sessions")) {
+      return Promise.resolve(mockResponse(options.browserSessions ?? { sessions: [] }));
+    }
+    if (url.includes("/api/extensions")) return Promise.resolve(mockResponse(options.extensions ?? { extensions: [] }));
+    if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+    if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+    if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+    if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+    return Promise.resolve(mockResponse({}));
+  });
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -62,6 +154,495 @@ describe("CockpitView", () => {
     vi.restoreAllMocks();
   });
 
+  it("renders a governed marketplace extension row with action readiness", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      capabilities: emptyCapabilityOverview({
+        catalog_items: [
+          {
+            name: "Atlas Marketplace Pack",
+            catalog_id: "atlas.marketplace",
+            type: "extension_pack",
+            description: "Governed installable extension pack",
+            category: "operations",
+            bundled: false,
+            installed: false,
+            source: "marketplace",
+            trust: "verified",
+            version: "1.2.0",
+            publisher: { name: "Seraph Labs" },
+            contribution_types: ["toolset_presets", "messaging_connectors"],
+            compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+            diagnostics_summary: {
+              issue_count: 0,
+              error_issue_count: 0,
+              warning_issue_count: 0,
+              load_error_count: 0,
+              degraded_contribution_count: 0,
+              degraded_connector_count: 0,
+              state_counts: { catalog: 1 },
+              highlighted_messages: [],
+            },
+            permission_summary: {
+              status: "review_ready",
+              ok: true,
+              required: {},
+              missing: {},
+              risk_level: "medium",
+            },
+          },
+        ],
+        marketplace_flows: [
+          {
+            id: "flow-atlas-marketplace",
+            label: "Atlas Marketplace Pack",
+            kind: "extension_pack",
+            availability: "ready",
+            summary: "Install flow ready",
+            detail: "2/2 governed steps ready",
+            ready_count: 2,
+            total_count: 2,
+            catalog_id: "atlas.marketplace",
+            contribution_types: ["toolset_presets", "messaging_connectors"],
+            trust: "verified",
+            publisher: { name: "Seraph Labs" },
+            compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+          },
+        ],
+      }),
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    expect(within(consoleRegion).getByText("Atlas Marketplace Pack")).toBeInTheDocument();
+    expect(consoleRegion).toHaveTextContent(/0 installed · 1 installable · 0 rollback receipts/i);
+    expect(consoleRegion).toHaveTextContent(/marketplace · installable · flow ready · marketplace · verified · Seraph Labs · 1.2.0/i);
+    expect(consoleRegion).toHaveTextContent(/compatible · Seraph >=0.9.0 · current 0.9.1/i);
+    expect(consoleRegion).toHaveTextContent(/toolset presets · messaging connectors · install ready · rollback unavailable/i);
+    expect(within(consoleRegion).getByRole("button", { name: "install" })).toBeEnabled();
+  });
+
+  it("renders live browser session controls with degraded fallback and redacted provenance", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      browserProviders: {
+        providers: [
+          {
+            extension_id: "seraph.openclaw-remote-cdp",
+            name: "remote-cdp",
+            provider_kind: "remote_cdp",
+            description: "Remote CDP provider",
+            enabled: true,
+            configured: true,
+            selected: true,
+            execution_mode: "local_fallback",
+            runtime_state: "staged_local_fallback",
+            requires_network: true,
+            requires_daemon: false,
+            capabilities: ["snapshot", "replay"],
+            fallback_policy: "local_extract_only",
+          },
+        ],
+      },
+      browserSessions: {
+        sessions: [
+          {
+            session_id: "bs-live-1",
+            owner_session_id: "session-1",
+            url: "https://example.test/research",
+            provider_name: "remote-cdp",
+            provider_kind: "remote_cdp",
+            execution_mode: "local_fallback",
+            status: "degraded",
+            risk_state: "provider_degraded_labeled",
+            recovery_state: "operator_acknowledgement_required",
+            partition_id: "bp-123",
+            partition_revision: 2,
+            boundary_decisions: {
+              profile: { state: "local_fallback_ephemeral", enforced: false, operator_visible: true },
+              cookie: { state: "session_scoped_no_export", enforced: false, operator_visible: true },
+              credential: { state: "scoped_refs_only", enforced: true, operator_visible: true },
+              download: { state: "quarantine_required_before_adoption", enforced: false, operator_visible: true },
+              upload: { state: "operator_review_required", enforced: false, operator_visible: true },
+              network: { state: "site_policy_guarded", enforced: true, operator_visible: true },
+            },
+            provider_degradation: {
+              degraded: true,
+              fallback_labeled: true,
+              fallback_reason: "remote_provider_staged_local_runtime_used",
+              silent_fallback_allowed: false,
+            },
+            snapshot_count: 1,
+            latest_ref: "bs-live-1:1",
+            latest_capture: "extract",
+            latest_summary: "Example page body",
+            latest_artifact_provenance: {
+              artifact_handle: "seraph://browser-sessions/bs-live-1/bs-live-1:1/abc123",
+              artifact_body_digest: "abc123",
+              raw_artifact_body_exposed: false,
+            },
+            control_events: [],
+            updated_at: "2026-06-18T12:00:00Z",
+          },
+        ],
+      },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
+    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 degraded · no quarantine/i);
+    expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
+    expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
+    expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);
+    expect(browserControls).toHaveTextContent(/seraph:\/\/browser-sessions\/bs-live-1/i);
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(within(browserControls).getByRole("button", { name: "replay" }));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("degraded local-fallback"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/operator/browser-computer-use-control/actions"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"session_id":"bs-live-1"'),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/operator/browser-computer-use-control/actions"),
+        expect.objectContaining({
+          body: expect.stringContaining('"acknowledge_degraded_fallback":true'),
+        }),
+      ),
+    );
+  });
+
+  it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        return Promise.resolve(mockResponse({ detail: "approval_context_changed" }, false, 409));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([{ id: "session-2", title: "Atlas thread" }]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "test",
+          build_id: "test",
+          provider: "test",
+          model: "test",
+          model_label: "test",
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/brief.md"],
+                  error_summary: "write_file blocked by approval",
+                  is_recoverable: true,
+                },
+              ],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: ["write_file"],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              checkpoint_context_available: true,
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    useCockpitLayoutStore.setState({
+      paneVisibility: {
+        ...getDefaultPaneVisibility("default"),
+        workflows_pane: true,
+      },
+      savedPaneVisibility: {
+        default: {
+          ...getDefaultPaneVisibility("default"),
+          workflows_pane: true,
+        },
+      },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const timelineTitle = await screen.findByText("Workflow timeline");
+    const timeline = timelineTitle.closest(".cockpit-window");
+    expect(timeline).not.toBeNull();
+    const workflowRow = await within(timeline as HTMLElement).findByText("web-brief-to-file");
+    const row = workflowRow.closest(".cockpit-row");
+    expect(row).not.toBeNull();
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Retry step" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/workflows/runs/root-1/control"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"action":"retry"'),
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Live recovery control refused web-brief-to-file: approval_context_changed")).toBeInTheDocument(),
+    );
+    expect(screen.queryByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).not.toBeInTheDocument();
+  });
+
+  it("renders degraded revoked extension state with rollback unavailable and guarded alternatives", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      extensions: {
+        extensions: [
+          {
+            id: "seraph.revoked",
+            display_name: "Revoked Device Bridge Pack",
+            version: "0.4.0",
+            kind: "extension_pack",
+            trust: "workspace",
+            source: "workspace",
+            location: "workspace",
+            status: "revoked",
+            revocation_state: "revoked",
+            review_state: "required",
+            publisher: { name: "Bridge Ops" },
+            compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+            diagnostics_summary: {
+              issue_count: 1,
+              error_issue_count: 1,
+              warning_issue_count: 0,
+              load_error_count: 1,
+              degraded_contribution_count: 1,
+              degraded_connector_count: 1,
+              state_counts: { revoked: 1, degraded: 1 },
+              highlighted_messages: ["device pairing was revoked"],
+            },
+            issues: [
+              {
+                code: "connector_revoked",
+                severity: "error",
+                message: "Device connector is revoked",
+                contribution_type: "node_adapters",
+              },
+            ],
+            load_errors: [
+              {
+                source: "connectors/device.yaml",
+                phase: "load",
+                message: "Cannot load revoked connector",
+                details: [],
+              },
+            ],
+            permission_summary: {
+              status: "missing_permissions",
+              ok: false,
+              required: {},
+              missing: { network: true, tools: ["device_reach"], execution_boundaries: ["device_boundary"] },
+              risk_level: "high",
+            },
+            approval_profile: {
+              requires_runtime_approval: true,
+              runtime_behavior: "always",
+              requires_lifecycle_approval: true,
+              lifecycle_boundaries: ["device_boundary"],
+              risk_level: "high",
+            },
+            connector_summary: { total: 1, ready: 0, states: { revoked: 1 } },
+            disable_supported: true,
+            removable: true,
+            enable_supported: false,
+            enabled_scope: "extension",
+            configurable: true,
+            metadata_supported: true,
+            config_scope: "extension",
+            contributions: [
+              {
+                type: "node_adapters",
+                reference: "connectors/device.yaml",
+                name: "Revoked phone bridge",
+                status: "revoked",
+                loaded: false,
+                enabled: false,
+                health: { state: "revoked", ready: false, enabled: false, summary: "Revoked by operator" },
+                permission_profile: {
+                  status: "missing_permissions",
+                  requires_network: true,
+                  missing_network: true,
+                  requires_approval: true,
+                  approval_behavior: "always",
+                  missing_tools: ["device_reach"],
+                  missing_execution_boundaries: ["device_boundary"],
+                },
+              },
+            ],
+            studio_files: [
+              {
+                key: "manifest",
+                role: "manifest",
+                reference: "manifest.yaml",
+                label: "manifest.yaml",
+                display_type: "manifest",
+                format: "yaml",
+                editable: true,
+                save_supported: true,
+                validation_supported: true,
+                loaded: true,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    expect(within(consoleRegion).getByText("Revoked Device Bridge Pack")).toBeInTheDocument();
+    expect(consoleRegion).toHaveTextContent(/revoked · review required/i);
+    expect(consoleRegion).toHaveTextContent(/revoked · lifecycle actions blocked/i);
+    expect(consoleRegion).toHaveTextContent(/rollback unavailable · no backend receipt/i);
+    expect(consoleRegion).toHaveTextContent(/error: Device connector is revoked/i);
+    expect(consoleRegion).toHaveTextContent(/missing network, 1 tool, 1 boundary/i);
+    expect(within(consoleRegion).getByRole("button", { name: "rollback unavailable" })).toBeDisabled();
+    expect(within(consoleRegion).getByRole("button", { name: "review" })).toBeEnabled();
+    expect(within(consoleRegion).queryByRole("button", { name: "disable via studio" })).not.toBeInTheDocument();
+    expect(within(consoleRegion).queryByRole("button", { name: "remove via studio" })).not.toBeInTheDocument();
+  });
+
+  it("runs governed extension console quarantine as a live backend action", async () => {
+    const extensionsPayload = {
+      extensions: [
+        {
+          id: "seraph.live-pack",
+          display_name: "Live Pack",
+          version: "1.0.0",
+          kind: "capability-pack",
+          trust: "local",
+          source: "workspace",
+          location: "workspace",
+          status: "ready",
+          publisher: { name: "Seraph" },
+          compatibility: { seraph: ">=0.9.0", current_version: "0.9.1", compatible: true },
+          diagnostics_summary: {
+            issue_count: 0,
+            error_issue_count: 0,
+            warning_issue_count: 0,
+            load_error_count: 0,
+            degraded_contribution_count: 0,
+            degraded_connector_count: 0,
+            state_counts: { ready: 1 },
+            highlighted_messages: [],
+          },
+          issues: [],
+          load_errors: [],
+          permission_summary: { status: "granted", ok: true, required: {}, missing: {}, risk_level: "low" },
+          connector_summary: { total: 0, ready: 0, states: {} },
+          disable_supported: true,
+          removable: true,
+          enable_supported: true,
+          enabled_scope: "extension",
+          configurable: false,
+          metadata_supported: true,
+          config_scope: "metadata_only",
+          enabled: true,
+          contributions: [],
+          studio_files: [],
+        },
+      ],
+    };
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/extensions/seraph.live-pack/quarantine")) {
+        return Promise.resolve(mockResponse({
+          status: "quarantined",
+          receipt: { id: "extension-lifecycle:seraph.live-pack:quarantine:1" },
+          extension: { display_name: "Live Pack" },
+        }));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ version: "test", build_id: "test", provider: "test", model: "test", model_label: "test" }));
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) return Promise.resolve(mockResponse({ daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" }, notifications: [], queued_insights: [], queued_insight_count: 0, recent_interventions: [], reach: { route_statuses: [] } }));
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse(extensionsPayload));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    fireEvent.click(within(consoleRegion).getByRole("button", { name: "quarantine" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.live-pack/quarantine"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining("cockpit operator quarantine"),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/Live Pack quarantine complete/i)).toBeInTheDocument();
+  });
+
   it("surfaces workflow runs in the cockpit inspector", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -72,7 +653,6 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/capabilities/overview")) {
         return Promise.resolve(
           mockResponse({
@@ -102,7 +682,13 @@ describe("CockpitView", () => {
                 tool_name: "workflow_summarize_file",
                 description: "Summarize an existing workspace file",
                 inputs: {
-                  file_path: { type: "string", description: "Workspace file", required: true },
+                  source_path: {
+                    type: "string",
+                    description: "Workspace file",
+                    required: true,
+                    artifact_input: true,
+                    artifact_types: ["markdown_document", "workspace_file"],
+                  },
                 },
                 requires_tools: ["read_file"],
                 requires_skills: [],
@@ -110,6 +696,34 @@ describe("CockpitView", () => {
                 enabled: true,
                 step_count: 1,
                 file_path: "defaults/workflows/summarize-file.json",
+                policy_modes: ["balanced", "full"],
+                execution_boundaries: ["workspace"],
+                risk_level: "low",
+                requires_approval: false,
+                approval_behavior: "direct",
+                is_available: true,
+                missing_tools: [],
+                missing_skills: [],
+              },
+              {
+                name: "annotate-image",
+                tool_name: "workflow_annotate_image",
+                description: "Annotate an image asset",
+                inputs: {
+                  image_path: {
+                    type: "string",
+                    description: "Image file",
+                    required: true,
+                    artifact_input: true,
+                    artifact_types: ["image"],
+                  },
+                },
+                requires_tools: ["read_file"],
+                requires_skills: [],
+                user_invocable: true,
+                enabled: true,
+                step_count: 1,
+                file_path: "defaults/workflows/annotate-image.json",
                 policy_modes: ["balanced", "full"],
                 execution_boundaries: ["workspace"],
                 risk_level: "low",
@@ -269,10 +883,31 @@ describe("CockpitView", () => {
                 thread_source: "session",
                 run_fingerprint: "fp-1",
                 run_identity: "session-1:workflow_web_brief_to_file:fp-1",
+                branch_kind: "retry_failed_step",
+                branch_depth: 0,
+                checkpoint_context_available: true,
                 replay_allowed: true,
                 replay_block_reason: null,
                 replay_draft: "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
                 retry_from_step_draft: "Retry workflow \"web-brief-to-file\" from step \"write_file\" with query=\"seraph\", file_path=\"notes/brief.md\".",
+                checkpoint_candidates: [
+                  {
+                    step_id: "web_search",
+                    kind: "branch_from_checkpoint",
+                    status: "succeeded",
+                    resume_supported: true,
+                    resume_draft:
+                      "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\", _seraph_resume_from_step=\"web_search\".",
+                  },
+                  {
+                    step_id: "write_file",
+                    kind: "retry_failed_step",
+                    status: "degraded",
+                    resume_supported: true,
+                    resume_draft:
+                      "Run workflow \"web-brief-to-file\" with query=\"seraph\", file_path=\"notes/brief.md\", _seraph_resume_from_step=\"write_file\".",
+                  },
+                ],
                 step_records: [
                   {
                     id: "web_search",
@@ -364,6 +999,42 @@ describe("CockpitView", () => {
                 continuity_surface: "bundle_queue",
               },
             ],
+            reach: {
+              route_statuses: [
+                {
+                  route: "live_delivery",
+                  label: "Live delivery",
+                  status: "fallback_active",
+                  selected_transport: "native_notification",
+                  repair_hint: "Keep a cockpit tab connected or route this delivery class to native notifications first.",
+                  summary: "Live delivery is falling back to native notification because no live browser session is connected for websocket delivery.",
+                },
+                {
+                  route: "alert_delivery",
+                  label: "Alert delivery",
+                  status: "ready",
+                  selected_transport: "native_notification",
+                  repair_hint: null,
+                  summary: "Alert delivery will use native notification.",
+                },
+                {
+                  route: "scheduled_delivery",
+                  label: "Scheduled delivery",
+                  status: "unavailable",
+                  selected_transport: null,
+                  repair_hint: "Reconnect the native daemon or route this delivery class to websocket first.",
+                  summary: "Scheduled delivery has no available transport.",
+                },
+                {
+                  route: "bundle_delivery",
+                  label: "Bundle delivery",
+                  status: "unavailable",
+                  selected_transport: null,
+                  repair_hint: "Reconnect the native daemon or route this delivery class to websocket first.",
+                  summary: "Bundle delivery has no available transport.",
+                },
+              ],
+            },
           }),
         );
       }
@@ -434,7 +1105,7 @@ describe("CockpitView", () => {
     expect(screen.getByText("ready · reflect_goal")).toBeInTheDocument();
     expect(screen.getByText("calendar-planning")).toBeInTheDocument();
     expect(screen.getByText("disabled · calendar_events")).toBeInTheDocument();
-    expect(screen.getByText("invocable 1/2 available")).toBeInTheDocument();
+    expect(screen.getByText("invocable 2/3 available")).toBeInTheDocument();
     expect(screen.getByText("approval 0 · blocked 1")).toBeInTheDocument();
     expect(screen.getByText("blocked web-brief-to-file")).toBeInTheDocument();
     expect(screen.getByText("tools write_file")).toBeInTheDocument();
@@ -445,6 +1116,7 @@ describe("CockpitView", () => {
     fireEvent.click(windowsMenu.closest("button") as HTMLButtonElement);
 
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
+    expect(screen.getByText(/Bundle delivery: unavailable/i)).toBeInTheDocument();
     expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Test browser" }));
     await waitFor(() =>
@@ -473,16 +1145,18 @@ describe("CockpitView", () => {
     );
     fireEvent.click(screen.getAllByText("workflow_web_brief_to_file succeeded (2 steps)")[0]);
 
-    expect(screen.getByText("Draft Boundary-Aware Rerun")).toBeInTheDocument();
-    expect(screen.getByText(/web_search succeeded · 2 web results/)).toBeInTheDocument();
+    expect(screen.getByText("Plan Boundary-Aware Rerun")).toBeInTheDocument();
+    expect(screen.getAllByText(/web_search succeeded · 2 web results/)).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "Retry step" })).toBeInTheDocument();
-    expect(screen.getByText("Use Output")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Branch web_search" })).toBeInTheDocument();
+    expect(screen.getAllByText("Use Output")).not.toHaveLength(0);
     const runButton = screen.getByRole("button", { name: "Run summarize-file" });
     expect(runButton).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run annotate-image" })).not.toBeInTheDocument();
     fireEvent.click(runButton);
     await waitFor(() =>
       expect(
-        screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/brief.md"\./),
+        screen.getByDisplayValue(/Run workflow "summarize-file" with source_path="notes\/brief.md"\./),
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByText("Dismiss"));
@@ -502,6 +1176,2503 @@ describe("CockpitView", () => {
     expect(screen.getAllByText("web-brief-to-file").length).toBeGreaterThan(0);
   }, 30000);
 
+  it("surfaces active triage for approvals, workflows, queued guardian items, and reach failures", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+          { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/approval-run/approve")) return Promise.resolve(mockResponse({ status: "approved" }));
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "approval-run",
+            session_id: "session-2",
+            thread_id: "session-2",
+            thread_label: "Atlas thread",
+            tool_name: "shell_execute",
+            risk_level: "high",
+            status: "pending",
+            summary: "Approve Atlas shell command",
+            created_at: "2026-03-18T12:03:00Z",
+            resume_message: "Continue Atlas shell approval",
+          },
+        ]));
+      }
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [
+            {
+              id: "queued-1",
+              intervention_id: null,
+              content_excerpt: "Draft Atlas follow-up",
+              intervention_type: "advisory",
+              urgency: 2,
+              reasoning: "bundle_delivery",
+              session_id: "session-2",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continuation_mode: "same_thread",
+              resume_message: "Continue Atlas queued item",
+              created_at: "2026-03-18T12:02:00Z",
+            },
+          ],
+          queued_insight_count: 1,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "degraded",
+            primary_surface: "reach",
+            recommended_focus: "Bundle delivery",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 1,
+            recent_intervention_count: 0,
+            degraded_route_count: 1,
+            degraded_source_adapter_count: 1,
+            attention_family_count: 1,
+            presence_surface_count: 4,
+            attention_presence_surface_count: 3,
+            paired_presence_surface_count: 1,
+            unpaired_presence_surface_count: 1,
+            revoked_presence_surface_count: 1,
+            blocked_device_surface_count: 2,
+          },
+          imported_reach: {
+            summary: {
+              family_count: 1,
+              active_family_count: 1,
+              attention_family_count: 1,
+              approval_family_count: 0,
+            },
+            families: [
+              {
+                type: "messaging_connectors",
+                label: "messaging",
+                total: 1,
+                installed: 1,
+                ready: 0,
+                attention: 1,
+                approval: 0,
+                packages: ["Seraph Relay Pack"],
+              },
+            ],
+          },
+          source_adapters: {
+            summary: {
+              adapter_count: 1,
+              ready_adapter_count: 0,
+              degraded_adapter_count: 1,
+              authenticated_adapter_count: 1,
+              authenticated_ready_adapter_count: 0,
+              authenticated_degraded_adapter_count: 1,
+            },
+            adapters: [
+              {
+                name: "github-managed",
+                provider: "github",
+                source_kind: "managed_connector",
+                authenticated: true,
+                runtime_state: "requires_runtime",
+                adapter_state: "degraded",
+                contracts: ["work_items.read", "code_activity.read"],
+                degraded_reason: "runtime_adapter_missing",
+                next_best_sources: [{ name: "web_search", reason: "fallback", description: "Use public context." }],
+              },
+            ],
+          },
+          presence_surfaces: {
+            summary: {
+              surface_count: 4,
+              active_surface_count: 3,
+              ready_surface_count: 1,
+              attention_surface_count: 3,
+              paired_surface_count: 1,
+              unpaired_surface_count: 1,
+              revoked_surface_count: 1,
+              blocked_device_surface_count: 2,
+            },
+            surfaces: [
+              {
+                id: "node_adapters:seraph.device:connectors/nodes/unpaired.yaml",
+                kind: "node_adapter",
+                label: "Atlas companion bridge",
+                package_label: "Seraph Device Pack",
+                package_id: "seraph.device",
+                status: "staged_link",
+                active: true,
+                ready: false,
+                attention: true,
+                detail: "Seraph Device Pack adds Atlas companion bridge for companion device reach (staged link).",
+                repair_hint: null,
+                follow_up_hint: null,
+                follow_up_prompt: null,
+                transport: null,
+                source_type: null,
+                boundary_posture: "device_boundary",
+                boundary_scope: "companion_device",
+                trust_state: "not_trusted",
+                pairing_state: "unpaired",
+                revocation_state: "none",
+                device_reach_allowed: false,
+                blocked_reason: "device is not paired",
+              },
+              {
+                id: "node_adapters:seraph.device:connectors/nodes/revoked.yaml",
+                kind: "node_adapter",
+                label: "Revoked phone bridge",
+                package_label: "Seraph Device Pack",
+                package_id: "seraph.device",
+                status: "staged_link",
+                active: true,
+                ready: false,
+                attention: true,
+                detail: "Seraph Device Pack adds Revoked phone bridge for companion device reach (staged link).",
+                repair_hint: null,
+                follow_up_hint: "Use operator review before routing companion or device follow-through through this surface.",
+                follow_up_prompt: "Plan guarded companion follow-through via Revoked phone bridge.",
+                transport: null,
+                source_type: null,
+                boundary_posture: "device_boundary",
+                boundary_scope: "phone_device",
+                trust_state: "revoked",
+                pairing_state: "paired",
+                revocation_state: "revoked",
+                device_reach_allowed: false,
+                blocked_reason: "device pairing was revoked",
+              },
+              {
+                id: "messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+                kind: "messaging_connector",
+                label: "Telegram relay",
+                package_label: "Seraph Relay Pack",
+                package_id: "seraph.relay",
+                status: "requires_config",
+                active: false,
+                ready: false,
+                attention: true,
+                detail: "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+                repair_hint: "Finish connector configuration in the operator surface before routing follow-through here.",
+                follow_up_hint: null,
+                follow_up_prompt: null,
+                transport: null,
+                source_type: null,
+              },
+              {
+                id: "channel_adapters:seraph.native:channels/native.yaml",
+                kind: "channel_adapter",
+                label: "native notification channel",
+                package_label: "Seraph Native Pack",
+                package_id: "seraph.native",
+                status: "ready",
+                active: true,
+                ready: true,
+                attention: false,
+                detail: "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+                repair_hint: null,
+                follow_up_hint: "Use operator review before routing external follow-through through this surface.",
+                follow_up_prompt: "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+                transport: "native_notification",
+                source_type: null,
+                boundary_posture: "channel_boundary",
+                boundary_scope: "native_notification",
+                trust_state: "local_daemon",
+              },
+            ],
+          },
+          threads: [
+            {
+              id: "thread:session-2",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              thread_source: "session",
+              continuation_mode: "resume_thread",
+              continue_message: "Continue Atlas queued item",
+              item_count: 1,
+              pending_notification_count: 0,
+              queued_insight_count: 1,
+              recent_intervention_count: 0,
+              latest_updated_at: "2026-03-18T12:02:00Z",
+              primary_surface: "bundle_queue",
+              surfaces: ["bundle_queue"],
+              summary: "1 continuity item across bundle queue for Atlas thread.",
+              open_thread_available: true,
+            },
+          ],
+          recovery_actions: [
+            {
+              id: "route:bundle_delivery",
+              kind: "reach_repair",
+              label: "Repair Bundle delivery",
+              detail: "Bundle delivery waiting on browser reconnect",
+              status: "unavailable",
+              surface: "reach",
+              route: "bundle_delivery",
+              repair_hint: "Keep a cockpit tab connected.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "followup:thread:session-2",
+              kind: "thread_follow_up",
+              label: "Continue Atlas thread",
+              detail: "1 continuity item across bundle queue for Atlas thread.",
+              status: "actionable",
+              surface: "bundle_queue",
+              route: null,
+              repair_hint: null,
+              thread_id: "session-2",
+              continue_message: "Continue Atlas queued item",
+              open_thread_available: true,
+            },
+            {
+              id: "source:github-managed",
+              kind: "source_adapter_repair",
+              label: "Restore source adapter github-managed",
+              detail: "github adapter is degraded (runtime_adapter_missing).",
+              status: "degraded",
+              surface: "source_adapter",
+              route: null,
+              repair_hint: "Next best: web_search.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "presence:messaging_connectors:seraph.relay:connectors/messaging/telegram.yaml",
+              kind: "presence_repair",
+              label: "Review presence surface Telegram relay",
+              detail: "Seraph Relay Pack exposes Telegram relay on telegram (requires config).",
+              status: "requires_config",
+              surface: "presence",
+              route: "messaging_connector",
+              repair_hint: "Finish connector configuration in the operator surface before routing follow-through here.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "imported:messaging_connectors",
+              kind: "imported_reach_attention",
+              label: "Review imported messaging",
+              detail: "1 imported contribution needs attention across 1 package.",
+              status: "attention",
+              surface: "imported_reach",
+              route: null,
+              repair_hint: "Inspect Seraph Relay Pack in the operator surface.",
+              thread_id: null,
+              continue_message: null,
+              open_thread_available: false,
+            },
+            {
+              id: "presence-follow:channel_adapters:seraph.native:channels/native.yaml",
+              kind: "presence_follow_up",
+              label: "Plan follow-up via native notification channel",
+              detail: "Seraph Native Pack exposes native notification channel for native notification delivery (ready).",
+              status: "ready",
+              surface: "presence",
+              route: "channel_adapter",
+              repair_hint: "Use operator review before routing external follow-through through this surface.",
+              thread_id: null,
+              continue_message: "Plan guarded follow-through for native notification channel. Confirm the audience, target reference, channel scope, and approval boundaries before acting.",
+              open_thread_available: false,
+              boundary_posture: "channel_boundary",
+              boundary_scope: "native_notification",
+              trust_state: "local_daemon",
+              device_reach_allowed: null,
+            },
+            {
+              id: "presence-follow:node_adapters:seraph.device:connectors/nodes/revoked.yaml",
+              kind: "presence_follow_up",
+              label: "Plan follow-up via Revoked phone bridge",
+              detail: "Seraph Device Pack adds Revoked phone bridge for companion device reach (staged link).",
+              status: "ready",
+              surface: "presence",
+              route: "node_adapter",
+              repair_hint: "Use operator review before routing companion or device follow-through through this surface.",
+              thread_id: null,
+              continue_message: "Plan guarded companion follow-through via Revoked phone bridge.",
+              open_thread_available: false,
+              boundary_posture: "device_boundary",
+              boundary_scope: "phone_device",
+              trust_state: "revoked",
+              pairing_state: "paired",
+              revocation_state: "revoked",
+              device_reach_allowed: false,
+              blocked_reason: "device pairing was revoked",
+            },
+          ],
+          reach: {
+            route_statuses: [
+              {
+                route: "bundle_delivery",
+                label: "Bundle delivery",
+                status: "unavailable",
+                summary: "Bundle delivery waiting on browser reconnect",
+                selected_transport: "websocket",
+                repair_hint: "Keep a cockpit tab connected.",
+              },
+            ],
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 2,
+            workflows_total: 2,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [
+            {
+              name: "web-brief-to-file",
+              tool_name: "workflow_web_brief_to_file",
+              description: "Write a brief into a workspace file",
+              inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+              requires_tools: ["write_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/web-brief-to-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read", "workspace_write"],
+              risk_level: "medium",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+              output_surface_artifact_types: ["markdown_document"],
+            },
+            {
+              name: "summarize-file",
+              tool_name: "workflow_summarize_file",
+              description: "Summarize a workspace file",
+              inputs: {
+                file_path: {
+                  type: "string",
+                  description: "Workspace file",
+                  required: true,
+                  artifact_input: true,
+                  artifact_types: ["markdown_document", "workspace_file"],
+                },
+              },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/summarize-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+            },
+          ],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs/") && url.includes("/control")) {
+        const body = typeof init?.body === "string" ? init.body : "";
+        if (body.includes('"action":"resume"')) {
+          const continueMessage = url.includes("branch-1")
+            ? "Continue Atlas branch"
+            : "Continue Atlas workflow";
+          return Promise.resolve(mockResponse({
+            status: "recorded",
+            action: "resume",
+            external_action_allowed: false,
+            resume_plan: {
+              continue_message: continueMessage,
+              resume_checkpoint_label: "approval gate",
+            },
+          }));
+        }
+        return Promise.resolve(mockResponse({
+          status: "recorded",
+          action: "retry",
+          external_action_allowed: false,
+          resume_plan: {
+            draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+            resume_checkpoint_label: "write_file",
+          },
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/brief.md"],
+                  error_summary: "write_file blocked by approval",
+                  recovery_hint: "Approve the pending write step and continue the workflow.",
+                  recovery_actions: [{ type: "set_tool_policy", label: "Allow write_file", name: "write_file", mode: "full" }],
+                  is_recoverable: true,
+                },
+              ],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: ["write_file"],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+              thread_continue_message: "Continue Atlas workflow",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              checkpoint_context_available: true,
+            },
+            {
+              id: "run-branch",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "running",
+              started_at: "2026-03-18T12:05:00Z",
+              updated_at: "2026-03-18T12:06:00Z",
+              summary: "workflow_web_brief_to_file branch running",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/branch-brief.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas branch",
+              run_identity: "branch-1",
+              parent_run_identity: "root-1",
+              root_run_identity: "root-1",
+            },
+            {
+              id: "run-repair",
+              tool_name: "workflow_atlas_repair",
+              workflow_name: "atlas-repair",
+              session_id: "session-2",
+              status: "failed",
+              started_at: "2026-03-18T11:55:00Z",
+              updated_at: "2026-03-18T12:01:00Z",
+              summary: "workflow_atlas_repair blocked before replay",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: [],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: false,
+              replay_block_reason: "policy_boundary",
+              replay_recommended_actions: [{ type: "set_tool_policy", label: "Allow write_file", name: "write_file", mode: "full" }],
+              run_identity: "repair-1",
+              root_run_identity: "repair-1",
+            },
+            {
+              id: "run-complete",
+              tool_name: "workflow_summarize_file",
+              workflow_name: "summarize-file",
+              session_id: "session-2",
+              status: "succeeded",
+              started_at: "2026-03-18T12:06:00Z",
+              updated_at: "2026-03-18T12:07:00Z",
+              summary: "workflow_summarize_file saved final note",
+              step_tools: ["read_file"],
+              step_records: [],
+              artifact_paths: ["notes/final.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas summary",
+              run_identity: "complete-1",
+              root_run_identity: "complete-1",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 2,
+            workflow_count: 4,
+            active_workflows: 1,
+            blocked_workflows: 1,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 1,
+          },
+          sessions: [
+            {
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              workflow_count: 3,
+              active_workflows: 1,
+              blocked_workflows: 1,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 1,
+              latest_updated_at: "2026-03-18T12:06:00Z",
+              lead_run_identity: "root-1",
+              lead_workflow_name: "web-brief-to-file",
+              lead_status: "degraded",
+              lead_summary: "workflow_web_brief_to_file failed at write_file",
+              continue_message: "Continue Atlas workflow",
+              lead_step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+            {
+              thread_id: null,
+              thread_label: null,
+              workflow_count: 1,
+              active_workflows: 0,
+              blocked_workflows: 0,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 0,
+              latest_updated_at: "2026-03-18T12:01:00Z",
+              lead_run_identity: null,
+              lead_workflow_name: "cleanup",
+              lead_status: "running",
+              lead_summary: "Ambient cleanup scan",
+              continue_message: null,
+              lead_step_focus: {
+                kind: "active",
+                step_id: "scan",
+                tool: "read_file",
+                status: "running",
+                summary: "Scanning workspace files",
+                recovery_action_count: 0,
+                is_recoverable: false,
+              },
+            },
+          ],
+          workflows: [
+            {
+              run_identity: "root-1",
+              workflow_name: "web-brief-to-file",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              status: "degraded",
+              availability: "attention",
+              updated_at: "2026-03-18T12:04:00Z",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continue_message: "Continue Atlas workflow",
+              output_path: "notes/brief.md",
+              pending_approval_count: 0,
+              checkpoint_candidate_count: 1,
+              retry_from_step_available: true,
+              replay_block_reason: null,
+              step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const m7Board = await screen.findByLabelText("M7 command board");
+    await waitFor(() => {
+      expect(within(m7Board).getByText("active work")).toBeInTheDocument();
+      expect(within(m7Board).getByText("2 active · 0 paused")).toBeInTheDocument();
+      expect(within(m7Board).getByText("trust")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/4 boundaries · approval high_risk/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText("approvals")).toBeInTheDocument();
+      expect(within(m7Board).getByText("1 pending · 1 hot")).toBeInTheDocument();
+      expect(within(m7Board).getByText("memory evidence")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/0 receipts · unknown/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText("tool calls")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/0 calls · 0 failures/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText("artifacts")).toBeInTheDocument();
+      expect(within(m7Board).getByText("0 files · notes/brief.md")).toBeInTheDocument();
+      expect(within(m7Board).getByText("next action")).toBeInTheDocument();
+      expect(within(m7Board).getByText("approval: shell_execute")).toBeInTheDocument();
+      expect(within(m7Board).getByText(/artifact notes\/brief.md/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/boundary Atlas companion bridge/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/approve direct backend control/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/repair routed or policy gated control/i)).toBeInTheDocument();
+      expect(within(m7Board).getByText(/branch operator draft control/i)).toBeInTheDocument();
+    });
+    expect(m7Board.querySelector(".cockpit-m7-signal-grid")).not.toBeNull();
+    expect(m7Board.querySelector(".cockpit-m7-control-strip")).not.toBeNull();
+    expect(within(m7Board).getByLabelText("M7 fast controls")).toBeInTheDocument();
+    expect(within(m7Board).getByRole("button", { name: "Approve top M7 approval" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Deny top M7 approval" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Pause active M7 work" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Resume paused M7 work" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Retry primary M7 workflow" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Repair primary M7 workflow" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Open primary M7 branch" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Compare primary M7 outputs" })).toBeEnabled();
+    expect(within(m7Board).getByRole("button", { name: "Revoke M7 reach target" })).toBeEnabled();
+    fireEvent.click(within(m7Board).getByRole("button", { name: "Pause active M7 work" }));
+    await waitFor(() => expect(screen.getByDisplayValue(/Pause active Seraph work/)).toBeInTheDocument());
+    fireEvent.click(within(m7Board).getByRole("button", { name: "Resume paused M7 work" }));
+    await waitFor(() => expect(screen.getByDisplayValue(/Resume paused Seraph work/)).toBeInTheDocument());
+    fireEvent.click(within(m7Board).getByRole("button", { name: "Revoke M7 reach target" }));
+    await waitFor(() => expect(screen.getByDisplayValue(/Review and revoke reach for "Atlas companion bridge"/)).toBeInTheDocument());
+
+    const triage = await screen.findByLabelText("Active triage");
+    await waitFor(() => {
+      expect(within(triage).getByText("approval: shell_execute")).toBeInTheDocument();
+      expect(within(triage).getByText("awaiting approval · Approve Atlas shell command")).toBeInTheDocument();
+      expect(within(triage).getByText("workflow degraded: web-brief-to-file")).toBeInTheDocument();
+      expect(within(triage).getByText("workflow running: web-brief-to-file")).toBeInTheDocument();
+      expect(within(triage).getByText("workflow failed: atlas-repair")).toBeInTheDocument();
+      expect(within(triage).getByText("degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
+      expect(within(triage).getByText("queued: advisory")).toBeInTheDocument();
+      expect(within(triage).getByText("queued follow-up · Draft Atlas follow-up")).toBeInTheDocument();
+      expect(within(triage).getByText("reach: Bundle delivery")).toBeInTheDocument();
+      expect(within(triage).getByText("unavailable · Bundle delivery waiting on browser reconnect")).toBeInTheDocument();
+      expect(within(triage).getAllByRole("button", { name: /Inspect latest branch for workflow .*: web-brief-to-file/ })).toHaveLength(1);
+    });
+    expect(within(triage).queryByText("workflow: summarize-file")).not.toBeInTheDocument();
+
+    const supervision = await screen.findByLabelText("Workflow supervision");
+    await waitFor(() => {
+      expect(within(supervision).getByText("workflow: summarize-file")).toBeInTheDocument();
+      expect(within(supervision).getByText("completed · workflow_summarize_file saved final note")).toBeInTheDocument();
+      expect(within(supervision).getByText(/history 1 outputs/i)).toBeInTheDocument();
+    });
+
+    const orchestration = await screen.findByLabelText("Workflow orchestration");
+    await waitFor(() => {
+      expect(within(orchestration).getByText("4 workflows · 2 sessions · 0 compacted")).toBeInTheDocument();
+      expect(within(orchestration).getByText("Atlas thread")).toBeInTheDocument();
+      expect(within(orchestration).getByText("web-brief-to-file · degraded · workflow_web_brief_to_file failed at write_file")).toBeInTheDocument();
+      expect(within(orchestration).getByText("Ambient workflows")).toBeInTheDocument();
+      expect(within(orchestration).getByText("cleanup · running · Ambient cleanup scan")).toBeInTheDocument();
+    });
+
+    const orchestrationRow = within(orchestration).getByText("Atlas thread").closest(".cockpit-operator-row--entry");
+    expect(orchestrationRow).not.toBeNull();
+    expect(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Continue workflow orchestration for Atlas thread" })).toBeInTheDocument();
+    expect(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    fireEvent.click(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Continue workflow orchestration for Atlas thread" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas workflow")).toBeInTheDocument());
+    fireEvent.click(within(orchestrationRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+
+    const approvalRow = within(triage).getByText("approval: shell_execute").closest(".cockpit-operator-row--entry");
+    expect(approvalRow).not.toBeNull();
+    fireEvent.click(within(approvalRow as HTMLElement).getByRole("button", { name: "Approve approval: shell_execute" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run/approve"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    const workflowRow = within(triage).getByText("workflow degraded: web-brief-to-file").closest(".cockpit-operator-row--entry");
+    expect(workflowRow).not.toBeNull();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Retry step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Repair step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Open best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Continue best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getByRole("button", { name: "Compare best continuation for workflow degraded: web-brief-to-file" })).toBeInTheDocument();
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow degraded: web-brief-to-file" }));
+    await waitFor(() => expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument());
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Retry step for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/workflows/runs/root-1/control"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"action":"retry"'),
+        }),
+      ),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Repair step for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Compare best continuation for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/brief.md" and "notes/branch-brief.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Review workflow family state for "web-brief-to-file". Current output: "notes/brief.md". Best continuation: "workflow_web_brief_to_file branch running" with latest output "notes/branch-brief.md" Latest family failure: "workflow_web_brief_to_file failed at write_file". Related reusable outputs: "notes/branch-brief.md". Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Continue best continuation for workflow degraded: web-brief-to-file" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas branch")).toBeInTheDocument());
+
+    fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Open best continuation for workflow degraded: web-brief-to-file" }));
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
+    );
+    expect(screen.getByText("parent run")).toBeInTheDocument();
+
+    const runningWorkflowRow = within(triage).getByText("workflow running: web-brief-to-file").closest(".cockpit-operator-row--entry");
+    expect(runningWorkflowRow).not.toBeNull();
+    expect(within(runningWorkflowRow as HTMLElement).getByRole("button", { name: "Use failure context for workflow running: web-brief-to-file" })).toBeInTheDocument();
+    expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Open best continuation for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
+    expect(within(runningWorkflowRow as HTMLElement).queryByRole("button", { name: "Retry step for workflow running: web-brief-to-file" })).not.toBeInTheDocument();
+
+    const supervisionRow = within(supervision).getByText("workflow: summarize-file").closest(".cockpit-operator-row--entry");
+    expect(supervisionRow).not.toBeNull();
+    expect(within(supervisionRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow supervision summarize-file" })).toBeInTheDocument();
+    expect(within(supervisionRow as HTMLElement).getByRole("button", { name: "Draft next step for workflow supervision summarize-file" })).toBeInTheDocument();
+    fireEvent.click(within(supervisionRow as HTMLElement).getByRole("button", { name: "Use latest output for workflow supervision summarize-file" }));
+    await waitFor(() => expect(screen.getByDisplayValue('Use the workspace file "notes/final.md" as context for the next action.')).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "F", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Current failure: write_file blocked by approval\./),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "T", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Retry step "write_file" for workflow "web-brief-to-file".')).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "H", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
+    );
+
+    fireEvent.keyDown(window, { key: "L", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
+    );
+    expect(screen.getByText("parent run")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "B", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file branch running"),
+    );
+
+    fireEvent.keyDown(window, { key: "N", shiftKey: true });
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas branch")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "G", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/brief.md" and "notes/branch-brief.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    const blockedWorkflowRow = within(triage).getByText("workflow failed: atlas-repair").closest(".cockpit-operator-row--entry");
+    expect(blockedWorkflowRow).not.toBeNull();
+    expect(within(blockedWorkflowRow as HTMLElement).getByRole("button", { name: "Repair replay for workflow failed: atlas-repair" })).toBeInTheDocument();
+    expect(within(blockedWorkflowRow as HTMLElement).queryByRole("button", { name: "Retry step for workflow failed: atlas-repair" })).not.toBeInTheDocument();
+    fireEvent.click(within(blockedWorkflowRow as HTMLElement).getByRole("button", { name: "Repair replay for workflow failed: atlas-repair" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/tool-policy-mode"),
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+
+    const queuedRow = within(triage).getByText("queued: advisory").closest(".cockpit-operator-row--entry");
+    expect(queuedRow).not.toBeNull();
+    fireEvent.click(within(queuedRow as HTMLElement).getByRole("button", { name: "Continue queued: advisory" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas queued item")).toBeInTheDocument());
+
+    const routeRow = within(triage).getByText("reach: Bundle delivery").closest(".cockpit-operator-row--entry");
+    expect(routeRow).not.toBeNull();
+    fireEvent.click(within(routeRow as HTMLElement).getByRole("button", { name: "Open desktop shell for reach: Bundle delivery" }));
+    await waitFor(() => expect(screen.getByText("Desktop shell")).toBeInTheDocument());
+    expect(screen.getByText(/continuity degraded · threads 1 · ambient 0/i)).toBeInTheDocument();
+    expect(screen.getByText(/typed adapters 0\/1 ready · authenticated 0\/1/i)).toBeInTheDocument();
+    expect(screen.getByText(/presence 1\/4 ready · 3 attention · 1 paired · 1 unpaired · 1 revoked · 2 blocked reach/i)).toBeInTheDocument();
+    expect(screen.getByText(/Atlas companion bridge: staged link · Seraph Device Pack · boundary device boundary · scope companion device · trust not trusted · pairing unpaired · revocation none · device reach blocked: device is not paired/i)).toBeInTheDocument();
+    expect(screen.getByText(/Revoked phone bridge: staged link · Seraph Device Pack · boundary device boundary · scope phone device · trust revoked · pairing paired · revocation revoked · device reach blocked: device pairing was revoked/i)).toBeInTheDocument();
+    expect(screen.getByText(/imported reach 1\/1 active · 1 attention/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Draft repair" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Continue" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Open Thread" }).length).toBeGreaterThan(0);
+
+    const sourceRow = within(triage).getByText("reach: Restore source adapter github-managed").closest(".cockpit-operator-row--entry");
+    expect(sourceRow).not.toBeNull();
+    expect(within(sourceRow as HTMLElement).getByRole("button", { name: "Draft repair for reach: Restore source adapter github-managed" })).toBeInTheDocument();
+    expect(within(sourceRow as HTMLElement).getByRole("button", { name: "Open operator surface for reach: Restore source adapter github-managed" })).toBeInTheDocument();
+    fireEvent.click(within(sourceRow as HTMLElement).getByRole("button", { name: "Draft repair for reach: Restore source adapter github-managed" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review restore source adapter github-managed/i),
+      ).toBeInTheDocument(),
+    );
+
+    const followUpDesktopRow = screen.getByText("Plan follow-up via native notification channel").closest(".cockpit-row");
+    expect(followUpDesktopRow).not.toBeNull();
+    fireEvent.click(within(followUpDesktopRow as HTMLElement).getByRole("button", { name: "Draft follow-up" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Plan guarded follow-through for native notification channel/i)).toBeInTheDocument(),
+    );
+
+    const revokedFollowUpRow = screen.getByText("Plan follow-up via Revoked phone bridge").closest(".cockpit-row");
+    expect(revokedFollowUpRow).not.toBeNull();
+    expect(within(revokedFollowUpRow as HTMLElement).getByText(/follow-up blocked/i)).toBeInTheDocument();
+    expect(within(revokedFollowUpRow as HTMLElement).queryByRole("button", { name: "Draft follow-up" })).not.toBeInTheDocument();
+  }, 45000);
+
+  it("keeps workflow-orchestration controls when the lead run only exists in the orchestration payload", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "healthy",
+            primary_surface: "workspace",
+            recommended_focus: "workflow orchestration",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 0,
+            attention_presence_surface_count: 0,
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: {
+            workspace_mode: "single_operator_guarded_workspace",
+            review_posture: "guarded",
+            approval_mode: "high_risk",
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            delegation_enabled: false,
+            roles: [],
+          },
+          usage: {
+            window_hours: 24,
+            llm_call_count: 0,
+            llm_cost_usd: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            user_triggered_llm_calls: 0,
+            autonomous_llm_calls: 0,
+            failure_count: 0,
+            pending_approvals: 0,
+            active_workflows: 1,
+            blocked_workflows: 0,
+          },
+          runtime_posture: {
+            runtime: {
+              version: "2026.4.10",
+              build_id: "SERAPH_PRIME_v2026.4.10",
+              provider: "openrouter",
+              model: "openrouter/openai/gpt-4.1-mini",
+              model_label: "gpt-4.1-mini",
+            },
+            extensions: {
+              total: 0,
+              ready: 0,
+              degraded: 0,
+              governed: 0,
+              issue_count: 0,
+              degraded_connector_count: 0,
+            },
+            continuity: {
+              continuity_health: "healthy",
+              primary_surface: "workspace",
+              recommended_focus: "workflow orchestration",
+              actionable_thread_count: 1,
+              degraded_route_count: 0,
+              degraded_source_adapter_count: 0,
+              attention_presence_surface_count: 0,
+            },
+          },
+          handoff: {
+            pending_approvals: [],
+            blocked_workflows: [],
+            follow_ups: [],
+            review_receipts: [],
+          },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 1,
+            workflow_count: 2,
+            active_workflows: 1,
+            blocked_workflows: 0,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 1,
+            long_running_workflows: 1,
+            compacted_workflows: 1,
+            total_step_count: 5,
+            compacted_step_count: 2,
+            boundary_blocked_workflows: 0,
+            repair_ready_workflows: 1,
+            branch_ready_workflows: 2,
+            stalled_workflows: 0,
+            output_debugger_ready_workflows: 2,
+            attention_sessions: 1,
+          },
+          sessions: [
+            {
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              workflow_count: 2,
+              active_workflows: 1,
+              blocked_workflows: 0,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 1,
+              latest_updated_at: "2026-03-18T12:06:00Z",
+              lead_run_identity: "root-1",
+              lead_workflow_name: "web-brief-to-file",
+              lead_status: "degraded",
+              lead_summary: "workflow_web_brief_to_file failed at write_file",
+              continue_message: "Continue Atlas workflow",
+              total_step_count: 0,
+              compacted_step_count: 0,
+              compacted_workflow_count: 1,
+              long_running_workflow_count: 0,
+              artifact_count: 0,
+              lead_state_capsule: null,
+              boundary_blocked_workflows: 0,
+              repair_ready_workflows: 1,
+              branch_ready_workflows: 2,
+              stalled_workflows: 0,
+              output_debugger_ready_workflows: 2,
+              queue_state: "repair_ready",
+              queue_position: 1,
+              queue_reason: "1 workflow exposes a recoverable failed step that can be repaired now.",
+              attention_summary: "1 repair ready · 2 branch ready · 2 debugger ready",
+              queue_draft: "Review the workflow queue for Atlas thread. Lead workflow \"web-brief-to-file\" is currently repair ready.",
+              handoff_draft: "Prepare a workflow handoff for Atlas thread. Lead workflow \"web-brief-to-file\" is currently repair ready.",
+              lead_recommended_recovery_path: "step_repair",
+              lead_output_path: "notes/brief.md",
+              lead_related_output_paths: ["notes/brief-branch.md"],
+              lead_output_history: [
+                {
+                  path: "notes/brief-branch.md",
+                  run_identity: "root-1:branch-1",
+                  summary: "Branched repair completed",
+                  status: "succeeded",
+                  branch_kind: "branch_from_checkpoint",
+                  updated_at: "2026-03-18T12:06:00Z",
+                  is_primary: false,
+                },
+                {
+                  path: "notes/brief.md",
+                  run_identity: "root-1",
+                  summary: "workflow_web_brief_to_file failed at write_file",
+                  status: "degraded",
+                  branch_kind: null,
+                  updated_at: "2026-03-18T12:04:00Z",
+                  is_primary: true,
+                },
+              ],
+              lead_latest_branch_run_identity: "root-1:branch-1",
+              lead_latest_branch_summary: "Branched repair completed",
+              lead_step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+            },
+          ],
+          workflows: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              parent_run_identity: null,
+              workflow_name: "web-brief-to-file",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              status: "degraded",
+              availability: "ready",
+              session_id: "session-2",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continue_message: "Continue Atlas workflow",
+              thread_continue_message: "Continue Atlas workflow",
+              output_path: "notes/brief.md",
+              artifact_paths: ["notes/brief.md"],
+              step_records: [
+                {
+                  id: "scope",
+                  index: 0,
+                  tool: "session_search",
+                  status: "succeeded",
+                  result_summary: "Scoped existing brief context",
+                },
+                {
+                  id: "collect",
+                  index: 1,
+                  tool: "web_search",
+                  status: "succeeded",
+                  result_summary: "Collected source material",
+                },
+                {
+                  id: "outline",
+                  index: 2,
+                  tool: "llm_plan",
+                  status: "succeeded",
+                  result_summary: "Outlined the brief",
+                },
+                {
+                  id: "write_file",
+                  index: 3,
+                  tool: "write_file",
+                  status: "failed",
+                  error_summary: "write_file blocked by approval",
+                  recovery_hint: "Approve the pending write step and continue the workflow.",
+                  recovery_actions: [{ type: "set_tool_policy", label: "Allow write_file", mode: "full" }],
+                  is_recoverable: true,
+                },
+                {
+                  id: "notify",
+                  index: 4,
+                  tool: "notify_user",
+                  status: "pending",
+                  result_summary: "Queue follow-up notification",
+                },
+              ],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 1,
+              checkpoint_candidates: [{ step_id: "collect", label: "collect" }],
+              retry_from_step_available: true,
+              retry_from_step_draft: 'Retry step "write_file" for workflow "web-brief-to-file".',
+              replay_allowed: true,
+              replay_block_reason: null,
+              replay_recommended_actions: [],
+              step_focus: {
+                kind: "failure",
+                step_id: "write_file",
+                tool: "write_file",
+                status: "failed",
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve the pending write step and continue the workflow.",
+                recovery_action_count: 1,
+                is_recoverable: true,
+              },
+              is_long_running: true,
+              is_compacted: true,
+              duration_minutes: 37,
+              step_count: 5,
+              visible_step_count: 3,
+              compacted_step_count: 2,
+              artifact_count: 1,
+              preserved_recovery_paths: ["retry_from_step", "checkpoint_branch", "step_repair"],
+              recent_step_labels: [
+                "outline / llm_plan / succeeded",
+                "write_file / write_file / failed",
+                "notify / notify_user / pending",
+              ],
+              state_capsule: "5 steps · 2 compacted · 1 artifact · preserves retry from step, checkpoint branch, step repair",
+              recovery_density: {
+                recommended_path: "step_repair",
+                approval_pending: false,
+                boundary_blocked: false,
+                retry_ready: true,
+                checkpoint_ready: true,
+                repair_ready: true,
+                branch_ready: true,
+                replay_ready: true,
+                stalled: false,
+                checkpoint_candidate_count: 1,
+                recovery_action_count: 1,
+                repair_action_types: ["set_tool_policy"],
+                repair_hint: "Approve the pending write step and continue the workflow.",
+                failure_step_id: "write_file",
+                failure_step_tool: "write_file",
+              },
+              output_debugger: {
+                family_run_count: 2,
+                branch_run_count: 1,
+                history_output_count: 2,
+                primary_output_path: "notes/brief.md",
+                related_output_paths: ["notes/brief-branch.md"],
+                history_outputs: [
+                  {
+                    path: "notes/brief-branch.md",
+                    run_identity: "root-1:branch-1",
+                    summary: "Branched repair completed",
+                    status: "succeeded",
+                    branch_kind: "branch_from_checkpoint",
+                    updated_at: "2026-03-18T12:06:00Z",
+                    is_primary: false,
+                  },
+                  {
+                    path: "notes/brief.md",
+                    run_identity: "root-1",
+                    summary: "workflow_web_brief_to_file failed at write_file",
+                    status: "degraded",
+                    branch_kind: null,
+                    updated_at: "2026-03-18T12:04:00Z",
+                    is_primary: true,
+                  },
+                ],
+                latest_branch_run_identity: "root-1:branch-1",
+                latest_branch_summary: "Branched repair completed",
+                latest_branch_status: "succeeded",
+                latest_branch_output_path: "notes/brief-branch.md",
+                comparison_ready: true,
+                checkpoint_labels: ["collect"],
+              },
+            },
+            {
+              id: "run-branch",
+              tool_name: "workflow_web_brief_to_file",
+              run_identity: "root-1:branch-1",
+              root_run_identity: "root-1",
+              parent_run_identity: "root-1",
+              workflow_name: "web-brief-to-file",
+              summary: "Branched repair completed",
+              status: "succeeded",
+              availability: "ready",
+              session_id: "session-2",
+              started_at: "2026-03-18T12:05:00Z",
+              updated_at: "2026-03-18T12:06:00Z",
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              continue_message: "Continue Atlas workflow branch",
+              thread_continue_message: "Continue Atlas workflow branch",
+              output_path: "notes/brief-branch.md",
+              artifact_paths: ["notes/brief-branch.md"],
+              step_records: [
+                {
+                  id: "repair",
+                  index: 0,
+                  tool: "write_file",
+                  status: "succeeded",
+                  result_summary: "Published repaired branch draft",
+                },
+              ],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 0,
+              checkpoint_candidates: [],
+              retry_from_step_available: false,
+              retry_from_step_draft: null,
+              replay_allowed: true,
+              replay_block_reason: null,
+              replay_recommended_actions: [],
+              step_focus: {
+                kind: "latest",
+                step_id: "repair",
+                tool: "write_file",
+                status: "succeeded",
+                summary: "Published repaired branch draft",
+                recovery_action_count: 0,
+                is_recoverable: false,
+              },
+              is_long_running: false,
+              is_compacted: false,
+              duration_minutes: 1,
+              step_count: 1,
+              visible_step_count: 1,
+              compacted_step_count: 0,
+              artifact_count: 1,
+              preserved_recovery_paths: [],
+              recent_step_labels: ["repair / write_file / succeeded"],
+              state_capsule: "1 steps · 1 artifact",
+              recovery_density: {
+                recommended_path: "branch_continue",
+                approval_pending: false,
+                boundary_blocked: false,
+                retry_ready: false,
+                checkpoint_ready: false,
+                repair_ready: false,
+                branch_ready: true,
+                replay_ready: true,
+                stalled: false,
+                checkpoint_candidate_count: 0,
+                recovery_action_count: 0,
+                repair_action_types: [],
+                repair_hint: null,
+                failure_step_id: null,
+                failure_step_tool: null,
+              },
+              output_debugger: {
+                family_run_count: 2,
+                branch_run_count: 1,
+                history_output_count: 2,
+                primary_output_path: "notes/brief-branch.md",
+                related_output_paths: ["notes/brief.md"],
+                history_outputs: [
+                  {
+                    path: "notes/brief-branch.md",
+                    run_identity: "root-1:branch-1",
+                    summary: "Branched repair completed",
+                    status: "succeeded",
+                    branch_kind: "branch_from_checkpoint",
+                    updated_at: "2026-03-18T12:06:00Z",
+                    is_primary: true,
+                  },
+                  {
+                    path: "notes/brief.md",
+                    run_identity: "root-1",
+                    summary: "workflow_web_brief_to_file failed at write_file",
+                    status: "degraded",
+                    branch_kind: null,
+                    updated_at: "2026-03-18T12:04:00Z",
+                    is_primary: false,
+                  },
+                ],
+                latest_branch_run_identity: null,
+                latest_branch_summary: null,
+                latest_branch_status: null,
+                latest_branch_output_path: null,
+                comparison_ready: false,
+                checkpoint_labels: [],
+              },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const orchestration = await screen.findByLabelText("Workflow orchestration");
+    await waitFor(() => {
+      expect(orchestration).toHaveTextContent(/2 workflows · 1 sessions · 1 compacted/i);
+      expect(orchestration).toHaveTextContent(/1 active · 0 awaiting approval · 0 blocked · 1 recoverable · 1 long-running · 5 steps · 2 compacted · 1 repair-ready · 2 branch-ready · 2 debugger-ready · 1 attention sessions/i);
+    });
+    const row = (await within(orchestration).findByText("Atlas thread")).closest(".cockpit-operator-row--entry");
+    expect(row).not.toBeNull();
+    expect(row as HTMLElement).toHaveTextContent(/2 workflows · 1 active · 1 recoverable/i);
+    expect(row as HTMLElement).toHaveTextContent(/queue #1 · queue repair ready · next step repair · 1 repair-ready · 2 branch-ready · 2 debugger-ready/i);
+    expect(row as HTMLElement).toHaveTextContent(/1 repair ready · 2 branch ready · 2 debugger ready/i);
+    expect(row as HTMLElement).toHaveTextContent(/1 workflow exposes a recoverable failed step that can be repaired now\./i);
+    expect(row as HTMLElement).toHaveTextContent(/1 long-running · 5 steps · 2 compacted · 1 artifacts?/i);
+    expect(row as HTMLElement).toHaveTextContent(/5 steps · 2 compacted · 1 artifact · preserves retry from step, checkpoint branch, step repair/i);
+    expect(row as HTMLElement).toHaveTextContent(/visible steps 3\/5/i);
+    expect(row as HTMLElement).toHaveTextContent(/outline \/ llm_plan \/ succeeded/i);
+    expect(row as HTMLElement).toHaveTextContent(/notify \/ notify_user \/ pending/i);
+    expect(row as HTMLElement).toHaveTextContent(/output notes\/brief\.md · related notes\/brief-branch\.md/i);
+    expect(row as HTMLElement).toHaveTextContent(/2 history outputs · latest branch Branched repair completed/i);
+    expect(
+      within(row as HTMLElement).getAllByRole("button", { name: "Inspect workflow orchestration for Atlas thread" }),
+    ).toHaveLength(2);
+    expect(within(row as HTMLElement).getByRole("button", { name: "Use latest output for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Repair workflow orchestration for Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Retry step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Open latest branch for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Compare branch output for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Redirect workflow orchestration for Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Plan queue focus for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft handoff for workflow orchestration Atlas thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft next step for workflow orchestration Atlas thread" })).toBeInTheDocument();
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use latest output for workflow orchestration Atlas thread" }));
+    await waitFor(() => expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument());
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Use failure context for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Compare branch output for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Compare the workspace files "notes\/brief\.md" and "notes\/brief-branch\.md"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Plan queue focus for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review the workflow queue for Atlas thread\./),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Draft handoff for workflow orchestration Atlas thread" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Prepare a workflow handoff for Atlas thread\./),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("surfaces background continuity supervision and handoff in the operator terminal", async () => {
+    let backgroundSessionsUrl = "";
+    let engineeringMemoryUrl = "";
+    let continuityGraphUrl = "";
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas background thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "2026.4.10",
+          build_id: "SERAPH_PRIME_v2026.4.10",
+          provider: "openrouter",
+          model: "openrouter/openai/gpt-4.1-mini",
+          model_label: "gpt-4.1-mini",
+          llm_logging_enabled: true,
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: true, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "healthy",
+            primary_surface: "workspace",
+            recommended_focus: "Atlas background thread",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 0,
+            attention_presence_surface_count: 0,
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: {
+            workspace_mode: "single_operator_guarded_workspace",
+            review_posture: "guarded",
+            approval_mode: "high_risk",
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            delegation_enabled: false,
+            roles: [],
+          },
+          usage: {
+            window_hours: 24,
+            llm_call_count: 0,
+            llm_cost_usd: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            user_triggered_llm_calls: 0,
+            autonomous_llm_calls: 0,
+            failure_count: 0,
+            pending_approvals: 0,
+            active_workflows: 1,
+            blocked_workflows: 0,
+          },
+          runtime_posture: {
+            runtime: {
+              version: "2026.4.10",
+              build_id: "SERAPH_PRIME_v2026.4.10",
+              provider: "openrouter",
+              model: "openrouter/openai/gpt-4.1-mini",
+              model_label: "gpt-4.1-mini",
+            },
+            extensions: {
+              total: 0,
+              ready: 0,
+              degraded: 0,
+              governed: 0,
+              issue_count: 0,
+              degraded_connector_count: 0,
+            },
+            continuity: {
+              continuity_health: "healthy",
+              primary_surface: "workspace",
+              recommended_focus: "Atlas background thread",
+              actionable_thread_count: 1,
+              degraded_route_count: 0,
+              degraded_source_adapter_count: 0,
+              attention_presence_surface_count: 0,
+            },
+          },
+          handoff: {
+            pending_approvals: [],
+            blocked_workflows: [],
+            follow_ups: [],
+            review_receipts: [],
+          },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 0,
+            workflow_count: 0,
+            active_workflows: 0,
+            blocked_workflows: 0,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 0,
+          },
+          sessions: [],
+          workflows: [],
+        }));
+      }
+      if (url.includes("/api/operator/background-sessions")) {
+        backgroundSessionsUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 1,
+            background_process_count: 1,
+            running_background_process_count: 1,
+            sessions_with_branch_handoff: 1,
+            sessions_with_active_workflows: 1,
+          },
+          sessions: [
+            {
+              session_id: "session-1",
+              title: "Atlas background thread",
+              latest_updated_at: "2026-04-10T11:05:00Z",
+              last_message: "Review Atlas branch output.",
+              workflow_count: 1,
+              active_workflows: 1,
+              blocked_workflows: 0,
+              background_process_count: 1,
+              running_background_process_count: 1,
+              lead_workflow_name: "repo-review",
+              lead_workflow_status: "running",
+              continue_message: "Continue Atlas branch review.",
+              branch_handoff_available: true,
+              branch_handoff: {
+                available: true,
+                target_type: "workflow_branch",
+                continue_message: "Continue Atlas branch review.",
+                workflow_name: "repo-review",
+                run_identity: "root-1",
+                branch_kind: "branch_from_checkpoint",
+                branch_depth: 1,
+                artifact_paths: ["notes/atlas-review.md"],
+                resume_checkpoint_label: "Draft review",
+                summary: "Branch handoff is ready for review publishing.",
+              },
+              lead_process: {
+                process_id: "proc-1",
+                pid: 1234,
+                command: "python3",
+                args: ["worker.py"],
+                cwd: "/workspace",
+                status: "running",
+                started_at: "2026-04-10T11:03:00Z",
+                session_id: "session-1",
+              },
+              background_processes: [],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/engineering-memory")) {
+        engineeringMemoryUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            query: null,
+            tracked_bundles: 1,
+            repository_bundle_count: 0,
+            pull_request_bundle_count: 1,
+            work_item_bundle_count: 0,
+            search_match_count: 1,
+          },
+          bundles: [
+            {
+              reference: "seraph-quest/seraph/pull/390",
+              target_kind: "pull_request",
+              repository_reference: "seraph-quest/seraph",
+              latest_updated_at: "2026-04-10T11:04:00Z",
+              workflow_count: 1,
+              approval_count: 0,
+              audit_event_count: 1,
+              session_match_count: 1,
+              thread_ids: ["session-1"],
+              thread_labels: ["Atlas background thread"],
+              artifact_paths: ["notes/atlas-review.md"],
+              continue_message: "Continue review for seraph-quest/seraph/pull/390.",
+              session_matches: [
+                {
+                  session_id: "session-1",
+                  title: "Atlas background thread",
+                  matched_at: "2026-04-10T11:03:00Z",
+                  snippet: "Need to finish seraph-quest/seraph/pull/390 review.",
+                  source: "message",
+                },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/continuity-graph")) {
+        continuityGraphUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            continuity_health: "attention",
+            primary_surface: "workspace",
+            recommended_focus: "Atlas background thread",
+            tracked_sessions: 1,
+            workflow_count: 1,
+            approval_count: 0,
+            notification_count: 1,
+            queued_insight_count: 0,
+            intervention_count: 1,
+            artifact_count: 1,
+            edge_count: 4,
+          },
+          sessions: [
+            {
+              id: "session:session-1",
+              kind: "session",
+              title: "Atlas background thread",
+              summary: "Atlas branch review is waiting.",
+              updated_at: "2026-04-10T11:05:00Z",
+              thread_id: "session-1",
+              continue_message: "Continue Atlas branch review.",
+              metadata: {
+                pending_notification_count: 1,
+                queued_insight_count: 0,
+                recent_intervention_count: 1,
+                item_count: 3,
+                primary_surface: "native_notification",
+                continuity_surface: "native_notification",
+                workflow_count: 1,
+                approval_count: 0,
+                notification_count: 1,
+                intervention_count: 1,
+                artifact_count: 1,
+                linked_item_count: 3,
+              },
+            },
+          ],
+          nodes: [],
+          edges: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_repo_review",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              parent_run_identity: null,
+              workflow_name: "repo-review",
+              summary: "Review Atlas branch output before publish.",
+              status: "running",
+              availability: "ready",
+              session_id: "session-1",
+              started_at: "2026-04-10T11:00:00Z",
+              updated_at: "2026-04-10T11:05:00Z",
+              thread_id: "session-1",
+              thread_label: "Atlas background thread",
+              continue_message: "Continue Atlas branch review.",
+              thread_continue_message: "Continue Atlas branch review.",
+              output_path: "notes/atlas-review.md",
+              artifact_paths: ["notes/atlas-review.md"],
+              step_records: [],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 1,
+              checkpoint_candidates: [],
+              retry_from_step_available: false,
+              replay_allowed: true,
+              replay_recommended_actions: [],
+              step_focus: null,
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const continuity = await screen.findByRole("region", { name: /background continuity/i });
+    await waitFor(() => expect(continuity).toHaveTextContent(/1 sessions · 1\/1 running procs · 1 bundles · 4 edges/i));
+    expect(continuity).toHaveTextContent(/1 handoff-ready · 1 active sessions · 0 repos · 1 prs · 0 work items · focus Atlas background thread/i);
+    expect(continuity).toHaveTextContent(/Atlas background thread/);
+    expect(continuity).toHaveTextContent(/repo-review · running/i);
+    expect(continuity).toHaveTextContent(/seraph-quest\/seraph\/pull\/390/);
+    expect(backgroundSessionsUrl).not.toContain("session_id=");
+    expect(engineeringMemoryUrl).not.toContain("session_id=");
+    expect(continuityGraphUrl).not.toContain("session_id=");
+
+    fireEvent.click(within(continuity).getByRole("button", { name: /Continue background continuity for Atlas background thread/i }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Continue Atlas branch review\./i)).toBeInTheDocument(),
+    );
+  }, 30000);
+
+  it("surfaces guardian memory live controls, provider triage, and bounded evidence", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Memory thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: true, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "steady",
+            primary_surface: "browser",
+            actionable_thread_count: 0,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 0,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 0,
+            attention_presence_surface_count: 0,
+          },
+          recovery_actions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/operator/guardian-memory-live-control")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            operator_status: "guardian_memory_controls_live",
+            memory_candidate_count: 2,
+            provider_count: 1,
+            quarantined_provider_count: 0,
+            stale_candidate_count: 1,
+            rollback_available_count: 1,
+            delete_export_pending_count: 1,
+            action_receipt_count: 2,
+            claim_boundary: "bounded_live_controls_not_solved_learning_or_memory_superiority",
+          },
+          memory_candidates: [
+            {
+              id: "mem-pin",
+              kind: "preference",
+              status: "active",
+              summary: "Prefer short operator-ready release notes.",
+              content: "Prefer short operator-ready release notes.",
+              confidence: 0.91,
+              privacy_boundary: "private",
+              learning_outcome: "unreviewed",
+              stale_evidence: false,
+              rollback_available: true,
+              delete_export_state: "pending_review",
+              recommended_actions: ["review_outcome", "rollback_memory"],
+            },
+          ],
+          provider_controls: [
+            {
+              name: "workspace-vector",
+              runtime_state: "degraded",
+              control_state: "watch",
+              retrieval_allowed: true,
+              writeback_allowed: false,
+              advisory_only: true,
+              notes: ["Canonical guardian memory remains authoritative."],
+              recommended_actions: ["quarantine_provider"],
+            },
+          ],
+          action_receipts: [
+            {
+              id: "live-review",
+              action: "review_outcome",
+              target_kind: "memory",
+              target_id: "mem-pin",
+              summary: "Operator reviewed memory learning outcome.",
+              outcome: "helpful",
+              changed_memory: true,
+              changed_provider_state: false,
+              risk_level: "low",
+              created_at: "2026-05-05T08:03:00Z",
+            },
+          ],
+          blocked_claims: ["memory_superiority", "full_parity"],
+          policy: {},
+        }));
+      }
+      if (url.includes("/api/operator/m6-memory-superiority")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            operator_status: "m6_memory_superiority_visible",
+            active_memory_count: 4,
+            superseded_memory_count: 1,
+            archived_memory_count: 1,
+            source_receipt_count: 6,
+            control_receipt_count: 3,
+            behavior_receipt_count: 1,
+            privacy_boundary_count: 2,
+            provider_writeback_blocked_count: 1,
+            memory_confidence: "grounded",
+            action_posture: "clarify_first",
+            claim_boundary: "deterministic_operator_memory_control_and_behavior_receipts_not_live_external_memory_parity",
+          },
+          behavior_receipts: [
+            {
+              id: "guardian-state-memory-influence",
+              changed: true,
+              changed_dimensions: ["recall_context", "action_posture"],
+              action_posture: "clarify_first",
+              intent_resolution: "clarify",
+              memory_confidence: "grounded",
+              evidence: ["relevant_memory_context_present", "procedural_memory_guidance_present"],
+              diagnostics: ["state=conflict_reconciled, active=4, superseded=1, archived=1"],
+              receipt_contract: "memory_changed_or_explained_guardian_behavior",
+            },
+          ],
+          memory_records: [
+            {
+              id: "mem-pin",
+              kind: "preference",
+              status: "active",
+              summary: "Prefer short operator-ready release notes.",
+              content: "Prefer short operator-ready release notes.",
+              confidence: 0.91,
+              importance: 0.96,
+              reinforcement: 2.1,
+              last_confirmed_at: "2026-05-05T08:00:00Z",
+              updated_at: "2026-05-05T08:00:00Z",
+              provenance: { source_session_id: "session-1", source_count: 2, source_types: ["session", "operator"], has_source_receipt: true },
+              control: { pinned: true, corrected: false, forgotten: false, privacy_boundary: "private", provider_writeback_allowed: false },
+              conflict: { superseded_by_memory_id: null, superseded_reason: null, archived_reason: null },
+            },
+            {
+              id: "mem-forget",
+              kind: "project",
+              status: "archived",
+              summary: "Old Atlas launch channel is Telegram.",
+              content: "Old Atlas launch channel is Telegram.",
+              confidence: 0.2,
+              importance: 0.4,
+              reinforcement: 0.1,
+              last_confirmed_at: null,
+              updated_at: "2026-04-05T08:00:00Z",
+              provenance: { source_session_id: "session-1", source_count: 1, source_types: ["session"], has_source_receipt: true },
+              control: { pinned: false, corrected: false, forgotten: true, privacy_boundary: "standard", provider_writeback_allowed: true },
+              conflict: { superseded_by_memory_id: "mem-pin", superseded_reason: "operator_correction", archived_reason: "operator_forget" },
+            },
+          ],
+          control_receipts: [
+            {
+              id: "audit-pin",
+              action: "pin",
+              event_type: "memory.pinned",
+              memory_id: "mem-pin",
+              summary: "Memory pin: Prefer short operator-ready release notes.",
+              risk_level: "low",
+              session_id: "session-1",
+              created_at: "2026-05-05T08:01:00Z",
+              details: { memory_id: "mem-pin" },
+            },
+            {
+              id: "audit-forget",
+              action: "forget",
+              event_type: "memory.forgotten",
+              memory_id: "mem-forget",
+              summary: "Memory forget: Old Atlas launch channel is Telegram.",
+              risk_level: "medium",
+              session_id: "session-1",
+              created_at: "2026-05-05T08:02:00Z",
+              details: { memory_id: "mem-forget" },
+            },
+          ],
+          privacy_boundaries: ["private", "standard"],
+          reconciliation: {},
+          benchmark: {},
+          policy: {},
+        }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: { workspace_mode: "single_operator_guarded_workspace", review_posture: "operator_review", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: false, roles: [] },
+          usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 0, blocked_workflows: 0 },
+          runtime_posture: { runtime: { provider: "local", model: "test", model_label: "test", build_id: "test", version: "test" }, extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 }, continuity: { continuity_health: "steady", actionable_thread_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 } },
+          handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/benchmark-proof")) {
+        return Promise.resolve(mockResponse({
+          summary: { suite_count: 0, scenario_count: 0, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "none", governed_improvement_status: "review_gated_canary_required" },
+          suites: [],
+          memory_benchmark: null,
+          user_model_benchmark: null,
+          workflow_endurance_benchmark: null,
+          trust_boundary_benchmark: null,
+          secure_capability_host_benchmark: null,
+          computer_use_benchmark: null,
+          governed_improvement: { target_count: 0, target_types: [], required_suite_count: 0, gate_policy: { min_review_ready_score: 0, min_strong_score: 0, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" }, summary: null, failure_report: [], policy: null, recent_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/guardian-state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/operator/workflow-orchestration")) return Promise.resolve(mockResponse({ summary: {}, sessions: [], workflows: [] }));
+      if (url.includes("/api/operator/background-sessions")) return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, background_process_count: 0, running_background_process_count: 0, sessions_with_branch_handoff: 0, sessions_with_active_workflows: 0 }, sessions: [] }));
+      if (url.includes("/api/operator/m5-operating-layer")) return Promise.resolve(mockResponse({ summary: {}, jobs: [], routines: [], delegations: [], work_queue: [], missing_trigger_classes: [], proof_receipts: [] }));
+      if (url.includes("/api/operator/engineering-memory")) return Promise.resolve(mockResponse({ summary: { query: null, tracked_bundles: 0, repository_bundle_count: 0, pull_request_bundle_count: 0, work_item_bundle_count: 0, search_match_count: 0 }, bundles: [] }));
+      if (url.includes("/api/operator/continuity-graph")) return Promise.resolve(mockResponse({ summary: { continuity_health: null, primary_surface: null, recommended_focus: null, tracked_sessions: 0, workflow_count: 0, approval_count: 0, notification_count: 0, queued_insight_count: 0, intervention_count: 0, artifact_count: 0, edge_count: 0 }, sessions: [], nodes: [], edges: [] }));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const memorySurface = await screen.findByLabelText("Guardian memory controls");
+    await waitFor(() => {
+      expect(memorySurface).toHaveTextContent(/guardian memory controls live · 2 memories · 1 providers · 0 quarantined · 1 rollback-ready · 1 delete\/export pending/i);
+      expect(memorySurface).toHaveTextContent(/1 stale evidence · 2 live receipts · bounded live controls not solved learning or memory superiority/i);
+      expect(memorySurface).toHaveTextContent(/Prefer short operator-ready release notes/i);
+      expect(memorySurface).toHaveTextContent(/preference · active · outcome unreviewed · fresh enough · rollback available · delete\/export pending review · privacy private/i);
+      expect(memorySurface).toHaveTextContent(/Helpful/i);
+      expect(memorySurface).toHaveTextContent(/Harmful/i);
+      expect(memorySurface).toHaveTextContent(/workspace-vector/i);
+      expect(memorySurface).toHaveTextContent(/degraded · watch · retrieval allowed · writeback blocked · advisory only · runtime-local control/i);
+      expect(memorySurface).toHaveTextContent(/review outcome/i);
+      expect(memorySurface).toHaveTextContent(/confidence grounded · posture clarify first · 1 corrected\/superseded · 1 forgotten\/archived · 6 source receipts · 2 privacy boundaries/i);
+      expect(memorySurface).toHaveTextContent(/Memory changed behavior/i);
+      expect(memorySurface).toHaveTextContent(/recall context, action posture · intent clarify · confidence grounded/i);
+      expect(memorySurface).toHaveTextContent(/preference · active · pinned · privacy private · provider writeback blocked/i);
+      expect(memorySurface).toHaveTextContent(/project · archived · forgotten · conflict operator_correction · stale operator_forget/i);
+      expect(memorySurface).toHaveTextContent(/memory pin/i);
+      expect(memorySurface).toHaveTextContent(/memory forget/i);
+    });
+  }, 30000);
+
+  it("surfaces evidence shortcuts and keyboard-first triage control", async () => {
+    useChatStore.setState({
+      messages: [{
+        id: "trace-1",
+        role: "step",
+        content: "write_file saved notes/brief.md",
+        timestamp: new Date("2026-03-18T12:06:30Z").getTime(),
+        sessionId: "session-2",
+        stepNumber: 2,
+        toolUsed: "write_file",
+      }],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+          { id: "session-2", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-write",
+            session_id: "session-2",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "Saved brief draft",
+            created_at: "2026-03-18T12:06:00Z",
+            details: {
+              arguments: { file_path: "notes/brief.md" },
+            },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/approval-run/approve")) {
+        return Promise.resolve(mockResponse({ status: "approved" }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "approval-run",
+            session_id: "session-2",
+            thread_id: "session-2",
+            thread_label: "Atlas thread",
+            tool_name: "shell_execute",
+            risk_level: "high",
+            status: "pending",
+            summary: "Approve Atlas shell command",
+            created_at: "2026-03-18T12:03:00Z",
+            resume_message: "Continue Atlas shell approval",
+          },
+        ]));
+      }
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:04:00Z",
+              summary: "workflow_web_brief_to_file failed at write_file",
+              step_tools: ["web_search", "write_file"],
+              step_records: [
+                {
+                  id: "write_file",
+                  index: 1,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/brief.md"],
+                  error_summary: "write_file blocked by approval",
+                },
+              ],
+              artifact_paths: ["notes/brief.md"],
+              continued_error_steps: ["write_file"],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas workflow",
+              run_identity: "root-1",
+              root_run_identity: "root-1",
+              checkpoint_context_available: true,
+            },
+            {
+              id: "run-branch",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-2",
+              status: "running",
+              started_at: "2026-03-18T12:05:00Z",
+              updated_at: "2026-03-18T12:06:00Z",
+              summary: "workflow_web_brief_to_file branch running",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/branch-brief.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue Atlas branch",
+              run_identity: "branch-1",
+              parent_run_identity: "root-1",
+              root_run_identity: "root-1",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(await within(evidence).findByText("artifact: notes/brief.md")).toBeInTheDocument();
+    expect(await within(evidence).findByText("trace: write_file")).toBeInTheDocument();
+    expect(await within(evidence).findByText("approval context: shell_execute")).toBeInTheDocument();
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/brief.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/brief\.md"\./)).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "I", shiftKey: true });
+    await waitFor(() => expect(screen.getByText("approval-run")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "A", shiftKey: true });
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run/approve"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    fireEvent.keyDown(window, { key: "C", shiftKey: true });
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas shell approval")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "R", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Redirect workflow "web-brief-to-file" from its current state\./)).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "E", shiftKey: true });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Use In Command Bar" })).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "J", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/brief\.md"\./)).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "W", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByText("workflow_web_brief_to_file failed at write_file").length).toBeGreaterThan(0),
+    );
+
+    fireEvent.keyDown(window, { key: "M", shiftKey: true });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Source Run" })).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "S", shiftKey: true });
+    await waitFor(() =>
+      expect((document.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("workflow_web_brief_to_file failed at write_file"),
+    );
+
+    fireEvent.keyDown(window, { key: "D", shiftKey: true });
+    await waitFor(() => expect(screen.getByDisplayValue("Continue Atlas workflow")).toBeInTheDocument());
+
+    fireEvent.keyDown(window, { key: "Q", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(/Review workflow "web-brief-to-file" step "write_file"/),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "X", shiftKey: true });
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/brief.md" and "notes/branch-brief.md". Summarize the key differences, what changed between these artifact outputs, and which file is the better base for the next step.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(window, { key: "U", shiftKey: true });
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument(),
+    );
+  }, 30000);
+
+  it("prefers the newest artifact across workflow runs for evidence shortcuts", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-older-artifact",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "Saved older notes artifact",
+            created_at: "2026-03-18T12:02:00Z",
+            details: {
+              arguments: { file_path: "notes/older.md" },
+            },
+          },
+          {
+            id: "audit-newer-artifact",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved newer notes artifact",
+            created_at: "2026-03-18T12:05:30Z",
+            details: {
+              arguments: { file_path: "notes/newer.md" },
+            },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          extension_packages: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-older-artifact",
+              tool_name: "workflow_web_brief_to_file",
+              workflow_name: "web-brief-to-file",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-18T12:00:00Z",
+              updated_at: "2026-03-18T12:10:00Z",
+              summary: "older artifact with newer workflow metadata",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/older.md"],
+              continued_error_steps: [],
+              risk_level: "medium",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-older-artifact",
+              root_run_identity: "run-older-artifact",
+            },
+            {
+              id: "run-newer-artifact",
+              tool_name: "workflow_daily_summary",
+              workflow_name: "daily-summary",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-18T12:01:00Z",
+              updated_at: "2026-03-18T12:09:00Z",
+              summary: "newer artifact with older workflow metadata",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/newer.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-newer-artifact",
+              root_run_identity: "run-newer-artifact",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    await waitFor(
+      () => expect(within(evidence).getByText("artifact: notes/newer.md")).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+    expect(within(evidence).queryByText("artifact: notes/older.md")).not.toBeInTheDocument();
+
+    fireEvent.click(await within(evidence).findByRole("button", { name: "Inspect artifact: notes/newer.md" }));
+    const useButton = await screen.findByRole("button", { name: "Use In Command Bar" });
+    fireEvent.click(useButton);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/newer.md" as context for the next action.')).toBeInTheDocument(),
+    );
+  }, 30000);
+
   it("supports starter-pack repairs and saved runbook macros", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -513,7 +3684,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -635,8 +3805,8 @@ describe("CockpitView", () => {
     );
   });
 
-  it("drafts the starter-pack command after a successful bootstrap", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+  it("surfaces anticipatory repair and backup branch choices in workflow orchestration", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -646,7 +3816,210 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({ daemon: {}, notifications: [], queued_insights: [], recent_interventions: [] }));
+      }
+      if (url.includes("/api/workflows") && !url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ workflows: [] }));
+      if (url.includes("/api/skills")) return Promise.resolve(mockResponse({ skills: [] }));
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/tools")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: { workspace_mode: "governed", review_posture: "required", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: true, roles: [] },
+          usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 1, blocked_workflows: 0 },
+          runtime_posture: { runtime: { provider: "openrouter", model: "test", model_label: "test", build_id: "test" }, extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 }, continuity: { continuity_health: "healthy", primary_surface: "workspace", recommended_focus: "workflow orchestration", actionable_thread_count: 1, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 } },
+          handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/benchmark-proof")) {
+        return Promise.resolve(mockResponse({
+          summary: { suite_count: 8, scenario_count: 52, benchmark_posture: "deterministic_proof_backed", operator_status: "operator_visible", remaining_gap: "live_provider_and_real_computer_use_depth", governed_improvement_status: "review_gated_canary_required", memory_benchmark_posture: "ci_gated_operator_visible", user_model_benchmark_posture: "ci_gated_operator_visible", workflow_endurance_benchmark_posture: "ci_gated_operator_visible", trust_boundary_benchmark_posture: "ci_gated_operator_visible", governed_improvement_benchmark_posture: "ci_gated_operator_visible" },
+          suites: [],
+          memory_benchmark: null,
+          user_model_benchmark: null,
+          workflow_endurance_benchmark: null,
+          trust_boundary_benchmark: null,
+          governed_improvement: {
+            target_count: 0,
+            target_types: [],
+            required_suite_count: 8,
+            gate_policy: { min_review_ready_score: 0.7, min_strong_score: 0.9, requires_human_review: true, blocks_on_constraint_failure: true, required_benchmark_suites: [], proof_contract: "deterministic_benchmark_suites_plus_review_receipts" },
+            summary: { suite_name: "governed_improvement", benchmark_posture: "ci_gated_operator_visible", operator_status: "saved_proposal_receipts_visible", scenario_count: 6, dimension_count: 5, failure_mode_count: 5, active_failure_count: 0, anti_misevolution_state: "preference_collapse_blocked", canary_rollout_state: "review_candidates_canary_only", rollback_state: "candidate_and_receipt_paths_required", operator_receipt_state: "saved_proposal_and_benchmark_receipts_visible", recent_receipt_count: 0, held_receipt_count: 0 },
+            failure_report: [],
+            policy: { preference_diversity_policy: "block_preference_collapse_and_watch_single_signal_edits", canary_rollout_policy: "saved_review_candidates_remain_canary_only_until_reviewed_promotion", rollback_policy: "candidate_receipt_and_source_baseline_required_before_promotion", acceptance_policy: "benchmark_gated_canary_then_reviewed_promotion", operator_visibility: "benchmark_proof_plus_recent_saved_receipts_visible", receipt_surfaces: ["/api/evolution/validate", "/api/evolution/proposals", "/api/operator/benchmark-proof", "/api/operator/governed-improvement-benchmark"], ci_gate_mode: "required_benchmark_suite" },
+            recent_receipts: [],
+          },
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            tracked_sessions: 1,
+            workflow_count: 1,
+            active_workflows: 1,
+            blocked_workflows: 0,
+            awaiting_approval_workflows: 0,
+            recoverable_workflows: 0,
+            long_running_workflows: 1,
+            compacted_workflows: 1,
+            total_step_count: 4,
+            compacted_step_count: 1,
+            boundary_blocked_workflows: 0,
+            repair_ready_workflows: 0,
+            branch_ready_workflows: 1,
+            anticipatory_ready_workflows: 1,
+            backup_branch_ready_workflows: 1,
+            fidelity_watch_workflows: 0,
+            stalled_workflows: 0,
+            output_debugger_ready_workflows: 1,
+            attention_sessions: 1,
+          },
+          sessions: [
+            {
+              thread_id: "session-1",
+              thread_label: "Release thread",
+              workflow_count: 1,
+              active_workflows: 1,
+              blocked_workflows: 0,
+              awaiting_approval_workflows: 0,
+              recoverable_workflows: 0,
+              latest_updated_at: "2026-04-11T08:45:00Z",
+              lead_run_identity: "release-root",
+              lead_workflow_name: "release-brief",
+              lead_status: "running",
+              lead_summary: "Preparing release publication.",
+              continue_message: "Continue release brief.",
+              total_step_count: 4,
+              compacted_step_count: 1,
+              compacted_workflow_count: 1,
+              long_running_workflow_count: 1,
+              artifact_count: 1,
+              lead_state_capsule: "4 steps · 1 compacted · 1 artifact · preserves checkpoint branch",
+              boundary_blocked_workflows: 0,
+              repair_ready_workflows: 0,
+              branch_ready_workflows: 1,
+              anticipatory_ready_workflows: 1,
+              backup_branch_ready_workflows: 1,
+              fidelity_watch_workflows: 0,
+              stalled_workflows: 0,
+              output_debugger_ready_workflows: 1,
+              queue_state: "active",
+              queue_position: 1,
+              queue_reason: "1 workflow is actively progressing.",
+              attention_summary: "1 anticipatory ready · 1 backup branch ready · 1 debugger ready",
+              queue_draft: "Review the workflow queue for Release thread.",
+              handoff_draft: "Prepare a workflow handoff for Release thread.",
+              lead_recommended_recovery_path: "continue_thread",
+              lead_anticipatory_risk_level: "elevated",
+              lead_anticipatory_summary: "anticipatory repair ready · backup branch from draft (write_file)",
+              lead_backup_branch_label: "draft (write_file)",
+              lead_backup_branch_draft: 'Run workflow "release-brief" with _seraph_resume_from_step="draft".',
+              lead_anticipatory_repair_draft: 'Before continuing workflow "release-brief", review the next risky step and prepare a safer continuation path.',
+              lead_condensation_fidelity_state: "strong",
+              lead_condensation_fidelity_summary: "visible 3/4 steps · preserves checkpoint branch · 1 output histories",
+              lead_output_path: "notes/release-brief.md",
+              lead_related_output_paths: [],
+              lead_output_history: [{ path: "notes/release-brief.md", run_identity: "release-root", summary: "Preparing release publication.", status: "running", branch_kind: null, updated_at: "2026-04-11T08:45:00Z", is_primary: true }],
+              lead_latest_branch_run_identity: null,
+              lead_latest_branch_summary: null,
+              lead_step_focus: { kind: "active", step_id: "review", tool: "diff_compare", status: "running", summary: "Comparing candidate release notes", recovery_action_count: 0, is_recoverable: false },
+            },
+          ],
+          workflows: [
+            {
+              id: "run-1",
+              tool_name: "workflow_release_brief",
+              run_identity: "release-root",
+              root_run_identity: "release-root",
+              parent_run_identity: null,
+              workflow_name: "release-brief",
+              summary: "Preparing release publication.",
+              status: "running",
+              availability: "ready",
+              session_id: "session-1",
+              started_at: "2026-04-11T08:00:00Z",
+              updated_at: "2026-04-11T08:45:00Z",
+              thread_id: "session-1",
+              thread_label: "Release thread",
+              continue_message: "Continue release brief.",
+              thread_continue_message: "Continue release brief.",
+              output_path: "notes/release-brief.md",
+              artifact_paths: ["notes/release-brief.md"],
+              step_records: [
+                { id: "collect", index: 1, tool: "web_search", status: "succeeded", result_summary: "Collected release notes" },
+                { id: "draft", index: 2, tool: "write_file", status: "succeeded", result_summary: "Drafted release brief" },
+                { id: "review", index: 3, tool: "diff_compare", status: "running", result_summary: "Comparing candidate release notes" },
+              ],
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              checkpoint_candidate_count: 1,
+              checkpoint_candidates: [{ step_id: "draft", label: "draft (write_file)", status: "succeeded", resume_draft: 'Run workflow "release-brief" with _seraph_resume_from_step="draft".', resume_supported: true }],
+              retry_from_step_available: false,
+              retry_from_step_draft: null,
+              replay_allowed: true,
+              replay_block_reason: null,
+              replay_recommended_actions: [],
+              step_focus: { kind: "active", step_id: "review", tool: "diff_compare", status: "running", summary: "Comparing candidate release notes", recovery_action_count: 0, is_recoverable: false },
+              is_long_running: true,
+              is_compacted: true,
+              duration_minutes: 45,
+              step_count: 4,
+              visible_step_count: 3,
+              compacted_step_count: 1,
+              artifact_count: 1,
+              preserved_recovery_paths: ["checkpoint_branch"],
+              recent_step_labels: ["collect / web_search / succeeded", "draft / write_file / succeeded", "review / diff_compare / running"],
+              state_capsule: "4 steps · 1 compacted · 1 artifact · preserves checkpoint branch",
+              recovery_density: { recommended_path: "continue_thread", approval_pending: false, boundary_blocked: false, retry_ready: false, checkpoint_ready: true, repair_ready: false, branch_ready: true, replay_ready: true, stalled: false, checkpoint_candidate_count: 1, recovery_action_count: 0, repair_action_types: [], repair_hint: null, failure_step_id: null, failure_step_tool: null },
+              output_debugger: { family_run_count: 1, branch_run_count: 0, history_output_count: 1, primary_output_path: "notes/release-brief.md", related_output_paths: [], history_outputs: [{ path: "notes/release-brief.md", run_identity: "release-root", summary: "Preparing release publication.", status: "running", branch_kind: null, updated_at: "2026-04-11T08:45:00Z", is_primary: true }], latest_branch_run_identity: null, latest_branch_summary: null, latest_branch_status: null, latest_branch_output_path: null, comparison_ready: false, checkpoint_labels: ["draft (write_file)"] },
+              condensation_fidelity: { state: "strong", watch_required: false, visible_step_count: 3, total_step_count: 4, preserved_path_count: 1, history_output_count: 1, branch_run_count: 0, summary: "visible 3/4 steps · preserves checkpoint branch · 1 output histories" },
+              anticipatory_plan: { risk_level: "elevated", anticipatory_ready: true, signal_count: 3, signals: ["long_running", "active_step", "checkpoint_branch_available"], summary: "anticipatory repair ready · backup branch from draft (write_file)", backup_branch_ready: true, backup_branch_step_id: "draft", backup_branch_label: "draft (write_file)", backup_branch_draft: 'Run workflow "release-brief" with _seraph_resume_from_step="draft".', anticipatory_repair_draft: 'Before continuing workflow "release-brief", review the next risky step and prepare a safer continuation path.', family_failure_count: 0 },
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/operator/background-sessions")) return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, background_process_count: 0, running_background_process_count: 0, sessions_with_branch_handoff: 0, sessions_with_active_workflows: 0 }, sessions: [] }));
+      if (url.includes("/api/operator/engineering-memory")) return Promise.resolve(mockResponse({ summary: { query: null, tracked_bundles: 0, repository_bundle_count: 0, pull_request_bundle_count: 0, work_item_bundle_count: 0, search_match_count: 0 }, bundles: [] }));
+      if (url.includes("/api/operator/continuity-graph")) return Promise.resolve(mockResponse({ summary: { continuity_health: null, primary_surface: null, recommended_focus: null, tracked_sessions: 0, workflow_count: 0, approval_count: 0, notification_count: 0, queued_insight_count: 0, intervention_count: 0, artifact_count: 0, edge_count: 0 }, sessions: [], nodes: [], edges: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const orchestration = await screen.findByLabelText("Workflow orchestration");
+    const row = (await within(orchestration).findByText("Release thread")).closest(".cockpit-operator-row--entry");
+    expect(row).not.toBeNull();
+    expect(row as HTMLElement).toHaveTextContent(/1 anticipatory-ready · 1 backup-branch ready/i);
+    expect(row as HTMLElement).toHaveTextContent(/anticipatory elevated · anticipatory repair ready · backup branch from draft \(write_file\)/i);
+    expect(row as HTMLElement).toHaveTextContent(/fidelity strong · visible 3\/4 steps · preserves checkpoint branch/i);
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft backup branch for workflow orchestration Release thread" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Draft anticipatory repair for workflow orchestration Release thread" })).toBeInTheDocument();
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Draft backup branch for workflow orchestration Release thread" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Run workflow "release-brief" with _seraph_resume_from_step="draft".')).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Draft anticipatory repair for workflow orchestration Release thread" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Before continuing workflow "release-brief"/)).toBeInTheDocument(),
+    );
+  });
+
+  it("drafts the starter-pack command after a successful bootstrap", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -720,7 +4093,6 @@ describe("CockpitView", () => {
         }));
       }
       if (url.includes("/api/capabilities/bootstrap")) {
-        expect(init?.method).toBe("POST");
         return Promise.resolve(mockResponse({
           target_type: "starter_pack",
           name: "research-briefing",
@@ -760,8 +4132,8 @@ describe("CockpitView", () => {
     );
   });
 
-  it("runs manual bootstrap actions for blocked runbooks before stopping", async () => {
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+  it("surfaces manual bootstrap actions for blocked runbooks without auto-running them", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
@@ -771,7 +4143,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -847,7 +4218,6 @@ describe("CockpitView", () => {
         }));
       }
       if (url.includes("/api/capabilities/bootstrap")) {
-        expect(init?.method).toBe("POST");
         return Promise.resolve(mockResponse({
           target_type: "runbook",
           name: "runbook:github-sync",
@@ -875,6 +4245,9 @@ describe("CockpitView", () => {
     await waitFor(() => expect(screen.getByText("GitHub sync")).toBeInTheDocument());
     const runbookRow = screen.getByText("GitHub sync").closest(".cockpit-operator-row");
     expect(runbookRow).not.toBeNull();
+    const mcpTestCallCountBefore = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/mcp/servers/github/test") && init?.method === "POST",
+    ).length;
     fireEvent.click(within(runbookRow as HTMLElement).getByRole("button", { name: "repair" }));
 
     await waitFor(() =>
@@ -883,15 +4256,14 @@ describe("CockpitView", () => {
         expect.objectContaining({ method: "POST" }),
       ),
     );
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringMatching(/\/api\/mcp\/servers\/.+\/test/),
-        expect.objectContaining({ method: "POST" }),
-      ),
-    );
+    await waitFor(() => expect(screen.getByText("doctor plans")).toBeInTheDocument());
+    const mcpTestCallCountAfter = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/mcp/servers/github/test") && init?.method === "POST",
+    ).length;
+    expect(mcpTestCallCountAfter).toBe(mcpTestCallCountBefore);
   });
 
-  it("routes manual bootstrap extension enables through the lifecycle approval path", async () => {
+  it("routes explicit manual bootstrap extension enables through the lifecycle approval path", async () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -929,7 +4301,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -955,6 +4326,8 @@ describe("CockpitView", () => {
             starter_packs_total: 0,
             mcp_servers_ready: 0,
             mcp_servers_total: 0,
+            marketplace_flows_ready: 1,
+            marketplace_flows_total: 2,
           },
           native_tools: [],
           skills: [],
@@ -1066,13 +4439,160 @@ describe("CockpitView", () => {
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/bootstrap"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "run manual" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/extensions/seraph.research-pack/enable"),
         expect.objectContaining({ method: "POST" }),
       ),
     );
-    expect(await screen.findByText("Enable Research Pack contributions with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Enable Research Pack contributions with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-enable")).toBeInTheDocument();
     expect(screen.queryByText("Research briefing repair sequence applied")).not.toBeInTheDocument();
+  });
+
+  it("blocks generated multi-step privileged repair bundles from running in one click", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [{
+            id: "runbook:research-briefing",
+            name: "research-briefing",
+            label: "Research briefing",
+            description: "Enable the pack and repair policy",
+            source: "workflow",
+            command: null,
+            availability: "blocked",
+            blocking_reasons: ["missing policy and extension enablement"],
+            recommended_actions: [
+              { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+              { type: "enable_extension", label: "Enable extension", name: "seraph.research-pack" },
+            ],
+            parameter_schema: {},
+            risk_level: "high",
+            execution_boundaries: ["workspace_write"],
+            action: { type: "draft_workflow", label: "Draft workflow", name: "research-briefing" },
+          }],
+        }));
+      }
+      if (url.includes("/api/capabilities/preflight")) {
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:research-briefing",
+          label: "Research briefing",
+          description: "Enable the pack and repair policy",
+          availability: "blocked",
+          blocking_reasons: ["missing policy and extension enablement"],
+          autorepair_actions: [],
+          recommended_actions: [
+            { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+            { type: "enable_extension", label: "Enable extension", name: "seraph.research-pack" },
+          ],
+          ready: false,
+          can_autorepair: false,
+        }));
+      }
+      if (url.includes("/api/capabilities/bootstrap")) {
+        return Promise.resolve(mockResponse({
+          target_type: "runbook",
+          name: "runbook:research-briefing",
+          label: "Research briefing",
+          status: "blocked",
+          ready: false,
+          availability: "blocked",
+          blocking_reasons: ["missing policy and extension enablement"],
+          applied_actions: [],
+          manual_actions: [
+            { type: "set_tool_policy", label: "Allow write_file", mode: "full" },
+            { type: "enable_extension", label: "Enable extension", name: "seraph.research-pack" },
+          ],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "full" }));
+      if (url.includes("/api/extensions/seraph.research-pack/enable")) return Promise.resolve(mockResponse({ status: "enabled" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Research briefing")).toBeInTheDocument());
+    const runbookRow = screen.getByText("Research briefing").closest(".cockpit-operator-row");
+    expect(runbookRow).not.toBeNull();
+    fireEvent.click(within(runbookRow as HTMLElement).getByRole("button", { name: "repair" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/capabilities/bootstrap"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    const toolPolicyUpdateCountBefore = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/settings/tool-policy-mode") && init?.method === "PUT",
+    ).length;
+    const extensionEnableCountBefore = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/extensions/seraph.research-pack/enable") && init?.method === "POST",
+    ).length;
+    fireEvent.click(await screen.findByRole("button", { name: "run manual" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Research briefing requires step-by-step execution/)).toBeInTheDocument(),
+    );
+    const toolPolicyUpdateCountAfter = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/settings/tool-policy-mode") && init?.method === "PUT",
+    ).length;
+    const extensionEnableCountAfter = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes("/api/extensions/seraph.research-pack/enable") && init?.method === "POST",
+    ).length;
+    expect(toolPolicyUpdateCountAfter).toBe(toolPolicyUpdateCountBefore);
+    expect(extensionEnableCountAfter).toBe(extensionEnableCountBefore);
   });
 
   it("keeps step repair visible even when replay is blocked", async () => {
@@ -1085,7 +4605,6 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -1245,7 +4764,7 @@ describe("CockpitView", () => {
           runbooks: [],
         }));
       }
-      if (url.includes("/api/operator/timeline")) {
+      if (url.includes("/api/activity/ledger")) {
         return Promise.resolve(mockResponse({
           items: [
             {
@@ -1373,7 +4892,14 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: { request_id: "agent-ws:session-1:123" },
+              metadata: {
+                request_id: "agent-ws:session-1:123",
+                capability_family: "conversation",
+                runtime_path: "chat_agent",
+                required_policy_intents: ["fast"],
+                max_cost_tier: "medium",
+                max_latency_tier: "low",
+              },
             },
             {
               id: "tool-1",
@@ -1406,6 +4932,11 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument());
+    expect(
+      screen.getByRole("button", {
+        name: /LLM call[\s\S]*Conversation reasoning for Session 1 using claude-sonnet-4[\s\S]*chat_agent/i,
+      }),
+    ).toBeInTheDocument();
     expect(screen.getByText("write_file")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Repair" }));
     await waitFor(() =>
@@ -1478,6 +5009,12 @@ describe("CockpitView", () => {
             output_tokens: 250,
             user_triggered_llm_calls: 1,
             autonomous_llm_calls: 0,
+            llm_cost_by_runtime_path: [
+              { key: "chat_agent", calls: 1, cost_usd: 0.0123, input_tokens: 1000, output_tokens: 250 },
+            ],
+            llm_cost_by_capability_family: [
+              { key: "conversation", calls: 1, cost_usd: 0.0123, input_tokens: 1000, output_tokens: 250 },
+            ],
             categories: { llm: 1, workflow: 1, approval: 0, guardian: 0, agent: 1, system: 0 },
           },
           items: [
@@ -1500,7 +5037,7 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: { request_id: "agent-ws:session-1:123" },
+              metadata: { request_id: "agent-ws:session-1:123", runtime_path: "chat_agent", capability_family: "conversation" },
             },
             {
               id: "tool-1",
@@ -1546,11 +5083,190 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
     expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
+    expect(screen.getByText(/conversation \$0\.012/)).toBeInTheDocument();
+    expect(screen.getByText(/chat_agent \$0\.012/)).toBeInTheDocument();
     expect(screen.getByText("Conversation reasoning for Session 1 using claude-sonnet-4")).toBeInTheDocument();
     expect(screen.getByText("web_search")).toBeInTheDocument();
     expect(screen.getByText(/2 tools|1 tool/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "llm" }));
     expect(screen.queryByText("Workflow resumed after approval")).not.toBeInTheDocument();
+  });
+
+  it("surfaces imported capability families and extension governance in the operator terminal", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) {
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.browser-ops",
+            display_name: "Browser Ops Pack",
+            version: "2026.3.24",
+            kind: "connector-pack",
+            trust: "workspace",
+            source: "manifest",
+            location: "workspace",
+            status: "degraded",
+            summary: "Browser and messaging reach",
+            issues: [],
+            load_errors: [],
+            toggle_targets: [],
+            toggleable_contribution_types: ["browser_providers", "messaging_connectors"],
+            passive_contribution_types: ["toolset_presets"],
+            enable_supported: false,
+            disable_supported: false,
+            removable: true,
+            enabled_scope: "none",
+            configurable: true,
+            metadata_supported: true,
+            config_scope: "metadata_and_connector_configs",
+            enabled: true,
+            config: {},
+            permission_summary: {
+              status: "missing_permissions",
+              ok: false,
+              required: { network: true },
+              missing: { network: true },
+              risk_level: "high",
+            },
+            approval_profile: {
+              requires_runtime_approval: true,
+              runtime_behavior: "always",
+              requires_lifecycle_approval: true,
+              lifecycle_boundaries: ["network"],
+              risk_level: "high",
+            },
+            connector_summary: {
+              total: 2,
+              ready: 1,
+              states: { ready: 1, requires_config: 1 },
+            },
+            contributions: [
+              {
+                type: "browser_providers",
+                reference: "browserbase",
+                name: "browserbase",
+                status: "ready",
+                configured: true,
+                enabled: true,
+                capabilities: ["tabs", "snapshots"],
+                requires_network: true,
+                permission_profile: {
+                  status: "granted",
+                  requires_network: true,
+                  missing_network: false,
+                  requires_approval: false,
+                  approval_behavior: "never",
+                  missing_tools: [],
+                  missing_execution_boundaries: [],
+                },
+                health: { state: "ready", ready: true, configured: true, enabled: true },
+              },
+              {
+                type: "messaging_connectors",
+                reference: "telegram",
+                name: "telegram",
+                status: "requires_config",
+                configured: false,
+                enabled: false,
+                platform: "telegram",
+                config_fields: [{ key: "bot_token", secret: true }],
+                requires_network: true,
+                permission_profile: {
+                  status: "missing_permissions",
+                  requires_network: true,
+                  missing_network: true,
+                  requires_approval: true,
+                  approval_behavior: "always",
+                  missing_tools: [],
+                  missing_execution_boundaries: [],
+                },
+                health: { state: "requires_config", ready: false, configured: false, enabled: false },
+              },
+              {
+                type: "toolset_presets",
+                reference: "browser-ops",
+                name: "browser ops",
+                loaded: false,
+                requires_network: true,
+                permission_profile: {
+                  status: "missing_permissions",
+                  requires_network: true,
+                  missing_network: true,
+                  requires_approval: false,
+                  approval_behavior: "never",
+                  missing_tools: [],
+                  missing_execution_boundaries: [],
+                },
+              },
+            ],
+            studio_files: [],
+          }],
+        }));
+      }
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    expect(await screen.findByText("browser providers")).toBeInTheDocument();
+    const operatorPane = screen.getByText("Operator terminal").closest("section");
+    expect(within(operatorPane as HTMLElement).getByText("browser providers")).toBeInTheDocument();
+    expect(within(operatorPane as HTMLElement).getAllByText("extension boundaries").length).toBeGreaterThan(0);
+    expect(within(operatorPane as HTMLElement).getAllByText("Browser Ops Pack").length).toBeGreaterThan(0);
+    expect(within(operatorPane as HTMLElement).getAllByText(/lifecycle approval network/).length).toBeGreaterThan(0);
+    expect(operatorPane?.textContent ?? "").toContain("imported reach");
+    expect(operatorPane?.textContent ?? "").toContain("1 active");
+    expect(operatorPane?.textContent ?? "").toContain("3 installed");
+    expect(operatorPane?.textContent ?? "").toContain("1 inactive");
   });
 
   it("derives activity ledger summary when the new endpoint omits summary fields", async () => {
@@ -1622,7 +5338,31 @@ describe("CockpitView", () => {
               completion_tokens: 250,
               cost_usd: 0.0123,
               duration_ms: 810,
-              metadata: {},
+              metadata: {
+                runtime_path: " chat_agent ",
+              },
+            },
+            {
+              id: "llm-2",
+              kind: "llm_call",
+              category: "llm",
+              title: "LLM call",
+              summary: "Automation reasoning for Session 1",
+              status: "success",
+              created_at: "2026-03-19T10:02:00Z",
+              updated_at: "2026-03-19T10:02:00Z",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              source: "system",
+              model: "openai/gpt-4.1-mini",
+              provider: "openai",
+              prompt_tokens: 100,
+              completion_tokens: 50,
+              cost_usd: 0.001,
+              duration_ms: 120,
+              metadata: {
+                capability_family: " ",
+              },
             },
           ],
         }));
@@ -1636,11 +5376,24 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     await waitFor(() => expect(screen.getByText("Activity ledger")).toBeInTheDocument());
-    expect(await screen.findByText(/spend \$0\.012/)).toBeInTheDocument();
+    expect(await screen.findByText(/spend \$0\.013/)).toBeInTheDocument();
     expect(screen.getByText("1 user llm")).toBeInTheDocument();
+    const runtimeSpendRow = screen.getByText((_, element) => !!(
+      element?.classList.contains("cockpit-ledger-badge")
+      && /chat_agent/i.test(element.textContent ?? "")
+      && /\$0\.012/i.test(element.textContent ?? "")
+    ));
+    expect(runtimeSpendRow).toBeInTheDocument();
+    const unattributedSpendRow = screen.getByText((_, element) => !!(
+      element?.classList.contains("cockpit-ledger-badge")
+      && /unattributed/i.test(element.textContent ?? "")
+      && /\$0\.013/i.test(element.textContent ?? "")
+      && /2x/i.test(element.textContent ?? "")
+    ));
+    expect(unattributedSpendRow).toBeInTheDocument();
   });
 
-  it("clears stale activity ledger rows when both ledger sources fail", async () => {
+  it("clears stale activity ledger rows when the current ledger fetch fails before any successful payload", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -1717,9 +5470,6 @@ describe("CockpitView", () => {
         }
         return Promise.resolve(mockResponse({}, false, 500));
       }
-      if (url.includes("/api/operator/timeline")) {
-        return Promise.resolve(mockResponse({}, false, 500));
-      }
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
       if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
@@ -1794,7 +5544,7 @@ describe("CockpitView", () => {
           runbooks: [],
         }));
       }
-      if (url.includes("/api/operator/timeline")) {
+      if (url.includes("/api/activity/ledger")) {
         return Promise.resolve(mockResponse({
           items: [
             {
@@ -1857,7 +5607,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -1908,7 +5657,6 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/capabilities/overview")) {
@@ -1986,7 +5734,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2062,13 +5809,15 @@ describe("CockpitView", () => {
 
     render(<CockpitView onSend={() => {}} />);
 
+    expect(await screen.findByRole("button", { name: "Approve" }, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Continue" }, { timeout: 5000 }));
 
     await waitFor(() => expect(useChatStore.getState().sessionId).toBe("session-2"), { timeout: 5000 });
     expect(
       await screen.findByDisplayValue("Continue workflow after approval.", {}, { timeout: 5000 }),
     ).toBeInTheDocument();
-  });
+  }, 15000);
 
   it("shows a visible pending state and fresh-thread guidance while the agent is working", async () => {
     useChatStore.setState({
@@ -2095,7 +5844,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2134,7 +5882,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2189,7 +5936,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2227,6 +5973,936 @@ describe("CockpitView", () => {
     expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" });
   });
 
+  it("surfaces guardian confidence and judgment proof in the guardian pane", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) {
+        return Promise.resolve(mockResponse({
+          user_state: "focused",
+          interruption_mode: "minimal",
+          active_window: "VS Code",
+          is_working_hours: true,
+          screen_context: "Reviewing Atlas release notes",
+          active_goals_summary: "Ship Atlas safely",
+          upcoming_events: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse({
+          governance: { workspace_mode: "single_operator_guarded_workspace", review_posture: "", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: true, roles: [] },
+          usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 0, blocked_workflows: 0 },
+          runtime_posture: {
+            runtime: { version: "2026.4.10", build_id: "SERAPH_TEST", provider: "openrouter", model: "openrouter/openai/gpt-4.1-mini", model_label: "gpt-4.1-mini" },
+            extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 },
+            continuity: { continuity_health: "ready", primary_surface: "presence", recommended_focus: null, actionable_thread_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 },
+          },
+          handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+        }));
+      }
+      if (url.includes("/api/operator/benchmark-proof")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            suite_count: 11,
+            scenario_count: 68,
+            benchmark_posture: "deterministic_proof_backed",
+            operator_status: "operator_visible",
+            remaining_gap: "live_provider_and_real_computer_use_depth",
+            governed_improvement_status: "review_gated_canary_required",
+            memory_benchmark_posture: "ci_gated_operator_visible",
+            user_model_benchmark_posture: "ci_gated_operator_visible",
+            workflow_endurance_benchmark_posture: "ci_gated_operator_visible",
+            live_workflow_endurance_canary_posture: "live_workflow_canary_ci_gated_operator_visible",
+            trust_boundary_benchmark_posture: "ci_gated_operator_visible",
+            secure_capability_host_benchmark_posture: "secure_host_ci_gated_operator_visible",
+            computer_use_benchmark_posture: "ci_gated_operator_visible",
+            one_reach_channel_canary_posture: "one_reach_channel_canary_ci_gated_operator_visible",
+            governed_improvement_benchmark_posture: "ci_gated_operator_visible",
+          },
+          memory_benchmark: {
+            summary: {
+              suite_name: "guardian_memory_quality",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "memory_proof_visible",
+              scenario_count: 8,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 2,
+              contradiction_state: "conflict_reconciled",
+              selective_forgetting_state: "active",
+            },
+            failure_report: [
+              {
+                type: "contradiction_reconciled",
+                summary: "Atlas release date corrected after contradictory note.",
+                reason: "contradiction",
+              },
+              {
+                type: "selective_forgetting_archive",
+                summary: "Archived obsolete Hermes coordination draft.",
+                reason: "archived",
+              },
+            ],
+            policy: {
+              retrieval_ranking_policy: "contradiction_aware_query_and_project_weighted",
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
+          user_model_benchmark: {
+            summary: {
+              suite_name: "guardian_user_model_restraint",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "guardian_state_visible",
+              scenario_count: 4,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 0,
+              clarification_policy_state: "required_on_high_ambiguity",
+              restraint_policy_state: "clarify_or_wait_before_unverified_personalization",
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "ambiguous referent restraint regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              canonical_authority: "guardian_world_model",
+              clarify_before_action_policy: "required_on_high_ambiguity",
+              personalization_override_policy: "forbidden_without_canonical_receipt",
+              operator_visibility: "facet_evidence_watchpoints_and_restraint_receipts",
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
+          workflow_endurance_benchmark: {
+            summary: {
+              suite_name: "workflow_endurance_and_repair",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "workflow_orchestration_visible",
+              scenario_count: 4,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 0,
+              anticipatory_repair_state: "checkpoint_and_pre_repair_visible",
+              condensation_fidelity_state: "recovery_paths_and_output_history_retained",
+              branch_continuity_state: "backup_branch_operator_selectable",
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "backup branch recovery regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              anticipatory_repair_policy: "prepare_repair_and_backup_branch_before_obvious_failure_points",
+              backup_branch_policy: "checkpoint_backed_branch_receipts_must_remain_operator_selectable",
+              condensation_fidelity_policy: "compaction_must_preserve_recovery_paths_and_output_lineage",
+              operator_visibility: "workflow_orchestration_and_benchmark_visible",
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
+          live_workflow_endurance_canary: {
+            summary: {
+              suite_name: "live_workflow_endurance_canary",
+              benchmark_posture: "live_workflow_canary_ci_gated_operator_visible",
+              operator_status: "live_workflow_canary_visible",
+              scenario_count: 4,
+              session_count: 2,
+              run_count: 5,
+              branch_run_count: 3,
+              checkpoint_count: 4,
+              failure_injection_count: 1,
+              recovery_action_count: 1,
+              artifact_receipt_count: 4,
+              approval_preservation_count: 2,
+              trust_boundary_block_count: 1,
+              audit_receipt_count: 10,
+              active_failure_count: 0,
+              claim_boundary: "audit_projected_replayable_canary_not_durable_workflow_engine",
+            },
+            scenario_names: [
+              "live_workflow_canary_protocol_behavior",
+              "live_workflow_canary_failure_recovery_behavior",
+              "live_workflow_canary_approval_preservation_behavior",
+              "operator_live_workflow_canary_surface_behavior",
+            ],
+            protocol: {
+              replay_command: "uv run python -m src.evals.harness --benchmark-suite live_workflow_endurance_canary --indent 0",
+              time_anchor: "2026-05-11T09:00:00Z",
+            },
+            policy: {
+              claim_boundary: "audit_projected_replayable_canary_not_durable_workflow_engine",
+              receipt_surfaces: [
+                "/api/operator/live-workflow-endurance-canary",
+                "/api/operator/workflow-orchestration",
+                "/api/operator/benchmark-proof",
+              ],
+              not_claimed: ["durable_workflow_state_machine", "crash_safe_executor"],
+              required_receipts: [
+                "run_identity",
+                "thread_id",
+                "checkpoint_id",
+                "branch_lineage",
+                "failure_injection",
+                "recovery_action",
+                "delegated_owner",
+                "artifact_comparison",
+                "approval_preservation",
+                "trust_boundary_decision",
+                "audit_trail",
+              ],
+            },
+            sessions: [
+              { session_id: "session-canary-a", run_count: 3 },
+              { session_id: "session-canary-b", run_count: 2 },
+            ],
+            runs: [
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:root",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "running",
+                branch_kind: "root",
+                summary: "Primary long-running artifact handoff is paused at comparison before publish.",
+                checkpoint_candidates: [{ step_id: "plan" }],
+                artifact_receipts: [{ artifact_id: "artifact-root" }],
+                audit_receipts: ["audit-root", "audit-artifact"],
+              },
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:branch-compare",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "succeeded",
+                branch_kind: "branch_from_checkpoint",
+                summary: "Checkpoint branch compares the revised artifact against the original output.",
+                checkpoint_candidates: [{ step_id: "compare" }],
+                artifact_receipts: [{ artifact_id: "artifact-compare" }],
+                audit_receipts: ["audit-compare", "audit-artifact"],
+              },
+              {
+                run_identity: "session-canary-a:workflow_live_workflow_endurance_canary:branch-repair",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "recovered",
+                branch_kind: "retry_failed_step",
+                summary: "Injected failure recovered through repair branch.",
+                checkpoint_candidates: [{ step_id: "repair" }, { step_id: "compare" }],
+                artifact_receipts: [{ artifact_id: "artifact-repair" }],
+                audit_receipts: ["audit-failure", "audit-recovery"],
+              },
+              {
+                run_identity: "session-canary-b:workflow_live_workflow_endurance_canary:approval-preserved",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "awaiting_approval",
+                branch_kind: "root",
+                summary: "Second session holds a pending operator approval with stable context.",
+                checkpoint_candidates: [{ step_id: "approval_gate" }],
+                artifact_receipts: [],
+                audit_receipts: ["audit-approval", "audit-pending"],
+              },
+              {
+                run_identity: "session-canary-b:workflow_live_workflow_endurance_canary:approval-drift",
+                workflow_name: "workflow_live_workflow_endurance_canary",
+                status: "failed",
+                branch_kind: "retry_failed_step",
+                summary: "Replay is blocked because the repair path gained authenticated-source authority.",
+                replay_block_reason: "approval_context_changed",
+                checkpoint_candidates: [],
+                artifact_receipts: [],
+                audit_receipts: ["audit-approval-drift"],
+              },
+            ],
+            operator_story: {
+              multi_session_visible: true,
+              delegated_owner_visible: true,
+              checkpoint_branch_visible: true,
+              failure_recovery_visible: true,
+              artifact_comparison_visible: true,
+              approval_preservation_visible: true,
+              trust_boundary_fail_closed_visible: true,
+              audit_trail_visible: true,
+            },
+            failure_report: [],
+            latest_run: { total: 4, passed: 4, failed: 0, duration_ms: 100 },
+          },
+          trust_boundary_benchmark: {
+            summary: {
+              suite_name: "trust_boundary_and_safety_receipts",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "safety_receipts_visible",
+              scenario_count: 7,
+              dimension_count: 5,
+              failure_mode_count: 6,
+              active_failure_count: 1,
+              secret_egress_state: "field_scoped_egress_allowlist_required",
+              delegation_partition_state: "vault_and_background_partitioned",
+              workflow_replay_state: "boundary_drift_blocks_replay",
+              operator_receipt_state: "benchmark_and_runtime_visible",
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "secret ref egress regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              secret_egress_policy: "field_scoped_secret_refs_plus_required_credential_egress_allowlist",
+              delegation_partition_policy: "vault_operations_route_to_vault_keeper",
+              background_execution_policy: "session_partitioned_managed_process_recovery",
+              workflow_replay_policy: "trust_boundary_drift_blocks_replay_and_resume",
+              operator_visibility: "benchmark_proof_plus_runtime_receipts_visible",
+              receipt_surfaces: [
+                "/api/operator/benchmark-proof",
+                "/api/operator/trust-boundary-benchmark",
+                "/api/operator/workflow-orchestration",
+                "/api/operator/background-sessions",
+                "/api/activity/ledger",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
+          secure_capability_host_benchmark: {
+            summary: {
+              suite_name: "secure_capability_host",
+              benchmark_posture: "secure_host_ci_gated_operator_visible",
+              operator_status: "secure_capability_host_receipts_visible",
+              scenario_count: 7,
+              dimension_count: 5,
+              failure_mode_count: 6,
+              active_failure_count: 0,
+              credential_egress_state: "session_field_host_allowlist_enforced",
+              workspace_secret_file_state: "generic_read_patch_blocked",
+              process_environment_state: "ambient_secret_env_scrubbed",
+              prompt_surface_state: "suspicious_context_quarantined",
+              delegation_provider_state: "trust_partition_receipts_visible",
+            },
+            failure_report: [],
+            policy: {
+              credential_egress_policy: "session_bound_field_scoped_destination_host_allowlisted_secret_refs",
+              workspace_secret_file_policy: "generic_read_and_patch_paths_block_secret_like_files",
+              process_environment_policy: "allowlisted_environment_only_for_foreground_and_background_processes",
+              prompt_surface_policy: "suspicious_prompt_bearing_content_quarantined_before_capability_execution",
+              delegation_provider_policy: "delegation_partitions_and_provider_fallback_trust_changes_must_be_explicit_receipts",
+              operator_visibility: "benchmark_proof_plus_secure_host_surface_plus_cockpit_receipts_visible",
+              claim_boundary: "deterministic_secure_host_choke_points_not_full_host_container_isolation",
+              receipt_surfaces: [
+                "/api/operator/benchmark-proof",
+                "/api/operator/secure-capability-host-benchmark",
+                "/api/operator/trust-boundary-benchmark",
+                "/api/activity/ledger",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
+          computer_use_benchmark: {
+            summary: {
+              suite_name: "computer_use_browser_desktop",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "browser_desktop_receipts_visible",
+              scenario_count: 7,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 1,
+              browser_replay_state: "extract_html_and_screenshot_receipts_visible",
+              desktop_action_state: "dismiss_poll_and_ack_receipts_visible",
+              cross_surface_receipt_state: "continuity_and_operator_receipts_visible",
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "desktop notification replay regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              browser_task_replay_policy: "extract_html_and_screenshot_actions_require_distinct_audit_receipts",
+              desktop_action_replay_policy: "enqueue_dismiss_poll_and_ack_must_remain_cross_surface_replayable",
+              cross_surface_continuity_policy: "browser_and_desktop_share_one_operator_visible_continuity_snapshot",
+              operator_visibility: "benchmark_proof_plus_computer_use_receipts_visible",
+              receipt_surfaces: [
+                "/api/operator/benchmark-proof",
+                "/api/operator/computer-use-benchmark",
+                "/api/observer/continuity",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+          },
+          one_reach_channel_canary: {
+            summary: {
+              suite_name: "one_excellent_reach_channel_canary",
+              benchmark_posture: "one_reach_channel_canary_ci_gated_operator_visible",
+              operator_status: "one_reach_channel_canary_visible",
+              selected_channel: "native_notification",
+              scenario_count: 5,
+              active_failure_count: 0,
+              pairing_state: "paired",
+              revocation_state: "revoked",
+              health_state: "ready",
+              degraded_state: "daemon_offline",
+              retry_state: "bounded_retry_with_fallback_visible",
+              thread_continuity_state: "channel_thread_session_and_memory_context_linked",
+              approval_handoff_state: "pending_operator_approval",
+              audit_receipt_count: 7,
+              e2e_step_count: 4,
+              channel_sprawl_state: "rejected_until_native_notification_canary_meets_bar",
+              claim_boundary: "deterministic_native_notification_canary_not_broad_live_channel_reach",
+            },
+            protocol: {
+              replay_command: "uv run python -m src.evals.harness --benchmark-suite one_excellent_reach_channel_canary --indent 0",
+              time_anchor: "2026-05-11T11:00:00Z",
+            },
+            policy: {
+              claim_boundary: "deterministic_native_notification_canary_not_broad_live_channel_reach",
+              receipt_surfaces: [
+                "/api/operator/one-reach-channel-canary",
+                "/api/operator/control-plane",
+                "/api/operator/benchmark-proof",
+                "/api/activity",
+              ],
+              not_claimed: ["broad_mobile_or_messaging_channel_coverage", "production_grade_pairing_protocol"],
+            },
+            receipt: {
+              continuity: {
+                thread_id: "reach-thread-native-001",
+                memory_context_id: "memctx-reach-native-001",
+              },
+              degraded_state_ui: {
+                primary_degraded_reason: "daemon_offline",
+                repair_action: "reconnect_native_daemon",
+              },
+              e2e_flow: [
+                {
+                  step: "external_message_received",
+                },
+                {
+                  step: "seraph_decision",
+                  decision: "request_approval_before_channel_response",
+                  reason: "external channel response could commit operator intent",
+                },
+                {
+                  step: "approval_handoff",
+                  status: "pending_operator_approval",
+                },
+                {
+                  step: "audited_response",
+                  action: "queue_native_notification_response",
+                  status: "queued_after_approval_handoff",
+                },
+              ],
+            },
+            operator_story: {
+              single_channel_selected: true,
+              channel_sprawl_rejected: true,
+              pairing_visible: true,
+              revocation_fail_closed_visible: true,
+              health_visible: true,
+              retry_visible: true,
+              thread_continuity_visible: true,
+              memory_context_visible: true,
+              approval_handoff_visible: true,
+              audit_trail_visible: true,
+              degraded_state_ui_visible: true,
+              e2e_flow_visible: true,
+            },
+            failure_report: [],
+          },
+          suites: [
+            {
+              name: "guardian_memory_quality",
+              label: "Guardian memory benchmark",
+              description: "Contradiction-aware memory benchmark suite",
+              benchmark_axis: "guardian_memory_quality",
+              operator_summary: "Guardian memory quality stays operator-visible and CI-gated.",
+              remaining_gap: "Broader live-provider and computer-use proof still remains.",
+              scenario_count: 8,
+              scenario_names: ["memory_contradiction_ranking_behavior"],
+            },
+            {
+              name: "guardian_user_model_restraint",
+              label: "Guardian user-model and restraint benchmark",
+              description: "Clarification and restraint benchmark",
+              benchmark_axis: "guardian_judgment_and_restraint",
+              operator_summary: "User modeling now tightens clarification and restraint behavior through explicit receipts.",
+              remaining_gap: "Longer-horizon live replay remains.",
+              scenario_count: 4,
+              scenario_names: ["guardian_clarification_restraint_behavior"],
+            },
+            {
+              name: "memory_continuity_workflows",
+              label: "Memory, continuity, and workflows",
+              description: "Memory and workflow endurance suite",
+              benchmark_axis: "memory_and_workflow_endurance",
+              operator_summary: "Guardian memory and workflow continuity retain recoverable state.",
+              remaining_gap: "Broader live-provider and production-like replay is still missing.",
+              scenario_count: 14,
+              scenario_names: ["workflow_operating_layer_behavior"],
+            },
+            {
+              name: "workflow_endurance_and_repair",
+              label: "Workflow endurance, anticipatory repair, and backup branches",
+              description: "Workflow endurance and anticipatory repair suite",
+              benchmark_axis: "workflow_endurance_and_repair",
+              operator_summary: "Long-running workflows surface backup branches and pre-action repair choices.",
+              remaining_gap: "Broader live workload replay still remains.",
+              scenario_count: 4,
+              scenario_names: ["workflow_anticipatory_repair_behavior"],
+            },
+            {
+              name: "live_workflow_endurance_canary",
+              label: "Live workflow endurance canary",
+              description: "Replayable workflow canary suite",
+              benchmark_axis: "live_workflow_endurance_canary",
+              operator_summary: "Long-running workflow endurance has an operator-visible canary receipt.",
+              remaining_gap: "Durable workflow state machine remains future work.",
+              scenario_count: 4,
+              scenario_names: ["live_workflow_canary_protocol_behavior"],
+            },
+            {
+              name: "trust_boundary_and_safety_receipts",
+              label: "Trust boundaries and safety receipts",
+              description: "Trust-boundary and safety-receipt suite",
+              benchmark_axis: "trust_boundary_and_safety_receipts",
+              operator_summary: "Trust posture now has one explicit benchmark lane for secret egress, replay drift, delegation boundaries, and operator safety receipts.",
+              remaining_gap: "Broader live hostile-environment replay still remains.",
+              scenario_count: 7,
+              scenario_names: ["secret_ref_egress_boundary_behavior"],
+            },
+            {
+              name: "secure_capability_host",
+              label: "M3 secure capability host",
+              description: "Secure-host enforcement suite",
+              benchmark_axis: "m3_secure_capability_host",
+              operator_summary: "Secure capability-host proof binds least-privilege decisions to live choke points.",
+              remaining_gap: "Full host/container isolation still remains.",
+              scenario_count: 7,
+              scenario_names: ["secure_host_secret_ref_fail_closed_behavior"],
+            },
+            {
+              name: "computer_use_browser_desktop",
+              label: "Computer-use, browser, and desktop execution",
+              description: "Browser and desktop suite",
+              benchmark_axis: "computer_use_execution",
+              operator_summary: "Browser and desktop continuity paths stay visible and auditable.",
+              remaining_gap: "A fuller real browser-task harness still remains.",
+              scenario_count: 7,
+              scenario_names: ["browser_execution_task_replay_behavior"],
+            },
+            {
+              name: "one_excellent_reach_channel_canary",
+              label: "One excellent reach-channel canary",
+              description: "Native notification reach canary suite",
+              benchmark_axis: "one_excellent_reach_channel_canary",
+              operator_summary: "Native notifications prove one reach path before broader external-channel claims.",
+              remaining_gap: "Broad mobile, messaging, voice, and production-grade pairing remain future work.",
+              scenario_count: 5,
+              scenario_names: ["one_reach_channel_selection_scope_behavior"],
+            },
+            {
+              name: "planning_retrieval_reporting",
+              label: "Planning, retrieval, and reporting",
+              description: "Planning and reporting suite",
+              benchmark_axis: "planning_and_reporting",
+              operator_summary: "Planning and report publication paths stay explicit and reviewable.",
+              remaining_gap: "Broader live integration proof still remains.",
+              scenario_count: 4,
+              scenario_names: ["source_report_action_workflow_behavior"],
+            },
+            {
+              name: "governed_improvement",
+              label: "Governed self-improvement",
+              description: "Governed self-improvement suite",
+              benchmark_axis: "governed_improvement",
+              operator_summary: "Self-improvement stays anti-drift, canary-gated, and receipt-backed.",
+              remaining_gap: "Broader candidate classes still remain.",
+              scenario_count: 6,
+              scenario_names: [
+                "governed_self_evolution_behavior",
+                "governed_preference_diversity_behavior",
+                "governed_canary_rollout_behavior",
+              ],
+            },
+          ],
+          governed_improvement: {
+            target_count: 2,
+            target_types: ["prompt_pack", "skill"],
+            required_suite_count: 11,
+            gate_policy: {
+              min_review_ready_score: 0.7,
+              min_strong_score: 0.9,
+              requires_human_review: true,
+              blocks_on_constraint_failure: true,
+              required_benchmark_suites: [
+                "guardian_memory_quality",
+                "guardian_user_model_restraint",
+                "memory_continuity_workflows",
+                "workflow_endurance_and_repair",
+                "live_workflow_endurance_canary",
+                "trust_boundary_and_safety_receipts",
+                "secure_capability_host",
+                "computer_use_browser_desktop",
+                "one_excellent_reach_channel_canary",
+                "planning_retrieval_reporting",
+                "governed_improvement",
+              ],
+              proof_contract: "deterministic_benchmark_suites_plus_review_receipts",
+            },
+            summary: {
+              suite_name: "governed_improvement",
+              benchmark_posture: "ci_gated_operator_visible",
+              operator_status: "saved_proposal_receipts_visible",
+              scenario_count: 6,
+              dimension_count: 5,
+              failure_mode_count: 5,
+              active_failure_count: 1,
+              anti_misevolution_state: "preference_collapse_blocked",
+              canary_rollout_state: "review_candidates_canary_only",
+              rollback_state: "candidate_and_receipt_paths_required",
+              operator_receipt_state: "saved_proposal_and_benchmark_receipts_visible",
+              recent_receipt_count: 2,
+              held_receipt_count: 1,
+            },
+            failure_report: [
+              {
+                type: "benchmark_regression",
+                summary: "governed canary rollout regression",
+                reason: "deterministic_eval_failure",
+              },
+            ],
+            policy: {
+              preference_diversity_policy: "block_preference_collapse_and_watch_single_signal_edits",
+              canary_rollout_policy: "saved_review_candidates_remain_canary_only_until_reviewed_promotion",
+              rollback_policy: "candidate_receipt_and_source_baseline_required_before_promotion",
+              acceptance_policy: "benchmark_gated_canary_then_reviewed_promotion",
+              operator_visibility: "benchmark_proof_plus_recent_saved_receipts_visible",
+              receipt_surfaces: [
+                "/api/evolution/validate",
+                "/api/evolution/proposals",
+                "/api/operator/benchmark-proof",
+                "/api/operator/governed-improvement-benchmark",
+              ],
+              ci_gate_mode: "required_benchmark_suite",
+            },
+            recent_receipts: [
+              {
+                id: "web-briefing-review-candidate",
+                candidate_name: "Web Briefing Review Candidate",
+                target_type: "skill",
+                quality_state: "ready",
+                score: 1,
+                rollout_state: "review_ready",
+                acceptance_state: "ready_for_canary",
+                diversity_guard_state: "multi_signal_preserved",
+                rollback_ready: true,
+                blocked_constraints: [],
+                saved_candidate_path: "/tmp/extensions/workspace-capabilities/skills/web-briefing-review-candidate.md",
+                receipt_path: "/tmp/extensions/workspace-capabilities/evolution/receipts/web-briefing-review-candidate.json",
+                updated_at: "2026-04-11T08:00:00+00:00",
+              },
+              {
+                id: "review-prompt-held-candidate",
+                candidate_name: "Review Prompt Held Candidate",
+                target_type: "prompt_pack",
+                quality_state: "ready",
+                score: 0.74,
+                rollout_state: "review_ready",
+                acceptance_state: "held_for_canary",
+                diversity_guard_state: "single_signal_watch",
+                rollback_ready: true,
+                blocked_constraints: [],
+                saved_candidate_path: "/tmp/extensions/workspace-capabilities/prompts/review-prompt-held-candidate.yaml",
+                receipt_path: "/tmp/extensions/workspace-capabilities/evolution/receipts/review-prompt-held-candidate.json",
+                updated_at: "2026-04-11T08:05:00+00:00",
+              },
+            ],
+          },
+        }));
+      }
+      if (url.includes("/api/operator/guardian-state")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            overall_confidence: "partial",
+            observer_confidence: "grounded",
+            world_model_confidence: "partial",
+            memory_confidence: "grounded",
+            current_session_confidence: "grounded",
+            recent_sessions_confidence: "partial",
+            intent_uncertainty_level: "high",
+            intent_resolution: "clarify_first",
+            action_posture: "clarify_first",
+            current_focus: "Atlas release planning",
+            focus_source: "observer_goal_window",
+            focus_alignment: "aligned",
+            intervention_receptivity: "guarded",
+            dominant_thread: "Atlas launch thread",
+            user_model_confidence: "grounded",
+          },
+          explanation: {
+            judgment_proof_lines: [
+              "Project-target proof: Atlas remains the strongest active project anchor.",
+              "Referent proof: the user message contains an unresolved referent.",
+            ],
+            intent_uncertainty_diagnostics: [],
+            judgment_risks: ["Competing project anchors still require conservative judgment."],
+            corroboration_sources: ["observer", "memory"],
+            preference_inference_diagnostics: [],
+            learning_diagnostics: ["Fresh live outcomes are overruling older procedural guidance."],
+            restraint_reasons: ["Intent remains weakly grounded, so clarification is safer than taking a confident action."],
+            user_model_benchmark_diagnostics: ["User-model benchmark state: confidence=grounded, restraint_posture=clarify_before_personalizing, action_posture=clarify_first."],
+            memory_provider_diagnostics: [],
+            memory_reconciliation_diagnostics: [],
+          },
+          user_model: {
+            confidence: "grounded",
+            restraint_posture: "clarify_before_personalizing",
+            continuity_strategy: "prefer_existing_thread",
+            clarification_watchpoints: ["Clarify interaction style when live and procedural preference evidence disagree."],
+            restraint_reasons: ["Preference evidence is split, so Seraph should explain uncertainty first."],
+            evidence_store: ["Prefers concise updates during Atlas launch work."],
+            facets: [
+              {
+                key: "communication_style",
+                label: "Communication preference",
+                value: "brief literal",
+                confidence: "grounded",
+                evidence_sources: ["preference_memory", "live_learning"],
+                evidence_lines: ["Prefers concise updates during Atlas launch work."],
+              },
+            ],
+          },
+          operator_guidance: {
+            active_projects: ["Atlas"],
+            active_commitments: ["Ship Atlas release notes"],
+            active_blockers: ["Pending release approval"],
+            next_up: ["Clarify whether the user meant Atlas or Hermes"],
+            learning_guidance: "Prefer clarification before interrupting.",
+            recent_execution_summary: "- Atlas deploy failed recently",
+          },
+          observer: {
+            user_state: "focused",
+            interruption_mode: "minimal",
+            active_window: "VS Code",
+            active_project: "Atlas",
+            active_goals_summary: "Ship Atlas safely",
+            screen_context: "Reviewing Atlas release notes",
+            data_quality: "good",
+            is_working_hours: true,
+          },
+        }));
+      }
+      if (url.includes("/api/operator/m8-guardian-brain")) {
+        return Promise.resolve(mockResponse({
+          summary: {
+            operator_status: "m8_guardian_brain_visible",
+            decision_count: 7,
+            action_count: 2,
+            restraint_count: 4,
+            capability_choice_count: 3,
+            approval_preservation_count: 1,
+            score_dimensions: ["timing", "usefulness", "trust_preservation", "recovery"],
+            guardian_action_posture: "clarify_first",
+            intent_resolution: "clarify_first",
+            claim_boundary: "deterministic_guardian_judgment_receipts_not_live_superiority_claim",
+            receipt_source: "live_guardian_state_plus_deterministic_benchmark",
+          },
+          decision_receipts: [
+            {
+              scenario_id: "m8_capability_choice_act_behavior",
+              action: "act",
+              reason: "grounded_capability_choice",
+              signal: "blocked workflow has fresh state",
+              selected_capability: {
+                id: "guardian.thread_continue",
+                label: "Continue existing thread",
+                lane: "continuity",
+                risk_level: "low",
+                requires_approval: false,
+              },
+              rejected_capabilities: [],
+              inputs: {},
+              scores: { timing: "now", usefulness: "high", trust_preservation: "high", recovery: "operator_correctable" },
+              operator_correction: { can_correct_action: true, can_correct_capability: true, receipt_surface: "/api/operator/m8-guardian-brain" },
+              claim_boundary: "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+            },
+            {
+              scenario_id: "m8_risky_capability_approval_behavior",
+              action: "request_approval",
+              reason: "risky_capability_requires_approval",
+              signal: "external connector mutation may resolve a commitment",
+              selected_capability: {
+                id: "guardian.external_mutation",
+                label: "External mutation",
+                lane: "external_action",
+                risk_level: "high",
+                requires_approval: true,
+              },
+              rejected_capabilities: [],
+              inputs: {},
+              scores: { timing: "now", usefulness: "high", trust_preservation: "high", recovery: "operator_correctable" },
+              operator_correction: { can_correct_action: true, can_correct_capability: true, receipt_surface: "/api/operator/m8-guardian-brain" },
+              claim_boundary: "deterministic_guardian_judgment_receipt_not_live_superiority_claim",
+            },
+          ],
+          capability_choices: [
+            {
+              id: "guardian.thread_continue",
+              label: "Continue existing thread",
+              lane: "continuity",
+              risk_level: "low",
+              requires_approval: false,
+            },
+            {
+              id: "guardian.external_mutation",
+              label: "External mutation",
+              lane: "external_action",
+              risk_level: "high",
+              requires_approval: true,
+            },
+          ],
+          restraint_receipts: [],
+          approval_receipts: [],
+          proof_receipts: ["/api/operator/m8-guardian-brain"],
+        }));
+      }
+      if (url.includes("/api/operator/workflow-orchestration")) {
+        return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, workflow_count: 0, active_workflows: 0, blocked_workflows: 0, awaiting_approval_workflows: 0, recoverable_workflows: 0 }, sessions: [], workflows: [] }));
+      }
+      if (url.includes("/api/operator/background-sessions")) {
+        return Promise.resolve(mockResponse({ summary: { tracked_sessions: 0, background_process_count: 0, running_background_process_count: 0, sessions_with_branch_handoff: 0, sessions_with_active_workflows: 0 }, sessions: [] }));
+      }
+      if (url.includes("/api/operator/engineering-memory")) {
+        return Promise.resolve(mockResponse({ summary: { query: null, tracked_bundles: 0, repository_bundle_count: 0, pull_request_bundle_count: 0, work_item_bundle_count: 0, search_match_count: 0 }, bundles: [] }));
+      }
+      if (url.includes("/api/operator/continuity-graph")) {
+        return Promise.resolve(mockResponse({ summary: { continuity_health: null, primary_surface: null, recommended_focus: null, tracked_sessions: 0, workflow_count: 0, approval_count: 0, notification_count: 0, queued_insight_count: 0, intervention_count: 0, artifact_count: 0, edge_count: 0 }, sessions: [], nodes: [], edges: [] }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const guardianTitle = await screen.findByText("Guardian state", { selector: ".cockpit-window-title" });
+    const guardianWindow = guardianTitle.closest(".cockpit-window") as HTMLElement;
+    const operatorTitle = await screen.findByText("Operator terminal", { selector: ".cockpit-window-title" });
+    const operatorWindow = operatorTitle.closest(".cockpit-window") as HTMLElement;
+
+    expect(within(guardianWindow).getByText("overall confidence")).toBeInTheDocument();
+    expect(within(guardianWindow).getAllByText("clarify first").length).toBeGreaterThan(0);
+    await within(guardianWindow).findByText("Atlas release planning");
+    await within(guardianWindow).findByText("Prefer clarification before interrupting.");
+    expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
+    expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/7 decisions • 3 capability choices • 4 restraint receipts • 1 approval-preserving paths • live guardian state plus deterministic benchmark/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/request approval: risky capability requires approval/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/External mutation · external action · high · approval required/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/m8 risky capability approval behavior · timing now · usefulness high · trust high · recovery operator_correctable/)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/Competing project anchors still require conservative judgment\./)).toBeInTheDocument();
+    expect(within(guardianWindow).getByText(/clarify before personalizing/)).toBeInTheDocument();
+    expect(
+      within(guardianWindow).getAllByText(/Prefers concise updates during Atlas launch work\./).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(within(guardianWindow).getByText(/Communication preference · brief literal · grounded · Prefers concise updates during Atlas launch work\./)).toBeInTheDocument();
+    await within(operatorWindow).findByText("benchmark proof");
+    await within(operatorWindow).findByText(/11 suites · 68 scenarios · deterministic proof backed · 2 evolution targets/);
+    expect(within(operatorWindow).getAllByText(/Guardian memory benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Guardian user-model benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Workflow endurance benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Live workflow endurance canary/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/One reach-channel canary/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Trust-boundary benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Secure capability-host benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Computer-use benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getAllByText(/Governed improvement benchmark/).length).toBeGreaterThan(0);
+    expect(within(operatorWindow).getByText(/preference collapse blocked · review candidates canary only · candidate and receipt paths required · saved proposal and benchmark receipts visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/block preference collapse and watch single signal edits · saved review candidates remain canary only until reviewed promotion · 4 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Web Briefing Review Candidate · ready for canary · multi signal preserved · rollback ready/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Review Prompt Held Candidate · held for canary · single signal watch · rollback ready/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/ci gated operator visible · 2 active failures · 5 dimensions/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/contradiction reconciled · Atlas release date corrected after contradictory note\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/required on high ambiguity · clarify or wait before unverified personalization · guardian world model/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · ambiguous referent restraint regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/checkpoint and pre repair visible · recovery paths and output history retained · backup branch operator selectable/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · backup branch recovery regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/live workflow canary ci gated operator visible · 0 active failures · 2 sessions · 5 runs/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/3 branches · 4 checkpoints · 1 injected failures · 1 recoveries · 4 artifact receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/2 approvals preserved · 1 trust-boundary blocks · 10 audit receipts · 3 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/multi session visible · delegated owner visible · checkpoint branch visible · failure recovery visible · artifact comparison visible · approval preservation visible · trust boundary fail closed visible · audit trail visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/audit projected replayable canary not durable workflow engine · not durable workflow state machine · not crash safe executor/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/uv run python -m src\.evals\.harness --benchmark-suite live_workflow_endurance_canary --indent 0/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/2026-05-11T09:00:00Z · 11 required receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Primary long-running artifact handoff is paused at comparison before publish\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Checkpoint branch compares the revised artifact against the original output\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Injected failure recovered through repair branch\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Second session holds a pending operator approval with stable context\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Replay is blocked because the repair path gained authenticated-source authority\./)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/blocked approval context changed/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/one reach channel canary ci gated operator visible · native notification · 0 active failures · 4 E2E steps/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/pairing paired · revocation revoked · health ready · degraded daemon offline/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/bounded retry with fallback visible · channel thread session and memory context linked · pending operator approval · 7 audit receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/single channel selected · channel sprawl rejected · pairing visible · revocation fail closed visible · health visible · retry visible · thread continuity visible · memory context visible · approval handoff visible · audit trail visible · degraded state ui visible · e2e flow visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/rejected until native notification canary meets bar · deterministic native notification canary not broad live channel reach · not broad mobile or messaging channel coverage · not production grade pairing protocol/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/uv run python -m src\.evals\.harness --benchmark-suite one_excellent_reach_channel_canary --indent 0/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/reach-thread-native-001 · memctx-reach-native-001 · degraded daemon offline · repair reconnect native daemon/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/seraph decision · request approval before channel response · external channel response could commit operator intent/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/approval handoff · pending operator approval/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/audited response · queue native notification response · queued after approval handoff/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/field scoped egress allowlist required · vault and background partitioned · boundary drift blocks replay · benchmark and runtime visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/field scoped secret refs plus required credential egress allowlist · trust boundary drift blocks replay and resume · 5 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · secret ref egress regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/session field host allowlist enforced · generic read patch blocked · ambient secret env scrubbed · suspicious context quarantined · trust partition receipts visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/session bound field scoped destination host allowlisted secret refs · deterministic secure host choke points not full host container isolation · 4 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/extract html and screenshot receipts visible · dismiss poll and ack receipts visible · continuity and operator receipts visible/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/extract html and screenshot actions require distinct audit receipts · enqueue dismiss poll and ack must remain cross surface replayable · 3 receipt surfaces/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/benchmark regression · desktop notification replay regression · deterministic eval failure/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Memory, continuity, and workflows/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Workflow endurance, anticipatory repair, and backup branches/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Trust boundaries and safety receipts/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/M3 secure capability host/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Computer-use, browser, and desktop execution/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Planning, retrieval, and reporting/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/Governed self-improvement/)).toBeInTheDocument();
+    expect(within(operatorWindow).getByText(/review gate >= 0.7 · strong >= 0.9/)).toBeInTheDocument();
+  });
+
   it("hides a pane from its window close control", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
@@ -2238,7 +6914,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2282,7 +6957,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2331,7 +7005,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2452,7 +7125,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2546,13 +7218,1596 @@ describe("CockpitView", () => {
     const workflowLabel = await screen.findByText("resume-review");
     const workflowRow = workflowLabel.closest(".cockpit-row");
     expect(workflowRow).not.toBeNull();
-    expect(within(workflowRow as HTMLElement).getByText(/checkpoint review_checkpoint/i)).toBeInTheDocument();
+    expect(within(workflowRow as HTMLElement).getAllByText(/checkpoint review_checkpoint/i).length).toBeGreaterThan(0);
     expect(within(workflowRow as HTMLElement).getByText(/run resume-r/i)).toBeInTheDocument();
 
     fireEvent.click(within(workflowRow as HTMLElement).getByRole("button", { name: "Studio" }));
 
     const studio = await screen.findByLabelText("Extension studio");
     expect(within(studio).getByText("Resume a review workflow")).toBeInTheDocument();
+  }, 15000);
+
+  it("surfaces workflow branch families and can continue the latest branch", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [{
+            name: "resume-review",
+            tool_name: "workflow_resume_review",
+            description: "Resume a review workflow",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "defaults/workflows/resume-review.md",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "never",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/root-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "replay_from_start",
+              branch_depth: 0,
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
+              replay_allowed: true,
+              replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:00:00Z", summary: "Workflow started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:05:00Z", summary: "root review workflow completed" },
+              ],
+            },
+            {
+              id: "run-child",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-20T09:06:00Z",
+              updated_at: "2026-03-20T09:08:00Z",
+              summary: "branch review needs continuation",
+              step_tools: ["read_file"],
+              step_records: [
+                {
+                  id: "review_checkpoint",
+                  index: 0,
+                  tool: "read_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/branch-review.md"],
+                  error_summary: "review checkpoint needs continuation",
+                  recovery_actions: [
+                    {
+                      type: "set_tool_policy",
+                      label: "Allow read_file",
+                      mode: "full",
+                    },
+                  ],
+                  is_recoverable: true,
+                },
+              ],
+              artifact_paths: ["notes/branch-review.md"],
+              continued_error_steps: ["review_checkpoint"],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-child-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "review_checkpoint",
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "retry_failed_step",
+                },
+              ],
+              replay_allowed: true,
+              thread_continue_message: "Continue child branch from the review checkpoint.",
+              retry_from_step_draft:
+                'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:06:00Z", summary: "Branch workflow started" },
+                { kind: "workflow_degraded", at: "2026-03-20T09:08:00Z", summary: "branch review needs continuation" },
+              ],
+            },
+            {
+              id: "run-peer",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:07:00Z",
+              updated_at: "2026-03-20T09:07:30Z",
+              summary: "peer review branch completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/peer-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-peer-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "peer_checkpoint",
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "peer_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="peer_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
+              replay_allowed: true,
+              thread_continue_message: "Continue peer branch from the peer checkpoint.",
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:07:00Z", summary: "Peer branch started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:07:30Z", summary: "peer review branch completed" },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const rootSummary = await screen.findByText("root review workflow completed");
+    const rootRow = rootSummary.closest(".cockpit-row");
+    expect(rootRow).not.toBeNull();
+    expect(within(rootRow as HTMLElement).getByText(/supervision branched/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/2 child branches/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/root branch/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/continue resume-review/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/latest failure branch review needs continuation/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/history 3 outputs/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/2 checkpoints/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/4 recovery paths/i)).toBeInTheDocument();
+    expect(within(rootRow as HTMLElement).getByText(/6 lineage events/i)).toBeInTheDocument();
+
+    fireEvent.click(rootSummary);
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Open Latest Branch" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue Latest Branch" })).toBeInTheDocument();
+    expect(within(inspector).getAllByText("child branch")).toHaveLength(2);
+    expect(within(inspector).getByText("branch origin")).toBeInTheDocument();
+    expect(within(inspector).getByText("best continuation")).toBeInTheDocument();
+    expect(within(inspector).getByText("failure lineage")).toBeInTheDocument();
+    expect(within(inspector).getAllByText("family output").length).toBeGreaterThan(0);
+    expect(within(inspector).getByRole("button", { name: "Open best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue best continuation for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from best continuation resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry step for best continuation resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for best continuation resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue workflow for family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from family output notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for family output notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare family output notes/branch-review.md from resume-c" })).toBeInTheDocument();
+    expect(within(inspector).getByText("output history")).toBeInTheDocument();
+    expect(within(inspector).getByText("checkpoint history")).toBeInTheDocument();
+    expect(within(inspector).getByText("lineage event")).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use current run for output history notes/root-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use best continuation for output history notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Branch review_checkpoint from current run for checkpoint history review_checkpoint" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use output from current run lineage event workflow_succeeded" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use failure from best continuation lineage event workflow_degraded" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Plan retry from best continuation lineage event workflow_degraded" })).toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: "Use failure from current run lineage event workflow_succeeded" })).not.toBeInTheDocument();
+    expect(within(inspector).getAllByText(/recovery ready/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry review_checkpoint from best continuation resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry step for best continuation resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use output from current run lineage event workflow_succeeded" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use failure from best continuation lineage event workflow_degraded" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review workflow "resume-review" step "review_checkpoint" \(read_file\)\./)).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Plan retry from best continuation lineage event workflow_degraded" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Branch review_checkpoint from current run for checkpoint history review_checkpoint" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Review workflow family state for "resume-review". Current output: "notes/root-review.md". Best continuation: "branch review needs continuation" with latest output "notes/branch-review.md" Latest family failure: "branch review needs continuation". Related reusable outputs: "notes/branch-review.md", "notes/peer-review.md". Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare child branch output notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/root-review.md" and "notes/branch-review.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Continue workflow for family output notes/branch-review.md from resume-c" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue child branch from the review checkpoint.")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Continue Latest Branch" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue child branch from the review checkpoint.")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Open Latest Branch" }));
+    await waitFor(() =>
+      expect((inspector.querySelector(".cockpit-inspector-body") as HTMLElement).textContent).toContain("branch review needs continuation"),
+    );
+    expect(within(inspector).getAllByRole("button", { name: "Open Parent" }).length).toBeGreaterThan(0);
+    expect(within(inspector).getByText("parent run")).toBeInTheDocument();
+    expect(within(inspector).getByText("peer branch")).toBeInTheDocument();
+    expect(within(inspector).getAllByText(/older than current/i)).toHaveLength(2);
+    expect(within(inspector).getByRole("button", { name: "Compare ancestor output notes/root-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare peer branch output notes/peer-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare family output notes/root-review.md from resume-r" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use ancestor output notes/root-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue peer branch resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue failure lineage branch resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use failure context from resume-review failure lineage" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Branch review_checkpoint from parent run resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Branch peer_checkpoint from peer branch resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from failure lineage branch resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry step for failure lineage branch resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for failure lineage branch resume-review" })).toBeInTheDocument();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use ancestor output notes/root-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Branch review_checkpoint from parent run resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Continue peer branch resume-review" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue peer branch from the peer checkpoint.")).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Branch peer_checkpoint from peer branch resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="peer_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use failure context from resume-review failure lineage" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review workflow "resume-review" step "review_checkpoint" \(read_file\)\./)).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry step for failure lineage branch resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry review_checkpoint from failure lineage branch resume-review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Continue failure lineage branch resume-review" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("Continue child branch from the review checkpoint.")).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use family output notes/root-review.md from resume-r" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/root-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare peer branch output notes/peer-review.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/branch-review.md" and "notes/peer-review.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use peer branch output notes/peer-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/peer-review.md" as context for the next action.')).toBeInTheDocument(),
+    );
+  }, 30000);
+
+  it("compares the specific output-history artifact instead of the source run primary output", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [{
+            name: "resume-review",
+            tool_name: "workflow_resume_review",
+            description: "Resume a review workflow",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "defaults/workflows/resume-review.md",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "never",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/root-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              replay_allowed: true,
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:00:00Z", summary: "Workflow started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:05:00Z", summary: "root review workflow completed" },
+              ],
+            },
+            {
+              id: "run-child",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:06:00Z",
+              updated_at: "2026-03-20T09:08:00Z",
+              summary: "branch review completed with multiple outputs",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/branch-review.md", "notes/branch-review-alt.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-child-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              replay_allowed: true,
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:06:00Z", summary: "Branch workflow started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:08:00Z", summary: "branch review completed with multiple outputs" },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const rootSummary = await screen.findByText("root review workflow completed");
+    fireEvent.click(rootSummary);
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Compare child branch for output history notes/branch-review-alt.md" })).toBeInTheDocument();
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare child branch for output history notes/branch-review-alt.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/root-review.md" and "notes/branch-review-alt.md". Summarize the key differences, what changed between these workflow outputs, and whether the related branch improved the result.',
+        ),
+      ).toBeInTheDocument(),
+    );
+  }, 15000);
+
+  it("keeps family next-step planning available without a best continuation", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 1,
+            workflows_total: 1,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [{
+            name: "resume-review",
+            tool_name: "workflow_resume_review",
+            description: "Resume a review workflow",
+            inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+            requires_tools: ["read_file"],
+            requires_skills: [],
+            user_invocable: true,
+            enabled: true,
+            step_count: 1,
+            file_path: "defaults/workflows/resume-review.md",
+            policy_modes: ["balanced", "full"],
+            execution_boundaries: ["workspace_read"],
+            risk_level: "low",
+            requires_approval: false,
+            approval_behavior: "never",
+            is_available: true,
+            availability: "ready",
+            missing_tools: [],
+            missing_skills: [],
+          }],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/root-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "replay_from_start",
+              branch_depth: 0,
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:00:00Z", summary: "Workflow started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:05:00Z", summary: "root review workflow completed" },
+              ],
+            },
+            {
+              id: "run-peer",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:07:00Z",
+              updated_at: "2026-03-20T09:07:30Z",
+              summary: "peer review branch completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/peer-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-peer-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "peer_checkpoint",
+              checkpoint_context_available: true,
+              replay_allowed: true,
+              timeline: [
+                { kind: "workflow_started", at: "2026-03-20T09:07:00Z", summary: "Peer branch started" },
+                { kind: "workflow_succeeded", at: "2026-03-20T09:07:30Z", summary: "peer review branch completed" },
+              ],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const rootSummary = await screen.findByText("root review workflow completed");
+    fireEvent.click(rootSummary);
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).queryByText("best continuation")).not.toBeInTheDocument();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Draft next step from workflow family for resume-review" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Review workflow family state for "resume-review". Current output: "notes/root-review.md". Related reusable outputs: "notes/peer-review.md". Recommend the best next step, whether to continue a branch, compare outputs, or reuse one of the related outputs.',
+        ),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("surfaces artifact lineage and follow-on control across outputs and the inspector", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Session 1" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-root-output",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved root review output",
+            created_at: "2026-03-20T09:05:00Z",
+            details: { arguments: { file_path: "notes/root-review.md" } },
+          },
+          {
+            id: "audit-peer-output",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved peer review output",
+            created_at: "2026-03-20T09:07:30Z",
+            details: { arguments: { file_path: "notes/peer-review.md" } },
+          },
+          {
+            id: "audit-branch-output",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Saved branch review output",
+            created_at: "2026-03-20T09:08:00Z",
+            details: { arguments: { file_path: "notes/branch-review.md" } },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 2,
+            workflows_total: 2,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [
+            {
+              name: "resume-review",
+              tool_name: "workflow_resume_review",
+              description: "Resume a review workflow",
+              inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/resume-review.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+              output_surface_artifact_types: ["markdown_document"],
+            },
+            {
+              name: "summarize-file",
+              tool_name: "workflow_summarize_file",
+              description: "Summarize a workspace file",
+              inputs: {
+                file_path: {
+                  type: "string",
+                  description: "Workspace file",
+                  required: true,
+                  artifact_input: true,
+                  artifact_types: ["markdown_document", "workspace_file"],
+                },
+              },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/summarize-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+            },
+          ],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-root",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:00:00Z",
+              updated_at: "2026-03-20T09:05:00Z",
+              summary: "root review workflow completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/root-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "replay_from_start",
+              branch_depth: 0,
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
+              replay_allowed: true,
+              replay_draft: 'Run workflow "resume-review" with file_path="notes/review.md".',
+            },
+            {
+              id: "run-child",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "degraded",
+              started_at: "2026-03-20T09:06:00Z",
+              updated_at: "2026-03-20T09:08:00Z",
+              summary: "branch review needs continuation",
+              step_tools: ["read_file"],
+              step_records: [
+                {
+                  id: "review_checkpoint",
+                  index: 0,
+                  tool: "read_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/branch-review.md"],
+                  error_summary: "review checkpoint needs continuation",
+                  recovery_actions: [
+                    {
+                      type: "set_tool_policy",
+                      label: "Allow read_file",
+                      mode: "full",
+                    },
+                  ],
+                  is_recoverable: true,
+                },
+              ],
+              artifact_paths: ["notes/branch-review.md"],
+              continued_error_steps: ["review_checkpoint"],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-child-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "review_checkpoint",
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "review_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+                  kind: "retry_failed_step",
+                },
+              ],
+              replay_allowed: true,
+              thread_continue_message: "Continue child branch from the review checkpoint.",
+              retry_from_step_draft:
+                'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="review_checkpoint".',
+            },
+            {
+              id: "run-peer",
+              tool_name: "workflow_resume_review",
+              workflow_name: "resume-review",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-20T09:07:00Z",
+              updated_at: "2026-03-20T09:07:30Z",
+              summary: "peer review branch completed",
+              step_tools: ["read_file"],
+              artifact_paths: ["notes/peer-review.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              thread_id: "session-1",
+              thread_label: "Session 1",
+              run_identity: "resume-peer-run",
+              parent_run_identity: "resume-root-run",
+              root_run_identity: "resume-root-run",
+              branch_kind: "branch_from_checkpoint",
+              branch_depth: 1,
+              resume_checkpoint_label: "peer_checkpoint",
+              checkpoint_context_available: true,
+              checkpoint_candidates: [
+                {
+                  step_id: "peer_checkpoint",
+                  resume_draft:
+                    'Run workflow "resume-review" with file_path="notes/review.md", _seraph_resume_from_step="peer_checkpoint".',
+                  kind: "branch_from_checkpoint",
+                },
+              ],
+              replay_allowed: true,
+              thread_continue_message: "Continue peer branch from the peer checkpoint.",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    const draftArtifactButton = await within(evidence).findByRole("button", {
+      name: "Draft next step for artifact: notes/branch-review.md",
+    });
+    expect(draftArtifactButton).toBeInTheDocument();
+
+    fireEvent.click(draftArtifactButton);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review next steps for artifact "notes\/branch-review\.md"\./)).toBeInTheDocument(),
+    );
+    expect(screen.getByDisplayValue(/summarize-file/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/notes\/peer-review\.md/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/notes\/root-review\.md/)).toBeInTheDocument();
+
+    fireEvent.click(await within(evidence).findByRole("button", { name: "Inspect artifact: notes/branch-review.md" }));
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Open Source Run" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue Source Run" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use Source Failure" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare Related Output" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry review_checkpoint from artifact source notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Retry step for artifact source notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Repair step review_checkpoint for artifact source notes/branch-review.md resume-review" })).toBeInTheDocument();
+    expect(within(inspector).getByText("source run")).toBeInTheDocument();
+    expect(within(inspector).getByText("follow-on")).toBeInTheDocument();
+    expect(within(inspector).getAllByText("related output").length).toBeGreaterThan(0);
+    expect(within(inspector).getByRole("button", { name: "Run summarize-file from artifact notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Compare related output notes/peer-review.md with artifact notes/branch-review.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Continue related output run notes/peer-review.md" })).toBeInTheDocument();
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Use Source Failure" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review workflow "resume-review" step "review_checkpoint" \(read_file\)\./)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Compare related output notes/peer-review.md with artifact notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue(
+          'Compare the workspace files "notes/branch-review.md" and "notes/peer-review.md". Summarize the key differences, what changed between these artifact outputs, and which file is the better base for the next step.',
+        ),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(inspector).getByRole("button", { name: "Run summarize-file from artifact notes/branch-review.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Run workflow "summarize-file" with file_path="notes\/branch-review\.md"\./)).toBeInTheDocument(),
+    );
+  }, 15000);
+
+  it("resolves artifact source lineage from the broader workflow window", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        { id: "session-2", title: "Research thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+          { id: "session-2", title: "Research thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+          imported_reach: { summary: { family_count: 0, active_family_count: 0, attention_family_count: 0, approval_family_count: 0 }, families: [] },
+          source_adapters: { summary: { adapter_count: 0, ready_adapter_count: 0, degraded_adapter_count: 0, authenticated_adapter_count: 0, authenticated_ready_adapter_count: 0, authenticated_degraded_adapter_count: 0 }, adapters: [] },
+          summary: { continuity_health: "steady", primary_surface: "browser", actionable_thread_count: 0, ambient_item_count: 0, pending_notification_count: 0, queued_insight_count: 0, recent_intervention_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_family_count: 0 },
+          threads: [],
+          recovery_actions: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-artifact",
+            session_id: "session-2",
+            tool_name: "write_file",
+            event_type: "tool_result",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Research summary saved",
+            created_at: "2026-03-21T10:05:00Z",
+            details: { arguments: { file_path: "notes/shared-brief.md" } },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          native_tools: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/workflows/runs?limit=40")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-source",
+              tool_name: "workflow_research_brief",
+              workflow_name: "research-brief",
+              session_id: "session-2",
+              status: "succeeded",
+              started_at: "2026-03-21T10:00:00Z",
+              updated_at: "2026-03-21T10:05:00Z",
+              summary: "research brief completed",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/shared-brief.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-2",
+              thread_label: "Research thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue research brief",
+              run_identity: "research-run",
+              root_run_identity: "research-run",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "session-local-run",
+              tool_name: "workflow_local_note",
+              workflow_name: "local-note",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-21T10:01:00Z",
+              updated_at: "2026-03-21T10:02:00Z",
+              summary: "local note completed",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/local.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              thread_continue_message: "Continue local note",
+              run_identity: "local-run",
+              root_run_identity: "local-run",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(await within(evidence).findByText("artifact: notes/shared-brief.md")).toBeInTheDocument();
+    expect(within(evidence).getByText(/research-brief · succeeded/)).toBeInTheDocument();
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Inspect artifact: notes/shared-brief.md" }));
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: "Open Source Run" })).toBeInTheDocument();
+    expect(within(inspector).getByText("source run")).toBeInTheDocument();
+    expect(within(inspector).getByText(/research-brief · research brief completed/)).toBeInTheDocument();
+  }, 15000);
+
+  it("fails closed when artifact lineage is ambiguous across recent runs", async () => {
+    useChatStore.setState({
+      messages: [],
+      sessionId: "session-1",
+      sessions: [
+        { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+      ],
+    });
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Atlas thread", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+          imported_reach: { summary: { family_count: 0, active_family_count: 0, attention_family_count: 0, approval_family_count: 0 }, families: [] },
+          source_adapters: { summary: { adapter_count: 0, ready_adapter_count: 0, degraded_adapter_count: 0, authenticated_adapter_count: 0, authenticated_ready_adapter_count: 0, authenticated_degraded_adapter_count: 0 }, adapters: [] },
+          summary: { continuity_health: "steady", primary_surface: "browser", actionable_thread_count: 0, ambient_item_count: 0, pending_notification_count: 0, queued_insight_count: 0, recent_intervention_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_family_count: 0 },
+          threads: [],
+          recovery_actions: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "audit-ambiguous",
+            session_id: "session-1",
+            tool_name: "write_file",
+            event_type: "tool_result",
+            risk_level: "low",
+            policy_mode: "balanced",
+            summary: "Shared review saved",
+            created_at: "2026-03-21T11:05:00Z",
+            details: { arguments: { file_path: "notes/shared.md" } },
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          workflows: [],
+          skills: [],
+          mcp_servers: [],
+          native_tools: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [
+            {
+              id: "run-a",
+              tool_name: "workflow_write_summary",
+              workflow_name: "write-summary",
+              session_id: "session-1",
+              status: "succeeded",
+              started_at: "2026-03-21T11:00:00Z",
+              updated_at: "2026-03-21T11:02:00Z",
+              summary: "summary branch completed",
+              step_tools: ["write_file"],
+              step_records: [],
+              artifact_paths: ["notes/shared.md"],
+              continued_error_steps: [],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-a",
+              root_run_identity: "run-a",
+            },
+            {
+              id: "run-b",
+              tool_name: "workflow_update_summary",
+              workflow_name: "update-summary",
+              session_id: "session-1",
+              status: "failed",
+              started_at: "2026-03-21T11:03:00Z",
+              updated_at: "2026-03-21T11:04:00Z",
+              summary: "update branch failed after writing shared output",
+              step_tools: ["write_file"],
+              step_records: [
+                {
+                  id: "write_shared",
+                  index: 0,
+                  tool: "write_file",
+                  status: "failed",
+                  argument_keys: ["file_path"],
+                  artifact_paths: ["notes/shared.md"],
+                  error_summary: "write verification failed",
+                },
+              ],
+              artifact_paths: ["notes/shared.md"],
+              continued_error_steps: ["write_shared"],
+              risk_level: "low",
+              pending_approval_count: 0,
+              pending_approval_ids: [],
+              thread_id: "session-1",
+              thread_label: "Atlas thread",
+              replay_allowed: true,
+              run_identity: "run-b",
+              root_run_identity: "run-b",
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const evidence = await screen.findByLabelText("Evidence shortcuts");
+    expect(await within(evidence).findByText("artifact: notes/shared.md")).toBeInTheDocument();
+    expect(within(evidence).getAllByText(/source ambiguous/).length).toBeGreaterThan(0);
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Draft next step for artifact: notes/shared.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Source workflow is ambiguous across 2 recent runs/)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(within(evidence).getByRole("button", { name: "Inspect artifact: notes/shared.md" }));
+
+    const inspector = document.querySelector(".cockpit-inspector") as HTMLElement;
+    expect(within(inspector).queryByRole("button", { name: "Open Source Run" })).not.toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: "Use Source Failure" })).not.toBeInTheDocument();
+    expect(within(inspector).getByText("source ambiguous (2 candidates)")).toBeInTheDocument();
+    expect(within(inspector).getByText("unresolved · 2 recent runs wrote notes/shared.md")).toBeInTheDocument();
+    expect(within(inspector).getByText("candidate source")).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Open candidate source run write-summary for artifact notes/shared.md" })).toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Use candidate failure update-summary for artifact notes/shared.md" })).toBeInTheDocument();
+  }, 15000);
+
+  it("surfaces workflow approval, artifact, and trace density inside the inspector", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([{ id: "session-1", title: "Atlas thread" }]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/audit/events")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "evt-file",
+            session_id: "session-1",
+            event_type: "tool_result",
+            tool_name: "write_file",
+            risk_level: "medium",
+            policy_mode: "balanced",
+            summary: "write_file saved notes/brief.md",
+            details: { arguments: { file_path: "notes/brief.md" } },
+            created_at: "2026-03-26T09:01:00Z",
+          },
+        ]));
+      }
+      if (url.includes("/api/approvals/approval-run/approve")) {
+        return Promise.resolve(mockResponse({ status: "approved" }));
+      }
+      if (url.includes("/api/approvals/pending")) {
+        return Promise.resolve(mockResponse([
+          {
+            id: "approval-run",
+            session_id: "session-1",
+            thread_id: "session-1",
+            thread_label: "Atlas thread",
+            tool_name: "write_file",
+            risk_level: "high",
+            status: "pending",
+            summary: "Approve write_file for Atlas brief",
+            created_at: "2026-03-26T09:02:00Z",
+            resume_message: "Continue Atlas brief approval",
+          },
+        ]));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 1,
+            native_tools_total: 1,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 2,
+            workflows_total: 2,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [{ name: "read_file", description: "Read", risk_level: "low", execution_boundaries: ["workspace_read"], availability: "ready" }],
+          skills: [],
+          workflows: [
+            {
+              name: "atlas-brief",
+              tool_name: "workflow_atlas_brief",
+              description: "Create an Atlas brief",
+              inputs: { file_path: { type: "string", description: "Workspace file", required: true } },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/atlas-brief.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+              output_surface_artifact_types: ["document"],
+            },
+            {
+              name: "summarize-file",
+              tool_name: "workflow_summarize_file",
+              description: "Summarize a workspace file",
+              inputs: {
+                file_path: {
+                  type: "string",
+                  description: "Workspace file",
+                  required: true,
+                  artifact_input: true,
+                  artifact_types: ["document"],
+                },
+              },
+              requires_tools: ["read_file"],
+              requires_skills: [],
+              user_invocable: true,
+              enabled: true,
+              step_count: 1,
+              file_path: "defaults/workflows/summarize-file.md",
+              policy_modes: ["balanced", "full"],
+              execution_boundaries: ["workspace_read"],
+              risk_level: "low",
+              requires_approval: false,
+              approval_behavior: "never",
+              is_available: true,
+              availability: "ready",
+              missing_tools: [],
+              missing_skills: [],
+            },
+          ],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) {
+        return Promise.resolve(mockResponse({
+          runs: [{
+            id: "run-1",
+            tool_name: "workflow_atlas_brief",
+            workflow_name: "atlas-brief",
+            session_id: "session-1",
+            status: "awaiting_approval",
+            started_at: "2026-03-26T09:00:00Z",
+            updated_at: "2026-03-26T09:03:00Z",
+            summary: "atlas-brief waiting on write_file approval",
+            step_tools: ["read_file", "write_file"],
+            step_records: [
+              {
+                id: "write_file",
+                index: 1,
+                tool: "write_file",
+                status: "failed",
+                argument_keys: ["file_path"],
+                artifact_paths: ["notes/brief.md"],
+                error_summary: "write_file blocked by approval",
+                recovery_hint: "Approve write_file and continue the workflow.",
+                recovery_actions: [{ type: "approval", label: "Approve write_file" }],
+                is_recoverable: true,
+              },
+            ],
+            artifact_paths: ["notes/brief.md"],
+            continued_error_steps: ["write_file"],
+            risk_level: "medium",
+            pending_approval_count: 1,
+            pending_approval_ids: ["approval-run"],
+            thread_id: "session-1",
+            thread_label: "Atlas thread",
+            replay_allowed: true,
+            replay_draft: "Run workflow \"atlas-brief\" with file_path=\"notes/brief.md\".",
+            checkpoint_context_available: true,
+            checkpoint_candidates: [{
+              step_id: "write_file",
+              kind: "retry_failed_step",
+              status: "degraded",
+              resume_supported: true,
+              resume_draft:
+                "Run workflow \"atlas-brief\" with file_path=\"notes/brief.md\", _seraph_resume_from_step=\"write_file\".",
+            }],
+            timeline: [
+              {
+                kind: "workflow_step_failed",
+                at: "2026-03-26T09:02:00Z",
+                summary: "write_file blocked by approval",
+                step_id: "write_file",
+                duration_ms: 320,
+              },
+            ],
+          }],
+        }));
+      }
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const workflowSummary = await screen.findByText("atlas-brief waiting on write_file approval");
+    fireEvent.click(workflowSummary);
+
+    const inspectorWindow = screen.getByText("Operations inspector").closest(".cockpit-window");
+    expect(inspectorWindow).not.toBeNull();
+    const approvalButton = await within(inspectorWindow as HTMLElement).findByRole("button", {
+      name: "Approve approval context for atlas-brief",
+    });
+    const approvalStackRow = approvalButton.closest(".cockpit-inspector-stack-row");
+    expect(approvalStackRow).not.toBeNull();
+    fireEvent.click(approvalButton);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/approvals/approval-run/approve"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    const artifactRow = screen.getByText(/artifact output · notes\/brief\.md/i).closest(".cockpit-inspector-stack-row");
+    expect(artifactRow).not.toBeNull();
+    fireEvent.click(within(artifactRow as HTMLElement).getByRole("button", { name: "Use artifact output notes/brief.md" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Use the workspace file "notes/brief.md" as context for the next action.')).toBeInTheDocument(),
+    );
+    expect(within(artifactRow as HTMLElement).getByRole("button", { name: "Run summarize-file from artifact output notes/brief.md" })).toBeInTheDocument();
+
+    const traceRetryButton = within(inspectorWindow as HTMLElement).getByRole("button", {
+      name: "Plan retry from write_file for atlas-brief",
+    });
+    const traceRow = traceRetryButton.closest(".cockpit-inspector-stack-row");
+    expect(traceRow).not.toBeNull();
+    fireEvent.click(traceRetryButton);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Run workflow "atlas-brief" with file_path="notes/brief.md", _seraph_resume_from_step="write_file".')).toBeInTheDocument(),
+    );
+
+    const stepRow = within(inspectorWindow as HTMLElement).getByText(/write_file · write_file failed · write_file blocked by approval/i).closest(".cockpit-inspector-stack-row");
+    expect(stepRow).not.toBeNull();
+    expect(within(stepRow as HTMLElement).getByRole("button", { name: "Repair step write_file in atlas-brief" })).toBeInTheDocument();
+
+    fireEvent.click(within(stepRow as HTMLElement).getByRole("button", { name: "Use step context write_file for atlas-brief" }));
+    await waitFor(() =>
+      expect(screen.getByDisplayValue(/Review workflow "atlas-brief" step "write_file" \(write_file\)\./)).toBeInTheDocument(),
+    );
+
+    expect(within(stepRow as HTMLElement).getByRole("button", { name: "Run summarize-file from step output notes/brief.md" })).toBeInTheDocument();
   }, 15000);
 
   it("lets operators edit MCP config from the extension studio", async () => {
@@ -2566,7 +8821,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2687,7 +8941,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2805,7 +9058,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -2896,7 +9148,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3019,7 +9270,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3170,7 +9420,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3351,7 +9600,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3448,7 +9696,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3600,7 +9847,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3705,7 +9951,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3844,6 +10089,198 @@ describe("CockpitView", () => {
     await waitFor(() => expect(within(studio).getAllByText("Test Installable").length).toBeGreaterThan(0));
   }, 15000);
 
+  it("scaffolds a new skill pack from extension studio", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/scaffold") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "scaffolded",
+          path: "/tmp/seraph-test/extensions/research-pack",
+          created_files: ["manifest.yaml", "skills/research-pack.md"],
+          preview: {
+            path: "/tmp/seraph-test/extensions/research-pack",
+            extension_id: "seraph.research-pack",
+            display_name: "Research Pack",
+            ok: true,
+            results: [],
+          },
+        }, true, 201));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({ extensions: [] }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.change(within(studio).getByLabelText("New extension package name"), {
+      target: { value: "research-pack" },
+    });
+    fireEvent.change(within(studio).getByLabelText("New extension display name"), {
+      target: { value: "Research Pack" },
+    });
+    fireEvent.click(within(studio).getByRole("button", { name: "Scaffold skill pack" }));
+
+    await waitFor(() => {
+      const scaffoldCall = fetchMock.mock.calls.find(
+        ([input, callInit]) => String(input).includes("/api/extensions/scaffold") && (callInit as RequestInit | undefined)?.method === "POST",
+      );
+      expect(scaffoldCall).toBeDefined();
+      const body = JSON.parse(String((scaffoldCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as { package_name?: string; display_name?: string; contributions?: string[] };
+      expect(body.package_name).toBe("research-pack");
+      expect(body.display_name).toBe("Research Pack");
+      expect(body.contributions).toEqual(["skills"]);
+    });
+
+    await waitFor(() => {
+      expect(within(studio).getByLabelText("Extension package path")).toHaveValue("/tmp/seraph-test/extensions/research-pack");
+      expect(within(studio).getByText("Research Pack scaffolded with 2 files")).toBeInTheDocument();
+    });
+  }, 15000);
+
+  it("surfaces scaffolded-invalid responses as warnings in extension studio", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      if (url.includes("/api/extensions/scaffold") && init?.method === "POST") {
+        return Promise.resolve(mockResponse({
+          status: "scaffolded_invalid",
+          path: "/tmp/seraph-test/extensions/research-pack",
+          created_files: ["manifest.yaml", "skills/research-pack.md"],
+          preview: {
+            path: "/tmp/seraph-test/extensions/research-pack",
+            extension_id: "seraph.research-pack",
+            display_name: "Research Pack",
+            ok: false,
+            results: [{ issues: [{ code: "invalid_frontmatter" }] }],
+          },
+        }, true, 201));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({ extensions: [] }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+
+    const studio = await screen.findByLabelText("Extension studio");
+    fireEvent.change(within(studio).getByLabelText("New extension package name"), {
+      target: { value: "research-pack" },
+    });
+    fireEvent.change(within(studio).getByLabelText("New extension display name"), {
+      target: { value: "Research Pack" },
+    });
+    fireEvent.click(within(studio).getByRole("button", { name: "Scaffold skill pack" }));
+
+    await waitFor(() => {
+      expect(within(studio).getByText("Research Pack scaffolded but needs fixes (1 issue)")).toBeInTheDocument();
+    });
+  }, 15000);
+
   it("surfaces approval-required install responses in extension studio", async () => {
     let approvalQueued = false;
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -3879,7 +10316,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -3961,7 +10397,7 @@ describe("CockpitView", () => {
     fireEvent.click(installButton);
 
     expect(await within(studio).findByText(/Review Pending approvals, then retry\./)).toBeInTheDocument();
-    expect(await screen.findByText("Install Test Installable with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Install Test Installable with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-install")).toBeInTheDocument();
     expect(await screen.findByText("seraph.test-installable")).toBeInTheDocument();
     expect(await screen.findByText("/tmp/extensions/test-installable")).toBeInTheDocument();
@@ -3980,7 +10416,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4027,8 +10462,24 @@ describe("CockpitView", () => {
           extension_id: "seraph.test-installable",
           display_name: "Test Installable",
           version: "2026.4.01",
+          version_line: "2026.4",
+          compatibility: {
+            seraph: ">=2026.4.10",
+            current_version: "2026.4.10",
+            compatible: true,
+          },
           ok: true,
           results: [],
+          diagnostics_summary: {
+            issue_count: 0,
+            error_issue_count: 0,
+            warning_issue_count: 0,
+            load_error_count: 0,
+            degraded_contribution_count: 0,
+            degraded_connector_count: 0,
+            state_counts: { ready: 1 },
+            highlighted_messages: [],
+          },
           lifecycle_plan: {
             mode: "update_workspace",
             recommended_action: "update",
@@ -4116,6 +10567,9 @@ describe("CockpitView", () => {
     fireEvent.click(within(studio).getByRole("button", { name: "Validate path" }));
 
     await waitFor(() => expect(within(studio).getByRole("button", { name: "Update package" })).toBeInTheDocument());
+    expect(within(studio).getByText("update workspace · 2026.3.21 -> 2026.4.01 · upgrade")).toBeInTheDocument();
+    expect(within(studio).getByText("compatible · Seraph >=2026.4.10 · current 2026.4.10")).toBeInTheDocument();
+    expect(within(studio).getByText("ready · no doctor or load errors")).toBeInTheDocument();
     fireEvent.click(within(studio).getByRole("button", { name: "Update package" }));
 
     await waitFor(() => {
@@ -4126,6 +10580,313 @@ describe("CockpitView", () => {
       const body = JSON.parse(String((updateCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as { path?: string };
       expect(body.path).toBe("/tmp/extensions/test-installable");
     });
+  }, 15000);
+
+  it("surfaces extension ecosystem health and catalog governance signals in the operator surface", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { total_items: 0, visible_groups: 0 } }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {
+            native_tools_ready: 0,
+            native_tools_total: 0,
+            skills_ready: 0,
+            skills_total: 0,
+            workflows_ready: 0,
+            workflows_total: 0,
+            starter_packs_ready: 0,
+            starter_packs_total: 0,
+            mcp_servers_ready: 0,
+            mcp_servers_total: 0,
+          },
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [{
+            name: "Research Pack",
+            catalog_id: "seraph.research-pack",
+            type: "extension_pack",
+            description: "Workspace research routines.",
+            category: "capability-pack",
+            bundled: true,
+            installed: true,
+            trust: "workspace",
+            version: "2026.4.11",
+            version_line: "2026.4",
+            installed_version: "2026.4.03",
+            update_available: true,
+            compatibility: {
+              seraph: ">=2026.4.01",
+              current_version: "2026.4.07",
+              compatible: true,
+            },
+            publisher: { name: "Workspace", homepage: null, support: null },
+            diagnostics_summary: {
+              issue_count: 0,
+              error_issue_count: 0,
+              warning_issue_count: 0,
+              load_error_count: 0,
+              degraded_contribution_count: 0,
+              degraded_connector_count: 0,
+              state_counts: { ready: 3 },
+              highlighted_messages: [],
+            },
+            recommended_actions: [],
+          }],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [
+            {
+              id: "extension-pack:seraph.research-pack",
+              label: "Research Pack",
+              kind: "extension_pack",
+              availability: "ready",
+              summary: "Workspace research routines.",
+              detail: "2026.4 · 2026.4.03 -> 2026.4.11 · trust workspace",
+              ready_count: 1,
+              total_count: 1,
+              primary_action: { type: "install_catalog_item", label: "Update pack", name: "seraph.research-pack" },
+              recommended_actions: [],
+              draft_command: null,
+              blocking_reasons: [],
+              install_items: [],
+              skills: [],
+              workflows: [],
+              related_runbooks: [],
+              catalog_id: "seraph.research-pack",
+              installed: true,
+              update_available: true,
+              version: "2026.4.11",
+              version_line: "2026.4",
+              installed_version: "2026.4.03",
+              contribution_types: ["managed_connectors", "runbooks"],
+              trust: "workspace",
+              publisher: { name: "Workspace", homepage: null, support: null },
+              compatibility: {
+                seraph: ">=2026.4.01",
+                current_version: "2026.4.07",
+                compatible: true,
+              },
+              diagnostics_summary: {
+                issue_count: 0,
+                error_issue_count: 0,
+                warning_issue_count: 0,
+                load_error_count: 0,
+                degraded_contribution_count: 0,
+                degraded_connector_count: 0,
+                state_counts: { ready: 3 },
+                highlighted_messages: [],
+              },
+              status: "ready",
+            },
+            {
+              id: "starter-pack:research-briefing",
+              label: "Research Briefing",
+              kind: "starter_pack",
+              availability: "partial",
+              summary: "Compose research skills, workflow, and installables.",
+              detail: "0/3 ready · 1 install items missing · 1 runbooks",
+              ready_count: 0,
+              total_count: 3,
+              primary_action: { type: "activate_starter_pack", label: "Activate pack", name: "research-briefing" },
+              recommended_actions: [{ type: "install_catalog_item", label: "Install http-request", name: "http-request" }],
+              draft_command: "Research the latest release notes",
+              blocking_reasons: ["missing install item: http-request"],
+              install_items: ["http-request"],
+              skills: ["web-briefing"],
+              workflows: ["web-brief-to-file"],
+              related_runbooks: ["Research Briefing"],
+            },
+          ],
+        }));
+      }
+      if (url.includes("/api/extensions") && !url.includes("/source")) {
+        return Promise.resolve(mockResponse({
+          extensions: [{
+            id: "seraph.research-pack",
+            display_name: "Research Pack",
+            version: "2026.4.03",
+            version_line: "2026.4",
+            kind: "capability-pack",
+            trust: "workspace",
+            source: "manifest",
+            location: "workspace",
+            status: "degraded",
+            summary: "Workspace research routines.",
+            description: "Workspace research routines.",
+            compatibility: {
+              seraph: ">=2026.4.01",
+              current_version: "2026.4.07",
+              compatible: true,
+            },
+            publisher: { name: "Workspace", homepage: null, support: null },
+            diagnostics_summary: {
+              issue_count: 1,
+              error_issue_count: 0,
+              warning_issue_count: 1,
+              load_error_count: 0,
+              degraded_contribution_count: 1,
+              degraded_connector_count: 1,
+              state_counts: { degraded: 1, ready: 2 },
+              highlighted_messages: ["GitHub adapter needs reconnect"],
+            },
+            issues: [{ severity: "warning", message: "GitHub adapter needs reconnect" }],
+            load_errors: [],
+            toggle_targets: [],
+            toggleable_contribution_types: ["managed_connectors"],
+            passive_contribution_types: ["runbooks"],
+            enable_supported: true,
+            disable_supported: true,
+            removable: true,
+            enabled_scope: "toggleable_contributions",
+            configurable: true,
+            metadata_supported: true,
+            config_scope: "workspace_metadata",
+            enabled: true,
+            config: {},
+            permission_summary: {
+              status: "missing",
+              ok: false,
+              required: { tools: ["write_file"], execution_boundaries: ["workspace_write"], network: false },
+              missing: { tools: ["write_file"], execution_boundaries: ["workspace_write"], network: false },
+              risk_level: "high",
+            },
+            approval_profile: {
+              requires_runtime_approval: false,
+              requires_lifecycle_approval: true,
+              risk_level: "high",
+              runtime_behavior: "approval",
+              lifecycle_boundaries: ["workspace_write"],
+            },
+            connector_summary: { total: 1, ready: 0, states: { degraded: 1 } },
+            contributions: [{
+              type: "messaging_connectors",
+              reference: "connectors/messaging/slack.yaml",
+              resolved_path: "/tmp/workspace/extensions/research-pack/connectors/messaging/slack.yaml",
+              loaded: true,
+              enabled: true,
+              configured: true,
+              name: "slack",
+              status: "ready",
+              health: { state: "ready", ready: true },
+              permission_profile: {
+                status: "granted",
+                requires_network: true,
+                missing_network: false,
+                requires_approval: true,
+                approval_behavior: "lifecycle",
+                missing_tools: [],
+                missing_execution_boundaries: [],
+              },
+              capability_contract: {
+                schema_version: "2026-05-04.m1",
+                trust_class: "workspace",
+                provenance: { extension_id: "seraph.research-pack", version: "2026.4.03" },
+                permissions: {
+                  declared: {
+                    data_access: ["operator_messages"],
+                    mutation_rights: ["send_operator_message"],
+                    audit_events: ["message_delivery_attempted"],
+                    execution_boundaries: ["external_read", "connector_mutation"],
+                  },
+                },
+              },
+              config_fields: [],
+              config_keys: [],
+              capabilities: [],
+              delivery_modes: ["channel"],
+              requires_network: true,
+              requires_daemon: false,
+            }],
+            studio_files: [{
+              key: "seraph.research-pack:manifest",
+              role: "manifest",
+              reference: "manifest.yaml",
+              resolved_path: "/tmp/workspace/extensions/research-pack/manifest.yaml",
+              label: "manifest.yaml",
+              display_type: "manifest",
+              format: "yaml",
+              editable: true,
+              save_supported: true,
+              validation_supported: true,
+              loaded: true,
+              name: "Research Pack",
+            }],
+          }],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("extension health")).toBeInTheDocument());
+    await waitFor(() => {
+      expect(screen.getByText("1 installed · 1 degraded · 1 updates · 1 approval gated · 1 attention")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("1 available · 1 updates · 1 extension packs · 1 compatible")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("marketplace flows")).toBeInTheDocument();
+      expect(screen.getByText("1/2 ready · 1 updates · 1 attention")).toBeInTheDocument();
+    });
+
+    const healthSection = screen.getByText("extension health").closest(".cockpit-operator-section");
+    expect(healthSection).not.toBeNull();
+    const healthRow = within(healthSection as HTMLElement).getByText("Research Pack").closest(".cockpit-operator-row");
+    expect(healthRow).not.toBeNull();
+    expect(within(healthRow as HTMLElement).getByRole("button", { name: "update" })).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByRole("button", { name: "studio" })).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByRole("button", { name: "draft" })).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/publisher Workspace/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/lifecycle approval/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/1\/1 contracts/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/operator messages data/)).toBeInTheDocument();
+    expect(within(healthRow as HTMLElement).getByText(/send operator message mutation/)).toBeInTheDocument();
+
+    const reachSection = screen.getByText("imported capability reach").closest(".cockpit-operator-section");
+    expect(reachSection).not.toBeNull();
+    const messagingRow = within(reachSection as HTMLElement).getByText("messaging").closest(".cockpit-operator-row");
+    expect(messagingRow).not.toBeNull();
+    expect(within(messagingRow as HTMLElement).getByText(/1 contracts/)).toBeInTheDocument();
+
+    const flowSection = screen.getByText("marketplace flows").closest(".cockpit-operator-section");
+    expect(flowSection).not.toBeNull();
+    const flowRow = within(flowSection as HTMLElement).getByText("Research Briefing").closest(".cockpit-operator-row");
+    expect(flowRow).not.toBeNull();
+    expect(within(flowRow as HTMLElement).getByRole("button", { name: "Activate pack" })).toBeInTheDocument();
+    expect(within(flowRow as HTMLElement).getByRole("button", { name: "repair" })).toBeInTheDocument();
+    expect(within(flowRow as HTMLElement).getByRole("button", { name: "draft" })).toBeInTheDocument();
   }, 15000);
 
   it("surfaces approval-required update responses in extension studio", async () => {
@@ -4157,7 +10918,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4299,7 +11059,7 @@ describe("CockpitView", () => {
     fireEvent.click(within(studio).getByRole("button", { name: "Update package" }));
 
     expect(await within(studio).findByText(/Review Pending approvals, then retry\./)).toBeInTheDocument();
-    expect(await screen.findByText("Update Test Installable with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Update Test Installable with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-update")).toBeInTheDocument();
   }, 15000);
 
@@ -4314,7 +11074,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4411,7 +11170,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4628,7 +11386,6 @@ describe("CockpitView", () => {
             : [],
         ));
       }
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4783,7 +11540,7 @@ describe("CockpitView", () => {
     fireEvent.click(await within(studio).findByRole("button", { name: "Enable contributions" }));
 
     expect(await within(studio).findByText(/Review Pending approvals, then retry\./)).toBeInTheDocument();
-    expect(await screen.findByText("Enable Test Installable contributions with high-risk capabilities")).toBeInTheDocument();
+    expect((await screen.findAllByText("Enable Test Installable contributions with high-risk capabilities")).length).toBeGreaterThan(0);
     expect(await screen.findByText("approval-extension-enable")).toBeInTheDocument();
   }, 15000);
 
@@ -4799,7 +11556,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -4966,7 +11722,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5084,7 +11839,8 @@ describe("CockpitView", () => {
     await waitFor(() => expect(within(studio).queryByText("Test Installable")).not.toBeInTheDocument());
   }, 15000);
 
-  it("keeps successful cockpit surfaces visible when one refresh endpoint fails", async () => {
+  it("keeps the last successful activity ledger visible when a refresh fails", async () => {
+    let activityLedgerCalls = 0;
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -5095,7 +11851,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.reject(new Error("timeline unavailable"));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5179,6 +11934,60 @@ describe("CockpitView", () => {
           }],
         }));
       }
+      if (url.includes("/api/skills/reload")) return Promise.resolve(mockResponse({ ok: true }));
+      if (url.includes("/api/activity/ledger")) {
+        activityLedgerCalls += 1;
+        if (activityLedgerCalls === 1) {
+          return Promise.resolve(mockResponse({
+            summary: {
+              window_hours: 24,
+              started_at: "2026-03-24T10:00:00Z",
+              total_items: 1,
+              visible_groups: 1,
+              llm_calls: 1,
+              spend_usd: 0.015,
+              input_tokens: 200,
+              output_tokens: 40,
+              user_triggered_llm_calls: 1,
+              autonomous_llm_calls: 0,
+              llm_cost_by_runtime_path: [
+                { key: "chat_agent", calls: 1, cost_usd: 0.015, input_tokens: 200, output_tokens: 40 },
+              ],
+              llm_cost_by_capability_family: [
+                { key: "conversation", calls: 1, cost_usd: 0.015, input_tokens: 200, output_tokens: 40 },
+              ],
+              categories: { llm: 1, workflow: 0, approval: 0, guardian: 0, agent: 0, system: 0 },
+            },
+            items: [
+              {
+                id: "llm-1",
+                kind: "llm_call",
+                category: "llm",
+                title: "Conversation reasoning for Session 1 using claude-sonnet-4",
+                summary: "Initial activity snapshot",
+                status: "success",
+                created_at: "2026-03-24T10:01:00Z",
+                updated_at: "2026-03-24T10:01:00Z",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                source: "websocket_chat",
+                model: "openrouter/anthropic/claude-sonnet-4",
+                provider: "openrouter",
+                prompt_tokens: 200,
+                completion_tokens: 40,
+                cost_usd: 0.015,
+                duration_ms: 620,
+                metadata: {
+                  request_id: "agent-ws:session-1:refresh",
+                  runtime_path: "chat_agent",
+                  capability_family: "conversation",
+                },
+              },
+            ],
+          }));
+        }
+        return Promise.reject(new Error("activity ledger unavailable"));
+      }
       if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
       if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
       if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
@@ -5189,8 +11998,15 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument());
-    expect(screen.getByText("Run summarize-file")).toBeInTheDocument();
-    expect(screen.queryByText("Operator surface unavailable.")).not.toBeInTheDocument();
+    expect(await screen.findByText(/spend \$0\.015/)).toBeInTheDocument();
+    expect(screen.getByText(/conversation \$0\.015/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "reload" })[0]);
+
+    await waitFor(() => expect(activityLedgerCalls).toBeGreaterThan(1));
+    expect(screen.getByText(/spend \$0\.015/)).toBeInTheDocument();
+    expect(screen.getByText(/conversation \$0\.015/)).toBeInTheDocument();
+    expect(screen.getByText("Daily operator rhythm")).toBeInTheDocument();
   }, 15000);
 
   it("ignores stale studio source responses after switching entries", async () => {
@@ -5209,7 +12025,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5307,7 +12122,7 @@ describe("CockpitView", () => {
   }, 15000);
 
   it("does not process refresh payloads after the cockpit unmounts", async () => {
-    const deferredResponses = Array.from({ length: 10 }, () => {
+    const deferredResponses = Array.from({ length: 27 }, () => {
       let resolve!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
       const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((res) => {
         resolve = res;
@@ -5332,7 +12147,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(12));
+    await waitFor(() => expect(cockpitFetchCount).toBe(27));
     view.unmount();
 
     await act(async () => {
@@ -5361,7 +12176,6 @@ describe("CockpitView", () => {
       if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
       if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
       if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
-      if (url.includes("/api/operator/timeline")) return Promise.resolve(mockResponse({ items: [] }));
       if (url.includes("/api/observer/continuity")) {
         return Promise.resolve(mockResponse({
           daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
@@ -5398,5 +12212,384 @@ describe("CockpitView", () => {
     fireEvent.submit(composer.closest("form")!);
 
     await waitFor(() => expect(screen.getByDisplayValue("keep me")).toBeInTheDocument());
+  });
+
+  it("surfaces the team control plane in the operator terminal", async () => {
+    let controlPlaneUrl: string | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "2026.4.10",
+          build_id: "SERAPH_PRIME_v2026.4.10",
+          provider: "openrouter",
+          model: "openrouter/openai/gpt-4.1-mini",
+          model_label: "gpt-4.1-mini",
+          llm_logging_enabled: true,
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          summary: {
+            continuity_health: "attention",
+            primary_surface: "presence",
+            recommended_focus: "telegram relay",
+            actionable_thread_count: 1,
+            ambient_item_count: 0,
+            pending_notification_count: 0,
+            queued_insight_count: 0,
+            recent_intervention_count: 0,
+            degraded_route_count: 1,
+            degraded_source_adapter_count: 0,
+            attention_family_count: 0,
+            presence_surface_count: 1,
+            attention_presence_surface_count: 1,
+          },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        controlPlaneUrl = url;
+        return Promise.resolve(mockResponse({
+          governance: {
+            workspace_mode: "single_operator_guarded_workspace",
+            review_posture: "human review gates privileged mutations, extension lifecycle changes, and governed evolution proposals",
+            approval_mode: "high_risk",
+            tool_policy_mode: "balanced",
+            mcp_policy_mode: "approval",
+            delegation_enabled: true,
+            roles: [
+              {
+                id: "human_operator",
+                label: "Human operator",
+                scope: "workspace_governance",
+                summary: "Owns approvals, deployment posture, and final review of privileged mutations.",
+                status: "active",
+                permissions: ["approve high-risk actions"],
+                boundaries: ["human_review", "workspace_write", "external_mcp"],
+              },
+            ],
+          },
+          usage: {
+            window_hours: 24,
+            llm_call_count: 7,
+            llm_cost_usd: 0.0234,
+            input_tokens: 300,
+            output_tokens: 120,
+            user_triggered_llm_calls: 3,
+            autonomous_llm_calls: 4,
+            failure_count: 1,
+            pending_approvals: 2,
+            active_workflows: 3,
+            blocked_workflows: 1,
+          },
+          runtime_posture: {
+            runtime: {
+              version: "2026.4.10",
+              build_id: "SERAPH_PRIME_v2026.4.10",
+              provider: "openrouter",
+              model: "openrouter/openai/gpt-4.1-mini",
+              model_label: "gpt-4.1-mini",
+            },
+            extensions: {
+              total: 5,
+              ready: 4,
+              degraded: 1,
+              governed: 2,
+              issue_count: 3,
+              degraded_connector_count: 1,
+            },
+            continuity: {
+              continuity_health: "attention",
+              primary_surface: "presence",
+              recommended_focus: "telegram relay",
+              actionable_thread_count: 1,
+              degraded_route_count: 1,
+              degraded_source_adapter_count: 0,
+              attention_presence_surface_count: 1,
+            },
+          },
+          handoff: {
+            pending_approvals: [
+              {
+                id: "approval:1",
+                kind: "approval",
+                label: "write_file",
+                detail: "Approve guarded write",
+                status: "high",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                continue_message: "Resume after approval.",
+              },
+            ],
+            blocked_workflows: [
+              {
+                id: "workflow:1",
+                kind: "workflow",
+                label: "repo-review",
+                detail: "Workflow is blocked by approval context drift",
+                status: "blocked",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+                continue_message: "Start a fresh guarded repo review.",
+              },
+            ],
+            follow_ups: [
+              {
+                id: "follow:1",
+                kind: "presence_repair",
+                label: "Review Telegram relay",
+                detail: "Connector requires config.",
+                status: "requires_config",
+                continue_message: "Plan the Telegram repair.",
+              },
+            ],
+            review_receipts: [
+              {
+                id: "review:1",
+                title: "write_file",
+                summary: "Approval requested for write_file",
+                status: "approval_requested",
+                created_at: "2026-04-08T10:00:00Z",
+                thread_id: "session-1",
+                thread_label: "Session 1",
+              },
+            ],
+          },
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const controlPlane = await screen.findByRole("region", { name: /team control plane/i });
+    await waitFor(() => expect(controlPlane).toHaveTextContent(/single operator guarded workspace/i));
+    expect(screen.getByText(/7 llm/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 blocked workflows/i)).toBeInTheDocument();
+    expect(screen.getByText(/4\/5 extensions ready/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 governed/i)).toBeInTheDocument();
+    expect(screen.getByText("Human operator")).toBeInTheDocument();
+    expect(screen.getByText("Review Telegram relay")).toBeInTheDocument();
+    expect(screen.getByText("Approval requested for write_file")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "continue" }).length).toBeGreaterThan(0);
+    expect(controlPlaneUrl).not.toContain("session_id=");
+  });
+
+  it("surfaces M5 jobs, delegated work queue, and claim boundaries in the operator terminal", async () => {
+    let operatingLayerUrl: string | null = null;
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions")) {
+        return Promise.resolve(mockResponse([
+          { id: "session-1", title: "Session 1", created_at: "", updated_at: "", last_message: null, last_message_role: null },
+        ]));
+      }
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({
+          version: "2026.4.10",
+          build_id: "SERAPH_PRIME_v2026.4.10",
+          provider: "openrouter",
+          model: "openrouter/openai/gpt-4.1-mini",
+          model_label: "gpt-4.1-mini",
+        }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) {
+        return Promise.resolve(mockResponse({
+          tool_policy_mode: "balanced",
+          mcp_policy_mode: "approval",
+          approval_mode: "high_risk",
+          summary: {},
+          native_tools: [],
+          skills: [],
+          workflows: [],
+          mcp_servers: [],
+          starter_packs: [],
+          catalog_items: [],
+          recommendations: [],
+          runbooks: [],
+          marketplace_flows: [],
+        }));
+      }
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [], summary: {} }));
+      if (url.includes("/api/activity/ledger")) {
+        return Promise.resolve(mockResponse({ items: [], summary: { llm_call_count: 0, llm_cost_usd: 0, failure_count: 0 } }));
+      }
+      if (url.includes("/api/operator/m5-operating-layer")) {
+        operatingLayerUrl = url;
+        return Promise.resolve(mockResponse({
+          summary: {
+            work_item_count: 3,
+            scheduled_job_count: 1,
+            routine_count: 1,
+            workflow_run_count: 1,
+            delegation_partition_count: 1,
+            active_work_count: 2,
+            paused_work_count: 1,
+            awaiting_approval_count: 1,
+            failed_work_count: 0,
+            repair_ready_count: 1,
+            checkpoint_ready_count: 1,
+            branch_ready_count: 1,
+            session_churn_risk_count: 0,
+            durable_run_receipt_count: 2,
+            operator_status: "supervised_background_work_visible",
+            claim_boundary: "audit_projected_supervision_not_full_durable_executor",
+          },
+          jobs: [
+            {
+              id: "job:nightly-benchmark",
+              name: "Nightly benchmark steward",
+              status: "active",
+              enabled: true,
+              trigger_type: "cron",
+              trigger_label: "daily at 02:00",
+              action_type: "workflow",
+              action_label: "Run benchmark steward",
+              last_outcome: "approval_requested",
+              last_approval_id: "approval_m5_123456",
+              run_count: 2,
+              run_history: [
+                { id: "run:1", status: "finished", outcome: "approval_requested", approval_id: "approval_m5_123456" },
+              ],
+              lifecycle_controls: ["pause", "resume", "cancel"],
+              audit_receipts: ["audit:job-run"],
+            },
+          ],
+          routines: [
+            {
+              id: "routine:morning-repair",
+              name: "Morning repair sweep",
+              enabled: true,
+              trigger_label: "manual routine",
+              action_label: "Repair stale queue",
+              run_count: 0,
+              run_history: [],
+              lifecycle_controls: [],
+              audit_receipts: [],
+            },
+          ],
+          delegations: [
+            {
+              id: "delegation:vault-keeper",
+              specialist: "Vault keeper",
+              owner: "operator",
+              status: "available",
+              risk_level: "high",
+              task_summary: "Handles credential-sensitive background work.",
+              execution_boundaries: ["vault_partition", "approval_required"],
+              delegated_tool_names: ["read_secret_metadata", "request_approval"],
+              artifact_count: 2,
+              review_state: "pending_review",
+              trust_partition: {
+                mode: "vault_and_background_partitioned",
+                background_capable: true,
+                authenticated_source: true,
+                credential_egress_policy_count: 2,
+                blocked: false,
+              },
+            },
+          ],
+          work_queue: [
+            {
+              id: "work:branch-handoff",
+              kind: "branch_handoff",
+              label: "Prepare release branch handoff",
+              status: "awaiting_approval",
+              detail: "Checkpointed M5 work item ready for operator continuation.",
+              priority: "high",
+              thread_id: "session-1",
+              continue_message: "Continue the release branch handoff.",
+              checkpoint_ready: true,
+              repair_ready: true,
+              branch_ready: true,
+              delegation_ready: true,
+              approval_required: true,
+              actions: ["continue", "request_review"],
+            },
+          ],
+          missing_trigger_classes: ["calendar", "external_webhook"],
+          proof_receipts: ["receipt:m5-operating-layer"],
+        }));
+      }
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    const operatingLayer = await screen.findByRole("region", { name: /m5 operating layer/i });
+    await waitFor(() => expect(operatingLayer).toHaveTextContent(/3 work items · 1 jobs · 1 delegations/i));
+    expect(within(operatingLayer).getByText("Nightly benchmark steward")).toBeInTheDocument();
+    expect(operatingLayer).toHaveTextContent(/daily at 02:00 · Run benchmark steward · last approval_requested · 2 runs/i);
+    expect(within(operatingLayer).getByText("Prepare release branch handoff")).toBeInTheDocument();
+    expect(operatingLayer).toHaveTextContent(/checkpoint · repair · branch · delegation · approval · continue, request_review/i);
+    expect(within(operatingLayer).getByText("Vault keeper")).toBeInTheDocument();
+    expect(operatingLayer).toHaveTextContent(/vault and background partitioned · available · 2 tools/i);
+    expect(operatingLayer).toHaveTextContent(/audit projected supervision not full durable executor/i);
+    expect(operatingLayer).toHaveTextContent(/future triggers: calendar, external_webhook/i);
+    expect(operatingLayerUrl).not.toContain("session_id=");
   });
 });

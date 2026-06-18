@@ -19,21 +19,36 @@ _CONTRIBUTION_FIELDS = (
     "runbooks",
     "starter_packs",
     "provider_presets",
+    "toolset_presets",
     "prompt_packs",
+    "context_packs",
     "scheduled_routines",
     "mcp_servers",
     "managed_connectors",
+    "memory_providers",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_definitions",
     "observer_connectors",
     "channel_adapters",
+    "canvas_outputs",
+    "workflow_runtimes",
+    "speech_profiles",
+    "node_adapters",
     "workspace_adapters",
 )
 
 _CONNECTOR_FIELDS = {
     "mcp_servers",
     "managed_connectors",
+    "memory_providers",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_connectors",
     "channel_adapters",
+    "node_adapters",
     "workspace_adapters",
 }
 
@@ -93,6 +108,57 @@ class ExtensionPublisher(BaseModel):
         return value
 
 
+class ExtensionProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    publisher_id: str | None = None
+    url: str | None = None
+    catalog_entry: str | None = None
+
+    @field_validator("source", "publisher_id", "url", "catalog_entry")
+    @classmethod
+    def _validate_optional_non_empty_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+
+class ExtensionSignature(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key_id: str
+    digest: str
+    signature: str
+    algorithm: str = "seraph-sha256-v1"
+
+    @field_validator("key_id", "digest", "signature", "algorithm")
+    @classmethod
+    def _validate_non_empty_string(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _validate_digest(cls, value: str) -> str:
+        value = value.strip().lower()
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError("must be a lowercase SHA-256 hex digest")
+        return value
+
+
+class ExtensionGovernanceContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provenance: ExtensionProvenance
+    signature: ExtensionSignature | None = None
+
+
 class ExtensionCompatibility(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -124,10 +190,21 @@ class ExtensionPermissions(BaseModel):
     tools: list[str] = Field(default_factory=list)
     execution_boundaries: list[str] = Field(default_factory=list)
     network: bool = False
+    data_access: list[str] = Field(default_factory=list)
+    mutation_rights: list[str] = Field(default_factory=list)
+    audit_events: list[str] = Field(default_factory=list)
     secrets: list[str] = Field(default_factory=list)
     env: list[str] = Field(default_factory=list)
 
-    @field_validator("tools", "execution_boundaries", "secrets", "env")
+    @field_validator(
+        "tools",
+        "execution_boundaries",
+        "data_access",
+        "mutation_rights",
+        "audit_events",
+        "secrets",
+        "env",
+    )
     @classmethod
     def _validate_string_list(cls, values: list[str]) -> list[str]:
         normalized: list[str] = []
@@ -150,13 +227,23 @@ class ExtensionContributionPaths(BaseModel):
     runbooks: list[str] = Field(default_factory=list)
     starter_packs: list[str] = Field(default_factory=list)
     provider_presets: list[str] = Field(default_factory=list)
+    toolset_presets: list[str] = Field(default_factory=list)
     prompt_packs: list[str] = Field(default_factory=list)
+    context_packs: list[str] = Field(default_factory=list)
     scheduled_routines: list[str] = Field(default_factory=list)
     mcp_servers: list[str] = Field(default_factory=list)
     managed_connectors: list[str] = Field(default_factory=list)
+    memory_providers: list[str] = Field(default_factory=list)
+    automation_triggers: list[str] = Field(default_factory=list)
+    browser_providers: list[str] = Field(default_factory=list)
+    messaging_connectors: list[str] = Field(default_factory=list)
     observer_definitions: list[str] = Field(default_factory=list)
     observer_connectors: list[str] = Field(default_factory=list)
     channel_adapters: list[str] = Field(default_factory=list)
+    canvas_outputs: list[str] = Field(default_factory=list)
+    workflow_runtimes: list[str] = Field(default_factory=list)
+    speech_profiles: list[str] = Field(default_factory=list)
+    node_adapters: list[str] = Field(default_factory=list)
     workspace_adapters: list[str] = Field(default_factory=list)
 
     @field_validator(*_CONTRIBUTION_FIELDS)
@@ -199,6 +286,7 @@ class ExtensionManifest(BaseModel):
     trust: ExtensionTrust
     permissions: ExtensionPermissions = Field(default_factory=ExtensionPermissions)
     contributes: ExtensionContributionPaths
+    governance: ExtensionGovernanceContract | None = None
     summary: str | None = None
     description: str | None = None
 
@@ -252,6 +340,12 @@ class ExtensionManifest(BaseModel):
         if self.kind == ExtensionKind.CONNECTOR_PACK and not contributions.intersection(_CONNECTOR_FIELDS):
             raise ValueError("connector-pack manifests must contribute at least one connector surface")
 
+        if self.trust == ExtensionTrust.VERIFIED:
+            if self.governance is None:
+                raise ValueError("verified manifests must include governance provenance and signature")
+            if self.governance.signature is None:
+                raise ValueError("verified manifests must include a governance signature")
+
         return self
 
     def contributed_types(self) -> set[str]:
@@ -297,6 +391,8 @@ def load_extension_manifest(path: str | Path) -> ExtensionManifest:
     manifest_path = Path(path)
     try:
         content = manifest_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExtensionManifestError(str(manifest_path), "manifest is not valid UTF-8 text") from exc
     except OSError as exc:
         raise ExtensionManifestError(str(manifest_path), f"failed to read manifest: {exc}") from exc
     return parse_extension_manifest(content, source=str(manifest_path))

@@ -1,0 +1,7 @@
+name: openai-realtime-voice
+description: Duplex speech profile for guarded voice delivery and future live talk mode.
+provider: openai
+voice: alloy
+supports_tts: true
+supports_stt: true
+wake_word: seraph

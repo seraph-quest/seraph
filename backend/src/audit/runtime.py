@@ -4,11 +4,38 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from src.audit.repository import audit_repository
+from src.utils.background import track_task
 
 logger = logging.getLogger(__name__)
+_SYNC_AUDIT_WAIT_SECONDS = 5.0
+
+
+def _run_coro_on_dedicated_loop(coro, *, label: str) -> None:
+    error: Exception | None = None
+
+    def _runner() -> None:
+        nonlocal error
+        try:
+            asyncio.run(coro)
+        except Exception as exc:  # pragma: no cover - fail-open logging path
+            error = exc
+
+    worker = threading.Thread(target=_runner, name=label, daemon=True)
+    worker.start()
+    worker.join(timeout=_SYNC_AUDIT_WAIT_SECONDS)
+    if worker.is_alive():
+        logger.debug(
+            "Timed out waiting for sync runtime audit %s after %.1fs",
+            label,
+            _SYNC_AUDIT_WAIT_SECONDS,
+        )
+        return
+    if error is not None:
+        logger.debug("Failed to record sync runtime audit %s", label, exc_info=error)
 
 
 async def log_agent_run_event(
@@ -156,26 +183,29 @@ def log_integration_event_sync(
 ) -> None:
     """Sync wrapper for integration runtime events used by non-async callers."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        try:
-            asyncio.run(log_integration_event(
+        _run_coro_on_dedicated_loop(
+            log_integration_event(
                 integration_type=integration_type,
                 name=name,
                 outcome=outcome,
                 details=details,
-            ))
-        except Exception:
-            logger.debug("Failed to run integration runtime audit logger", exc_info=True)
+            ),
+            label=f"runtime_audit:integration:{integration_type}:{name}",
+        )
         return
 
     try:
-        loop.create_task(log_integration_event(
-            integration_type=integration_type,
-            name=name,
-            outcome=outcome,
-            details=details,
-        ))
+        track_task(
+            log_integration_event(
+                integration_type=integration_type,
+                name=name,
+                outcome=outcome,
+                details=details,
+            ),
+            name=f"runtime_audit:integration:{integration_type}:{name}",
+        )
     except Exception:
         logger.debug("Failed to run integration runtime audit logger", exc_info=True)
 
@@ -189,25 +219,28 @@ def log_background_task_event_sync(
 ) -> None:
     """Sync wrapper for background/helper runtime events used by non-async callers."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
-        try:
-            asyncio.run(log_background_task_event(
+        _run_coro_on_dedicated_loop(
+            log_background_task_event(
                 task_name=task_name,
                 outcome=outcome,
                 session_id=session_id,
                 details=details,
-            ))
-        except Exception:
-            logger.debug("Failed to run background runtime audit logger", exc_info=True)
+            ),
+            label=f"runtime_audit:background:{task_name}:{outcome}",
+        )
         return
 
     try:
-        loop.create_task(log_background_task_event(
-            task_name=task_name,
-            outcome=outcome,
-            session_id=session_id,
-            details=details,
-        ))
+        track_task(
+            log_background_task_event(
+                task_name=task_name,
+                outcome=outcome,
+                session_id=session_id,
+                details=details,
+            ),
+            name=f"runtime_audit:background:{task_name}:{outcome}",
+        )
     except Exception:
         logger.debug("Failed to run background runtime audit logger", exc_info=True)

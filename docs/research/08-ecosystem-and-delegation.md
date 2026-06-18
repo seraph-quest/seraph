@@ -7,6 +7,7 @@ Seraph should compound through reusable capabilities without collapsing into a m
 Detailed strategy:
 
 - [12. Extension Platform And MCP Strategy](/research/plugin-system-and-mcp-strategy)
+- [13. Hermes And OpenClaw Capability Import Plan](/research/hermes-and-openclaw-capability-import-plan)
 
 ## Capability Layers
 

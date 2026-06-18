@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -8,6 +9,8 @@ import pytest
 from config.settings import settings
 from src.extensions.state import save_extension_state_payload
 from src.audit.repository import audit_repository
+from src.db.models import MemoryEpisodeType
+from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager, _active_observer_definitions
 
@@ -258,6 +261,198 @@ class TestContextManagerRefresh:
             and event["details"]["sources_ok"] == 3
             for event in events
         )
+
+    @pytest.mark.asyncio
+    async def test_refresh_records_observer_transition_episodes(self, async_db):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing Atlas rollout notes")
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]):
+            ctx = await mgr.refresh()
+
+        episodes = await memory_repository.list_episodes(
+            episode_types=(MemoryEpisodeType.observer,),
+            limit=10,
+        )
+
+        assert ctx.active_project == "Atlas"
+        assert len(episodes) == 3
+        assert [json.loads(item.metadata_json)["observer_transition"] for item in episodes] == [
+            "activity",
+            "focus",
+            "project",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_refresh_logs_observer_transition_details(self, async_db):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing Atlas rollout notes")
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]):
+            await mgr.refresh()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "background_task_succeeded"
+            and event["tool_name"] == "observer_context_refresh"
+            and event["details"]["active_project"] == "Atlas"
+            and event["details"]["observer_transition_count"] == 3
+            for event in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_does_not_duplicate_observer_transition_episodes_without_change(self, async_db):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing Atlas rollout notes")
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]):
+            await mgr.refresh()
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]):
+            await mgr.refresh()
+
+        episodes = await memory_repository.list_episodes(
+            episode_types=(MemoryEpisodeType.observer,),
+            limit=10,
+        )
+
+        assert len(episodes) == 3
+
+    @pytest.mark.asyncio
+    async def test_refresh_survives_observer_episode_write_failure(self, async_db):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing Atlas rollout notes")
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]), \
+             patch("src.memory.observer_episodes.memory_repository.create_episode_batch", new_callable=AsyncMock, side_effect=RuntimeError("episode write failed")):
+            ctx = await mgr.refresh()
+
+        episodes = await memory_repository.list_episodes(
+            episode_types=(MemoryEpisodeType.observer,),
+            limit=10,
+        )
+
+        assert ctx.active_project == "Atlas"
+        assert episodes == []
+
+    @pytest.mark.asyncio
+    async def test_refresh_records_project_clear_transition(self, async_db):
+        mgr = ContextManager()
+        mgr._context.active_project = "Atlas"
+        mgr._context.active_goals_summary = "Ship Atlas launch"
+        mgr._context.active_window = "VS Code"
+        mgr._context.user_state = "deep_work"
+        mgr.update_screen_context("VS Code", "Reviewing launch wrap-up")
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "evening",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": False,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": ""
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="available"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=[]):
+            ctx = await mgr.refresh()
+
+        episodes = await memory_repository.list_episodes(
+            episode_types=(MemoryEpisodeType.observer,),
+            limit=10,
+        )
+
+        assert ctx.active_project is None
+        assert any(
+            json.loads(item.metadata_json)["observer_transition"] == "project"
+            and json.loads(item.metadata_json)["previous_project"] == "Atlas"
+            and json.loads(item.metadata_json)["current_project"] is None
+            for item in episodes
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_reuses_existing_project_entity_for_alias_like_observer_label(self, async_db):
+        mgr = ContextManager()
+        mgr.update_screen_context("VS Code", "Editing Atlas rollout notes")
+        existing_project = await memory_repository.get_or_create_entity(
+            canonical_name="Atlas launch",
+            entity_type="project",
+        )
+
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "afternoon",
+                 "day_of_week": "Tuesday",
+                 "is_working_hours": True,
+             }), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "Ship Atlas launch"
+             }), \
+             patch("src.observer.manager.user_state_machine.derive_state", return_value="deep_work"), \
+             patch("src.observer.screen_repository.screen_observation_repo.get_recent_projects", new_callable=AsyncMock, return_value=["Atlas"]):
+            await mgr.refresh()
+
+        episodes = await memory_repository.list_episodes(
+            episode_types=(MemoryEpisodeType.observer,),
+            limit=10,
+        )
+        resolved = await memory_repository.find_entities_by_names(
+            names=("Atlas", "Atlas launch"),
+            entity_type="project",
+        )
+
+        assert resolved["Atlas"].id == existing_project.id
+        assert resolved["Atlas launch"].id == existing_project.id
+        assert all(item.project_entity_id == existing_project.id for item in episodes)
 
     @pytest.mark.asyncio
     async def test_refresh_logs_failure_runtime_audit_event(self, async_db):

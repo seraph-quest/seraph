@@ -13,7 +13,7 @@ version: 2026.3.21
 display_name: Research Briefing
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19,<2027"
+  seraph: ">=2026.4.10,<2027"
 publisher:
   name: Seraph
 trust: bundled
@@ -30,6 +30,12 @@ permissions:
   tools:
     - web_search
     - write_file
+  data_access:
+    - public_web
+  mutation_rights:
+    - workspace.files.write
+  audit_events:
+    - tool_call
   network: true
 """
     )
@@ -39,8 +45,74 @@ permissions:
     assert manifest.trust.value == "bundled"
     assert manifest.contributed_types() == {"skills", "workflows", "runbooks", "mcp_servers"}
     assert manifest.permissions.tools == ["web_search", "write_file"]
-    assert manifest.is_compatible_with("2026.3.19") is True
+    assert manifest.permissions.data_access == ["public_web"]
+    assert manifest.permissions.mutation_rights == ["workspace.files.write"]
+    assert manifest.permissions.audit_events == ["tool_call"]
+    assert manifest.is_compatible_with("2026.4.10") is True
     assert manifest.is_compatible_with("2027.1.0") is False
+
+
+def test_parse_manifest_accepts_wave2_capability_types():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.guardian-reach
+version: 2026.3.23
+display_name: Guardian Reach
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  toolset_presets:
+    - presets/toolset/research.yaml
+  context_packs:
+    - context/research.yaml
+  speech_profiles:
+    - speech/voice.yaml
+permissions:
+  tools:
+    - read_file
+  network: false
+"""
+    )
+
+    assert manifest.contributed_types() == {"toolset_presets", "context_packs", "speech_profiles"}
+
+
+def test_parse_manifest_accepts_wave2_connector_types():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.reach-connectors
+version: 2026.3.23
+display_name: Reach Connectors
+kind: connector-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: local
+contributes:
+  automation_triggers:
+    - automation/daily-brief.yaml
+  browser_providers:
+    - connectors/browser/browserbase.yaml
+  messaging_connectors:
+    - connectors/messaging/telegram.yaml
+  node_adapters:
+    - connectors/nodes/companion.yaml
+permissions:
+  network: true
+"""
+    )
+
+    assert manifest.contributed_types() == {
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "node_adapters",
+    }
 
 
 def test_parse_rejects_absolute_or_traversing_contribution_paths():
@@ -52,7 +124,7 @@ version: 2026.3.21
 display_name: Bad Paths
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -76,7 +148,7 @@ version: 2026.3.21
 display_name: Directory Paths
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -98,7 +170,7 @@ version: 2026.3.21
 display_name: Bad Layout
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -120,7 +192,7 @@ version: 2026.3.21
 display_name: Empty Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -140,7 +212,7 @@ version: 2026.3.21
 display_name: Bad Native Tools
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -162,7 +234,7 @@ version: 2026.3.21
 display_name: Trusted Without Code
 kind: trusted-plugin
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -184,7 +256,7 @@ version: 2026.3.21
 display_name: Connector Without Connector
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -228,7 +300,7 @@ version: not-a-version
 display_name: Bad Version
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -250,7 +322,7 @@ version: 2026.3.21
 display_name: Local Example
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -278,7 +350,7 @@ version: 2026.3.21
 display_name: Layout Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -322,7 +394,7 @@ version: 2026.3.21
 display_name: Duplicate Paths
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: local
@@ -334,3 +406,60 @@ contributes:
         )
 
     assert "duplicate path" in str(exc_info.value)
+
+
+def test_parse_rejects_verified_manifest_without_governance_contract():
+    with pytest.raises(ExtensionManifestError) as exc_info:
+        parse_extension_manifest(
+            """
+id: seraph.verified-claim-only
+version: 2026.3.21
+display_name: Verified Claim Only
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: verified
+contributes:
+  skills:
+    - skills/helper.md
+"""
+        )
+
+    assert "verified manifests must include governance provenance and signature" in str(exc_info.value)
+
+
+def test_parse_accepts_verified_manifest_with_provenance_and_signature_contract():
+    manifest = parse_extension_manifest(
+        """
+id: seraph.verified-pack
+version: 2026.3.21
+display_name: Verified Pack
+kind: capability-pack
+compatibility:
+  seraph: ">=2026.4.10"
+publisher:
+  name: Seraph
+trust: verified
+governance:
+  provenance:
+    source: seraph-catalog
+    publisher_id: seraph
+    url: https://example.test/seraph/verified-pack
+  signature:
+    algorithm: seraph-sha256-v1
+    key_id: seraph-root-2026
+    digest: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    signature: seraph-sha256-v1:seraph-root-2026:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+contributes:
+  skills:
+    - skills/helper.md
+"""
+    )
+
+    assert manifest.trust.value == "verified"
+    assert manifest.governance is not None
+    assert manifest.governance.provenance.source == "seraph-catalog"
+    assert manifest.governance.signature is not None
+    assert manifest.governance.signature.key_id == "seraph-root-2026"

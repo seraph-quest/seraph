@@ -11,7 +11,10 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    _build_routing_decision_details,
+    _feedback_snapshot,
     _fallback_targets,
+    _mark_target_failed,
     _reset_target_health,
     build_completion_kwargs,
     build_model_kwargs,
@@ -1044,6 +1047,109 @@ def test_completion_with_fallback_sync_reroutes_away_from_unhealthy_primary(asyn
     assert "unhealthy_cooldown" in primary_candidate["reason_codes"]
 
 
+def test_completion_with_fallback_uses_live_feedback_to_deprioritize_recently_failing_target(async_db):
+    first_success = MagicMock()
+    second_success = MagicMock()
+
+    _reset_target_health()
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "llm_target_cooldown_seconds", 300),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            "openai/gpt-4o-mini=fast;openai/gpt-4.1-nano=fast",
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast"),
+        patch(
+            "litellm.completion",
+            side_effect=[
+                RuntimeError("primary down"),
+                RuntimeError("fallback timed out"),
+                first_success,
+                second_success,
+            ],
+        ) as mock_completion,
+    ):
+        first_result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick a healthy fast route"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+        second_result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "use recent provider feedback"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert first_result is first_success
+    assert second_result is second_success
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openrouter/anthropic/claude-sonnet-4",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4.1-nano",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=20)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4.1-nano"
+    assert details["attempt_order"] == ["openai/gpt-4.1-nano", "openai/gpt-4o-mini"]
+    assert details["selected_production_readiness"] == "ready"
+    assert details["rejected_target_summaries"][0]["model_id"] == "openai/gpt-4o-mini"
+    assert details["route_explanation"].startswith("selected openai/gpt-4.1-nano")
+    unstable_candidate = next(
+        candidate
+        for candidate in details["candidate_targets"]
+        if candidate["model_id"] == "openai/gpt-4o-mini"
+    )
+    assert unstable_candidate["feedback_state"] in {"cooldown", "recovering", "unstable"}
+    assert unstable_candidate["failure_risk_score"] > 0
+    assert unstable_candidate["live_feedback"]["last_failure_kind"] == "timeout"
+
+
+def test_feedback_snapshot_expires_stale_failures_from_live_routing_state(async_db):
+    _reset_target_health()
+
+    with patch("src.llm_runtime.monotonic", side_effect=[100.0, 100.0, 100.0 + 901.0]):
+        _mark_target_failed(
+            model_id="openai/gpt-4o-mini",
+            api_base="https://api.openai.test/v1",
+            api_key="test-key",
+            error=RuntimeError("provider timed out"),
+        )
+        _mark_target_failed(
+            model_id="openai/gpt-4o-mini",
+            api_base="https://api.openai.test/v1",
+            api_key="test-key",
+            error=RuntimeError("provider timed out"),
+        )
+        snapshot = _feedback_snapshot(
+            model_id="openai/gpt-4o-mini",
+            api_base="https://api.openai.test/v1",
+            api_key="test-key",
+        )
+
+    assert snapshot["consecutive_failures"] == 0
+    assert snapshot["recent_failure_count"] == 0
+    assert snapshot["failure_risk_score"] == 0.0
+    assert snapshot["production_readiness"] == "ready"
+    assert snapshot["feedback_state"] == "clear"
+    assert snapshot["last_failure_kind"] is None
+    assert snapshot["last_error"] is None
+
+
 def test_completion_with_fallback_sync_logs_primary_success(async_db):
     success_response = MagicMock()
 
@@ -1589,9 +1695,259 @@ def test_completion_with_fallback_logs_routing_decision(async_db):
     assert details["candidate_targets"][1]["matched_policy_intents"] == ["fast", "cheap"]
     assert details["candidate_targets"][1]["policy_score"] == 0.0
     assert details["candidate_targets"][1]["decision"] == "deferred"
+    assert details["candidate_targets"][1]["feedback_state"] == "clear"
+    assert details["candidate_targets"][1]["failure_risk_score"] == 0.0
     assert details["candidate_targets"][2]["model_id"] == "openai/gpt-4.1-nano"
     assert details["candidate_targets"][2]["matched_policy_intents"] == ["cheap"]
     assert details["candidate_targets"][2]["policy_score"] == 0.0
+    assert details["selected_failure_risk_score"] == 0.0
+    assert details["selected_production_readiness"] == "ready"
+    assert details["selection_policy_mode"] == "retain_primary_until_reroute"
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_selected"] is False
+    assert details["best_alternate_model"] == "openai/gpt-4o-mini"
+    assert details["selected_vs_best_alternate_margin"] < 0.0
+    assert details["route_explanation"].startswith("selected openrouter/anthropic/claude-sonnet-4")
+    assert details["route_comparison_summary"].startswith(
+        "retained primary openrouter/anthropic/claude-sonnet-4 even though openai/gpt-4o-mini"
+    )
+    assert len(details["rejected_target_summaries"]) == 2
+
+
+def test_build_routing_decision_details_disambiguates_same_model_routes():
+    with (
+        patch.object(settings, "runtime_policy_intents", ""),
+        patch.object(settings, "runtime_policy_requirements", ""),
+        patch.object(settings, "runtime_policy_scores", ""),
+        patch.object(settings, "runtime_max_cost_tier", "high"),
+        patch.object(settings, "runtime_max_latency_tier", "slow"),
+        patch.object(settings, "runtime_task_class", "analysis"),
+        patch.object(settings, "runtime_max_budget_class", "high"),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+    ):
+        details = _build_routing_decision_details(
+            runtime_path="session_title_generation",
+            runtime_profile="default",
+            primary_model="openai/gpt-4o-mini",
+            primary_api_base="https://api.primary.example/v1",
+            primary_api_key="primary-key",
+            primary_profile="default",
+            ordered_targets=[
+                {
+                    "model_id": "openai/gpt-4o-mini",
+                    "api_base": "https://api.primary.example/v1",
+                    "api_key": "primary-key",
+                    "profile": "default",
+                    "source": "primary",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4o-mini",
+                        api_base="https://api.primary.example/v1",
+                        api_key="primary-key",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 0.0,
+                        "policy_score": 0.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 0.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": -1.0,
+                    },
+                },
+                {
+                    "model_id": "openai/gpt-4o-mini",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key": "",
+                    "profile": "local",
+                    "source": "runtime_profile",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4o-mini",
+                        api_base="http://localhost:11434/v1",
+                        api_key="",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 1.0,
+                        "policy_score": 0.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 1.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": 1.0,
+                    },
+                },
+            ],
+            rerouted=False,
+            rerouted_due_to_policy=False,
+        )
+
+    assert details["selection_policy_mode"] == "retain_primary_until_reroute"
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_profile"] == "local"
+    assert details["planning_winner_source"] == "runtime_profile"
+    assert details["planning_winner_selected"] is False
+    assert details["best_alternate_model"] == "openai/gpt-4o-mini"
+    assert details["best_alternate_profile"] == "local"
+    assert details["best_alternate_source"] == "runtime_profile"
+    assert "openai/gpt-4o-mini (local/runtime_profile)" in details["route_comparison_summary"]
+    assert "openai/gpt-4o-mini (default/primary)" in details["route_comparison_summary"]
+
+
+def test_build_routing_decision_details_marks_legacy_order_when_planning_winner_differs():
+    with (
+        patch.object(settings, "runtime_policy_intents", ""),
+        patch.object(settings, "runtime_policy_requirements", ""),
+        patch.object(settings, "runtime_policy_scores", ""),
+        patch.object(settings, "runtime_max_cost_tier", "high"),
+        patch.object(settings, "runtime_max_latency_tier", "slow"),
+        patch.object(settings, "runtime_task_class", "analysis"),
+        patch.object(settings, "runtime_max_budget_class", "high"),
+        patch("src.llm_runtime._is_target_healthy", return_value=True),
+    ):
+        details = _build_routing_decision_details(
+            runtime_path="chat_agent",
+            runtime_profile="default",
+            primary_model="openrouter/anthropic/claude-sonnet-4",
+            primary_api_base="https://openrouter.ai/api/v1",
+            primary_api_key="primary-key",
+            primary_profile="default",
+            ordered_targets=[
+                {
+                    "model_id": "openai/gpt-4.1-nano",
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key": "fallback-key",
+                    "profile": "default",
+                    "source": "fallback_chain",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4.1-nano",
+                        api_base="https://api.openai.com/v1",
+                        api_key="fallback-key",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 0.0,
+                        "policy_score": 1.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 1.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": 1.0,
+                    },
+                },
+                {
+                    "model_id": "openai/gpt-4o-mini",
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key": "standby-key",
+                    "profile": "default",
+                    "source": "fallback_chain",
+                    "live_feedback": _feedback_snapshot(
+                        model_id="openai/gpt-4o-mini",
+                        api_base="https://api.openai.com/v1",
+                        api_key="standby-key",
+                    ),
+                    "policy_assessment": {
+                        "required_policy_intents": [],
+                        "matched_required_intents": [],
+                        "missing_required_intents": [],
+                        "cost_tier": "medium",
+                        "latency_tier": "medium",
+                        "task_class": "analysis",
+                        "budget_class": "standard",
+                        "within_cost_guardrail": True,
+                        "within_latency_guardrail": True,
+                        "required_task_class": "analysis",
+                        "matched_task_class": True,
+                        "max_budget_class": "high",
+                        "within_budget_guardrail": True,
+                        "policy_compliant": True,
+                    },
+                    "priority_components": {
+                        "local_preference_score": 0.0,
+                        "policy_score": 3.0,
+                        "capability_priority": (),
+                        "capability_gap_count": 0,
+                        "capability_gap_penalty": 0.0,
+                        "budget_preference_score": 0.0,
+                        "preference_score": 3.0,
+                        "live_feedback_penalty": 0.0,
+                        "health_penalty": 0.0,
+                        "guardrail_penalty": 0.0,
+                        "compliance_penalty": 0.0,
+                        "planning_score": 3.0,
+                    },
+                },
+            ],
+            rerouted=True,
+            rerouted_due_to_policy=False,
+        )
+
+    assert details["selection_policy_mode"] == "legacy_ordered_attemptable"
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_selected"] is False
+    assert details["route_comparison_summary"].startswith(
+        "selected openai/gpt-4.1-nano by legacy ordering even though openai/gpt-4o-mini"
+    )
 
 
 def test_completion_with_fallback_logs_weighted_policy_scores(async_db):
@@ -1703,6 +2059,144 @@ def test_completion_with_fallback_reroutes_to_guardrail_compliant_target(async_d
     assert primary_candidate["missing_required_intents"] == ["tool_use"]
     assert "missing_required_intents" in primary_candidate["reason_codes"]
     assert primary_candidate["decision"] == "skipped"
+
+
+def test_completion_with_fallback_prefers_lower_budget_compliant_route_on_score_tie(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="budget-steered path"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                "openai/gpt-4o-mini=tool_use|fast;"
+                "openai/gpt-4.1-nano=tool_use|fast"
+            ),
+        ),
+        patch.object(
+            settings,
+            "provider_budget_classes",
+            (
+                "openrouter/anthropic/claude-sonnet-4=high;"
+                "openai/gpt-4o-mini=medium;"
+                "openai/gpt-4.1-nano=low"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast"),
+        patch.object(settings, "runtime_policy_requirements", "session_title_generation=tool_use"),
+        patch.object(settings, "runtime_policy_scores", "session_title_generation=fast:1"),
+        patch.object(settings, "runtime_max_budget_class", "session_title_generation=medium"),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "pick the lower-budget compliant route"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openai/gpt-4.1-nano",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4.1-nano"
+    assert details["budget_steering_mode"] == "preserve_budget_headroom"
+    assert details["selected_budget_headroom"] == 1
+    assert details["selected_budget_preference_score"] == 1.0
+    assert details["selected_route_score"] == 2.0
+    assert details["attempt_order"] == [
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4o-mini",
+    ]
+    assert details["planning_winner_model"] == "openai/gpt-4.1-nano"
+    assert details["planning_winner_selected"] is True
+    assert details["best_alternate_model"] == "openai/gpt-4o-mini"
+    assert details["selected_vs_best_alternate_margin"] == 1.0
+    assert details["simulated_routes"][0]["entry_model"] == "openai/gpt-4.1-nano"
+    assert details["simulated_routes"][0]["selected"] is True
+    assert details["simulated_routes"][1]["entry_model"] == "openai/gpt-4o-mini"
+    assert details["simulated_routes"][1]["route_score"] == 1.0
+
+
+def test_completion_with_fallback_keeps_intent_match_ahead_of_budget_steering(async_db):
+    completion_response = MagicMock()
+    completion_response.choices = [MagicMock(message=MagicMock(content="intent-first path"))]
+
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
+        patch.object(
+            settings,
+            "provider_capability_overrides",
+            (
+                "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                "openai/gpt-4o-mini=fast;"
+                "openai/gpt-4.1-nano=tool_use"
+            ),
+        ),
+        patch.object(
+            settings,
+            "provider_budget_classes",
+            (
+                "openrouter/anthropic/claude-sonnet-4=high;"
+                "openai/gpt-4o-mini=medium;"
+                "openai/gpt-4.1-nano=low"
+            ),
+        ),
+        patch.object(settings, "runtime_policy_intents", "session_title_generation=fast"),
+        patch.object(settings, "runtime_max_budget_class", "session_title_generation=medium"),
+        patch("litellm.completion", return_value=completion_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "prefer the fast route, not just the cheapest one"}],
+            temperature=0.2,
+            max_tokens=128,
+            runtime_path="session_title_generation",
+        )
+
+    assert result is completion_response
+    assert [call.kwargs["model"] for call in mock_completion.call_args_list] == [
+        "openai/gpt-4o-mini",
+    ]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_routing_decision"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    details = events[0]["details"]
+    assert details["selected_model"] == "openai/gpt-4o-mini"
+    assert details["budget_steering_mode"] == "preserve_budget_headroom"
+    assert details["attempt_order"] == [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4.1-nano",
+    ]
+    assert details["planning_winner_model"] == "openai/gpt-4o-mini"
+    assert details["planning_winner_selected"] is True
+    assert details["best_alternate_model"] == "openai/gpt-4.1-nano"
+    assert details["simulated_routes"][0]["entry_model"] == "openai/gpt-4o-mini"
+    assert details["simulated_routes"][0]["selected"] is True
+    assert details["simulated_routes"][1]["entry_model"] == "openai/gpt-4.1-nano"
+    assert details["simulated_routes"][1]["selected"] is False
 
 
 def test_completion_with_fallback_degrades_open_when_no_guardrail_compliant_target(async_db):

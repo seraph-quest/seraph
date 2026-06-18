@@ -10,6 +10,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
+_scheduler_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _async_job_wrapper(coro_func, loop: asyncio.AbstractEventLoop):
@@ -43,7 +44,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
     Returns None if scheduler is disabled via settings.
     """
-    global _scheduler
+    global _scheduler, _scheduler_loop
 
     if not settings.scheduler_enabled:
         logger.info("Scheduler disabled (SCHEDULER_ENABLED=false)")
@@ -53,6 +54,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     validated_tz = _validate_timezone(settings.user_timezone)
 
     loop = asyncio.get_running_loop()
+    _scheduler_loop = loop
 
     from src.scheduler.jobs.memory_consolidation import run_memory_consolidation
     from src.scheduler.jobs.goal_check import run_goal_check
@@ -147,8 +149,69 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
 def shutdown_scheduler() -> None:
     """Gracefully shut down the scheduler if running."""
-    global _scheduler
+    global _scheduler, _scheduler_loop
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
         logger.info("Scheduler shut down")
         _scheduler = None
+        _scheduler_loop = None
+
+
+def get_scheduler() -> AsyncIOScheduler | None:
+    return _scheduler
+
+
+async def sync_scheduled_jobs() -> None:
+    if _scheduler is None:
+        return
+
+    from src.scheduler.scheduled_jobs import build_cron_trigger, execute_scheduled_job, scheduled_job_repository
+
+    jobs = await scheduled_job_repository.list_jobs(include_disabled=True, limit=None)
+    wanted_ids = {job["id"] for job in jobs if job.get("enabled", False)}
+    existing_ids = {
+        scheduled_job.id.removeprefix("user_cron:")
+        for scheduled_job in _scheduler.get_jobs()
+        if scheduled_job.id.startswith("user_cron:")
+    }
+
+    for stale_job_id in existing_ids - wanted_ids:
+        try:
+            _scheduler.remove_job(f"user_cron:{stale_job_id}")
+        except Exception:
+            logger.exception("Failed to remove stale scheduled job %s", stale_job_id)
+
+    if _scheduler_loop is None:
+        return
+
+    for job in jobs:
+        apscheduler_id = f"user_cron:{job['id']}"
+        if not job.get("enabled", False):
+            if apscheduler_id in {scheduled_job.id for scheduled_job in _scheduler.get_jobs()}:
+                try:
+                    _scheduler.remove_job(apscheduler_id)
+                except Exception:
+                    logger.exception("Failed to remove disabled scheduled job %s", job["id"])
+            continue
+        try:
+            _scheduler.add_job(
+                _async_job_wrapper(lambda job_id=job["id"]: execute_scheduled_job(job_id), _scheduler_loop),
+                trigger=build_cron_trigger(job),
+                id=apscheduler_id,
+                name=job["name"],
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+            )
+        except Exception:
+            logger.exception("Failed to register scheduled job %s", job["id"])
+
+
+def sync_scheduled_jobs_blocking() -> None:
+    if _scheduler is None:
+        return
+    if _scheduler_loop is not None and _scheduler_loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(sync_scheduled_jobs(), _scheduler_loop)
+        future.result(timeout=5)
+        return
+    asyncio.run(sync_scheduled_jobs())

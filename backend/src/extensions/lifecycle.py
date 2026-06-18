@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -15,16 +17,23 @@ from urllib.parse import urlparse
 from config.settings import settings
 from packaging.version import Version
 from src.agent.factory import get_base_tools_and_active_skills
-from src.extensions.channels import select_active_channel_adapters
+from src.extensions.channels import build_presence_boundary_contract, select_active_channel_adapters
 from src.extensions.connector_health import (
     ConnectorHealthSnapshot,
     managed_connector_health,
     mcp_server_health,
+    planned_configurable_connector_health,
     planned_connector_health,
     static_connector_health,
 )
 from src.extensions.connectors import ConnectorDefinitionError, MCPServerDefinition, load_mcp_server_definition
 from src.extensions.doctor import doctor_snapshot
+from src.extensions.governance import (
+    assert_governance_allows_lifecycle,
+    build_capability_pack_hardening_receipt,
+    build_governance_status,
+    extension_permission_fingerprint,
+)
 from src.extensions.layout import iter_extension_manifest_paths, resolve_package_reference
 from src.extensions.manifest import (
     ExtensionManifest,
@@ -32,6 +41,7 @@ from src.extensions.manifest import (
     load_extension_manifest,
     parse_extension_manifest,
 )
+from src.extensions.capability_contract import build_capability_contract
 from src.extensions.permissions import (
     evaluate_contribution_permissions,
     evaluate_tool_permissions,
@@ -43,16 +53,24 @@ from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
     ExtensionRegistry,
+    _current_seraph_version,
     bundled_manifest_root,
     default_manifest_roots_for_workspace,
 )
 from src.extensions.scaffold import validate_extension_package
 from src.extensions.state import (
+    add_extension_rollback_snapshot,
+    append_extension_lifecycle_event,
     connector_enabled_override,
     connector_enabled_overrides,
+    extension_lifecycle_entry,
+    extension_quarantine_active,
+    extension_state_entries,
     load_extension_state_payload,
+    mark_extension_governance_reviewed,
     save_extension_state_payload,
     set_connector_enabled_override,
+    set_extension_quarantine,
     state_path,
 )
 from src.runbooks.loader import scan_runbook_paths
@@ -73,20 +91,79 @@ _STUDIO_TYPE_ORDER = {
     "workflows": 2,
     "runbooks": 3,
     "starter_packs": 4,
-    "mcp_servers": 5,
-    "managed_connectors": 6,
-    "observer_definitions": 7,
-    "observer_connectors": 8,
-    "channel_adapters": 9,
-    "workspace_adapters": 10,
+    "toolset_presets": 5,
+    "context_packs": 6,
+    "prompt_packs": 7,
+    "speech_profiles": 8,
+    "provider_presets": 9,
+    "mcp_servers": 10,
+    "managed_connectors": 11,
+    "memory_providers": 12,
+    "automation_triggers": 13,
+    "browser_providers": 14,
+    "messaging_connectors": 15,
+    "observer_definitions": 16,
+    "observer_connectors": 17,
+    "channel_adapters": 18,
+    "canvas_outputs": 19,
+    "workflow_runtimes": 20,
+    "node_adapters": 21,
+    "workspace_adapters": 22,
 }
 _CONNECTOR_CONTRIBUTION_TYPES = {
     "mcp_servers",
     "managed_connectors",
+    "memory_providers",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_definitions",
     "observer_connectors",
     "channel_adapters",
+    "node_adapters",
     "workspace_adapters",
+}
+_REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
+_PLANNED_CONNECTOR_CONTRIBUTION_TYPES = {
+    "memory_providers",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
+    "node_adapters",
+}
+_PASSIVE_TYPED_CONTRIBUTION_FIELDS = {
+    "toolset_presets": (
+        "name",
+        "description",
+        "mode",
+        "include_tools",
+        "exclude_tools",
+        "capabilities",
+        "execution_boundaries",
+        "default_enabled",
+    ),
+    "prompt_packs": ("name", "title", "description", "instructions"),
+    "context_packs": ("name", "description", "instructions", "memory_tags", "profile_fields", "prompt_refs", "domains"),
+    "speech_profiles": ("name", "description", "provider", "voice", "supports_tts", "supports_stt", "wake_word"),
+    "provider_presets": ("name", "label", "default_model", "notes"),
+    "canvas_outputs": ("name", "title", "description", "surface_kind", "sections", "artifact_types", "preferred_panel"),
+    "workflow_runtimes": (
+        "name",
+        "engine_kind",
+        "description",
+        "delegation_mode",
+        "checkpoint_policy",
+        "structured_output",
+        "default_output_surface",
+    ),
+}
+
+_PLANNED_CONNECTOR_REQUIRED_FIELDS = {
+    "memory_providers": ("name", "provider_kind"),
+    "automation_triggers": ("name", "trigger_type"),
+    "browser_providers": ("name", "provider_kind"),
+    "messaging_connectors": ("name", "platform"),
+    "node_adapters": ("name", "adapter_kind"),
 }
 
 
@@ -118,6 +195,94 @@ def _extension_package_digest(root_path: str | None) -> str | None:
     return _hash_extension_directory(root)
 
 
+def _utc_now_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+
+
+def _extension_governance_status(
+    extension: ExtensionRecord,
+    state_entry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return build_governance_status(
+        extension.manifest,
+        root_path=extension.root_path,
+        state_entry=state_entry,
+    )
+
+
+def _raise_if_governance_blocks_lifecycle(
+    extension: ExtensionRecord,
+    *,
+    action: str,
+    state_entry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return assert_governance_allows_lifecycle(
+        extension.manifest,
+        root_path=extension.root_path,
+        state_entry=state_entry,
+        action=action,
+    )
+
+
+def _verified_governance_blocks_runtime_access(
+    extension: ExtensionRecord,
+    state_entry: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if extension.manifest is None:
+        return None
+    governance = _extension_governance_status(extension, state_entry)
+    if extension.manifest.trust.value != "verified" or not governance.get("fail_closed"):
+        return None
+    return governance
+
+
+def _sync_blocked_verified_extension_runtime_access(
+    extension: ExtensionRecord,
+    *,
+    state_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = state_payload if isinstance(state_payload, dict) else _state_payload()
+    state_by_id = payload.setdefault("extensions", {})
+    state_entry = state_by_id.get(extension.id) if isinstance(state_by_id.get(extension.id), dict) else {}
+    governance = _verified_governance_blocks_runtime_access(extension, state_entry)
+    changed: list[dict[str, Any]] = []
+    if governance is None:
+        return {"blocked": False, "governance": None, "changed": changed}
+
+    for contribution in extension.contributions:
+        if contribution.contribution_type in {"managed_connectors", *_PLANNED_CONNECTOR_CONTRIBUTION_TYPES}:
+            if connector_enabled_override(state_entry, contribution.reference) is not False:
+                set_connector_enabled_override(payload, extension.id, contribution.reference, enabled=False)
+                changed.append({
+                    "type": contribution.contribution_type,
+                    "reference": contribution.reference,
+                    "enabled": False,
+                })
+            continue
+        definition = _mcp_definition_for_contribution(contribution)
+        if definition is None:
+            continue
+        runtime_entry = mcp_manager._config.get(definition.name)
+        if isinstance(runtime_entry, dict) and bool(runtime_entry.get("enabled", True)):
+            mcp_manager.update_server(
+                definition.name,
+                enabled=False,
+                extension_id=extension.id,
+                extension_reference=contribution.reference,
+                extension_display_name=extension.display_name,
+                source="extension",
+            )
+            changed.append({
+                "type": "mcp_servers",
+                "reference": contribution.reference,
+                "name": definition.name,
+                "enabled": False,
+            })
+    if changed:
+        _save_state(payload)
+    return {"blocked": True, "governance": governance, "changed": changed}
+
+
 def _version_relation(candidate_version: str, current_version: str | None) -> str:
     if not current_version:
         return "new"
@@ -128,6 +293,105 @@ def _version_relation(candidate_version: str, current_version: str | None) -> st
     if candidate < current:
         return "downgrade"
     return "same"
+
+
+def _version_line(version: str | None) -> str | None:
+    if not version:
+        return None
+    try:
+        parsed = Version(version)
+    except Exception:
+        return None
+    return f"{parsed.major}.{parsed.minor}"
+
+
+def _compatibility_payload(manifest: ExtensionManifest | None) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+    current_version = _current_seraph_version()
+    compatible = manifest.is_compatible_with(current_version)
+    return {
+        "seraph": manifest.compatibility.seraph,
+        "current_version": current_version,
+        "compatible": compatible,
+    }
+
+
+def _diagnostics_summary(
+    *,
+    issues: list[dict[str, Any]],
+    load_errors: list[dict[str, Any]],
+    contributions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    issue_count = len(issues)
+    error_issue_count = sum(1 for issue in issues if str(issue.get("severity") or "").lower() == "error")
+    warning_issue_count = sum(1 for issue in issues if str(issue.get("severity") or "").lower() == "warning")
+    load_error_count = len(load_errors)
+    degraded_contribution_count = 0
+    degraded_connector_count = 0
+    state_counts: dict[str, int] = {}
+    highlighted_messages: list[str] = []
+    non_degraded_states = {
+        "ready",
+        "connected",
+        "loaded",
+        "enabled",
+        "disabled",
+        "planned",
+        "overridden",
+        "catalog",
+    }
+
+    for contribution in contributions:
+        raw_state = str(
+            contribution.get("status")
+            or (
+                contribution.get("health", {}).get("state")
+                if isinstance(contribution.get("health"), dict)
+                else ""
+            )
+            or "unknown"
+        ).strip().lower()
+        state = raw_state or "unknown"
+        state_counts[state] = state_counts.get(state, 0) + 1
+        if state not in non_degraded_states:
+            degraded_contribution_count += 1
+            if str(contribution.get("type") or "") in _CONNECTOR_CONTRIBUTION_TYPES:
+                degraded_connector_count += 1
+        if len(highlighted_messages) >= 3:
+            continue
+        health = contribution.get("health")
+        summary = (
+            str(health.get("summary") or "").strip()
+            if isinstance(health, dict)
+            else ""
+        )
+        if summary and summary not in highlighted_messages:
+            highlighted_messages.append(summary)
+
+    for issue in issues:
+        if len(highlighted_messages) >= 3:
+            break
+        message = str(issue.get("message") or "").strip()
+        if message and message not in highlighted_messages:
+            highlighted_messages.append(message)
+    for error in load_errors:
+        if len(highlighted_messages) >= 3:
+            break
+        message = str(error.get("message") or "").strip()
+        if message and message not in highlighted_messages:
+            highlighted_messages.append(message)
+
+    return {
+        "issue_count": issue_count,
+        "error_issue_count": error_issue_count,
+        "warning_issue_count": warning_issue_count,
+        "load_error_count": load_error_count,
+        "degraded_contribution_count": degraded_contribution_count,
+        "degraded_connector_count": degraded_connector_count,
+        "state_counts": state_counts,
+        "highlighted_messages": highlighted_messages,
+    }
 
 
 def _extension_lifecycle_plan(
@@ -275,22 +539,121 @@ def _managed_connector_config(
     state_entry: dict[str, Any] | None,
     connector_name: str,
 ) -> dict[str, Any]:
-    if not isinstance(state_entry, dict) or not connector_name:
+    return _contribution_config(state_entry, "managed_connectors", connector_name)
+
+
+def _config_section_key(contribution_type: str) -> str:
+    return contribution_type
+
+
+def _contribution_config(
+    state_entry: dict[str, Any] | None,
+    contribution_type: str,
+    contribution_name: str,
+) -> dict[str, Any]:
+    if not isinstance(state_entry, dict) or not contribution_name:
         return {}
 
     config_payload = state_entry.get("config")
     if not isinstance(config_payload, dict):
         config_payload = {}
-    managed_config = config_payload.get("managed_connectors")
-    if not isinstance(managed_config, dict):
-        managed_config = {}
-    config_entry = managed_config.get(connector_name)
+    section_key = _config_section_key(contribution_type)
+    section_payload = config_payload.get(section_key)
+    if not isinstance(section_payload, dict):
+        section_payload = {}
+    config_entry = section_payload.get(contribution_name)
     if not isinstance(config_entry, dict):
         return {}
     return config_entry
 
 
-def _managed_connector_config_errors(
+def _sensitive_config_field_keys(metadata: dict[str, Any]) -> set[str]:
+    config_fields = metadata.get("config_fields")
+    if not isinstance(config_fields, list):
+        return set()
+    keys: set[str] = set()
+    for field in config_fields:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("input") or "") != "password":
+            continue
+        key = field.get("key")
+        if isinstance(key, str) and key.strip():
+            keys.add(key)
+    return keys
+
+
+def _redact_config_entry(metadata: dict[str, Any], config_entry: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(config_entry, dict):
+        return {}
+    redacted = deepcopy(config_entry)
+    for key in _sensitive_config_field_keys(metadata):
+        value = redacted.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        redacted[key] = _REDACTED_CONFIG_SENTINEL
+    return redacted
+
+
+def _redact_extension_config(extension: ExtensionRecord, raw_config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw_config, dict):
+        return {}
+    redacted = deepcopy(raw_config)
+    for contribution in extension.contributions:
+        contribution_type = contribution.contribution_type
+        contribution_name = _contribution_name(contribution)
+        if contribution_type not in _CONNECTOR_CONTRIBUTION_TYPES or not contribution_name:
+            continue
+        type_config = redacted.get(contribution_type)
+        if not isinstance(type_config, dict):
+            continue
+        config_entry = type_config.get(contribution_name)
+        if not isinstance(config_entry, dict):
+            continue
+        type_config[contribution_name] = _redact_config_entry(contribution.metadata, config_entry)
+    return redacted
+
+
+def _preserve_secret_placeholders(
+    extension: ExtensionRecord,
+    *,
+    incoming_config: dict[str, Any],
+    existing_config: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(incoming_config)
+    for contribution in extension.contributions:
+        contribution_type = contribution.contribution_type
+        contribution_name = _contribution_name(contribution)
+        if contribution_type not in _CONNECTOR_CONTRIBUTION_TYPES or not contribution_name:
+            continue
+        sensitive_keys = _sensitive_config_field_keys(contribution.metadata)
+        if not sensitive_keys:
+            continue
+        type_config = merged.get(contribution_type)
+        if not isinstance(type_config, dict):
+            continue
+        contribution_config = type_config.get(contribution_name)
+        if not isinstance(contribution_config, dict):
+            continue
+        existing_type_config = existing_config.get(contribution_type)
+        existing_entry = (
+            existing_type_config.get(contribution_name)
+            if isinstance(existing_type_config, dict)
+            else None
+        )
+        for key in sensitive_keys:
+            if contribution_config.get(key) != _REDACTED_CONFIG_SENTINEL:
+                continue
+            if isinstance(existing_entry, dict) and key in existing_entry:
+                contribution_config[key] = existing_entry[key]
+            else:
+                contribution_config.pop(key, None)
+    return merged
+
+
+def _contribution_config_errors(
     metadata: dict[str, Any],
     config_entry: dict[str, Any],
 ) -> list[str]:
@@ -334,6 +697,32 @@ def _managed_connector_config_errors(
     return errors
 
 
+def _managed_connector_config_errors(
+    metadata: dict[str, Any],
+    config_entry: dict[str, Any],
+) -> list[str]:
+    return _contribution_config_errors(metadata, config_entry)
+
+
+def _contribution_name(contribution: ExtensionContributionRecord) -> str:
+    name = contribution.metadata.get("name")
+    return name.strip() if isinstance(name, str) and name.strip() else ""
+
+
+def _configurable_connector_types(extension: ExtensionRecord) -> set[str]:
+    configurable: set[str] = set()
+    for contribution in extension.contributions:
+        if contribution.contribution_type == "managed_connectors":
+            configurable.add(contribution.contribution_type)
+            continue
+        if (
+            contribution.contribution_type in _PLANNED_CONNECTOR_CONTRIBUTION_TYPES
+            and isinstance(contribution.metadata.get("config_fields"), list)
+        ):
+            configurable.add(contribution.contribution_type)
+    return configurable
+
+
 def _connector_default_enabled(contribution: ExtensionContributionRecord) -> bool:
     return bool(contribution.metadata.get("default_enabled", True))
 
@@ -352,10 +741,16 @@ def _managed_connector_package_enable_target(
     extension: ExtensionRecord,
     contribution: ExtensionContributionRecord,
 ) -> bool:
-    if contribution.contribution_type != "managed_connectors":
+    if contribution.contribution_type not in {"managed_connectors", *_PLANNED_CONNECTOR_CONTRIBUTION_TYPES}:
         return True
     has_non_managed_toggleables = any(
-        item.contribution_type in {"skills", "workflows", "mcp_servers", "observer_definitions", "channel_adapters"}
+        item.contribution_type in {
+            "skills",
+            "workflows",
+            "mcp_servers",
+            "observer_definitions",
+            "channel_adapters",
+        }
         for item in extension.contributions
     )
     if not has_non_managed_toggleables:
@@ -1057,6 +1452,52 @@ def _contribution_indexes(
     }
 
 
+def _planned_connector_definition_errors(contribution: ExtensionContributionRecord) -> list[str]:
+    errors: list[str] = []
+    required_fields = _PLANNED_CONNECTOR_REQUIRED_FIELDS.get(contribution.contribution_type, ())
+    for field_name in required_fields:
+        value = contribution.metadata.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(
+                f"{contribution.contribution_type.removesuffix('s').replace('_', ' ')} definition is invalid and cannot load"
+            )
+            break
+    conflict = contribution.metadata.get("registry_conflict")
+    if isinstance(conflict, dict):
+        name = str(conflict.get("name") or contribution.metadata.get("name") or contribution.reference)
+        winner = str(conflict.get("winner_display_name") or conflict.get("winner_extension_id") or "another extension")
+        errors.append(
+            f"{contribution.contribution_type.removesuffix('s').replace('_', ' ')} '{name}' conflicts with {winner}"
+        )
+    return errors
+
+
+def _finalize_contribution_payload(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    permission_profile = payload.get("permission_profile")
+    if not isinstance(permission_profile, dict):
+        return payload
+    contract = build_capability_contract(
+        extension,
+        contribution_type=contribution.contribution_type,
+        reference=contribution.reference,
+        metadata=contribution.metadata,
+        permission_profile=permission_profile,
+    )
+    payload["capability_contract"] = contract
+    payload["capability_enforcement"] = contract["enforcement"]
+    enforcement_status = str(contract["enforcement"].get("status") or "")
+    if enforcement_status == "rejected":
+        payload["status"] = enforcement_status
+        payload["runtime_ready"] = False
+    elif enforcement_status == "quarantined":
+        payload["runtime_ready"] = False
+    return payload
+
+
 def _contribution_payload(
     extension: ExtensionRecord,
     contribution: ExtensionContributionRecord,
@@ -1102,7 +1543,7 @@ def _contribution_payload(
         health = mcp_server_health(contribution.metadata, runtime_entry)
         payload["health"] = health.as_payload()
         payload.setdefault("status", health.state)
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "managed_connectors":
         default_enabled = _connector_default_enabled(contribution)
         enabled = _connector_enabled(contribution, state_entry)
@@ -1153,7 +1594,100 @@ def _contribution_payload(
             enabled=enabled,
         ).as_payload()
         payload["status"] = str(payload["health"].get("state") or payload["status"])
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
+    if contribution.contribution_type in _PLANNED_CONNECTOR_CONTRIBUTION_TYPES:
+        default_enabled = _connector_default_enabled(contribution)
+        enabled = _connector_enabled(contribution, state_entry)
+        payload = {
+            "type": contribution.contribution_type,
+            "reference": contribution.reference,
+            "resolved_path": normalized_path,
+            "loaded": False,
+            "default_enabled": default_enabled,
+            "enabled": enabled,
+        }
+        payload["permission_profile"] = evaluate_contribution_permissions(
+            extension,
+            contribution_type=contribution.contribution_type,
+            metadata=contribution.metadata,
+        )
+        for field_name in (
+            "name",
+            "description",
+            "trigger_type",
+            "schedule",
+            "endpoint",
+            "topic",
+            "provider_kind",
+            "platform",
+            "adapter_kind",
+        ):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, str) and field_value:
+                payload[field_name] = field_value
+        for field_name in ("capabilities", "config_fields", "delivery_modes"):
+            field_value = contribution.metadata.get(field_name)
+            if isinstance(field_value, list) and field_value:
+                payload[field_name] = field_value
+        for field_name in ("requires_network", "requires_daemon"):
+            if field_name in contribution.metadata:
+                payload[field_name] = bool(contribution.metadata.get(field_name))
+        contribution_name = _contribution_name(contribution)
+        config_entry = _contribution_config(state_entry, contribution.contribution_type, contribution_name)
+        config_errors = _contribution_config_errors(contribution.metadata, config_entry) if config_entry else []
+        definition_errors = _planned_connector_definition_errors(contribution)
+        requires_config = bool(contribution.metadata.get("config_fields"))
+        configured = bool(config_entry) if requires_config else True
+        if config_entry:
+            payload["config_keys"] = sorted(config_entry.keys())
+        if config_errors:
+            payload["config_errors"] = config_errors
+        if definition_errors:
+            payload["configured"] = False
+            payload["health"] = ConnectorHealthSnapshot(
+                state="invalid",
+                summary=definition_errors[0],
+                ready=False,
+                enabled=enabled,
+                configured=False,
+                connected=False,
+                error="; ".join(definition_errors),
+                supports_test=False,
+                supports_configure=True,
+                supports_enable=True,
+                supports_disable=True,
+            ).as_payload()
+            payload["status"] = "invalid"
+        else:
+            health = planned_configurable_connector_health(
+                "Runtime support for this connector surface lands in the later capability-reach waves.",
+                enabled=enabled,
+                configured=configured,
+                config_errors=config_errors,
+                supports_test=False,
+            )
+            payload["configured"] = configured and not config_errors
+            payload["health"] = health.as_payload()
+            payload["status"] = str(payload["health"].get("state") or "planned")
+        if contribution.contribution_type in {"messaging_connectors", "node_adapters"}:
+            status = str(payload.get("status") or "planned")
+            pairing = (
+                {"pairing_state": "unpaired", "trust_state": "unpaired"}
+                if contribution.contribution_type == "node_adapters"
+                else None
+            )
+            payload["presence_contract"] = build_presence_boundary_contract(
+                contribution_type=contribution.contribution_type,
+                extension_id=extension.id,
+                reference=contribution.reference,
+                metadata=contribution.metadata,
+                status=status,
+                active=enabled,
+                ready=False,
+                pairing=pairing,
+                follow_up_ready=False,
+            )
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "observer_definitions":
         active_definition = (
             indexes.get("observer_definitions", {}).get(normalized_path or "")
@@ -1206,7 +1740,7 @@ def _contribution_payload(
             supports_disable=True,
             supports_test=True,
         ).as_payload()
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type == "channel_adapters":
         active_adapter = (
             indexes.get("channel_adapters", {}).get(normalized_path or "")
@@ -1282,7 +1816,17 @@ def _contribution_payload(
             payload["health"] = health.as_payload()
             if daemon_connected is not None:
                 payload["health"]["connected"] = daemon_connected
-        return payload
+        payload["presence_contract"] = build_presence_boundary_contract(
+            contribution_type=contribution.contribution_type,
+            extension_id=extension.id,
+            reference=contribution.reference,
+            metadata=contribution.metadata,
+            status=str(payload.get("status") or "unknown"),
+            active=bool(payload.get("enabled")),
+            ready=bool(payload.get("health", {}).get("ready")) if isinstance(payload.get("health"), dict) else False,
+            follow_up_ready=bool(payload.get("health", {}).get("ready")) if isinstance(payload.get("health"), dict) else False,
+        )
+        return _finalize_contribution_payload(extension, contribution, payload)
     if contribution.contribution_type in {"observer_connectors", "workspace_adapters"}:
         payload = {
             "type": contribution.contribution_type,
@@ -1299,7 +1843,7 @@ def _contribution_payload(
                 "Runtime support for this connector surface is not wired yet.",
             ).as_payload(),
         }
-        return payload
+        return _finalize_contribution_payload(extension, contribution, payload)
     item = (
         indexes.get(contribution.contribution_type, {}).get(normalized_path or "")
         if normalized_path is not None
@@ -1344,7 +1888,28 @@ def _contribution_payload(
             if field_name in item:
                 payload[field_name] = item[field_name]
     if contribution.contribution_type in {"skills", "workflows"}:
-        for field_name in ("name", "description", "requires_tools", "requires_skills", "step_tools", "tool_name", "user_invocable", "default_enabled"):
+        for field_name in (
+            "name",
+            "description",
+            "requires_tools",
+            "requires_skills",
+            "step_tools",
+            "tool_name",
+            "runtime_profile",
+            "output_surface",
+            "declared_output_surface",
+            "effective_output_surface",
+            "output_surface_title",
+            "output_surface_sections",
+            "output_surface_artifact_types",
+            "user_invocable",
+            "default_enabled",
+        ):
+            field_value = contribution.metadata.get(field_name)
+            if field_value not in (None, "", [], {}):
+                payload.setdefault(field_name, field_value)
+    if contribution.contribution_type in _PASSIVE_TYPED_CONTRIBUTION_FIELDS:
+        for field_name in _PASSIVE_TYPED_CONTRIBUTION_FIELDS[contribution.contribution_type]:
             field_value = contribution.metadata.get(field_name)
             if field_value not in (None, "", [], {}):
                 payload.setdefault(field_name, field_value)
@@ -1358,7 +1923,7 @@ def _contribution_payload(
     payload.setdefault("missing_manifest_network", bool(payload["permission_profile"]["missing_network"]))
     payload.setdefault("approval_behavior", payload["permission_profile"]["approval_behavior"])
     payload.setdefault("requires_approval", bool(payload["permission_profile"]["requires_approval"]))
-    return payload
+    return _finalize_contribution_payload(extension, contribution, payload)
 
 
 def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
@@ -1377,27 +1942,57 @@ def _toggle_targets(extension: ExtensionRecord) -> list[dict[str, str]]:
             targets.append({"type": "mcp_server", "name": target_name})
         elif contribution.contribution_type == "managed_connectors":
             targets.append({"type": "managed_connector", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "memory_providers":
+            targets.append({"type": "memory_provider", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "automation_triggers":
+            targets.append({"type": "automation_trigger", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "browser_providers":
+            targets.append({"type": "browser_provider", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "messaging_connectors":
+            targets.append({"type": "messaging_connector", "name": target_name, "reference": contribution.reference})
         elif contribution.contribution_type == "observer_definitions":
             targets.append({"type": "observer_definition", "name": target_name, "reference": contribution.reference})
         elif contribution.contribution_type == "channel_adapters":
             targets.append({"type": "channel_adapter", "name": target_name, "reference": contribution.reference})
+        elif contribution.contribution_type == "node_adapters":
+            targets.append({"type": "node_adapter", "name": target_name, "reference": contribution.reference})
     return targets
 
 
 def _toggleable_contribution_types(extension: ExtensionRecord) -> list[str]:
-    types: list[str] = []
-    for contribution in extension.contributions:
-        if contribution.contribution_type in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions", "channel_adapters"} and contribution.contribution_type not in types:
-            types.append(contribution.contribution_type)
-    return types
+    allowed_types = {
+        "skills",
+        "workflows",
+        "mcp_servers",
+        "managed_connectors",
+        "memory_providers",
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "observer_definitions",
+        "channel_adapters",
+        "node_adapters",
+    }
+    discovered = {contribution.contribution_type for contribution in extension.contributions if contribution.contribution_type in allowed_types}
+    return sorted(discovered, key=lambda item: (_STUDIO_TYPE_ORDER.get(item, 999), item))
 
 
 def _passive_contribution_types(extension: ExtensionRecord) -> list[str]:
-    types: list[str] = []
-    for contribution in extension.contributions:
-        if contribution.contribution_type not in {"skills", "workflows", "mcp_servers", "managed_connectors", "observer_definitions", "channel_adapters"} and contribution.contribution_type not in types:
-            types.append(contribution.contribution_type)
-    return types
+    toggleable_types = {
+        "skills",
+        "workflows",
+        "mcp_servers",
+        "managed_connectors",
+        "memory_providers",
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "observer_definitions",
+        "channel_adapters",
+        "node_adapters",
+    }
+    discovered = {contribution.contribution_type for contribution in extension.contributions if contribution.contribution_type not in toggleable_types}
+    return sorted(discovered, key=lambda item: (_STUDIO_TYPE_ORDER.get(item, 999), item))
 
 
 def _connector_summary(contributions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1455,7 +2050,10 @@ def _extension_payload(
     extension_load_errors = _extension_load_errors_for_extension(extension, load_errors)
     toggles = _toggle_targets(extension)
     state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+    lifecycle_state = extension_lifecycle_entry(state_entry, create=False) or {}
     location = _location_for_extension(extension)
+    package_digest = _extension_package_digest(extension.root_path)
+    governance = _extension_governance_status(extension, state_entry)
     contributions = [
         _contribution_payload(extension, contribution, indexes=indexes, state_entry=state_entry)
         for contribution in extension.contributions
@@ -1495,29 +2093,56 @@ def _extension_payload(
     if enabled_values:
         enabled = all(enabled_values)
     passive_types = _passive_contribution_types(extension)
-    managed_connector_present = any(
-        contribution.contribution_type == "managed_connectors"
-        for contribution in extension.contributions
-    )
+    configurable_types = _configurable_connector_types(extension)
     connector_summary = _connector_summary(contributions)
+    compatibility = _compatibility_payload(extension.manifest)
+    diagnostics_summary = _diagnostics_summary(
+        issues=issues,
+        load_errors=extension_load_errors,
+        contributions=contributions,
+    )
+    lifecycle_plan = _extension_lifecycle_plan(
+        extension.manifest,
+        extension,
+        candidate_digest=package_digest or "",
+    ) if extension.manifest is not None else {}
+    hardening_receipt = build_capability_pack_hardening_receipt(
+        extension.manifest,
+        governance_status=governance,
+        compatibility=compatibility,
+        lifecycle_plan=lifecycle_plan,
+        diagnostics_summary=diagnostics_summary,
+        permission_summary={
+            "status": permission_summary["status"],
+            "ok": permission_summary["ok"],
+            "required": permission_summary["required"],
+            "missing": permission_summary["missing"],
+            "risk_level": permission_summary["risk_level"],
+        },
+    )
+    status = "ready" if not issues and not extension_load_errors else "degraded"
+    if governance.get("fail_closed"):
+        status = "blocked"
+    if extension_quarantine_active(state_entry):
+        status = "quarantined"
     return {
         "id": extension.id,
         "display_name": extension.display_name,
         "version": extension.manifest.version if extension.manifest is not None else None,
+        "version_line": _version_line(extension.manifest.version if extension.manifest is not None else None),
         "kind": extension.kind,
         "trust": extension.trust,
         "source": extension.source,
         "location": location,
         "root_path": extension.root_path,
-        "package_digest": _extension_package_digest(extension.root_path),
+        "package_digest": package_digest,
         "manifest_path": extension.manifest_path,
+        "governance": governance,
+        "lifecycle": lifecycle_state,
         "summary": extension.manifest.summary if extension.manifest is not None else None,
         "description": extension.manifest.description if extension.manifest is not None else None,
-        "compatibility": (
-            {"seraph": extension.manifest.compatibility.seraph}
-            if extension.manifest is not None
-            else None
-        ),
+        "compatibility": compatibility,
+        "capability_pack_hardening": hardening_receipt,
         "publisher": (
             {
                 "name": extension.manifest.publisher.name,
@@ -1539,7 +2164,8 @@ def _extension_payload(
         "doctor_ok": bool(getattr(doctor_result, "ok", True)),
         "issues": issues,
         "load_errors": extension_load_errors,
-        "status": "ready" if not issues and not extension_load_errors else "degraded",
+        "status": status,
+        "diagnostics_summary": diagnostics_summary,
         "toggle_targets": toggles,
         "toggleable_contribution_types": toggleable_types,
         "passive_contribution_types": passive_types,
@@ -1547,11 +2173,19 @@ def _extension_payload(
         "disable_supported": bool(toggles),
         "removable": location == "workspace",
         "enabled_scope": "toggleable_contributions" if toggles else "none",
-        "configurable": managed_connector_present,
+        "configurable": bool(configurable_types),
         "metadata_supported": True,
-        "config_scope": "metadata_and_managed_connectors" if managed_connector_present else "metadata_only",
+        "config_scope": (
+            "metadata_and_managed_connectors"
+            if configurable_types == {"managed_connectors"}
+            else (
+                "metadata_and_connector_configs"
+                if configurable_types
+                else "metadata_only"
+            )
+        ),
         "enabled": enabled,
-        "config": state_entry.get("config", {}),
+        "config": _redact_extension_config(extension, state_entry.get("config", {})),
         "connector_summary": connector_summary,
         "contributions": contributions,
         "studio_files": _studio_files(extension, indexes=indexes),
@@ -1560,9 +2194,12 @@ def _extension_payload(
 
 def list_extensions() -> dict[str, Any]:
     snapshot = _registry().snapshot()
+    state_payload = _state_payload()
+    for extension in snapshot.extensions:
+        _sync_blocked_verified_extension_runtime_access(extension, state_payload=state_payload)
     doctor = doctor_snapshot(snapshot)
     doctor_by_id = {result.extension_id: result for result in doctor.results}
-    state_by_id = _state_payload()["extensions"]
+    state_by_id = extension_state_entries(state_payload)
     raw_extensions = [
         _extension_payload(
             extension,
@@ -1590,6 +2227,12 @@ def list_extensions() -> dict[str, Any]:
             "degraded": sum(1 for extension in extensions if extension["status"] == "degraded"),
             "bundled": sum(1 for extension in extensions if extension["location"] == "bundled"),
             "workspace": sum(1 for extension in extensions if extension["location"] == "workspace"),
+            "issue_count": sum(int(extension.get("diagnostics_summary", {}).get("issue_count") or 0) for extension in extensions),
+            "load_error_count": sum(int(extension.get("diagnostics_summary", {}).get("load_error_count") or 0) for extension in extensions),
+            "degraded_connector_count": sum(
+                int(extension.get("diagnostics_summary", {}).get("degraded_connector_count") or 0)
+                for extension in extensions
+            ),
         },
     }
 
@@ -1678,6 +2321,54 @@ def _set_managed_connector_enabled(
     }
 
 
+def _set_planned_connector_enabled(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+    *,
+    enabled: bool,
+    changed_type: str,
+) -> dict[str, Any]:
+    contribution_name = _contribution_name(contribution)
+    if not contribution_name:
+        raise ValueError(
+            f"connector '{contribution.reference}' in extension '{extension.id}' is not a valid {changed_type} definition"
+        )
+    definition_errors = _planned_connector_definition_errors(contribution)
+    if definition_errors:
+        raise ValueError(definition_errors[0])
+    state_payload = _state_payload()
+    state_by_id = state_payload.get("extensions")
+    state_entry = (
+        state_by_id.get(extension.id)
+        if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+        else {}
+    )
+    config_entry = _contribution_config(state_entry, contribution.contribution_type, contribution_name)
+    config_errors = _contribution_config_errors(contribution.metadata, config_entry)
+    if enabled and contribution.metadata.get("config_fields") and (not config_entry or config_errors):
+        raise ValueError(
+            f"{changed_type.replace('_', ' ')} '{contribution_name}' requires valid configuration before enable"
+        )
+    set_connector_enabled_override(
+        state_payload,
+        extension.id,
+        contribution.reference,
+        enabled=enabled,
+    )
+    _save_state(state_payload)
+    return {
+        "extension": get_extension(extension.id),
+        "connector": get_extension_connector(extension.id, contribution.reference),
+        "changed": {
+            "type": changed_type,
+            "name": contribution_name,
+            "reference": contribution.reference,
+            "enabled": enabled,
+            "ok": True,
+        },
+    }
+
+
 def _set_runtime_selector_contribution_enabled(
     extension: ExtensionRecord,
     contribution: ExtensionContributionRecord,
@@ -1711,6 +2402,32 @@ def _set_runtime_selector_contribution_enabled(
     }
 
 
+def _raise_if_capability_enforcement_blocks_enable(
+    extension: ExtensionRecord,
+    contribution: ExtensionContributionRecord,
+) -> None:
+    permission_profile = evaluate_contribution_permissions(
+        extension,
+        contribution_type=contribution.contribution_type,
+        metadata=contribution.metadata,
+    )
+    contract = build_capability_contract(
+        extension,
+        contribution_type=contribution.contribution_type,
+        reference=contribution.reference,
+        metadata=contribution.metadata,
+        permission_profile=permission_profile,
+    )
+    enforcement = contract["enforcement"]
+    if enforcement.get("status") not in {"rejected", "quarantined"}:
+        return
+    status = str(enforcement.get("status") or "blocked")
+    reason = str(enforcement.get("reason") or "manifest permissions do not cover the contribution")
+    raise ValueError(
+        f"connector '{contribution.reference}' in extension '{extension.id}' is {status}: {reason}"
+    )
+
+
 def set_extension_connector_enabled(
     extension_id: str,
     reference: str,
@@ -1725,8 +2442,45 @@ def set_extension_connector_enabled(
     contribution = next((item for item in extension.contributions if item.reference == reference), None)
     if contribution is None:
         raise KeyError(reference)
+    if enabled:
+        state_by_id = _state_payload()["extensions"]
+        state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+        _raise_if_governance_blocks_lifecycle(
+            extension,
+            action="enable connector",
+            state_entry=state_entry,
+        )
+        _raise_if_capability_enforcement_blocks_enable(extension, contribution)
     if contribution.contribution_type == "managed_connectors":
         return _set_managed_connector_enabled(extension, contribution, enabled=enabled)
+    if contribution.contribution_type == "memory_providers":
+        return _set_planned_connector_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="memory_provider",
+        )
+    if contribution.contribution_type == "automation_triggers":
+        return _set_planned_connector_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="automation_trigger",
+        )
+    if contribution.contribution_type == "browser_providers":
+        return _set_planned_connector_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="browser_provider",
+        )
+    if contribution.contribution_type == "messaging_connectors":
+        return _set_planned_connector_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="messaging_connector",
+        )
     if contribution.contribution_type == "observer_definitions":
         return _set_runtime_selector_contribution_enabled(
             extension,
@@ -1740,6 +2494,13 @@ def set_extension_connector_enabled(
             contribution,
             enabled=enabled,
             changed_type="channel_adapter",
+        )
+    if contribution.contribution_type == "node_adapters":
+        return _set_planned_connector_enabled(
+            extension,
+            contribution,
+            enabled=enabled,
+            changed_type="node_adapter",
         )
     if contribution.contribution_type != "mcp_servers":
         raise ValueError(
@@ -1805,6 +2566,13 @@ def validate_extension_path(path: str) -> dict[str, Any]:
     existing = _registry().snapshot().get_extension(manifest.id)
     report = validate_extension_package(package_root)
     package_digest = _hash_extension_directory(package_root)
+    state_by_id = _state_payload()["extensions"]
+    state_entry = state_by_id.get(manifest.id, {}) if isinstance(state_by_id.get(manifest.id), dict) else {}
+    governance = build_governance_status(
+        manifest,
+        root_path=package_root,
+        state_entry=state_entry,
+    )
     permission_summary = summarize_extension_permissions(
         extension,
         contribution_profiles=[
@@ -1830,26 +2598,51 @@ def validate_extension_path(path: str) -> dict[str, Any]:
             "risk_level": "low",
         },
     }
+    lifecycle_plan = _extension_lifecycle_plan(
+        manifest,
+        existing,
+        candidate_digest=package_digest,
+    )
+    diagnostics_summary = _diagnostics_summary(
+        issues=[
+            asdict(issue)
+            for result in report.results
+            for issue in result.issues
+        ],
+        load_errors=[_serialize_load_error(error) for error in report.load_errors],
+        contributions=[
+            _contribution_payload(extension, contribution, indexes=_contribution_indexes(state_by_id={}), state_entry={})
+            for contribution in (extension.contributions if extension is not None else [])
+        ],
+    )
+    permission_summary_payload = {
+        "status": permission_summary["status"],
+        "ok": permission_summary["ok"],
+        "required": permission_summary["required"],
+        "missing": permission_summary["missing"],
+        "risk_level": permission_summary["risk_level"],
+    }
     return {
         "path": str(package_root),
         "package_digest": package_digest,
         "manifest_path": str(package_root / "manifest.yaml"),
+        "governance": governance,
         "extension_id": manifest.id,
         "display_name": manifest.display_name,
         "version": manifest.version,
-        "lifecycle_plan": _extension_lifecycle_plan(
+        "version_line": _version_line(manifest.version),
+        "compatibility": _compatibility_payload(manifest),
+        "lifecycle_plan": lifecycle_plan,
+        "capability_pack_hardening": build_capability_pack_hardening_receipt(
             manifest,
-            existing,
-            candidate_digest=package_digest,
+            governance_status=governance,
+            compatibility=_compatibility_payload(manifest),
+            lifecycle_plan=lifecycle_plan,
+            diagnostics_summary=diagnostics_summary,
+            permission_summary=permission_summary_payload,
         ),
         "permissions": permission_summary["declared"],
-        "permission_summary": {
-            "status": permission_summary["status"],
-            "ok": permission_summary["ok"],
-            "required": permission_summary["required"],
-            "missing": permission_summary["missing"],
-            "risk_level": permission_summary["risk_level"],
-        },
+        "permission_summary": permission_summary_payload,
         "approval_profile": permission_summary["approval_profile"],
         "ok": report.ok,
         "load_errors": [_serialize_load_error(error) for error in report.load_errors],
@@ -1861,6 +2654,7 @@ def validate_extension_path(path: str) -> dict[str, Any]:
             }
             for result in report.results
         ],
+        "diagnostics_summary": diagnostics_summary,
     }
 
 
@@ -1915,6 +2709,13 @@ def save_extension_source(extension_id: str, reference: str, content: str) -> di
         raise KeyError(extension_id)
     if _location_for_extension(extension) != "workspace":
         raise ValueError(f"extension '{extension_id}' is read-only")
+    state_by_id = _state_payload()["extensions"]
+    state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+    _raise_if_governance_blocks_lifecycle(
+        extension,
+        action="source-save",
+        state_entry=state_entry,
+    )
 
     contribution_type, resolved_path, _ = _resolve_extension_reference(extension, reference)
     if contribution_type not in {"manifest", *sorted(_EDITABLE_STUDIO_TYPES)}:
@@ -1952,6 +2753,14 @@ def install_extension_path(path: str) -> dict[str, Any]:
     report = validate_extension_package(package_root)
     if not report.ok:
         raise ValueError("extension package failed validation")
+    state_by_id = _state_payload()["extensions"]
+    state_entry = state_by_id.get(manifest.id, {}) if isinstance(state_by_id.get(manifest.id), dict) else {}
+    assert_governance_allows_lifecycle(
+        manifest,
+        root_path=package_root,
+        state_entry=state_entry,
+        action="install",
+    )
 
     existing = _registry().snapshot().get_extension(manifest.id)
     if existing is not None:
@@ -1973,6 +2782,19 @@ def install_extension_path(path: str) -> dict[str, Any]:
         shutil.rmtree(target_root, ignore_errors=True)
         _refresh_runtime()
         raise
+    payload = _state_payload()
+    append_extension_lifecycle_event(
+        payload,
+        manifest.id,
+        action="install",
+        status="installed",
+        details={
+            "version": manifest.version,
+            "digest": _extension_package_digest(str(target_root)),
+            "path": str(target_root),
+        },
+    )
+    _save_state(payload)
     return get_extension(manifest.id)
 
 
@@ -1981,6 +2803,14 @@ def update_extension_path(path: str) -> dict[str, Any]:
     report = validate_extension_package(package_root)
     if not report.ok:
         raise ValueError("extension package failed validation")
+    state_by_id = _state_payload()["extensions"]
+    candidate_state_entry = state_by_id.get(manifest.id, {}) if isinstance(state_by_id.get(manifest.id), dict) else {}
+    assert_governance_allows_lifecycle(
+        manifest,
+        root_path=package_root,
+        state_entry=candidate_state_entry,
+        action="update",
+    )
 
     snapshot = _registry().snapshot()
     existing = snapshot.get_extension(manifest.id)
@@ -2002,6 +2832,10 @@ def update_extension_path(path: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="seraph-extension-update-") as temp_root:
         staging_root = Path(temp_root) / "package"
         backup_root = Path(temp_root) / "backup"
+        snapshot_id = f"{_slugify(manifest.id)}-{_utc_now_compact()}"
+        persistent_snapshot_root = (
+            Path(_workspace_root()) / ".seraph-extension-snapshots" / _slugify(manifest.id) / snapshot_id
+        )
         shutil.copytree(package_root, staging_root)
         shutil.move(target_root, backup_root)
         shutil.move(staging_root, target_root)
@@ -2011,12 +2845,39 @@ def update_extension_path(path: str) -> dict[str, Any]:
             if updated_extension is None:
                 raise ValueError(f"extension '{manifest.id}' did not load after update")
             _sync_mcp_servers_for_updated_extension(existing, updated_extension)
+            persistent_snapshot_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(backup_root, persistent_snapshot_root)
         except Exception:
             if target_root.exists():
                 shutil.rmtree(target_root, ignore_errors=True)
             shutil.move(backup_root, target_root)
             _refresh_runtime()
             raise
+    payload = _state_payload()
+    previous_version = existing.manifest.version if existing.manifest is not None else None
+    snapshot = add_extension_rollback_snapshot(
+        payload,
+        manifest.id,
+        snapshot_id=snapshot_id,
+        snapshot_path=str(persistent_snapshot_root),
+        version=previous_version,
+        digest=current_digest,
+        reason="pre_update",
+    )
+    append_extension_lifecycle_event(
+        payload,
+        manifest.id,
+        action="update" if _version_relation(manifest.version, previous_version) != "downgrade" else "downgrade",
+        status="updated",
+        details={
+            "previous_version": previous_version,
+            "previous_digest": current_digest,
+            "candidate_version": manifest.version,
+            "candidate_digest": candidate_digest,
+            "rollback_snapshot": snapshot,
+        },
+    )
+    _save_state(payload)
     return get_extension(manifest.id)
 
 
@@ -2026,6 +2887,17 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     if extension is None:
         raise KeyError(extension_id)
     if enabled:
+        state_by_id = _state_payload()["extensions"]
+        state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+        if extension_quarantine_active(state_entry):
+            raise ValueError(
+                f"extension '{extension_id}' is quarantined and requires re-entry review before enable"
+            )
+        _raise_if_governance_blocks_lifecycle(
+            extension,
+            action="enable",
+            state_entry=state_entry,
+        )
         doctor_report = doctor_snapshot(snapshot)
         doctor_result = next(
             (result for result in doctor_report.results if result.extension_id == extension_id),
@@ -2052,32 +2924,46 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
             else {}
         )
         for target in targets:
-            if target["type"] != "managed_connector":
+            if target["type"] not in {
+                "managed_connector",
+                "memory_provider",
+                "automation_trigger",
+                "browser_provider",
+                "messaging_connector",
+                "node_adapter",
+            }:
                 continue
             contribution = next(
                 (
                     item
                     for item in extension.contributions
                     if item.reference == target.get("reference")
-                    and item.contribution_type == "managed_connectors"
+                    and (
+                        (target["type"] == "managed_connector" and item.contribution_type == "managed_connectors")
+                        or (target["type"] == "memory_provider" and item.contribution_type == "memory_providers")
+                        or (target["type"] == "automation_trigger" and item.contribution_type == "automation_triggers")
+                        or (target["type"] == "browser_provider" and item.contribution_type == "browser_providers")
+                        or (target["type"] == "messaging_connector" and item.contribution_type == "messaging_connectors")
+                        or (target["type"] == "node_adapter" and item.contribution_type == "node_adapters")
+                    )
                 ),
                 None,
             )
             if contribution is None:
                 continue
-            connector_name = contribution.metadata.get("name")
+            connector_name = _contribution_name(contribution)
             if not isinstance(connector_name, str) or not connector_name:
                 raise ValueError(
-                    f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid managed connector definition"
+                    f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid {target['type'].replace('_', ' ')} definition"
                 )
             target_enabled = _managed_connector_package_enable_target(extension, contribution)
             if not target_enabled:
                 continue
-            config_entry = _managed_connector_config(state_entry, connector_name)
-            config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
-            if not config_entry or config_errors:
+            config_entry = _contribution_config(state_entry, contribution.contribution_type, connector_name)
+            config_errors = _contribution_config_errors(contribution.metadata, config_entry)
+            if contribution.metadata.get("config_fields") and (not config_entry or config_errors):
                 raise ValueError(
-                    f"managed connector '{connector_name}' requires valid configuration before enable"
+                    f"{target['type'].replace('_', ' ')} '{connector_name}' requires valid configuration before enable"
                 )
     changed: list[dict[str, Any]] = []
     state_payload: dict[str, Any] | None = None
@@ -2114,23 +3000,37 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                         source="extension",
                     )
                     ok = True
-        elif target["type"] == "managed_connector":
+        elif target["type"] in {
+            "managed_connector",
+            "memory_provider",
+            "automation_trigger",
+            "browser_provider",
+            "messaging_connector",
+            "node_adapter",
+        }:
             contribution = next(
                 (
                     item
                     for item in extension.contributions
                     if item.reference == target.get("reference")
-                    and item.contribution_type == "managed_connectors"
+                    and (
+                        (target["type"] == "managed_connector" and item.contribution_type == "managed_connectors")
+                        or (target["type"] == "memory_provider" and item.contribution_type == "memory_providers")
+                        or (target["type"] == "automation_trigger" and item.contribution_type == "automation_triggers")
+                        or (target["type"] == "browser_provider" and item.contribution_type == "browser_providers")
+                        or (target["type"] == "messaging_connector" and item.contribution_type == "messaging_connectors")
+                        or (target["type"] == "node_adapter" and item.contribution_type == "node_adapters")
+                    )
                 ),
                 None,
             )
             if contribution is None:
                 ok = False
             else:
-                connector_name = contribution.metadata.get("name")
+                connector_name = _contribution_name(contribution)
                 if not isinstance(connector_name, str) or not connector_name:
                     raise ValueError(
-                        f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid managed connector definition"
+                        f"connector '{contribution.reference}' in extension '{extension_id}' is not a valid {target['type'].replace('_', ' ')} definition"
                     )
                 if state_payload is None:
                     state_payload = _state_payload()
@@ -2143,11 +3043,11 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                 target_enabled = enabled
                 if enabled:
                     target_enabled = _managed_connector_package_enable_target(extension, contribution)
-                config_entry = _managed_connector_config(state_entry, connector_name)
-                config_errors = _managed_connector_config_errors(contribution.metadata, config_entry)
-                if target_enabled and (not config_entry or config_errors):
+                config_entry = _contribution_config(state_entry, contribution.contribution_type, connector_name)
+                config_errors = _contribution_config_errors(contribution.metadata, config_entry)
+                if target_enabled and contribution.metadata.get("config_fields") and (not config_entry or config_errors):
                     raise ValueError(
-                        f"managed connector '{connector_name}' requires valid configuration before enable"
+                        f"{target['type'].replace('_', ' ')} '{connector_name}' requires valid configuration before enable"
                     )
                 set_connector_enabled_override(
                     state_payload,
@@ -2184,7 +3084,7 @@ def _set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         changed.append({
             "type": target["type"],
             "name": target_name,
-            "enabled": target_enabled if target["type"] == "managed_connector" and ok else enabled,
+            "enabled": target_enabled if target["type"] in {"managed_connector", "memory_provider", "automation_trigger", "browser_provider", "messaging_connector", "node_adapter"} and ok else enabled,
             "ok": ok,
         })
     if state_payload is not None:
@@ -2203,46 +3103,356 @@ def disable_extension(extension_id: str) -> dict[str, Any]:
     return _set_enabled(extension_id, False)
 
 
+def extension_lifecycle_status(extension_id: str) -> dict[str, Any]:
+    extension = get_extension(extension_id)
+    lifecycle = extension.get("lifecycle") if isinstance(extension.get("lifecycle"), dict) else {}
+    rollback_snapshots = lifecycle.get("rollback_snapshots")
+    quarantine = lifecycle.get("quarantine")
+    return {
+        "extension": extension,
+        "lifecycle": lifecycle,
+        "rollback": {
+            "available": bool(rollback_snapshots),
+            "snapshots": rollback_snapshots if isinstance(rollback_snapshots, list) else [],
+        },
+        "quarantine": (
+            quarantine
+            if isinstance(quarantine, dict)
+            else {"active": False, "state": "clear"}
+        ),
+        "diagnostics": {
+            "status": extension.get("status"),
+            "compatibility": extension.get("compatibility"),
+            "diagnostics_summary": extension.get("diagnostics_summary"),
+            "permission_summary": extension.get("permission_summary"),
+            "governance": extension.get("governance"),
+            "vulnerability_state": "unknown",
+            "sbom_state": "unknown",
+        },
+    }
+
+
+def record_extension_review(
+    extension_id: str,
+    *,
+    reviewed_by: str = "operator",
+    reason: str = "",
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    if extension.manifest is None:
+        raise ValueError(f"extension '{extension_id}' does not expose a manifest")
+    digest = _extension_package_digest(extension.root_path)
+    if not digest:
+        raise ValueError(f"extension '{extension_id}' does not expose a package digest")
+    governance = _extension_governance_status(
+        extension,
+        _state_payload().get("extensions", {}).get(extension.id, {}),
+    )
+    key_id = str(governance.get("signing_key_id") or "local-manual-review")
+    permission_fingerprint = extension_permission_fingerprint(extension.manifest)
+    payload = _state_payload()
+    review = mark_extension_governance_reviewed(
+        payload,
+        extension.id,
+        digest=digest,
+        key_id=key_id,
+        permission_fingerprint=permission_fingerprint,
+        reviewed_by=reviewed_by,
+        reviewed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="review",
+        status="reviewed",
+        actor=reviewed_by,
+        details={
+            "reason": reason,
+            "digest": digest,
+            "key_id": key_id,
+            "permission_fingerprint": permission_fingerprint,
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "reviewed",
+        "review": review,
+        "receipt": event,
+        **extension_lifecycle_status(extension.id),
+    }
+
+
+def quarantine_extension(
+    extension_id: str,
+    *,
+    reason: str,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    digest = _extension_package_digest(extension.root_path)
+    version = extension.manifest.version if extension.manifest is not None else None
+    runtime_result = disable_extension(extension.id)
+    payload = _state_payload()
+    quarantine = set_extension_quarantine(
+        payload,
+        extension.id,
+        active=True,
+        reason=reason,
+        actor=actor,
+        digest=digest,
+        version=version,
+    )
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="quarantine",
+        status="quarantined",
+        actor=actor,
+        details={
+            "reason": reason,
+            "digest": digest,
+            "version": version,
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "quarantined",
+        "quarantine": quarantine,
+        "receipt": event,
+        "runtime_effects": runtime_result.get("changed", []),
+        **extension_lifecycle_status(extension.id),
+    }
+
+
+def reenter_extension(
+    extension_id: str,
+    *,
+    reviewed_by: str = "operator",
+    reason: str = "",
+) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    state_payload = _state_payload()
+    state_by_id = state_payload.get("extensions")
+    state_entry = (
+        state_by_id.get(extension.id)
+        if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+        else {}
+    )
+    governance = _extension_governance_status(extension, state_entry)
+    if governance.get("fail_closed"):
+        raise ValueError(
+            f"extension '{extension_id}' cannot re-enter while governance blocks runtime access: "
+            f"{governance.get('fail_closed_reason') or 'blocked'}"
+        )
+    doctor_report = doctor_snapshot(snapshot)
+    doctor_result = next(
+        (result for result in doctor_report.results if result.extension_id == extension_id),
+        None,
+    )
+    load_errors = _extension_load_errors_for_extension(extension, snapshot.load_errors)
+    if (doctor_result is not None and doctor_result.issues) or load_errors:
+        raise ValueError(f"extension '{extension_id}' cannot re-enter until diagnostics are clean")
+    review_result = record_extension_review(extension.id, reviewed_by=reviewed_by, reason=reason or "re-entry review")
+    payload = _state_payload()
+    digest = _extension_package_digest(extension.root_path)
+    version = extension.manifest.version if extension.manifest is not None else None
+    quarantine = set_extension_quarantine(
+        payload,
+        extension.id,
+        active=False,
+        reason=reason or "re-entry review accepted",
+        actor=reviewed_by,
+        digest=digest,
+        version=version,
+    )
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="reentry",
+        status="cleared",
+        actor=reviewed_by,
+        details={
+            "reason": reason,
+            "digest": digest,
+            "version": version,
+            "review_receipt": review_result.get("receipt", {}).get("id"),
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "reentry_cleared",
+        "quarantine": quarantine,
+        "receipt": event,
+        **extension_lifecycle_status(extension.id),
+    }
+
+
+def rollback_extension(extension_id: str, *, snapshot_id: str | None = None) -> dict[str, Any]:
+    snapshot = _registry().snapshot()
+    extension = snapshot.get_extension(extension_id)
+    if extension is None:
+        raise KeyError(extension_id)
+    if _location_for_extension(extension) != "workspace" or not extension.root_path:
+        raise ValueError(f"extension '{extension_id}' does not support rollback")
+    state_payload = _state_payload()
+    state_by_id = state_payload.get("extensions")
+    state_entry = (
+        state_by_id.get(extension.id)
+        if isinstance(state_by_id, dict) and isinstance(state_by_id.get(extension.id), dict)
+        else {}
+    )
+    lifecycle = extension_lifecycle_entry(state_entry, create=False) or {}
+    snapshots = lifecycle.get("rollback_snapshots")
+    snapshot_record = None
+    if isinstance(snapshots, list):
+        snapshot_record = next(
+            (
+                item
+                for item in snapshots
+                if isinstance(item, dict)
+                and (not snapshot_id or item.get("id") == snapshot_id)
+            ),
+            None,
+        )
+    if not isinstance(snapshot_record, dict):
+        raise ValueError(f"extension '{extension_id}' has no rollback snapshot")
+    snapshot_path = Path(str(snapshot_record.get("path") or "")).resolve()
+    workspace_root = Path(_workspace_root()).resolve()
+    if not snapshot_path.exists() or not snapshot_path.is_dir() or workspace_root not in snapshot_path.parents:
+        raise ValueError(f"rollback snapshot for extension '{extension_id}' is unavailable")
+    rollback_manifest = load_extension_manifest(str(snapshot_path / "manifest.yaml"))
+    if rollback_manifest.id != extension.id:
+        raise ValueError("rollback snapshot does not match extension id")
+    snapshot_digest = _hash_extension_directory(snapshot_path)
+    recorded_digest = snapshot_record.get("digest")
+    if isinstance(recorded_digest, str) and recorded_digest and recorded_digest != snapshot_digest:
+        raise ValueError("rollback snapshot digest does not match recorded restore point")
+    assert_governance_allows_lifecycle(
+        rollback_manifest,
+        root_path=snapshot_path,
+        state_entry=state_entry,
+        action="rollback",
+    )
+    target_root = Path(extension.root_path)
+    current_digest = _extension_package_digest(extension.root_path)
+    current_version = extension.manifest.version if extension.manifest is not None else None
+    with tempfile.TemporaryDirectory(prefix="seraph-extension-rollback-") as temp_root:
+        current_backup = Path(temp_root) / "current"
+        candidate = Path(temp_root) / "candidate"
+        shutil.copytree(target_root, current_backup)
+        shutil.copytree(snapshot_path, candidate)
+        if target_root.exists():
+            shutil.rmtree(target_root)
+        shutil.move(candidate, target_root)
+        try:
+            _refresh_runtime()
+            rolled_back = _registry().snapshot().get_extension(extension.id)
+            if rolled_back is None:
+                raise ValueError(f"extension '{extension_id}' did not load after rollback")
+            _sync_mcp_servers_for_updated_extension(extension, rolled_back)
+        except Exception:
+            if target_root.exists():
+                shutil.rmtree(target_root, ignore_errors=True)
+            shutil.move(current_backup, target_root)
+            _refresh_runtime()
+            raise
+    payload = _state_payload()
+    event = append_extension_lifecycle_event(
+        payload,
+        extension.id,
+        action="rollback",
+        status="rolled_back",
+        details={
+            "snapshot_id": snapshot_record.get("id"),
+            "previous_version": current_version,
+            "previous_digest": current_digest,
+            "restored_version": snapshot_record.get("version"),
+            "restored_digest": snapshot_record.get("digest"),
+        },
+    )
+    _save_state(payload)
+    return {
+        "status": "rolled_back",
+        "receipt": event,
+        **extension_lifecycle_status(extension.id),
+    }
+
+
 def configure_extension(extension_id: str, config: dict[str, Any]) -> dict[str, Any]:
     snapshot = _registry().snapshot()
     extension = snapshot.get_extension(extension_id)
     if extension is None:
         raise KeyError(extension_id)
-    managed_connector_configs = config.get("managed_connectors") if isinstance(config, dict) else None
-    if managed_connector_configs is not None and not isinstance(managed_connector_configs, dict):
-        raise ValueError("managed_connectors config must be an object keyed by connector name")
-    managed_connector_names: set[str] = set()
+    if not isinstance(config, dict):
+        raise ValueError("extension config must be an object")
+    state_payload = _state_payload()
+    state_by_id = state_payload["extensions"]
+    state_entry = state_by_id.get(extension.id, {}) if isinstance(state_by_id.get(extension.id), dict) else {}
+    _raise_if_governance_blocks_lifecycle(
+        extension,
+        action="configure",
+        state_entry=state_entry,
+    )
+    configurable_types = {
+        "managed_connectors",
+        "memory_providers",
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "node_adapters",
+    }
+    known_config_names: dict[str, set[str]] = {contribution_type: set() for contribution_type in configurable_types}
+    for contribution_type in configurable_types:
+        type_config = config.get(contribution_type)
+        if type_config is not None and not isinstance(type_config, dict):
+            raise ValueError(f"{contribution_type} config must be an object keyed by contribution name")
     for contribution in extension.contributions:
-        if contribution.contribution_type != "managed_connectors":
+        if contribution.contribution_type not in configurable_types:
             continue
-        connector_name = contribution.metadata.get("name")
-        if not isinstance(connector_name, str) or not connector_name:
+        contribution_name = _contribution_name(contribution)
+        if not contribution_name:
             continue
-        managed_connector_names.add(connector_name)
-        connector_config = (
-            managed_connector_configs.get(connector_name)
-            if isinstance(managed_connector_configs, dict)
-            else None
-        )
-        if connector_config is None:
+        known_config_names[contribution.contribution_type].add(contribution_name)
+        type_config = config.get(contribution.contribution_type)
+        contribution_config = type_config.get(contribution_name) if isinstance(type_config, dict) else None
+        if contribution_config is None:
             continue
-        if not isinstance(connector_config, dict):
-            raise ValueError(f"managed connector '{connector_name}' config must be an object")
-        config_errors = _managed_connector_config_errors(contribution.metadata, connector_config)
+        if not isinstance(contribution_config, dict):
+            raise ValueError(
+                f"{contribution.contribution_type.removesuffix('s').replace('_', ' ')} '{contribution_name}' config must be an object"
+            )
+        config_errors = _contribution_config_errors(contribution.metadata, contribution_config)
         if config_errors:
             raise ValueError("; ".join(config_errors))
-    if isinstance(managed_connector_configs, dict):
-        unknown_connectors = sorted(
-            connector_name for connector_name in managed_connector_configs.keys() if connector_name not in managed_connector_names
-        )
-        if unknown_connectors:
+    for contribution_type, known_names in known_config_names.items():
+        type_config = config.get(contribution_type)
+        if not isinstance(type_config, dict):
+            continue
+        unknown_names = sorted(name for name in type_config.keys() if name not in known_names)
+        if unknown_names:
             raise ValueError(
-                "unknown managed connector config entries: " + ", ".join(unknown_connectors)
+                f"unknown {contribution_type} config entries: " + ", ".join(unknown_names)
             )
-    payload = _state_payload()
+    payload = state_payload
     extensions = payload.setdefault("extensions", {})
     entry = extensions.setdefault(extension_id, {})
-    entry["config"] = config
+    existing_config = entry.get("config")
+    if not isinstance(existing_config, dict):
+        existing_config = {}
+    entry["config"] = _preserve_secret_placeholders(
+        extension,
+        incoming_config=config,
+        existing_config=existing_config,
+    )
     _save_state(payload)
     return get_extension(extension_id)
 

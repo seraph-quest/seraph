@@ -7,19 +7,392 @@ from unittest.mock import patch
 import pytest
 
 from config.settings import settings
+from src.evals.production_parity_readiness import PRODUCTION_PARITY_READINESS_SCENARIO_NAMES
+from src.evals.final_parity_audit import (
+    FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES,
+    FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES,
+    FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES,
+    OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES,
+    POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES,
+    POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES,
+    POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES,
+    PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES,
+    REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES,
+)
 from src.evals import harness
-from src.evals.harness import available_scenarios, main, run_runtime_evals
+from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
+from src.cockpit.production_operator_control import (
+    PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
+    PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
+)
+from src.cockpit.dense_operator_recovery import (
+    INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES,
+    LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES,
+    OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES,
+)
+from src.cockpit.operator_mission_control import (
+    LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES,
+    NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES,
+    OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES,
+)
+from src.cockpit.operator_control_certification import (
+    LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES,
+    MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES,
+    OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES,
+)
+from src.cockpit.operator_control_production_certification import (
+    AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES,
+    TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES,
+)
+from src.cockpit.post_dp_operator_debugging_recovery import (
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES,
+    AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+    DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES,
+    DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES,
+    OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES,
+    OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+    OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES,
+    POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+)
+from src.extensions.benchmark import (
+    GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES,
+    M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES,
+)
+from src.extensions.marketplace_lifecycle import (
+    CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES,
+    GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES,
+    MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES,
+)
+from src.extensions.live_marketplace_attestation import (
+    MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES,
+    PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES,
+    THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES,
+)
+from src.extensions.production_marketplace_security import (
+    HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES,
+    INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES,
+    PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES,
+)
+from src.extensions.marketplace_security_corpus import (
+    CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES,
+    PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES,
+)
+from src.extensions.production_secure_marketplace import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES,
+    MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES,
+    THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES,
+)
+from src.extensions.marketplace_production_security import (
+    ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES,
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES,
+    MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES,
+    PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES,
+    PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES,
+)
+from src.extensions.post_dp_marketplace_lifecycle_gap_closure import (
+    HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES,
+    MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES,
+    MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES,
+    MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES,
+    PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES,
+    POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES,
+)
+from src.extensions.browser_provider_usability import (
+    BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES,
+    LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES,
+    MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES,
+)
+from src.extensions.safe_browser_computer_use import (
+    AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES,
+    BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES,
+    INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES,
+    LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES,
+    SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES,
+)
+from src.extensions.browser_computer_use_parity_depth import (
+    BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES,
+    BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES,
+    SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES,
+)
+from src.extensions.full_browser_parity import (
+    BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES,
+    FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES,
+    SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES,
+)
+from src.extensions.browser_computer_use_production import (
+    BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES,
+    BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+    BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES,
+    CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES,
+    SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES,
+)
+from src.extensions.post_dp_browser_computer_use_reliability import (
+    BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES,
+    BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES,
+    BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES,
+    BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES,
+    BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES,
+    BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES,
+    POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES,
+)
+from src.extensions.production_reach_hardening import (
+    BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES,
+    GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES,
+    PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES,
+)
+from src.extensions.live_reach_media import (
+    CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES,
+    LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES,
+)
+from src.extensions.production_reach_voice_mobile import (
+    BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES,
+    MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES,
+    PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES,
+)
+from src.extensions.field_reach_operations import (
+    ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES,
+    BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES,
+)
+from src.extensions.always_available_reach_media import (
+    ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES,
+    MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES,
+    REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES,
+    VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES,
+)
+from src.extensions.reach_voice_production_ops import (
+    ALWAYS_AVAILABLE_REACH_LIVE_OPS_V1_SCENARIO_NAMES,
+    CHANNEL_INCIDENT_RESPONSE_V1_SCENARIO_NAMES,
+    CROSS_SURFACE_REACH_CONTINUITY_V2_SCENARIO_NAMES,
+    REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+)
+from src.extensions.post_dx_reach_voice_media_parity import (
+    CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+    MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+    POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+    REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+    REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+)
+from src.guardian.learning_arbitration_benchmark import GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES
+from src.guardian.live_learning_quality import (
+    CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES,
+    GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES,
+    LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES,
+    MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES,
+    PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES,
+)
+from src.guardian.live_human_outcome_learning import (
+    GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES,
+    LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES,
+    MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES,
+)
+from src.guardian.generalized_guardian_outcomes import (
+    CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES,
+    FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES,
+    GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES,
+    MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES,
+)
+from src.guardian.live_guardian_memory_field_program import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES,
+    LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES,
+    LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES,
+    LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES,
+)
+from src.guardian.post_dp_guardian_memory_gap_closure import (
+    GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES,
+    LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES,
+    LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES,
+    MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES,
+    MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES,
+    POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES,
+)
+from src.guardian.independent_learning_memory_parity import (
+    INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES,
+    MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES,
+    TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES,
+)
+from src.guardian.longitudinal_guardian_outcomes import (
+    LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES,
+    LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES,
+    NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES,
+)
+from src.guardian.multimodal_voice import GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES
+from src.workflows.durable_state import (
+    DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES,
+    DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES,
+    PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+)
+from src.workflows.live_orchestration import (
+    LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES,
+    ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES,
+)
+from src.workflows.production_sla_orchestration import (
+    DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES,
+    EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES,
+    PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES,
+)
+from src.workflows.continuous_orchestration_slo import (
+    CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES,
+    CRASH_FAILOVER_SOAK_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES,
+)
+from src.workflows.post_dx_live_durable_orchestration import (
+    CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES,
+    MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES,
+    OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES,
+    ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES,
+    RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES,
+    SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES,
+)
+from src.workflows.production_workflow_guarantees import (
+    CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES,
+    EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES,
+    PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES,
+)
+from src.security.production_isolation import (
+    PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES,
+    PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES,
+    SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES,
+)
+from src.security.independent_review import (
+    INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES,
+    LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES,
+    SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+)
+from src.security.container_grade_host import (
+    CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES,
+    SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES,
+)
+from src.security.certified_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES,
+    HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES,
+)
+from src.security.production_grade_secure_host import (
+    CREDENTIAL_BROKER_EGRESS_SOAK_SCENARIO_NAMES,
+    PRODUCTION_GRADE_SECURE_CAPABILITY_HOST_EVIDENCE_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_MATRIX_SCENARIO_NAMES,
+    SECURE_HOST_CROSS_SURFACE_ATTACK_CHAIN_SCENARIO_NAMES,
+    SECURE_HOST_FALSE_CLAIM_SCAN_SCENARIO_NAMES,
+    SECURE_HOST_OPERATOR_RECOVERY_AUTHORITY_SCENARIO_NAMES,
+)
+from src.security.post_dx_formal_secure_runtime_isolation import (
+    CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES,
+    EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES,
+    HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES,
+    POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES,
+    RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES,
+    SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES,
+)
 
 
-def test_run_runtime_evals_passes_all_scenarios():
-    summary = asyncio.run(run_runtime_evals())
+def _runtime_eval_scenario_names() -> list[str]:
+    return [scenario.name for scenario in available_scenarios()]
 
-    scenario_names = {scenario.name for scenario in available_scenarios()}
+
+def _runtime_eval_groups() -> list[tuple[str, list[str]]]:
+    scenario_names = _runtime_eval_scenario_names()
+    group_size = 26
+    return [
+        (f"group_{index + 1}", scenario_names[index : index + group_size])
+        for index in range(0, len(scenario_names), group_size)
+    ]
+
+
+def _runtime_group_1_without_source_report() -> list[str]:
+    _, scenario_names = _runtime_eval_groups()[0]
+    return [
+        scenario_name
+        for scenario_name in scenario_names
+        if scenario_name != "source_report_action_workflow_behavior"
+    ]
+
+
+def test_run_runtime_evals_passes_group_1():
+    scenario_names = _runtime_group_1_without_source_report()
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
     result_names = {result.name for result in summary.results}
 
     assert summary.total == len(scenario_names)
     assert summary.failed == 0
-    assert result_names == scenario_names
+    assert result_names == set(scenario_names)
+
+
+def test_run_runtime_evals_passes_group_2():
+    _, scenario_names = _runtime_eval_groups()[1]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.total == len(scenario_names)
+    assert summary.failed == 0
+    assert result_names == set(scenario_names)
+
+
+def test_run_runtime_evals_passes_group_3():
+    _, scenario_names = _runtime_eval_groups()[2]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.total == len(scenario_names)
+    assert summary.failed == 0
+    assert result_names == set(scenario_names)
+
+
+def test_run_runtime_evals_passes_group_4():
+    _, scenario_names = _runtime_eval_groups()[3]
+    summary = asyncio.run(run_runtime_evals(scenario_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.total == len(scenario_names)
+    assert summary.failed == 0
+    assert result_names == set(scenario_names)
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():
@@ -38,6 +411,3310 @@ def test_run_runtime_evals_rejects_unknown_scenarios():
         asyncio.run(run_runtime_evals(["missing-scenario"]))
 
 
+def test_source_report_action_workflow_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["source_report_action_workflow_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert details["report_status"] == "ready"
+    assert details["publish_status"] == "approval_required"
+    assert details["publish_action_kind"] == "comment"
+    assert details["publish_target_reference"] == "seraph-quest/seraph#343"
+    assert details["recommended_runbook"] == "runbook:source-progress-report"
+    assert details["recommended_starter_pack"] == "source-progress-report"
+    assert details["execution_status"] == "ok"
+    assert details["execution_tool_name"] == "add_comment_to_issue"
+    assert details["execution_argument_keys"] == [
+        "comment",
+        "issue_number",
+        "repo_full_name",
+    ]
+    assert details["review_publish_status"] == "approval_required"
+    assert details["review_publish_contract"] == "code_activity.write"
+    assert details["review_publish_action_kind"] == "review"
+    assert details["review_fixed_argument_keys"] == ["action", "file_comments"]
+    assert details["review_execution_status"] == "ok"
+    assert details["review_execution_tool_name"] == "add_review_to_pr"
+    assert details["review_execution_argument_keys"] == [
+        "action",
+        "file_comments",
+        "pr_number",
+        "repo_full_name",
+        "review",
+    ]
+
+
+def test_governed_self_evolution_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["governed_self_evolution_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert "prompt_pack" in details["target_types"]
+    assert "skill" in details["target_types"]
+    assert details["proposal_status"] == "saved"
+    assert details["proposal_quality_state"] in {"guarded", "ready"}
+    assert details["proposal_acceptance_state"] in {"held_for_canary", "ready_for_canary"}
+    assert details["proposal_canary_required"] is True
+    assert details["proposal_rollback_ready"] is True
+    assert details["saved_candidate_has_goal_section"] is True
+    assert details["saved_candidate_path"].endswith("extensions/workspace-capabilities/skills/web-briefing-review-candidate.md")
+    assert details["stored_receipt_candidate_name"] == "web-briefing Review Candidate"
+    assert details["stored_receipt_change_summary_count"] >= 1
+    assert details["stored_receipt_review_risk_count"] >= 1
+    assert details["proposal_change_summary_present"] is True
+    assert details["proposal_review_risks_present"] is True
+    assert details["blocked_status"] is True
+    assert details["blocked_constraint"] == "blocked"
+    assert details["blocked_tokens"] == ["vault://"]
+    assert details["blocked_diversity_guard_state"] == "single_signal_watch"
+    assert details["blocked_review_risk_mentions_trace_coverage"] is True
+
+
+def test_governed_preference_diversity_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["governed_preference_diversity_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["blocked"] is True
+    assert details["constraint_status"] == "blocked"
+    assert details["introduced_phrases"] == [
+        "always use the default workflow",
+        "ignore user-specific preferences",
+    ]
+    assert details["acceptance_state"] == "blocked"
+    assert details["diversity_guard_state"] == "blocked_preference_collapse"
+    assert details["blocked_constraints"] == ["preference_diversity_collapse"]
+    assert details["review_risk_mentions_diversity"] is True
+
+
+def test_governed_canary_rollout_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["governed_canary_rollout_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["proposal_status"] == "saved"
+    assert details["rollout_state"] == "review_ready"
+    assert details["acceptance_state"] == "ready_for_canary"
+    assert details["diversity_guard_state"] == "multi_signal_preserved"
+    assert details["preference_signal_count"] == 2
+    assert details["canary_required"] is True
+    assert details["rollback_ready"] is True
+    assert details["safety_receipt_state"] == "candidate_and_receipt_written"
+    assert details["receipt_surfaces_count"] == 4
+    assert details["saved_candidate_path_present"] is True
+    assert details["stored_receipt_rollback_ready"] is True
+
+
+def test_benchmark_proof_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["benchmark_proof_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_count"] == len(available_benchmark_suites())
+    assert details["production_parity_readiness_suite_present"] is True
+    assert details["production_parity_readiness_suite_scenario_count_matches"] is True
+    assert details["production_parity_readiness_suite_axis_matches"] is True
+    assert details["production_parity_readiness_gate_required"] is True
+    assert details["guardian_memory_suite_present"] is True
+    assert details["guardian_user_model_suite_present"] is True
+    assert details["memory_suite_present"] is True
+    assert details["workflow_suite_present"] is True
+    assert details["live_workflow_canary_suite_present"] is True
+    assert details["live_workflow_canary_suite_scenario_count_matches"] is True
+    assert details["live_workflow_canary_suite_axis_matches"] is True
+    assert details["live_workflow_canary_gate_required"] is True
+    assert details["durable_workflow_engine_suite_present"] is True
+    assert details["durable_workflow_engine_suite_scenario_count_matches"] is True
+    assert details["durable_workflow_engine_suite_axis_matches"] is True
+    assert details["durable_workflow_engine_gate_required"] is True
+    assert details["production_durable_orchestration_suite_present"] is True
+    assert details["production_durable_orchestration_suite_scenario_count_matches"] is True
+    assert details["production_durable_orchestration_suite_axis_matches"] is True
+    assert details["production_durable_orchestration_gate_required"] is True
+    assert details["durable_workflow_engine_v2_suite_present"] is True
+    assert details["durable_workflow_engine_v2_suite_scenario_count_matches"] is True
+    assert details["durable_workflow_engine_v2_suite_axis_matches"] is True
+    assert details["durable_workflow_engine_v2_gate_required"] is True
+    assert details["live_external_orchestration_suite_present"] is True
+    assert details["live_external_orchestration_suite_scenario_count_matches"] is True
+    assert details["live_external_orchestration_suite_axis_matches"] is True
+    assert details["live_external_orchestration_gate_required"] is True
+    assert details["orchestration_crash_recovery_study_suite_present"] is True
+    assert details["orchestration_crash_recovery_study_suite_scenario_count_matches"] is True
+    assert details["orchestration_crash_recovery_study_suite_axis_matches"] is True
+    assert details["orchestration_crash_recovery_study_gate_required"] is True
+    assert details["production_sla_orchestration_suite_present"] is True
+    assert details["production_sla_orchestration_suite_scenario_count_matches"] is True
+    assert details["production_sla_orchestration_suite_axis_matches"] is True
+    assert details["production_sla_orchestration_gate_required"] is True
+    assert details["exactly_once_recovery_evidence_suite_present"] is True
+    assert details["exactly_once_recovery_evidence_suite_scenario_count_matches"] is True
+    assert details["exactly_once_recovery_evidence_suite_axis_matches"] is True
+    assert details["exactly_once_recovery_evidence_gate_required"] is True
+    assert details["duplicate_side_effect_audit_suite_present"] is True
+    assert details["duplicate_side_effect_audit_suite_scenario_count_matches"] is True
+    assert details["duplicate_side_effect_audit_suite_axis_matches"] is True
+    assert details["duplicate_side_effect_audit_gate_required"] is True
+    assert details["continuous_orchestration_slo_suite_present"] is True
+    assert details["continuous_orchestration_slo_suite_scenario_count_matches"] is True
+    assert details["continuous_orchestration_slo_suite_axis_matches"] is True
+    assert details["continuous_orchestration_slo_gate_required"] is True
+    assert details["crash_failover_soak_suite_present"] is True
+    assert details["crash_failover_soak_suite_scenario_count_matches"] is True
+    assert details["crash_failover_soak_suite_axis_matches"] is True
+    assert details["crash_failover_soak_gate_required"] is True
+    assert details["side_effect_reconciliation_v2_suite_present"] is True
+    assert details["side_effect_reconciliation_v2_suite_scenario_count_matches"] is True
+    assert details["side_effect_reconciliation_v2_suite_axis_matches"] is True
+    assert details["side_effect_reconciliation_v2_gate_required"] is True
+    assert details["post_dp_durable_orchestration_suite_present"] is True
+    assert details["post_dp_durable_orchestration_suite_scenario_count_matches"] is True
+    assert details["post_dp_durable_orchestration_suite_axis_matches"] is True
+    assert details["post_dp_durable_orchestration_gate_required"] is True
+    assert details["multi_agent_handoff_recovery_suite_present"] is True
+    assert details["multi_agent_handoff_recovery_suite_scenario_count_matches"] is True
+    assert details["multi_agent_handoff_recovery_suite_axis_matches"] is True
+    assert details["multi_agent_handoff_recovery_gate_required"] is True
+    assert details["scheduler_crash_restart_recovery_suite_present"] is True
+    assert details["scheduler_crash_restart_recovery_suite_scenario_count_matches"] is True
+    assert details["scheduler_crash_restart_recovery_suite_axis_matches"] is True
+    assert details["scheduler_crash_restart_recovery_gate_required"] is True
+    assert details["side_effect_reconciliation_v5_suite_present"] is True
+    assert details["side_effect_reconciliation_v5_suite_scenario_count_matches"] is True
+    assert details["side_effect_reconciliation_v5_suite_axis_matches"] is True
+    assert details["side_effect_reconciliation_v5_gate_required"] is True
+    assert details["orchestration_false_claim_scan_v2_suite_present"] is True
+    assert details["orchestration_false_claim_scan_v2_suite_scenario_count_matches"] is True
+    assert details["orchestration_false_claim_scan_v2_suite_axis_matches"] is True
+    assert details["orchestration_false_claim_scan_v2_gate_required"] is True
+    assert details["live_replay_suite_present"] is True
+    assert details["live_replay_suite_scenario_count_matches"] is True
+    assert details["live_replay_suite_axis_matches"] is True
+    assert details["m5_suite_present"] is True
+    assert details["m5_suite_scenario_count_matches"] is True
+    assert details["trust_suite_present"] is True
+    assert details["secure_host_suite_present"] is True
+    assert details["production_secure_host_hardening_suite_present"] is True
+    assert details["production_secure_host_hardening_suite_scenario_count_matches"] is True
+    assert details["production_secure_host_hardening_suite_axis_matches"] is True
+    assert details["production_secure_host_hardening_gate_required"] is True
+    assert details["secure_host_live_isolation_v2_suite_present"] is True
+    assert details["secure_host_live_isolation_v2_suite_scenario_count_matches"] is True
+    assert details["secure_host_live_isolation_v2_suite_axis_matches"] is True
+    assert details["secure_host_live_isolation_v2_gate_required"] is True
+    assert details["production_isolation_hardening_v2_suite_present"] is True
+    assert details["production_isolation_hardening_v2_suite_scenario_count_matches"] is True
+    assert details["production_isolation_hardening_v2_suite_axis_matches"] is True
+    assert details["production_isolation_hardening_v2_gate_required"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_suite_present"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_suite_scenario_count_matches"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_suite_axis_matches"] is True
+    assert details["privileged_path_red_team_gauntlet_v2_gate_required"] is True
+    assert details["security_incident_recovery_drill_suite_present"] is True
+    assert details["security_incident_recovery_drill_suite_scenario_count_matches"] is True
+    assert details["security_incident_recovery_drill_suite_axis_matches"] is True
+    assert details["security_incident_recovery_drill_gate_required"] is True
+    assert details["independent_secure_host_review_suite_present"] is True
+    assert details["independent_secure_host_review_suite_scenario_count_matches"] is True
+    assert details["independent_secure_host_review_suite_axis_matches"] is True
+    assert details["independent_secure_host_review_gate_required"] is True
+    assert details["live_hostile_isolation_drills_suite_present"] is True
+    assert details["live_hostile_isolation_drills_suite_scenario_count_matches"] is True
+    assert details["live_hostile_isolation_drills_suite_axis_matches"] is True
+    assert details["live_hostile_isolation_drills_gate_required"] is True
+    assert details["secure_host_recovery_authority_suite_present"] is True
+    assert details["secure_host_recovery_authority_suite_scenario_count_matches"] is True
+    assert details["secure_host_recovery_authority_suite_axis_matches"] is True
+    assert details["secure_host_recovery_authority_gate_required"] is True
+    assert details["container_grade_capability_isolation_suite_present"] is True
+    assert details["container_grade_capability_isolation_suite_scenario_count_matches"] is True
+    assert details["container_grade_capability_isolation_suite_axis_matches"] is True
+    assert details["container_grade_capability_isolation_gate_required"] is True
+    assert details["external_security_validation_v1_suite_present"] is True
+    assert details["external_security_validation_v1_suite_scenario_count_matches"] is True
+    assert details["external_security_validation_v1_suite_axis_matches"] is True
+    assert details["external_security_validation_v1_gate_required"] is True
+    assert details["secret_egress_certification_drill_suite_present"] is True
+    assert details["secret_egress_certification_drill_suite_scenario_count_matches"] is True
+    assert details["secret_egress_certification_drill_suite_axis_matches"] is True
+    assert details["secret_egress_certification_drill_gate_required"] is True
+    assert details["runtime_isolation_implementation_suite_present"] is True
+    assert details["runtime_isolation_implementation_suite_scenario_count_matches"] is True
+    assert details["runtime_isolation_implementation_suite_axis_matches"] is True
+    assert details["credential_broker_egress_enforcement_suite_present"] is True
+    assert details["credential_broker_egress_enforcement_suite_scenario_count_matches"] is True
+    assert details["credential_broker_egress_enforcement_suite_axis_matches"] is True
+    assert details["external_security_certification_suite_present"] is True
+    assert details["external_security_certification_suite_scenario_count_matches"] is True
+    assert details["external_security_certification_suite_axis_matches"] is True
+    assert details["hostile_runtime_escape_gauntlet_suite_present"] is True
+    assert details["hostile_runtime_escape_gauntlet_suite_scenario_count_matches"] is True
+    assert details["hostile_runtime_escape_gauntlet_suite_axis_matches"] is True
+    assert details["computer_suite_present"] is True
+    assert details["channels_suite_present"] is True
+    assert details["channels_suite_scenario_count_matches"] is True
+    assert details["one_reach_channel_suite_present"] is True
+    assert details["one_reach_channel_suite_scenario_count_matches"] is True
+    assert details["one_reach_channel_suite_axis_matches"] is True
+    assert details["one_reach_channel_gate_required"] is True
+    assert details["m2_execution_suite_present"] is True
+    assert details["m7_operator_cockpit_suite_present"] is True
+    assert details["m7_operator_cockpit_suite_scenario_count_matches"] is True
+    assert details["m7_operator_cockpit_suite_axis_matches"] is True
+    assert details["cockpit_efficiency_suite_present"] is True
+    assert details["cockpit_efficiency_suite_scenario_count_matches"] is True
+    assert details["cockpit_efficiency_suite_axis_matches"] is True
+    assert details["cockpit_efficiency_gate_required"] is True
+    assert details["m8_guardian_brain_suite_present"] is True
+    assert details["m8_guardian_brain_suite_scenario_count_matches"] is True
+    assert details["m8_guardian_brain_suite_axis_matches"] is True
+    assert details["guardian_safe_multimodal_voice_suite_present"] is True
+    assert details["guardian_safe_multimodal_voice_suite_scenario_count_matches"] is True
+    assert details["guardian_safe_multimodal_voice_suite_axis_matches"] is True
+    assert details["guardian_safe_multimodal_voice_gate_required"] is True
+    assert details["production_reach_channel_hardening_suite_present"] is True
+    assert details["production_reach_channel_hardening_suite_scenario_count_matches"] is True
+    assert details["production_reach_channel_hardening_suite_axis_matches"] is True
+    assert details["production_reach_channel_hardening_gate_required"] is True
+    assert details["browser_computer_use_reliability_v2_suite_present"] is True
+    assert details["browser_computer_use_reliability_v2_suite_scenario_count_matches"] is True
+    assert details["browser_computer_use_reliability_v2_suite_axis_matches"] is True
+    assert details["browser_computer_use_reliability_v2_gate_required"] is True
+    assert details["guardian_safe_voice_media_runtime_suite_present"] is True
+    assert details["guardian_safe_voice_media_runtime_suite_scenario_count_matches"] is True
+    assert details["guardian_safe_voice_media_runtime_suite_axis_matches"] is True
+    assert details["guardian_safe_voice_media_runtime_gate_required"] is True
+    assert details["live_broad_reach_channel_attestation_suite_present"] is True
+    assert details["live_broad_reach_channel_attestation_suite_scenario_count_matches"] is True
+    assert details["live_broad_reach_channel_attestation_suite_axis_matches"] is True
+    assert details["live_broad_reach_channel_attestation_gate_required"] is True
+    assert details["production_voice_media_provider_runtime_suite_present"] is True
+    assert details["production_voice_media_provider_runtime_suite_scenario_count_matches"] is True
+    assert details["production_voice_media_provider_runtime_suite_axis_matches"] is True
+    assert details["production_voice_media_provider_runtime_gate_required"] is True
+    assert details["cross_surface_continuity_recovery_suite_present"] is True
+    assert details["cross_surface_continuity_recovery_suite_scenario_count_matches"] is True
+    assert details["cross_surface_continuity_recovery_suite_axis_matches"] is True
+    assert details["cross_surface_continuity_recovery_gate_required"] is True
+    assert details["broad_channel_sla_operations_suite_present"] is True
+    assert details["broad_channel_sla_operations_suite_scenario_count_matches"] is True
+    assert details["broad_channel_sla_operations_suite_axis_matches"] is True
+    assert details["broad_channel_sla_operations_gate_required"] is True
+    assert details["production_voice_media_quality_gates_suite_present"] is True
+    assert details["production_voice_media_quality_gates_suite_scenario_count_matches"] is True
+    assert details["production_voice_media_quality_gates_suite_axis_matches"] is True
+    assert details["production_voice_media_quality_gates_gate_required"] is True
+    assert details["mobile_execution_continuity_suite_present"] is True
+    assert details["mobile_execution_continuity_suite_scenario_count_matches"] is True
+    assert details["mobile_execution_continuity_suite_axis_matches"] is True
+    assert details["mobile_execution_continuity_gate_required"] is True
+    assert details["broad_reach_field_operations_suite_present"] is True
+    assert details["broad_reach_field_operations_suite_scenario_count_matches"] is True
+    assert details["broad_reach_field_operations_suite_axis_matches"] is True
+    assert details["broad_reach_field_operations_gate_required"] is True
+    assert details["voice_media_quality_operations_suite_present"] is True
+    assert details["voice_media_quality_operations_suite_scenario_count_matches"] is True
+    assert details["voice_media_quality_operations_suite_axis_matches"] is True
+    assert details["voice_media_quality_operations_gate_required"] is True
+    assert details["always_available_reach_slo_suite_present"] is True
+    assert details["always_available_reach_slo_suite_scenario_count_matches"] is True
+    assert details["always_available_reach_slo_suite_axis_matches"] is True
+    assert details["always_available_reach_slo_gate_required"] is True
+    assert details["always_available_reach_operations_v1_suite_present"] is True
+    assert details["always_available_reach_operations_v1_suite_scenario_count_matches"] is True
+    assert details["always_available_reach_operations_v1_suite_axis_matches"] is True
+    assert details["always_available_reach_operations_v1_gate_required"] is True
+    assert details["voice_media_parity_runtime_v1_suite_present"] is True
+    assert details["voice_media_parity_runtime_v1_suite_scenario_count_matches"] is True
+    assert details["voice_media_parity_runtime_v1_suite_axis_matches"] is True
+    assert details["voice_media_parity_runtime_v1_gate_required"] is True
+    assert details["mobile_cross_surface_continuity_v1_suite_present"] is True
+    assert details["mobile_cross_surface_continuity_v1_suite_scenario_count_matches"] is True
+    assert details["mobile_cross_surface_continuity_v1_suite_axis_matches"] is True
+    assert details["mobile_cross_surface_continuity_v1_gate_required"] is True
+    assert details["reach_degraded_recovery_field_campaign_suite_present"] is True
+    assert details["reach_degraded_recovery_field_campaign_suite_scenario_count_matches"] is True
+    assert details["reach_degraded_recovery_field_campaign_suite_axis_matches"] is True
+    assert details["reach_degraded_recovery_field_campaign_gate_required"] is True
+    assert details["guardian_learning_arbitration_suite_present"] is True
+    assert details["guardian_learning_arbitration_suite_scenario_count_matches"] is True
+    assert details["guardian_learning_arbitration_suite_axis_matches"] is True
+    assert details["guardian_learning_arbitration_gate_required"] is True
+    assert details["live_guardian_learning_quality_suite_present"] is True
+    assert details["live_guardian_learning_quality_suite_scenario_count_matches"] is True
+    assert details["live_guardian_learning_quality_suite_axis_matches"] is True
+    assert details["live_guardian_learning_quality_gate_required"] is True
+    assert details["guardian_intervention_outcome_cohorts_suite_present"] is True
+    assert details["guardian_intervention_outcome_cohorts_suite_scenario_count_matches"] is True
+    assert details["guardian_intervention_outcome_cohorts_suite_axis_matches"] is True
+    assert details["guardian_intervention_outcome_cohorts_gate_required"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_suite_present"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_suite_scenario_count_matches"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_suite_axis_matches"] is True
+    assert details["memory_provider_ecosystem_maturity_v1_gate_required"] is True
+    assert details["canonical_memory_reconciliation_v2_suite_present"] is True
+    assert details["canonical_memory_reconciliation_v2_suite_scenario_count_matches"] is True
+    assert details["canonical_memory_reconciliation_v2_suite_axis_matches"] is True
+    assert details["canonical_memory_reconciliation_v2_gate_required"] is True
+    assert details["provider_usefulness_regression_suite_present"] is True
+    assert details["provider_usefulness_regression_suite_scenario_count_matches"] is True
+    assert details["provider_usefulness_regression_suite_axis_matches"] is True
+    assert details["provider_usefulness_regression_gate_required"] is True
+    assert details["live_human_outcome_quality_study_suite_present"] is True
+    assert details["live_human_outcome_quality_study_suite_scenario_count_matches"] is True
+    assert details["live_human_outcome_quality_study_suite_axis_matches"] is True
+    assert details["live_human_outcome_quality_study_gate_required"] is True
+    assert details["guardian_learning_causal_attribution_suite_present"] is True
+    assert details["guardian_learning_causal_attribution_suite_scenario_count_matches"] is True
+    assert details["guardian_learning_causal_attribution_suite_axis_matches"] is True
+    assert details["guardian_learning_causal_attribution_gate_required"] is True
+    assert details["memory_provider_live_regression_monitor_suite_present"] is True
+    assert details["memory_provider_live_regression_monitor_suite_scenario_count_matches"] is True
+    assert details["memory_provider_live_regression_monitor_suite_axis_matches"] is True
+    assert details["memory_provider_live_regression_monitor_gate_required"] is True
+    assert details["longitudinal_guardian_outcome_study_suite_present"] is True
+    assert details["longitudinal_guardian_outcome_study_suite_scenario_count_matches"] is True
+    assert details["longitudinal_guardian_outcome_study_suite_axis_matches"] is True
+    assert details["longitudinal_guardian_outcome_study_gate_required"] is True
+    assert details["named_baseline_memory_comparison_suite_present"] is True
+    assert details["named_baseline_memory_comparison_suite_scenario_count_matches"] is True
+    assert details["named_baseline_memory_comparison_suite_axis_matches"] is True
+    assert details["named_baseline_memory_comparison_gate_required"] is True
+    assert details["learning_safety_monitor_v2_suite_present"] is True
+    assert details["learning_safety_monitor_v2_suite_scenario_count_matches"] is True
+    assert details["learning_safety_monitor_v2_suite_axis_matches"] is True
+    assert details["learning_safety_monitor_v2_gate_required"] is True
+    assert details["generalized_guardian_outcome_study_v1_suite_present"] is True
+    assert details["generalized_guardian_outcome_study_v1_suite_scenario_count_matches"] is True
+    assert details["generalized_guardian_outcome_study_v1_suite_axis_matches"] is True
+    assert details["generalized_guardian_outcome_study_v1_gate_required"] is True
+    assert details["full_memory_provider_parity_matrix_v1_suite_present"] is True
+    assert details["full_memory_provider_parity_matrix_v1_suite_scenario_count_matches"] is True
+    assert details["full_memory_provider_parity_matrix_v1_suite_axis_matches"] is True
+    assert details["full_memory_provider_parity_matrix_v1_gate_required"] is True
+    assert details["causal_learning_outcome_thresholds_v1_suite_present"] is True
+    assert details["causal_learning_outcome_thresholds_v1_suite_scenario_count_matches"] is True
+    assert details["causal_learning_outcome_thresholds_v1_suite_axis_matches"] is True
+    assert details["causal_learning_outcome_thresholds_v1_gate_required"] is True
+    assert details["memory_baseline_comparison_v1_suite_present"] is True
+    assert details["memory_baseline_comparison_v1_suite_scenario_count_matches"] is True
+    assert details["memory_baseline_comparison_v1_suite_axis_matches"] is True
+    assert details["memory_baseline_comparison_v1_gate_required"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_suite_present"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_suite_scenario_count_matches"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_suite_axis_matches"] is True
+    assert details["live_long_horizon_guardian_learning_field_study_v1_gate_required"] is True
+    assert details["memory_behavior_change_ablation_v1_suite_present"] is True
+    assert details["memory_behavior_change_ablation_v1_suite_scenario_count_matches"] is True
+    assert details["memory_behavior_change_ablation_v1_suite_axis_matches"] is True
+    assert details["memory_behavior_change_ablation_v1_gate_required"] is True
+    assert details["live_memory_provider_parity_operations_v1_suite_present"] is True
+    assert details["live_memory_provider_parity_operations_v1_suite_scenario_count_matches"] is True
+    assert details["live_memory_provider_parity_operations_v1_suite_axis_matches"] is True
+    assert details["live_memory_provider_parity_operations_v1_gate_required"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_suite_present"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_suite_scenario_count_matches"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_suite_axis_matches"] is True
+    assert details["independent_guardian_outcome_candidate_review_v1_gate_required"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_suite_present"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_suite_scenario_count_matches"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_suite_axis_matches"] is True
+    assert details["longitudinal_learning_safety_monitor_v3_gate_required"] is True
+    assert details["guardian_memory_false_claim_scan_v1_suite_present"] is True
+    assert details["guardian_memory_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v1_gate_required"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_suite_present"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_suite_scenario_count_matches"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_suite_axis_matches"] is True
+    assert details["post_dp_guardian_learning_memory_gap_closure_gate_required"] is True
+    assert details["long_horizon_learning_quality_v2_suite_present"] is True
+    assert details["long_horizon_learning_quality_v2_suite_scenario_count_matches"] is True
+    assert details["long_horizon_learning_quality_v2_suite_axis_matches"] is True
+    assert details["long_horizon_learning_quality_v2_gate_required"] is True
+    assert details["memory_behavior_ablation_v2_suite_present"] is True
+    assert details["memory_behavior_ablation_v2_suite_scenario_count_matches"] is True
+    assert details["memory_behavior_ablation_v2_suite_axis_matches"] is True
+    assert details["memory_behavior_ablation_v2_gate_required"] is True
+    assert details["memory_provider_operation_v2_suite_present"] is True
+    assert details["memory_provider_operation_v2_suite_scenario_count_matches"] is True
+    assert details["memory_provider_operation_v2_suite_axis_matches"] is True
+    assert details["memory_provider_operation_v2_gate_required"] is True
+    assert details["learning_safety_regression_v2_suite_present"] is True
+    assert details["learning_safety_regression_v2_suite_scenario_count_matches"] is True
+    assert details["learning_safety_regression_v2_suite_axis_matches"] is True
+    assert details["learning_safety_regression_v2_gate_required"] is True
+    assert details["guardian_memory_false_claim_scan_v2_suite_present"] is True
+    assert details["guardian_memory_false_claim_scan_v2_suite_scenario_count_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v2_suite_axis_matches"] is True
+    assert details["guardian_memory_false_claim_scan_v2_gate_required"] is True
+    assert details["m6_memory_suite_present"] is True
+    assert details["m6_memory_suite_scenario_count_matches"] is True
+    assert details["m6_memory_suite_axis_matches"] is True
+    assert details["memory_provider_gate_suite_present"] is True
+    assert details["memory_provider_gate_suite_scenario_count_matches"] is True
+    assert details["memory_provider_gate_suite_axis_matches"] is True
+    assert details["memory_provider_gate_required"] is True
+    assert details["planning_suite_present"] is True
+    assert details["governed_suite_present"] is True
+    assert details["m9_governed_ecosystem_suite_present"] is True
+    assert details["m9_governed_ecosystem_suite_scenario_count_matches"] is True
+    assert details["m9_governed_ecosystem_suite_axis_matches"] is True
+    assert details["m9_governed_ecosystem_gate_required"] is True
+    assert details["governed_capability_pack_hardening_suite_present"] is True
+    assert details["governed_capability_pack_hardening_suite_scenario_count_matches"] is True
+    assert details["governed_capability_pack_hardening_suite_axis_matches"] is True
+    assert details["governed_capability_pack_hardening_gate_required"] is True
+    assert details["marketplace_grade_capability_lifecycle_suite_present"] is True
+    assert details["marketplace_grade_capability_lifecycle_suite_scenario_count_matches"] is True
+    assert details["marketplace_grade_capability_lifecycle_suite_axis_matches"] is True
+    assert details["marketplace_grade_capability_lifecycle_gate_required"] is True
+    assert details["governed_capability_lifecycle_v2_suite_present"] is True
+    assert details["governed_capability_lifecycle_v2_suite_scenario_count_matches"] is True
+    assert details["governed_capability_lifecycle_v2_suite_axis_matches"] is True
+    assert details["governed_capability_lifecycle_v2_gate_required"] is True
+    assert details["capability_rollback_failure_diagnostics_suite_present"] is True
+    assert details["capability_rollback_failure_diagnostics_suite_scenario_count_matches"] is True
+    assert details["capability_rollback_failure_diagnostics_suite_axis_matches"] is True
+    assert details["capability_rollback_failure_diagnostics_gate_required"] is True
+    assert details["third_party_marketplace_attestation_suite_present"] is True
+    assert details["third_party_marketplace_attestation_suite_scenario_count_matches"] is True
+    assert details["third_party_marketplace_attestation_suite_axis_matches"] is True
+    assert details["third_party_marketplace_attestation_gate_required"] is True
+    assert details["marketplace_operations_incident_drill_suite_present"] is True
+    assert details["marketplace_operations_incident_drill_suite_scenario_count_matches"] is True
+    assert details["marketplace_operations_incident_drill_suite_axis_matches"] is True
+    assert details["marketplace_operations_incident_drill_gate_required"] is True
+    assert details["publisher_review_and_package_trust_suite_present"] is True
+    assert details["publisher_review_and_package_trust_suite_scenario_count_matches"] is True
+    assert details["publisher_review_and_package_trust_suite_axis_matches"] is True
+    assert details["publisher_review_and_package_trust_gate_required"] is True
+    assert details["marketplace_security_corpus_suite_present"] is True
+    assert details["marketplace_security_corpus_suite_scenario_count_matches"] is True
+    assert details["marketplace_security_corpus_suite_axis_matches"] is True
+    assert details["marketplace_security_corpus_gate_required"] is True
+    assert details["continuous_vulnerability_monitoring_suite_present"] is True
+    assert details["continuous_vulnerability_monitoring_suite_scenario_count_matches"] is True
+    assert details["continuous_vulnerability_monitoring_suite_axis_matches"] is True
+    assert details["continuous_vulnerability_monitoring_gate_required"] is True
+    assert details["publisher_trust_operations_suite_present"] is True
+    assert details["publisher_trust_operations_suite_scenario_count_matches"] is True
+    assert details["publisher_trust_operations_suite_axis_matches"] is True
+    assert details["publisher_trust_operations_gate_required"] is True
+    assert details["production_secure_marketplace_v1_suite_present"] is True
+    assert details["production_secure_marketplace_v1_suite_scenario_count_matches"] is True
+    assert details["production_secure_marketplace_v1_suite_axis_matches"] is True
+    assert details["production_secure_marketplace_v1_gate_required"] is True
+    assert details["third_party_package_security_certification_v1_suite_present"] is True
+    assert details["third_party_package_security_certification_v1_suite_scenario_count_matches"] is True
+    assert details["third_party_package_security_certification_v1_suite_axis_matches"] is True
+    assert details["third_party_package_security_certification_v1_gate_required"] is True
+    assert details["marketplace_live_corpus_operations_v2_suite_present"] is True
+    assert details["marketplace_live_corpus_operations_v2_suite_scenario_count_matches"] is True
+    assert details["marketplace_live_corpus_operations_v2_suite_axis_matches"] is True
+    assert details["marketplace_live_corpus_operations_v2_gate_required"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v1_suite_present"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v1_suite_scenario_count_matches"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v1_suite_axis_matches"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v1_gate_required"] is True
+    assert details["marketplace_security_certification_track_v1_suite_present"] is True
+    assert details["marketplace_security_certification_track_v1_suite_scenario_count_matches"] is True
+    assert details["marketplace_security_certification_track_v1_suite_axis_matches"] is True
+    assert details["marketplace_security_certification_track_v1_gate_required"] is True
+    assert details["production_secure_marketplace_live_ops_v2_suite_present"] is True
+    assert details["production_secure_marketplace_live_ops_v2_suite_scenario_count_matches"] is True
+    assert details["production_secure_marketplace_live_ops_v2_suite_axis_matches"] is True
+    assert details["production_secure_marketplace_live_ops_v2_gate_required"] is True
+    assert details["ecosystem_supply_chain_operations_v1_suite_present"] is True
+    assert details["ecosystem_supply_chain_operations_v1_suite_scenario_count_matches"] is True
+    assert details["ecosystem_supply_chain_operations_v1_suite_axis_matches"] is True
+    assert details["ecosystem_supply_chain_operations_v1_gate_required"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_suite_present"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_suite_scenario_count_matches"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_suite_axis_matches"] is True
+    assert details["hostile_package_lifecycle_gauntlet_v2_gate_required"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_suite_present"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_suite_scenario_count_matches"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_suite_axis_matches"] is True
+    assert details["publisher_trust_vulnerability_ops_v1_gate_required"] is True
+    assert details["marketplace_false_claim_scan_v1_suite_present"] is True
+    assert details["marketplace_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["marketplace_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["marketplace_false_claim_scan_v1_gate_required"] is True
+    assert details["managed_browser_provider_attestation_suite_present"] is True
+    assert details["managed_browser_provider_attestation_suite_scenario_count_matches"] is True
+    assert details["managed_browser_provider_attestation_suite_axis_matches"] is True
+    assert details["managed_browser_provider_attestation_gate_required"] is True
+    assert details["live_multi_operator_usability_study_suite_present"] is True
+    assert details["live_multi_operator_usability_study_suite_scenario_count_matches"] is True
+    assert details["live_multi_operator_usability_study_suite_axis_matches"] is True
+    assert details["live_multi_operator_usability_study_gate_required"] is True
+    assert details["browser_computer_use_recovery_drill_suite_present"] is True
+    assert details["browser_computer_use_recovery_drill_suite_scenario_count_matches"] is True
+    assert details["browser_computer_use_recovery_drill_suite_axis_matches"] is True
+    assert details["browser_computer_use_recovery_drill_gate_required"] is True
+    assert details["safe_autonomous_browser_runtime_v1_suite_present"] is True
+    assert details["safe_autonomous_browser_runtime_v1_suite_scenario_count_matches"] is True
+    assert details["safe_autonomous_browser_runtime_v1_suite_axis_matches"] is True
+    assert details["safe_autonomous_browser_runtime_v1_gate_required"] is True
+    assert details["full_browser_parity_matrix_v1_suite_present"] is True
+    assert details["full_browser_parity_matrix_v1_suite_scenario_count_matches"] is True
+    assert details["full_browser_parity_matrix_v1_suite_axis_matches"] is True
+    assert details["full_browser_parity_matrix_v1_gate_required"] is True
+    assert details["real_site_drift_recovery_v2_suite_present"] is True
+    assert details["real_site_drift_recovery_v2_suite_scenario_count_matches"] is True
+    assert details["real_site_drift_recovery_v2_suite_axis_matches"] is True
+    assert details["real_site_drift_recovery_v2_gate_required"] is True
+    assert details["browser_session_partition_certification_v1_suite_present"] is True
+    assert details["browser_session_partition_certification_v1_suite_scenario_count_matches"] is True
+    assert details["browser_session_partition_certification_v1_suite_axis_matches"] is True
+    assert details["browser_session_partition_certification_v1_gate_required"] is True
+    assert details["browser_computer_use_production_safety_v1_suite_present"] is True
+    assert details["browser_computer_use_production_safety_v1_suite_scenario_count_matches"] is True
+    assert details["browser_computer_use_production_safety_v1_suite_axis_matches"] is True
+    assert details["browser_computer_use_production_safety_v1_gate_required"] is True
+    assert details["safe_browser_automation_live_ops_v1_suite_present"] is True
+    assert details["safe_browser_automation_live_ops_v1_suite_scenario_count_matches"] is True
+    assert details["safe_browser_automation_live_ops_v1_suite_axis_matches"] is True
+    assert details["safe_browser_automation_live_ops_v1_gate_required"] is True
+    assert details["credentialed_site_recovery_v1_suite_present"] is True
+    assert details["credentialed_site_recovery_v1_suite_scenario_count_matches"] is True
+    assert details["credentialed_site_recovery_v1_suite_axis_matches"] is True
+    assert details["credentialed_site_recovery_v1_gate_required"] is True
+    assert details["browser_provider_parity_candidate_v1_suite_present"] is True
+    assert details["browser_provider_parity_candidate_v1_suite_scenario_count_matches"] is True
+    assert details["browser_provider_parity_candidate_v1_suite_axis_matches"] is True
+    assert details["browser_provider_parity_candidate_v1_gate_required"] is True
+    assert details["browser_session_partition_attestation_v2_suite_present"] is True
+    assert details["browser_session_partition_attestation_v2_suite_scenario_count_matches"] is True
+    assert details["browser_session_partition_attestation_v2_suite_axis_matches"] is True
+    assert details["browser_session_partition_attestation_v2_gate_required"] is True
+    assert details["browser_false_claim_scan_v1_suite_present"] is True
+    assert details["browser_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["browser_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["browser_false_claim_scan_v1_gate_required"] is True
+    assert details["production_operator_control_parity_suite_present"] is True
+    assert details["production_operator_control_parity_suite_scenario_count_matches"] is True
+    assert details["production_operator_control_parity_suite_axis_matches"] is True
+    assert details["production_operator_control_parity_gate_required"] is True
+    assert details["production_parity_train_suite_present"] is True
+    assert details["production_parity_train_suite_scenario_count_matches"] is True
+    assert details["production_parity_train_suite_axis_matches"] is True
+    assert details["production_parity_train_gate_required"] is True
+    assert details["operator_control_population_study_suite_present"] is True
+    assert details["operator_control_population_study_suite_scenario_count_matches"] is True
+    assert details["operator_control_population_study_suite_axis_matches"] is True
+    assert details["operator_control_population_study_gate_required"] is True
+    assert details["named_baseline_cockpit_comparison_suite_present"] is True
+    assert details["named_baseline_cockpit_comparison_suite_scenario_count_matches"] is True
+    assert details["named_baseline_cockpit_comparison_suite_axis_matches"] is True
+    assert details["named_baseline_cockpit_comparison_gate_required"] is True
+    assert details["long_work_debugging_slo_suite_present"] is True
+    assert details["long_work_debugging_slo_suite_scenario_count_matches"] is True
+    assert details["long_work_debugging_slo_suite_axis_matches"] is True
+    assert details["long_work_debugging_slo_gate_required"] is True
+    assert details["operator_control_certification_v1_suite_present"] is True
+    assert details["operator_control_certification_v1_suite_scenario_count_matches"] is True
+    assert details["operator_control_certification_v1_suite_axis_matches"] is True
+    assert details["operator_control_certification_v1_gate_required"] is True
+    assert details["mission_control_population_study_v2_suite_present"] is True
+    assert details["mission_control_population_study_v2_suite_scenario_count_matches"] is True
+    assert details["mission_control_population_study_v2_suite_axis_matches"] is True
+    assert details["mission_control_population_study_v2_gate_required"] is True
+    assert details["long_work_recovery_slo_v2_suite_present"] is True
+    assert details["long_work_recovery_slo_v2_suite_scenario_count_matches"] is True
+    assert details["long_work_recovery_slo_v2_suite_axis_matches"] is True
+    assert details["long_work_recovery_slo_v2_gate_required"] is True
+    assert details["operator_error_detectability_v1_suite_present"] is True
+    assert details["operator_error_detectability_v1_suite_scenario_count_matches"] is True
+    assert details["operator_error_detectability_v1_suite_axis_matches"] is True
+    assert details["operator_error_detectability_v1_gate_required"] is True
+    assert details["operator_control_certification_v2_suite_present"] is True
+    assert details["operator_control_certification_v2_suite_scenario_count_matches"] is True
+    assert details["operator_control_certification_v2_suite_axis_matches"] is True
+    assert details["operator_control_certification_v2_gate_required"] is True
+    assert details["operator_control_live_population_v1_suite_present"] is True
+    assert details["operator_control_live_population_v1_suite_scenario_count_matches"] is True
+    assert details["operator_control_live_population_v1_suite_axis_matches"] is True
+    assert details["operator_control_live_population_v1_gate_required"] is True
+    assert details["tamper_evident_audit_candidate_v1_suite_present"] is True
+    assert details["tamper_evident_audit_candidate_v1_suite_scenario_count_matches"] is True
+    assert details["tamper_evident_audit_candidate_v1_suite_axis_matches"] is True
+    assert details["tamper_evident_audit_candidate_v1_gate_required"] is True
+    assert details["authority_transfer_recovery_v1_suite_present"] is True
+    assert details["authority_transfer_recovery_v1_suite_scenario_count_matches"] is True
+    assert details["authority_transfer_recovery_v1_suite_axis_matches"] is True
+    assert details["authority_transfer_recovery_v1_gate_required"] is True
+    assert details["operator_control_false_claim_scan_v1_suite_present"] is True
+    assert details["operator_control_false_claim_scan_v1_suite_scenario_count_matches"] is True
+    assert details["operator_control_false_claim_scan_v1_suite_axis_matches"] is True
+    assert details["operator_control_false_claim_scan_v1_gate_required"] is True
+    assert details["live_replay_gate_required"] is True
+    assert details["required_suite_count_matches"] is True
+    assert details["gate_requires_review"] is True
+    assert details["gate_blocks_constraint_failure"] is True
+    assert details["proof_contract"] == "deterministic_benchmark_suites_plus_review_receipts"
+
+
+def test_run_benchmark_suites_executes_production_parity_readiness_suite():
+    summary = asyncio.run(run_benchmark_suites(["production_parity_readiness"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRODUCTION_PARITY_READINESS_SCENARIO_NAMES)
+    details_by_name = {result.name: result.details for result in summary.results}
+    assert details_by_name["production_parity_batch_contract_behavior"]["batch_count_matches"] is True
+    assert details_by_name["production_parity_claim_gate_behavior"]["full_parity_blocked"] is True
+    assert details_by_name["production_parity_proof_gate_behavior"]["secure_host_v2_path_named"] is True
+    assert details_by_name["production_parity_project_board_contract_behavior"]["review_and_pr_required"] is True
+    assert details_by_name["production_parity_duplicate_scope_boundary_behavior"]["proof_train_anchor_visible"] is True
+    assert details_by_name["production_parity_validation_receipt_behavior"]["critic_receipt_required"] is True
+    assert (
+        details_by_name["operator_production_parity_readiness_surface_behavior"]["full_parity_not_claimed"]
+        is True
+    )
+
+
+def test_run_durable_workflow_engine_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["durable_workflow_engine_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(DURABLE_WORKFLOW_ENGINE_BENCHMARK_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["suite_name_visible"] is True
+        assert result.details["receipt_surface_visible"] is True
+        assert result.details["benchmark_proof_surface_visible"] is True
+
+
+def test_run_durable_workflow_engine_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["durable_workflow_engine_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(DURABLE_WORKFLOW_ENGINE_V2_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["suite_name_visible"] is True
+        assert result.details["operator_surface_visible"] is True
+        assert result.details["blocked_claims_visible"] is True
+        assert result.details["ci_gate_required"] is True
+
+
+def test_run_production_durable_orchestration_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_durable_orchestration"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+    for result in summary.results:
+        assert result.details["production_suite_visible"] is True
+        assert result.details["production_ci_gate_required"] is True
+        assert result.details["unsafe_recovery_block_visible"] is True
+
+
+def test_run_live_external_orchestration_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_external_orchestration_attestation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_EXTERNAL_ORCHESTRATION_SCENARIO_NAMES)
+    assert all(result.details["provider_identity_visible"] for result in summary.results)
+    assert all(result.details["idempotency_keys_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+
+
+def test_run_orchestration_crash_recovery_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["orchestration_crash_recovery_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(ORCHESTRATION_CRASH_RECOVERY_STUDY_SCENARIO_NAMES)
+    assert all(result.details["crash_studies_visible"] for result in summary.results)
+    assert all(result.details["replay_suppression_visible"] for result in summary.results)
+    assert all(result.details["crash_study_gate_required"] for result in summary.results)
+
+
+def test_run_production_sla_orchestration_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_sla_orchestration"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_SLA_ORCHESTRATION_SCENARIO_NAMES)
+    assert all(result.details["sla_windows_visible"] for result in summary.results)
+    assert all(result.details["sla_budget_visible"] for result in summary.results)
+    assert all(result.details["sla_gate_required"] for result in summary.results)
+
+
+def test_run_exactly_once_recovery_evidence_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["exactly_once_recovery_evidence"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(EXACTLY_ONCE_RECOVERY_EVIDENCE_SCENARIO_NAMES)
+    assert all(result.details["failure_injection_method_visible"] for result in summary.results)
+    assert all(result.details["resume_authority_visible"] for result in summary.results)
+    assert all(result.details["exactly_once_gate_required"] for result in summary.results)
+
+
+def test_run_duplicate_side_effect_audit_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["duplicate_side_effect_audit"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(DUPLICATE_SIDE_EFFECT_AUDIT_SCENARIO_NAMES)
+    assert all(result.details["duplicate_audits_visible"] for result in summary.results)
+    assert all(result.details["duplicate_audit_reconciliation_visible"] for result in summary.results)
+    assert all(result.details["duplicate_audit_gate_required"] for result in summary.results)
+
+
+def test_run_continuous_orchestration_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["continuous_orchestration_slo_monitor"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CONTINUOUS_ORCHESTRATION_SLO_SCENARIO_NAMES)
+    assert all(result.details["monitor_samples_visible"] for result in summary.results)
+    assert all(result.details["monitors_within_budget"] for result in summary.results)
+    assert all(result.details["slo_gate_required"] for result in summary.results)
+
+
+def test_run_crash_failover_soak_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["crash_failover_soak_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CRASH_FAILOVER_SOAK_SCENARIO_NAMES)
+    assert all(result.details["crash_failover_soaks_visible"] for result in summary.results)
+    assert all(result.details["replay_authority_visible"] for result in summary.results)
+    assert all(result.details["soak_gate_required"] for result in summary.results)
+
+
+def test_run_side_effect_reconciliation_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["side_effect_reconciliation_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(SIDE_EFFECT_RECONCILIATION_V2_SCENARIO_NAMES)
+    assert all(result.details["side_effect_reconciliations_visible"] for result in summary.results)
+    assert all(result.details["reconciliation_boundaries_visible"] for result in summary.results)
+    assert all(result.details["reconciliation_gate_required"] for result in summary.results)
+
+
+def test_run_production_workflow_state_machine_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_workflow_state_machine_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_WORKFLOW_STATE_MACHINE_SCENARIO_NAMES)
+    assert all(result.details["da_only_state_machine_visible"] for result in summary.results)
+    assert all(result.details["lease_and_owner_authority_visible"] for result in summary.results)
+    assert all(result.details["state_gate_required"] for result in summary.results)
+
+
+def test_run_crash_proof_orchestration_fault_campaign_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["crash_proof_orchestration_fault_campaign"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        CRASH_PROOF_ORCHESTRATION_FAULT_CAMPAIGN_SCENARIO_NAMES
+    )
+    assert all(result.details["fault_campaign_visible"] for result in summary.results)
+    assert all(result.details["fault_receipt_handles_visible"] for result in summary.results)
+    assert all(result.details["fault_gate_required"] for result in summary.results)
+
+
+def test_run_external_side_effect_reconciliation_v3_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["external_side_effect_reconciliation_v3"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(EXTERNAL_SIDE_EFFECT_RECONCILIATION_V3_SCENARIO_NAMES)
+    assert all(result.details["side_effect_v3_visible"] for result in summary.results)
+    assert all(result.details["manual_repair_and_replay_decisions_visible"] for result in summary.results)
+    assert all(result.details["reconciliation_v3_gate_required"] for result in summary.results)
+
+
+def test_run_production_orchestration_hard_guarantees_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites(
+            [
+                "production_orchestration_hard_guarantees_v1",
+                "distributed_workflow_recovery_operations_v1",
+                "external_side_effect_correctness_v4",
+                "scheduler_failover_soak_v1",
+                "orchestration_false_claim_scan_v1",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+    assert all(result.details["hard_guarantee_receipts_visible"] for result in summary.results)
+    assert all(result.details["distributed_recovery_receipts_visible"] for result in summary.results)
+    assert all(result.details["side_effect_correctness_visible"] for result in summary.results)
+    assert all(result.details["scheduler_soak_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_post_dx_live_durable_orchestration_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites(
+            [
+                "post_dx_live_durable_orchestration_v1",
+                "recorded_live_orchestration_window_v1",
+                "crash_restart_failover_drill_v3",
+                "multi_agent_handoff_durability_v2",
+                "side_effect_reconciliation_v6",
+                "operator_recovery_control_v4",
+                "orchestration_false_claim_scan_v3",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == (
+        set(POST_DX_LIVE_DURABLE_ORCHESTRATION_SCENARIO_NAMES)
+        | set(RECORDED_LIVE_ORCHESTRATION_WINDOW_V1_SCENARIO_NAMES)
+        | set(CRASH_RESTART_FAILOVER_DRILL_V3_SCENARIO_NAMES)
+        | set(MULTI_AGENT_HANDOFF_DURABILITY_V2_SCENARIO_NAMES)
+        | set(SIDE_EFFECT_RECONCILIATION_V6_SCENARIO_NAMES)
+        | set(OPERATOR_RECOVERY_CONTROL_V4_SCENARIO_NAMES)
+        | set(ORCHESTRATION_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES)
+    )
+    assert all(result.details["recorded_live_windows_visible"] for result in summary.results)
+    assert all(result.details["residual_risk_markers_visible"] for result in summary.results)
+    assert all(result.details["failover_drills_visible"] for result in summary.results)
+    assert all(result.details["handoff_durability_visible"] for result in summary.results)
+    assert all(result.details["side_effect_v6_visible"] for result in summary.results)
+    assert all(result.details["operator_controls_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+    assert all(result.details["stronger_claims_not_claimed"] for result in summary.results)
+
+
+def test_run_post_dx_formal_secure_runtime_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dx_formal_secure_runtime_isolation_v1",
+            "runtime_isolation_attestation_evidence_v2",
+            "credential_broker_egress_enforcement_v3",
+            "hostile_chain_containment_v4",
+            "external_security_review_certification_track_v2",
+            "secure_runtime_recovery_authority_v3",
+            "secure_runtime_false_claim_scan_v3",
+        ])
+    )
+
+    assert summary.total == (
+        len(POST_DX_FORMAL_SECURE_RUNTIME_ISOLATION_SCENARIO_NAMES)
+        + len(RUNTIME_ISOLATION_ATTESTATION_EVIDENCE_V2_SCENARIO_NAMES)
+        + len(CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_V3_SCENARIO_NAMES)
+        + len(HOSTILE_CHAIN_CONTAINMENT_V4_SCENARIO_NAMES)
+        + len(EXTERNAL_SECURITY_REVIEW_CERTIFICATION_TRACK_V2_SCENARIO_NAMES)
+        + len(SECURE_RUNTIME_RECOVERY_AUTHORITY_V3_SCENARIO_NAMES)
+        + len(SECURE_RUNTIME_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES)
+    )
+    assert summary.failed == 0
+    assert all(result.details["post_dx_secure_runtime_suite_present"] for result in summary.results)
+    assert all(result.details["attestation_provenance_visible"] for result in summary.results)
+    assert all(result.details["unsupported_boundaries_marked"] for result in summary.results)
+    assert all(result.details["credential_egress_v3_denies_by_default"] for result in summary.results)
+    assert all(result.details["hostile_chains_contained"] for result in summary.results)
+    assert all(result.details["review_track_blocks_formal_certification"] for result in summary.results)
+    assert all(result.details["operator_recovery_authority_no_auto_expansion"] for result in summary.results)
+    assert all(result.details["false_claim_scan_command_backed"] for result in summary.results)
+
+
+def test_run_production_grade_secure_host_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites(
+            [
+                "production_grade_secure_capability_host_evidence_v1",
+                "secure_host_cross_surface_attack_chain_v1",
+                "credential_broker_egress_soak_v1",
+                "runtime_isolation_attestation_matrix_v1",
+                "secure_host_operator_recovery_authority_v1",
+                "secure_host_false_claim_scan_v1",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+    assert all(result.details["surface_matrix_covers_required_surfaces"] for result in summary.results)
+    assert all(result.details["attack_chains_fail_closed"] for result in summary.results)
+    assert all(result.details["credential_egress_soak_blocks_private_and_raw_secret"] for result in summary.results)
+    assert all(result.details["attestation_marks_unsupported_boundaries"] for result in summary.results)
+    assert all(result.details["operator_recovery_authority_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_production_operator_control_parity_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_operator_control_parity"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["required_actions_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_production_parity_train_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_parity_train"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES)
+    assert all(result.details["train_batch_count_matches"] for result in summary.results)
+    assert all(result.details["prior_train_prs_merged"] for result in summary.results)
+    assert all(result.details["cb_active_state_truthful"] for result in summary.results)
+
+
+def test_run_operator_control_population_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_control_population_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_CONTROL_POPULATION_STUDY_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["population_receipts_have_metadata_and_metrics"] for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] for result in summary.results)
+    assert all(result.details["handoff_requires_receiver_scope_renewal"] for result in summary.results)
+
+
+def test_run_named_baseline_cockpit_comparison_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["named_baseline_cockpit_comparison"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(NAMED_BASELINE_COCKPIT_COMPARISON_SCENARIO_NAMES)
+    assert all(result.details["named_baselines_pressure_only"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+    assert all(result.details["named_baseline_cockpit_gate_required"] for result in summary.results)
+
+
+def test_run_long_work_debugging_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["long_work_debugging_slo"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONG_WORK_DEBUGGING_SLO_SCENARIO_NAMES)
+    assert all(result.details["all_slos_met"] for result in summary.results)
+    assert all(
+        result.details["replay_and_runbook_actions_stay_read_only_until_context_matches"]
+        for result in summary.results
+    )
+    assert all(result.details["long_work_debugging_slo_gate_required"] for result in summary.results)
+
+
+def test_run_operator_control_certification_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_control_certification_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_CONTROL_CERTIFICATION_V1_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["required_controls_visible"] for result in summary.results)
+    assert all(result.details["stale_approval_negative_cases_visible"] for result in summary.results)
+    assert all(result.details["formal_certification_and_solved_control_blocked"] for result in summary.results)
+
+
+def test_run_operator_control_production_certification_benchmark_suites_pass():
+    suite_names = [
+        "operator_control_certification_v2",
+        "operator_control_live_population_v1",
+        "tamper_evident_audit_candidate_v1",
+        "authority_transfer_recovery_v1",
+        "operator_control_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected = (
+        set(OPERATOR_CONTROL_CERTIFICATION_V2_SCENARIO_NAMES)
+        | set(OPERATOR_CONTROL_LIVE_POPULATION_V1_SCENARIO_NAMES)
+        | set(TAMPER_EVIDENT_AUDIT_CANDIDATE_V1_SCENARIO_NAMES)
+        | set(AUTHORITY_TRANSFER_RECOVERY_V1_SCENARIO_NAMES)
+        | set(OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["dm_suites_visible"] for result in summary.results)
+    assert all(result.details["dm_suites_gate_required"] for result in summary.results)
+    assert all(result.details["tamper_evident_audit_candidate_visible_not_tamper_proof"] for result in summary.results)
+    assert all(result.details["unsupported_claims_remain_blocked"] for result in summary.results)
+
+
+def test_run_post_dp_operator_debugging_recovery_benchmark_suites_pass():
+    suite_names = [
+        POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SUITE_NAME,
+        DENSE_LONG_WORK_DEBUGGING_V2_SUITE_NAME,
+        OPERATOR_RECOVERY_SLO_V3_SUITE_NAME,
+        OPERATOR_EFFORT_REDUCTION_V2_SUITE_NAME,
+        AUTHORITY_TRANSFER_INTEGRITY_V2_SUITE_NAME,
+        OPERATOR_AUDIT_ACCESSIBILITY_V2_SUITE_NAME,
+        OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SUITE_NAME,
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected = (
+        set(POST_DP_OPERATOR_DEBUGGING_RECOVERY_CONTROL_SCENARIO_NAMES)
+        | set(DENSE_LONG_WORK_DEBUGGING_V2_SCENARIO_NAMES)
+        | set(OPERATOR_RECOVERY_SLO_V3_SCENARIO_NAMES)
+        | set(OPERATOR_EFFORT_REDUCTION_V2_SCENARIO_NAMES)
+        | set(AUTHORITY_TRANSFER_INTEGRITY_V2_SCENARIO_NAMES)
+        | set(OPERATOR_AUDIT_ACCESSIBILITY_V2_SCENARIO_NAMES)
+        | set(OPERATOR_CONTROL_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["du_suites_visible"] for result in summary.results)
+    assert all(result.details["du_suites_gate_required"] for result in summary.results)
+    assert all(result.details["control_flows_exercise_recovery_boundaries"] for result in summary.results)
+    assert all(result.details["authority_transfer_fails_closed"] for result in summary.results)
+    assert all(result.details["real_false_claim_scan_visible"] for result in summary.results)
+    assert all(result.details["unsupported_claims_remain_blocked"] for result in summary.results)
+
+
+def test_run_mission_control_population_study_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["mission_control_population_study_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MISSION_CONTROL_POPULATION_STUDY_V2_SCENARIO_NAMES)
+    assert all(result.details["population_telemetry_visible"] for result in summary.results)
+    assert all(result.details["keyboard_and_recovery_floors_met"] for result in summary.results)
+    assert all(result.details["baseline_rows_are_pressure_only"] for result in summary.results)
+
+
+def test_run_long_work_recovery_slo_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["long_work_recovery_slo_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONG_WORK_RECOVERY_SLO_V2_SCENARIO_NAMES)
+    assert all(result.details["long_work_slos_cover_required_dimensions"] for result in summary.results)
+    assert all(result.details["source_and_residual_drilldown_visible"] for result in summary.results)
+    assert all(result.details["long_work_recovery_slo_v2_gate_required"] for result in summary.results)
+
+
+def test_run_operator_error_detectability_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_error_detectability_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_ERROR_DETECTABILITY_V1_SCENARIO_NAMES)
+    assert all(result.details["error_detectability_and_calibration_met"] for result in summary.results)
+    assert all(result.details["safe_denial_and_stale_approval_blocks_visible"] for result in summary.results)
+    assert all(result.details["operator_error_detectability_gate_required"] for result in summary.results)
+
+
+def test_run_final_source_backed_parity_audit_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["final_source_backed_parity_audit"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FINAL_SOURCE_BACKED_PARITY_AUDIT_SCENARIO_NAMES)
+    assert all(result.details["current_sources_have_urls_and_dates"] for result in summary.results)
+    assert all(result.details["competitor_systems_visible"] for result in summary.results)
+    assert all(result.details["source_claim_use_bounded"] for result in summary.results)
+
+
+def test_run_final_claim_ledger_reconciliation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["final_claim_ledger_reconciliation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FINAL_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+    assert all(result.details["claim_ledger_blocks_forbidden_wording"] for result in summary.results)
+    assert all(result.details["critic_disposition_accepted"] for result in summary.results)
+
+
+def test_run_operator_final_parity_readiness_report_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_final_parity_readiness_report"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_FINAL_PARITY_READINESS_REPORT_SCENARIO_NAMES)
+    assert all(result.details["operator_surfaces_visible"] for result in summary.results)
+    assert all(result.details["residual_gaps_visible"] for result in summary.results)
+    assert all(result.details["no_false_completion_claim"] for result in summary.results)
+
+
+def test_run_post_cq_claim_ledger_reconciliation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["post_cq_claim_ledger_reconciliation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(POST_CQ_CLAIM_LEDGER_RECONCILIATION_SCENARIO_NAMES)
+    assert all(result.details["claim_ledger_rows_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+    assert all(result.details["cz_gate_visible"] for result in summary.results)
+
+
+def test_run_reference_system_source_refresh_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["reference_system_source_refresh_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(REFERENCE_SYSTEM_SOURCE_REFRESH_V2_SCENARIO_NAMES)
+    assert all(result.details["current_sources_have_urls_and_dates"] for result in summary.results)
+    assert all(result.details["all_sources_checked_today"] for result in summary.results)
+    assert all(result.details["source_claim_lift_blocked"] for result in summary.results)
+
+
+def test_run_false_completion_scan_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["false_completion_scan_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FALSE_COMPLETION_SCAN_V2_SCENARIO_NAMES)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
+    assert all(result.details["full_parity_claim_still_blocked"] for result in summary.results)
+    assert all(result.details["no_duplicate_tracking"] for result in summary.results)
+
+
+def test_run_full_parity_claim_lift_audit_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["full_parity_claim_lift_audit_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FULL_PARITY_CLAIM_LIFT_AUDIT_V1_SCENARIO_NAMES)
+    assert all(result.details["claim_lift_rows_visible"] for result in summary.results)
+    assert all(result.details["bounded_dp_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_production_readiness_reconciliation_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_readiness_reconciliation_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_READINESS_RECONCILIATION_V2_SCENARIO_NAMES)
+    assert all(result.details["readiness_covers_required_areas"] for result in summary.results)
+    assert all(result.details["readiness_receipts_have_raw_handles"] for result in summary.results)
+    assert all(result.details["readiness_is_reconciliation_only"] for result in summary.results)
+
+
+def test_run_reference_system_source_refresh_v4_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["reference_system_source_refresh_v4"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(REFERENCE_SYSTEM_SOURCE_REFRESH_V4_SCENARIO_NAMES)
+    assert all(result.details["source_refresh_v4_visible"] for result in summary.results)
+    assert all(result.details["source_claim_use_bounded"] for result in summary.results)
+    assert all(result.details["source_claim_lift_blocked"] for result in summary.results)
+
+
+def test_run_post_di_do_board_pr_issue_reconciliation_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["post_di_do_board_pr_issue_reconciliation_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        POST_DI_DO_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES
+    )
+    assert all(result.details["completed_di_do_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["di_do_pr_train_visible"] for result in summary.results)
+    assert all(result.details["stale_issue_body_caveats_visible"] for result in summary.results)
+
+
+def test_run_false_completion_scan_v4_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["false_completion_scan_v4"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FALSE_COMPLETION_SCAN_V4_SCENARIO_NAMES)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
+    assert all(result.details["bounded_dp_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["claim_lift_rows_keep_broad_claims_blocked"] for result in summary.results)
+
+
+def test_run_final_critic_contrarian_no_block_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["final_critic_contrarian_no_block_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    assert all(result.details["critic_no_block_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+    assert all(result.details["operator_surfaces_visible"] for result in summary.results)
+
+
+def test_run_post_dq_dw_claim_readiness_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dq_dw_board_pr_issue_reconciliation_v1",
+            "post_dq_dw_claim_ledger_reconciliation_v1",
+            "reference_system_source_refresh_v5",
+            "false_completion_scan_v5",
+            "post_dq_dw_critic_contrarian_no_block_v1",
+        ])
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == (
+        set(POST_DQ_DW_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(POST_DQ_DW_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(REFERENCE_SYSTEM_SOURCE_REFRESH_V5_SCENARIO_NAMES)
+        | set(FALSE_COMPLETION_SCAN_V5_SCENARIO_NAMES)
+        | set(POST_DQ_DW_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert all(result.details["completed_dq_dw_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["dx_merged_branch_visible"] for result in summary.results)
+    assert all(result.details["bounded_dx_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["article_access_caveat_only"] for result in summary.results)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
+
+
+def test_run_post_dx_final_claim_lift_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dx_final_board_pr_issue_reconciliation_v1",
+            "post_dx_final_claim_ledger_reconciliation_v1",
+            "reference_system_source_refresh_v6",
+            "false_completion_scan_v6",
+            "post_dx_final_critic_contrarian_no_block_v1",
+        ])
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == (
+        set(POST_DX_FINAL_BOARD_PR_ISSUE_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(POST_DX_FINAL_CLAIM_LEDGER_RECONCILIATION_V1_SCENARIO_NAMES)
+        | set(REFERENCE_SYSTEM_SOURCE_REFRESH_V6_SCENARIO_NAMES)
+        | set(FALSE_COMPLETION_SCAN_V6_SCENARIO_NAMES)
+        | set(POST_DX_FINAL_CRITIC_CONTRARIAN_NO_BLOCK_V1_SCENARIO_NAMES)
+    )
+    assert all(result.details["completed_post_dx_batches_done_merged_passed"] for result in summary.results)
+    assert all(result.details["ef_active_branch_visible"] for result in summary.results)
+    assert all(result.details["bounded_ef_wording_allowed_only"] for result in summary.results)
+    assert all(result.details["article_access_caveat_only"] for result in summary.results)
+    assert all(result.details["false_completion_scans_visible"] for result in summary.results)
+
+
+def test_run_benchmark_suites_executes_guardian_safe_multimodal_voice_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_safe_multimodal_voice"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GUARDIAN_SAFE_MULTIMODAL_VOICE_SCENARIO_NAMES)
+
+
+def test_run_production_reach_channel_hardening_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_reach_channel_hardening"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_REACH_CHANNEL_HARDENING_SCENARIO_NAMES)
+    assert all(result.details["paired_external_channel_visible"] for result in summary.results)
+    assert all(result.details["revocation_fail_closed_visible"] for result in summary.results)
+
+
+def test_run_browser_computer_use_reliability_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_computer_use_reliability_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROWSER_COMPUTER_USE_RELIABILITY_V2_SCENARIO_NAMES)
+    assert all(result.details["session_partition_visible"] for result in summary.results)
+    assert all(result.details["page_drift_replay_blocks_external_action"] for result in summary.results)
+
+
+def test_run_guardian_safe_voice_media_runtime_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["guardian_safe_voice_media_runtime"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(GUARDIAN_SAFE_VOICE_MEDIA_RUNTIME_SCENARIO_NAMES)
+    assert all(result.details["voice_media_deletion_visible"] for result in summary.results)
+    assert all(result.details["voice_media_revocation_visible"] for result in summary.results)
+
+
+def test_run_live_broad_reach_channel_attestation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_broad_reach_channel_attestation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_BROAD_REACH_CHANNEL_ATTESTATION_SCENARIO_NAMES)
+    assert all(result.details["recorded_live_channel_evidence_visible"] for result in summary.results)
+    assert all(result.details["degraded_recovery_fail_closed_visible"] for result in summary.results)
+
+
+def test_run_production_voice_media_provider_runtime_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_voice_media_provider_runtime"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_VOICE_MEDIA_PROVIDER_RUNTIME_SCENARIO_NAMES)
+    assert all(result.details["voice_media_consent_visible"] for result in summary.results)
+    assert all(result.details["voice_media_provider_failure_fallback_visible"] for result in summary.results)
+
+
+def test_run_cross_surface_continuity_recovery_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["cross_surface_continuity_recovery"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CROSS_SURFACE_CONTINUITY_RECOVERY_SCENARIO_NAMES)
+    assert all(result.details["continuity_thread_memory_visible"] for result in summary.results)
+    assert all(result.details["approval_survives_surface_shift_visible"] for result in summary.results)
+
+
+def test_run_broad_channel_sla_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["broad_channel_sla_operations"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROAD_CHANNEL_SLA_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["sla_windows_visible"] for result in summary.results)
+    assert all(result.details["rate_limit_abuse_visible"] for result in summary.results)
+    assert all(result.details["coverage_gap_visible"] for result in summary.results)
+
+
+def test_run_production_voice_media_quality_gates_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_voice_media_quality_gates"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PRODUCTION_VOICE_MEDIA_QUALITY_GATES_SCENARIO_NAMES)
+    assert all(result.details["voice_media_quality_gates_visible"] for result in summary.results)
+    assert all(result.details["voice_media_privacy_memory_boundary_visible"] for result in summary.results)
+    assert all(result.details["voice_media_revocation_visible"] for result in summary.results)
+    assert all(result.details["voice_media_correction_visible"] for result in summary.results)
+    assert all(result.details["voice_media_regression_fallback_visible"] for result in summary.results)
+
+
+def test_run_mobile_execution_continuity_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["mobile_execution_continuity"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MOBILE_EXECUTION_CONTINUITY_SCENARIO_NAMES)
+    assert all(result.details["mobile_approval_handoff_visible"] for result in summary.results)
+    assert all(result.details["mobile_action_continuity_visible"] for result in summary.results)
+    assert all(result.details["mobile_revocation_fail_closed_visible"] for result in summary.results)
+
+
+def test_run_broad_reach_field_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["broad_reach_field_operations"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROAD_REACH_FIELD_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["provider_matrix_breadth_visible"] for result in summary.results)
+    assert all(result.details["auth_consent_revocation_visible"] for result in summary.results)
+    assert all(result.details["cross_surface_continuity_visible"] for result in summary.results)
+    assert all(result.details["safe_receipt_redaction_visible"] for result in summary.results)
+    assert all(result.details["coverage_gap_visible"] for result in summary.results)
+
+
+def test_run_voice_media_quality_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["voice_media_quality_operations"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(VOICE_MEDIA_QUALITY_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["voice_media_quality_gates_visible"] for result in summary.results)
+    assert all(result.details["voice_media_latency_fallback_visible"] for result in summary.results)
+    assert all(result.details["voice_media_privacy_controls_visible"] for result in summary.results)
+    assert all(result.details["voice_media_memory_boundaries_visible"] for result in summary.results)
+    assert all(result.details["safe_receipt_redaction_visible"] for result in summary.results)
+
+
+def test_run_always_available_reach_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["always_available_reach_slo"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(ALWAYS_AVAILABLE_REACH_SLO_SCENARIO_NAMES)
+    assert all(result.details["slo_budget_receipts_visible"] for result in summary.results)
+    assert all(result.details["provider_failure_recovery_visible"] for result in summary.results)
+    assert all(result.details["offline_recovery_visible"] for result in summary.results)
+    assert all(result.details["safe_receipt_redaction_visible"] for result in summary.results)
+    assert all(result.details["always_available_claim_boundary_visible"] for result in summary.results)
+
+
+def test_run_always_available_reach_operations_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["always_available_reach_operations_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES)
+    assert all(result.details["selected_reach_channel_breadth_visible"] for result in summary.results)
+    assert all(result.details["campaign_14_day_equivalent_visible"] for result in summary.results)
+    assert all(result.details["pairing_revocation_visible"] for result in summary.results)
+    assert all(result.details["coverage_gap_visible"] for result in summary.results)
+
+
+def test_run_voice_media_parity_runtime_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["voice_media_parity_runtime_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES)
+    assert all(result.details["voice_media_provider_family_visible"] for result in summary.results)
+    assert all(result.details["voice_media_quality_latency_visible"] for result in summary.results)
+    assert all(result.details["voice_media_privacy_deletion_visible"] for result in summary.results)
+    assert all(result.details["voice_media_fallback_regression_visible"] for result in summary.results)
+
+
+def test_run_mobile_cross_surface_continuity_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["mobile_cross_surface_continuity_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES)
+    assert all(result.details["cross_surface_continuity_visible"] for result in summary.results)
+    assert all(result.details["channel_continuity_visible"] for result in summary.results)
+    assert all(result.details["no_raw_payloads_visible"] for result in summary.results)
+
+
+def test_run_reach_degraded_recovery_field_campaign_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["reach_degraded_recovery_field_campaign"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES)
+    assert all(result.details["field_campaign_repair_metrics_visible"] for result in summary.results)
+    assert all(result.details["false_and_missed_delivery_metrics_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+
+
+def test_run_reach_voice_production_ops_benchmark_suites_pass():
+    suite_names = [
+        "always_available_reach_live_ops_v1",
+        "voice_media_production_parity_candidate_v1",
+        "channel_incident_response_v1",
+        "cross_surface_reach_continuity_v2",
+        "reach_media_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected_names = {
+        *ALWAYS_AVAILABLE_REACH_LIVE_OPS_V1_SCENARIO_NAMES,
+        *VOICE_MEDIA_PRODUCTION_PARITY_CANDIDATE_V1_SCENARIO_NAMES,
+        *CHANNEL_INCIDENT_RESPONSE_V1_SCENARIO_NAMES,
+        *CROSS_SURFACE_REACH_CONTINUITY_V2_SCENARIO_NAMES,
+        *REACH_MEDIA_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES,
+    }
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["all_dk_suites_required_by_gate"] for result in summary.results)
+    assert all(result.details["safe_receipts_redacted_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_post_dx_reach_voice_media_benchmark_suites_pass():
+    suite_names = [
+        "post_dx_reach_voice_media_parity_proof_v1",
+        "multi_channel_reach_reliability_v3",
+        "voice_media_quality_latency_v3",
+        "reach_abuse_recovery_v3",
+        "cross_surface_reach_continuity_v3",
+        "reach_voice_media_false_claim_scan_v3",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+    expected_names = {
+        *POST_DX_REACH_VOICE_MEDIA_PARITY_PROOF_SCENARIO_NAMES,
+        *MULTI_CHANNEL_REACH_RELIABILITY_V3_SCENARIO_NAMES,
+        *VOICE_MEDIA_QUALITY_LATENCY_V3_SCENARIO_NAMES,
+        *REACH_ABUSE_RECOVERY_V3_SCENARIO_NAMES,
+        *CROSS_SURFACE_REACH_CONTINUITY_V3_SCENARIO_NAMES,
+        *REACH_VOICE_MEDIA_FALSE_CLAIM_SCAN_V3_SCENARIO_NAMES,
+    }
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["all_ea_suites_required_by_gate"] for result in summary.results)
+    assert all(result.details["multi_channel_reliability_visible"] for result in summary.results)
+    assert all(result.details["voice_media_quality_latency_visible"] for result in summary.results)
+    assert all(result.details["rate_abuse_recovery_visible"] for result in summary.results)
+    assert all(result.details["cross_surface_continuity_v3_visible"] for result in summary.results)
+    assert all(result.details["coverage_gaps_preserved"] for result in summary.results)
+    assert all(result.details["safe_receipts_redacted_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_managed_browser_provider_attestation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["managed_browser_provider_attestation"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MANAGED_BROWSER_PROVIDER_ATTESTATION_SCENARIO_NAMES)
+    assert all(result.details["provider_identity_visible"] for result in summary.results)
+    assert all(result.details["remote_cdp_existing_session_blocked"] for result in summary.results)
+
+
+def test_run_live_multi_operator_usability_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_multi_operator_usability_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_MULTI_OPERATOR_USABILITY_STUDY_SCENARIO_NAMES)
+    assert all(result.details["multi_operator_evidence_visible"] for result in summary.results)
+    assert all(result.details["keyboard_paths_visible"] for result in summary.results)
+
+
+def test_run_browser_computer_use_recovery_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_computer_use_recovery_drill"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(BROWSER_COMPUTER_USE_RECOVERY_DRILL_SCENARIO_NAMES)
+    assert all(result.details["fail_closed_recovery_visible"] for result in summary.results)
+    assert all(result.details["external_actions_blocked_during_recovery"] for result in summary.results)
+
+
+def test_run_long_work_debugging_recovery_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["long_work_debugging_recovery"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONG_WORK_DEBUGGING_RECOVERY_SCENARIO_NAMES)
+    assert all(result.details["debugging_receipts_visible"] for result in summary.results)
+    assert all(result.details["cross_batch_recovery_view_visible"] for result in summary.results)
+    assert all(result.details["debugging_has_lineage_branch_failure_budget"] for result in summary.results)
+
+
+def test_run_operator_control_density_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["operator_control_density"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(OPERATOR_CONTROL_DENSITY_SCENARIO_NAMES)
+    assert all(result.details["control_actions_visible"] for result in summary.results)
+    assert all(result.details["required_action_names_visible"] for result in summary.results)
+    assert all(result.details["controls_have_receipts_and_correctness_checks"] for result in summary.results)
+    assert all(result.details["revoke_quarantine_rollback_boundaries_visible"] for result in summary.results)
+
+
+def test_run_independent_operator_usability_accessibility_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_operator_usability_accessibility"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(INDEPENDENT_OPERATOR_USABILITY_ACCESSIBILITY_SCENARIO_NAMES)
+    assert all(result.details["independent_usability_accessibility_suite_visible"] for result in summary.results)
+    assert all(result.details["keyboard_accessibility_visible"] for result in summary.results)
+    assert all(result.details["independent_usability_receipts_have_reviewers_and_metrics"] for result in summary.results)
+    assert all(result.details["receipt_integrity_manifest_visible"] for result in summary.results)
+    assert all(result.details["receipt_hashes_and_reviewer_attestations_visible"] for result in summary.results)
+
+
+def test_run_benchmark_suites_executes_guardian_learning_arbitration_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_learning_arbitration_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GUARDIAN_LEARNING_ARBITRATION_SCENARIO_NAMES)
+
+
+def test_run_live_guardian_learning_quality_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_guardian_learning_quality"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_GUARDIAN_LEARNING_QUALITY_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["claim_boundary_visible"] for result in summary.results)
+
+
+def test_run_guardian_intervention_outcome_cohorts_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["guardian_intervention_outcome_cohorts"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(GUARDIAN_INTERVENTION_OUTCOME_COHORTS_SCENARIO_NAMES)
+    assert all(result.details["typed_outcomes_visible"] for result in summary.results)
+    assert all(result.details["policy_delta_visible"] for result in summary.results)
+
+
+def test_run_memory_provider_ecosystem_maturity_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_ecosystem_maturity_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_PROVIDER_ECOSYSTEM_MATURITY_V1_SCENARIO_NAMES)
+    assert all(result.details["provider_usefulness_visible"] for result in summary.results)
+    assert all(result.details["provider_degradation_visible"] for result in summary.results)
+
+
+def test_run_canonical_memory_reconciliation_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["canonical_memory_reconciliation_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(CANONICAL_MEMORY_RECONCILIATION_V2_SCENARIO_NAMES)
+    assert all(result.details["canonical_precedence_visible"] for result in summary.results)
+    assert all(result.details["delete_export_visible"] for result in summary.results)
+
+
+def test_run_provider_usefulness_regression_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["provider_usefulness_regression"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(PROVIDER_USEFULNESS_REGRESSION_SCENARIO_NAMES)
+    assert all(result.details["provider_regressions_visible"] for result in summary.results)
+    assert all(result.details["provider_quarantine_visible"] for result in summary.results)
+
+
+def test_run_live_human_outcome_quality_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_human_outcome_quality_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LIVE_HUMAN_OUTCOME_QUALITY_STUDY_SCENARIO_NAMES)
+    assert all(result.details["recorded_live_mode_visible"] for result in summary.results)
+    assert all(result.details["consent_visible"] for result in summary.results)
+    assert all(result.details["bias_limitations_visible"] for result in summary.results)
+
+
+def test_run_guardian_learning_causal_attribution_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["guardian_learning_causal_attribution"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(GUARDIAN_LEARNING_CAUSAL_ATTRIBUTION_SCENARIO_NAMES)
+    assert all(result.details["bounded_causal_claims_visible"] for result in summary.results)
+    assert all(result.details["counterfactuals_visible"] for result in summary.results)
+    assert all(result.details["reversible_learning_visible"] for result in summary.results)
+
+
+def test_run_memory_provider_live_regression_monitor_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_live_regression_monitor"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_PROVIDER_LIVE_REGRESSION_MONITOR_SCENARIO_NAMES)
+    assert all(result.details["provider_monitors_visible"] for result in summary.results)
+    assert all(result.details["provider_quarantine_visible"] for result in summary.results)
+    assert all(result.details["unsafe_provider_behavior_blocked"] for result in summary.results)
+
+
+def test_run_independent_outcome_cohort_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_outcome_cohort_review"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(INDEPENDENT_OUTCOME_COHORT_REVIEW_SCENARIO_NAMES)
+    assert all(result.details["independent_evaluators_visible"] for result in summary.results)
+    assert all(result.details["implementation_independence_visible"] for result in summary.results)
+    assert all(result.details["bounded_outcome_claims_visible"] for result in summary.results)
+
+
+def test_run_task_scoped_causal_learning_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["task_scoped_causal_learning"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(TASK_SCOPED_CAUSAL_LEARNING_SCENARIO_NAMES)
+    assert all(result.details["bounded_causal_claims_visible"] for result in summary.results)
+    assert all(result.details["causal_task_scope_visible"] for result in summary.results)
+    assert all(result.details["rollback_authority_visible"] for result in summary.results)
+
+
+def test_run_memory_provider_parity_matrix_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_parity_matrix"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_PROVIDER_PARITY_MATRIX_SCENARIO_NAMES)
+    assert all(result.details["provider_matrix_visible"] for result in summary.results)
+    assert all(result.details["canonical_override_blocked"] for result in summary.results)
+    assert all(result.details["secret_leak_zero_tolerance_visible"] for result in summary.results)
+
+
+def test_run_longitudinal_guardian_outcome_study_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["longitudinal_guardian_outcome_study"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LONGITUDINAL_GUARDIAN_OUTCOME_STUDY_SCENARIO_NAMES)
+    assert all(result.details["longitudinal_windows_visible"] for result in summary.results)
+    assert all(result.details["sample_power_visible"] for result in summary.results)
+    assert all(result.details["independent_evaluators_visible"] for result in summary.results)
+
+
+def test_run_named_baseline_memory_comparison_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["named_baseline_memory_comparison"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(NAMED_BASELINE_MEMORY_COMPARISON_SCENARIO_NAMES)
+    assert all(result.details["named_baselines_visible"] for result in summary.results)
+    assert all(result.details["baseline_pressure_only_visible"] for result in summary.results)
+    assert all(result.details["delete_export_mismatch_blocks_promotion"] for result in summary.results)
+
+
+def test_run_learning_safety_monitor_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["learning_safety_monitor_v2"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(LEARNING_SAFETY_MONITOR_V2_SCENARIO_NAMES)
+    assert all(result.details["policy_versions_visible"] for result in summary.results)
+    assert all(result.details["rollback_receipts_visible"] for result in summary.results)
+    assert all(result.details["quarantine_visible"] for result in summary.results)
+
+
+def test_run_generalized_guardian_outcome_study_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["generalized_guardian_outcome_study_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES
+    )
+    assert all(result.details["predeclared_protocol_visible"] for result in summary.results)
+    assert all(result.details["decision_family_coverage_visible"] for result in summary.results)
+    assert all(result.details["fairness_and_adverse_review_visible"] for result in summary.results)
+
+
+def test_run_full_memory_provider_parity_matrix_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["full_memory_provider_parity_matrix_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES
+    )
+    assert all(result.details["provider_matrix_visible"] for result in summary.results)
+    assert all(result.details["canonical_precedence_visible"] for result in summary.results)
+    assert all(result.details["provider_privacy_regression_visible"] for result in summary.results)
+
+
+def test_run_causal_learning_outcome_thresholds_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["causal_learning_outcome_thresholds_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(
+        CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES
+    )
+    assert all(result.details["causal_thresholds_visible"] for result in summary.results)
+    assert all(result.details["counterfactuals_visible"] for result in summary.results)
+    assert all(result.details["rollback_authority_visible"] for result in summary.results)
+
+
+def test_run_memory_baseline_comparison_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["memory_baseline_comparison_v1"]))
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == set(MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES)
+    assert all(result.details["baseline_sources_visible"] for result in summary.results)
+    assert all(result.details["baseline_pressure_only_visible"] for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] for result in summary.results)
+
+
+def test_run_live_guardian_memory_field_program_benchmark_suites_pass():
+    suites = [
+        "live_long_horizon_guardian_learning_field_study_v1",
+        "memory_behavior_change_ablation_v1",
+        "live_memory_provider_parity_operations_v1",
+        "independent_guardian_outcome_candidate_review_v1",
+        "longitudinal_learning_safety_monitor_v3",
+        "guardian_memory_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suites))
+
+    expected_names = set(
+        LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES
+        + MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES
+        + LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES
+        + INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES
+        + LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES
+        + GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["field_program_coverage_visible"] for result in summary.results)
+    assert all(result.details["counterfactual_memory_ablation_visible"] for result in summary.results)
+    assert all(result.details["provider_state_matrix_visible"] for result in summary.results)
+    assert all(result.details["negative_case_matrix_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_post_dp_guardian_memory_gap_closure_benchmark_suites_pass():
+    suites = [
+        "post_dp_guardian_learning_memory_gap_closure_v1",
+        "long_horizon_learning_quality_v2",
+        "memory_behavior_ablation_v2",
+        "memory_provider_operation_v2",
+        "learning_safety_regression_v2",
+        "guardian_memory_false_claim_scan_v2",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suites))
+
+    expected_names = set(
+        POST_DP_GUARDIAN_MEMORY_GAP_CLOSURE_SCENARIO_NAMES
+        + LONG_HORIZON_LEARNING_QUALITY_V2_SCENARIO_NAMES
+        + MEMORY_BEHAVIOR_ABLATION_V2_SCENARIO_NAMES
+        + MEMORY_PROVIDER_OPERATION_V2_SCENARIO_NAMES
+        + LEARNING_SAFETY_REGRESSION_V2_SCENARIO_NAMES
+        + GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES
+    )
+
+    assert summary.failed == 0
+    assert {result.name for result in summary.results} == expected_names
+    assert all(result.details["operator_status_visible"] for result in summary.results)
+    assert all(result.details["foundation_is_dl_not_duplicate"] for result in summary.results)
+    assert all(result.details["long_horizon_consent_protocol_visible"] for result in summary.results)
+    assert all(result.details["counterfactual_memory_ablation_visible"] for result in summary.results)
+    assert all(result.details["delete_export_stale_quarantine_visible"] for result in summary.results)
+    assert all(result.details["safety_negative_cases_visible"] for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] for result in summary.results)
+
+
+def test_run_benchmark_suites_executes_unique_suite_scenarios():
+    summary = asyncio.run(run_benchmark_suites(["governed_improvement"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "governed_self_evolution_behavior",
+        "governed_preference_diversity_behavior",
+        "governed_canary_rollout_behavior",
+        "operator_governed_improvement_benchmark_surface_behavior",
+        "capability_repair_behavior",
+        "capability_preflight_behavior",
+    }
+
+
+def test_batch_dc_scenarios_do_not_collide_with_existing_registry_names():
+    scenario_names = [scenario.name for scenario in available_scenarios()]
+    batch_dc_names = (
+        ALWAYS_AVAILABLE_REACH_OPERATIONS_V1_SCENARIO_NAMES
+        + VOICE_MEDIA_PARITY_RUNTIME_V1_SCENARIO_NAMES
+        + MOBILE_CROSS_SURFACE_CONTINUITY_V1_SCENARIO_NAMES
+        + REACH_DEGRADED_RECOVERY_FIELD_CAMPAIGN_SCENARIO_NAMES
+    )
+    duplicates = sorted({name for name in batch_dc_names if scenario_names.count(name) != 1})
+
+    assert duplicates == []
+
+
+def test_batch_dd_scenarios_do_not_collide_with_existing_registry_names():
+    scenario_names = [scenario.name for scenario in available_scenarios()]
+    batch_dd_names = (
+        GENERALIZED_GUARDIAN_OUTCOME_STUDY_V1_SCENARIO_NAMES
+        + FULL_MEMORY_PROVIDER_PARITY_MATRIX_V1_SCENARIO_NAMES
+        + CAUSAL_LEARNING_OUTCOME_THRESHOLDS_V1_SCENARIO_NAMES
+        + MEMORY_BASELINE_COMPARISON_V1_SCENARIO_NAMES
+    )
+    duplicates = sorted({name for name in batch_dd_names if scenario_names.count(name) != 1})
+
+    assert duplicates == []
+
+
+def test_batch_dl_scenarios_do_not_collide_with_existing_registry_names():
+    scenario_names = [scenario.name for scenario in available_scenarios()]
+    batch_dl_names = (
+        LIVE_LONG_HORIZON_GUARDIAN_LEARNING_FIELD_STUDY_V1_SCENARIO_NAMES
+        + MEMORY_BEHAVIOR_CHANGE_ABLATION_V1_SCENARIO_NAMES
+        + LIVE_MEMORY_PROVIDER_PARITY_OPERATIONS_V1_SCENARIO_NAMES
+        + INDEPENDENT_GUARDIAN_OUTCOME_CANDIDATE_REVIEW_V1_SCENARIO_NAMES
+        + LONGITUDINAL_LEARNING_SAFETY_MONITOR_V3_SCENARIO_NAMES
+        + GUARDIAN_MEMORY_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES
+    )
+    duplicates = sorted({name for name in batch_dl_names if scenario_names.count(name) != 1})
+
+    assert duplicates == []
+
+
+def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_memory_quality"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "memory_engineering_retrieval_benchmark_behavior",
+        "memory_contradiction_ranking_behavior",
+        "memory_selective_forgetting_surface_behavior",
+        "operator_memory_benchmark_surface_behavior",
+        "memory_provider_user_model_behavior",
+        "memory_provider_stale_evidence_behavior",
+        "memory_provider_writeback_behavior",
+        "memory_reconciliation_policy_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_m6_memory_superiority_suite():
+    summary = asyncio.run(run_benchmark_suites(["m6_memory_superiority"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "m6_long_horizon_recall_behavior",
+        "m6_contradiction_handling_behavior",
+        "m6_stale_memory_override_behavior",
+        "m6_source_trust_privacy_boundary_behavior",
+        "m6_provider_quality_behavior",
+        "m6_behavior_change_receipts_behavior",
+        "operator_m6_memory_superiority_benchmark_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_guardian_user_model_restraint_suite():
+    summary = asyncio.run(run_benchmark_suites(["guardian_user_model_restraint"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "guardian_user_model_continuity_behavior",
+        "guardian_clarification_restraint_behavior",
+        "guardian_judgment_behavior",
+        "operator_guardian_state_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_m8_guardian_intervention_quality_suite():
+    summary = asyncio.run(run_benchmark_suites(["m8_guardian_intervention_quality"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "m8_capability_choice_act_behavior",
+        "m8_ambiguous_evidence_clarify_behavior",
+        "m8_stale_memory_defer_behavior",
+        "m8_conflicting_commitment_bundle_behavior",
+        "m8_risky_capability_approval_behavior",
+        "m8_no_action_restraint_behavior",
+        "operator_m8_guardian_brain_surface_behavior",
+    }
+
+
+def test_operator_m8_guardian_brain_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m8_guardian_brain_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["live_state_receipt_visible"] is True
+    assert details["live_state_source_visible"] is True
+    assert details["live_state_preserves_claim_boundary"] is True
+    assert details["live_surface_counts_live_and_benchmark"] is True
+    assert details["all_actions_visible"] is True
+    assert details["capability_choice_state_visible"] is True
+    assert details["quality_score_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+
+
+def test_run_benchmark_suites_executes_m9_governed_ecosystem_suite():
+    summary = asyncio.run(run_benchmark_suites(["m9_governed_ecosystem"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(M9_GOVERNED_ECOSYSTEM_BENCHMARK_SCENARIO_NAMES)
+
+
+def test_run_benchmark_suites_executes_governed_capability_pack_hardening_suite():
+    summary = asyncio.run(run_benchmark_suites(["governed_capability_pack_hardening"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GOVERNED_CAPABILITY_PACK_HARDENING_SCENARIO_NAMES)
+
+
+def test_run_marketplace_grade_capability_lifecycle_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_grade_capability_lifecycle"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_GRADE_CAPABILITY_LIFECYCLE_SCENARIO_NAMES)
+    assert all(result.details["operator_status_visible"] is True for result in summary.results)
+    assert all(result.details["rollback_receipts_visible"] is True for result in summary.results)
+
+
+def test_run_governed_capability_lifecycle_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["governed_capability_lifecycle_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(GOVERNED_CAPABILITY_LIFECYCLE_V2_SCENARIO_NAMES)
+    assert all(result.details["cross_family_coverage_visible"] is True for result in summary.results)
+    assert all(result.details["package_count_substitution_blocked"] is True for result in summary.results)
+
+
+def test_run_capability_rollback_failure_diagnostics_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["capability_rollback_failure_diagnostics"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CAPABILITY_ROLLBACK_FAILURE_DIAGNOSTICS_SCENARIO_NAMES)
+    assert all(result.details["failed_update_rolls_back"] is True for result in summary.results)
+    assert all(result.details["negative_cases_fail_closed"] is True for result in summary.results)
+
+
+def test_run_third_party_marketplace_attestation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["third_party_marketplace_attestation"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(THIRD_PARTY_MARKETPLACE_ATTESTATION_SCENARIO_NAMES)
+    assert all(result.details["provenance_signature_publisher_fields_visible"] is True for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] is True for result in summary.results)
+
+
+def test_run_marketplace_operations_incident_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_operations_incident_drill"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_OPERATIONS_INCIDENT_DRILL_SCENARIO_NAMES)
+    assert all(result.details["malicious_package_quarantined"] is True for result in summary.results)
+    assert all(result.details["failed_update_rolls_back"] is True for result in summary.results)
+
+
+def test_run_publisher_review_and_package_trust_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["publisher_review_and_package_trust"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PUBLISHER_REVIEW_AND_PACKAGE_TRUST_SCENARIO_NAMES)
+    assert all(result.details["publisher_key_rotation_visible"] is True for result in summary.results)
+    assert all(result.details["package_count_substitution_blocked"] is True for result in summary.results)
+
+
+def test_run_independent_package_security_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_package_security_review"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(INDEPENDENT_PACKAGE_SECURITY_REVIEW_SCENARIO_NAMES)
+    assert all(result.details["independent_package_reviews_visible"] is True for result in summary.results)
+    assert all(result.details["raw_receipt_paths_visible"] is True for result in summary.results)
+
+
+def test_run_hostile_ecosystem_package_drills_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["hostile_ecosystem_package_drills"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(HOSTILE_ECOSYSTEM_PACKAGE_DRILLS_SCENARIO_NAMES)
+    assert all(result.details["hostile_drills_fail_closed"] is True for result in summary.results)
+    assert all(result.details["required_hostile_classes_visible"] is True for result in summary.results)
+
+
+def test_run_package_network_incident_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["package_network_incident_operations"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PACKAGE_NETWORK_INCIDENT_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["required_network_classes_visible"] is True for result in summary.results)
+    assert all(result.details["package_network_receipts_include_redirect_and_resolved_addresses"] is True for result in summary.results)
+
+
+def test_run_publisher_trust_vulnerability_handling_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["publisher_trust_vulnerability_handling"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PUBLISHER_TRUST_VULNERABILITY_HANDLING_SCENARIO_NAMES)
+    assert all(result.details["scanner_source_freshness_visible"] is True for result in summary.results)
+    assert all(result.details["stale_db_or_review_denied"] is True for result in summary.results)
+
+
+def test_run_marketplace_rollback_quarantine_diagnostics_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_rollback_quarantine_diagnostics"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_SCENARIO_NAMES)
+    assert all(result.details["required_lifecycle_actions_visible"] is True for result in summary.results)
+    assert all(result.details["rollback_snapshots_visible"] is True for result in summary.results)
+
+
+def test_run_marketplace_security_corpus_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_security_corpus_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_SECURITY_CORPUS_SCENARIO_NAMES)
+    assert all(result.details["corpus_package_count_matches"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
+def test_run_continuous_vulnerability_monitoring_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["continuous_vulnerability_monitoring"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CONTINUOUS_VULNERABILITY_MONITORING_SCENARIO_NAMES)
+    assert all(result.details["scanner_waiver_remediation_visible"] is True for result in summary.results)
+    assert all(result.details["critical_unwaived_package_quarantined"] is True for result in summary.results)
+
+
+def test_run_publisher_trust_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["publisher_trust_operations"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PUBLISHER_TRUST_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["publisher_actions_cover_allow_hold_deny"] is True for result in summary.results)
+    assert all(result.details["network_secret_workspace_denials_visible"] is True for result in summary.results)
+
+
+def test_run_production_secure_marketplace_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_secure_marketplace_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRODUCTION_SECURE_MARKETPLACE_V1_SCENARIO_NAMES)
+    assert all(result.details["production_gate_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["promotion_gate_matrix_enforces_full_policy"] is True for result in summary.results)
+    assert all(result.details["safe_receipt_digests_bind_payload"] is True for result in summary.results)
+    assert all(result.details["production_secure_marketplace_claim_blocked"] is True for result in summary.results)
+
+
+def test_run_third_party_package_security_certification_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["third_party_package_security_certification_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(THIRD_PARTY_PACKAGE_SECURITY_CERTIFICATION_V1_SCENARIO_NAMES)
+    assert all(result.details["certification_scope_and_retest_visible"] is True for result in summary.results)
+    assert all(result.details["certification_review_proofs_bound"] is True for result in summary.results)
+    assert all(result.details["certification_claim_lift_blocked"] is True for result in summary.results)
+
+
+def test_run_marketplace_live_corpus_operations_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_live_corpus_operations_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_LIVE_CORPUS_OPERATIONS_V2_SCENARIO_NAMES)
+    assert all(result.details["live_corpus_v2_quality_visible"] is True for result in summary.results)
+    assert all(result.details["risky_packages_blocked_or_held"] is True for result in summary.results)
+
+
+def test_run_hostile_package_lifecycle_gauntlet_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["hostile_package_lifecycle_gauntlet_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V1_SCENARIO_NAMES)
+    assert all(result.details["required_hostile_drills_covered"] is True for result in summary.results)
+    assert all(result.details["expanded_hostile_lifecycle_classes_covered"] is True for result in summary.results)
+    assert all(result.details["hostile_install_script_execution_denied"] is True for result in summary.results)
+    assert all(result.details["hostile_transitive_dependency_compromise_denied"] is True for result in summary.results)
+    assert all(result.details["hostile_compromised_signing_key_denied"] is True for result in summary.results)
+    assert all(result.details["hostile_archive_path_and_symlink_escape_denied"] is True for result in summary.results)
+    assert all(result.details["hostile_runtime_fetch_and_dynamic_import_denied"] is True for result in summary.results)
+    assert all(result.details["hostile_prompt_and_tool_injection_denied"] is True for result in summary.results)
+    assert all(result.details["hostile_gauntlet_fail_closed"] is True for result in summary.results)
+
+
+def test_run_marketplace_security_certification_track_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["marketplace_security_certification_track_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(MARKETPLACE_SECURITY_CERTIFICATION_TRACK_V1_SCENARIO_NAMES)
+    assert all(result.details["certification_track_scope_visible"] is True for result in summary.results)
+    assert all(result.details["marketplace_claims_blocked"] is True for result in summary.results)
+
+
+def test_run_marketplace_production_security_benchmark_suites_pass():
+    suite_names = [
+        "production_secure_marketplace_live_ops_v2",
+        "ecosystem_supply_chain_operations_v1",
+        "hostile_package_lifecycle_gauntlet_v2",
+        "publisher_trust_vulnerability_ops_v1",
+        "marketplace_false_claim_scan_v1",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert set(PRODUCTION_SECURE_MARKETPLACE_LIVE_OPS_V2_SCENARIO_NAMES) <= result_names
+    assert set(ECOSYSTEM_SUPPLY_CHAIN_OPERATIONS_V1_SCENARIO_NAMES) <= result_names
+    assert set(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V2_SCENARIO_NAMES) <= result_names
+    assert set(PUBLISHER_TRUST_VULNERABILITY_OPS_V1_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES) <= result_names
+    assert all(result.details["live_ops_v2_lifecycle_coverage_visible"] is True for result in summary.results)
+    assert all(result.details["supply_chain_fields_and_promotion_policy_visible"] is True for result in summary.results)
+    assert all(result.details["hostile_v2_boundary_denials_visible"] is True for result in summary.results)
+    assert all(result.details["publisher_vulnerability_ops_visible"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
+def test_run_post_dp_marketplace_lifecycle_benchmark_suites_pass():
+    suite_names = [
+        "post_dp_capability_marketplace_lifecycle_gap_closure_v1",
+        "marketplace_lifecycle_operations_v3",
+        "package_review_waiver_policy_v2",
+        "marketplace_vulnerability_monitoring_v2",
+        "hostile_package_lifecycle_gauntlet_v3",
+        "marketplace_rollback_quarantine_diagnostics_v2",
+        "marketplace_secure_host_audit_integration_v1",
+        "marketplace_lifecycle_false_claim_scan_v2",
+    ]
+    summary = asyncio.run(run_benchmark_suites(suite_names))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert set(POST_DP_CAPABILITY_MARKETPLACE_LIFECYCLE_GAP_CLOSURE_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_LIFECYCLE_OPERATIONS_V3_SCENARIO_NAMES) <= result_names
+    assert set(PACKAGE_REVIEW_WAIVER_POLICY_V2_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_VULNERABILITY_MONITORING_V2_SCENARIO_NAMES) <= result_names
+    assert set(HOSTILE_PACKAGE_LIFECYCLE_GAUNTLET_V3_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_ROLLBACK_QUARANTINE_DIAGNOSTICS_V2_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_SECURE_HOST_AUDIT_INTEGRATION_V1_SCENARIO_NAMES) <= result_names
+    assert set(MARKETPLACE_LIFECYCLE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES) <= result_names
+    assert all(result.details["lifecycle_receipt_fields_visible"] is True for result in summary.results)
+    assert all(result.details["waiver_denial_policy_visible"] is True for result in summary.results)
+    assert all(result.details["rollback_quarantine_diagnostics_visible"] is True for result in summary.results)
+    assert all(result.details["secure_host_audit_integration_visible"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
+def test_run_live_browser_task_depth_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_browser_task_depth"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(LIVE_BROWSER_TASK_DEPTH_SCENARIO_NAMES)
+    assert all(result.details["task_depth_visible"] is True for result in summary.results)
+    assert all(result.details["operator_status_visible"] is True for result in summary.results)
+
+
+def test_run_autonomous_browser_safety_controls_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["autonomous_browser_safety_controls"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(AUTONOMOUS_BROWSER_SAFETY_SCENARIO_NAMES)
+    assert all(result.details["dangerous_actions_default_blocked"] is True for result in summary.results)
+    assert all(result.details["autonomous_tasks_scoped_and_block_mutation"] is True for result in summary.results)
+
+
+def test_run_browser_session_partitioning_security_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_session_partitioning_security"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_SESSION_PARTITIONING_SCENARIO_NAMES)
+    assert all(result.details["session_isolation_invariants_visible"] is True for result in summary.results)
+    assert all(result.details["secret_or_credential_leak_zero_tolerance_visible"] is True for result in summary.results)
+
+
+def test_run_site_specific_recovery_drills_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["site_specific_recovery_drills"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SITE_SPECIFIC_BROWSER_RECOVERY_SCENARIO_NAMES)
+    assert all(result.details["site_specific_recovery_visible"] is True for result in summary.results)
+    assert all(result.details["site_recovery_fails_closed"] is True for result in summary.results)
+
+
+def test_run_browser_provider_reliability_matrix_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_provider_reliability_matrix"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_PROVIDER_RELIABILITY_MATRIX_SCENARIO_NAMES)
+    assert all(result.details["provider_reliability_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["provider_modes_visible"] is True for result in summary.results)
+
+
+def test_run_independent_browser_usability_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_browser_usability_review"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(INDEPENDENT_BROWSER_USABILITY_REVIEW_SCENARIO_NAMES)
+    assert all(result.details["independent_usability_visible"] is True for result in summary.results)
+    assert all(result.details["blocked_claims_visible"] is True for result in summary.results)
+
+
+def test_run_browser_task_breadth_matrix_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_task_breadth_matrix"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_TASK_BREADTH_MATRIX_SCENARIO_NAMES)
+    assert all(result.details["task_breadth_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["recorded_live_depth_visible"] is True for result in summary.results)
+
+
+def test_run_browser_auth_partition_operations_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_auth_partition_operations"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_AUTH_PARTITION_OPERATIONS_SCENARIO_NAMES)
+    assert all(result.details["partition_operations_visible"] is True for result in summary.results)
+    assert all(result.details["unapproved_external_mutation_blocked"] is True for result in summary.results)
+
+
+def test_run_site_drift_recovery_slo_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["site_drift_recovery_slo"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SITE_DRIFT_RECOVERY_SLO_SCENARIO_NAMES)
+    assert all(result.details["site_drift_modes_visible"] is True for result in summary.results)
+    assert all(result.details["site_drift_slo_visible"] is True for result in summary.results)
+
+
+def test_run_safe_autonomous_browser_runtime_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["safe_autonomous_browser_runtime_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SAFE_AUTONOMOUS_BROWSER_RUNTIME_V1_SCENARIO_NAMES)
+    assert all(result.details["runtime_task_corpus_visible"] is True for result in summary.results)
+    assert all(result.details["provider_execution_caveat_enforced"] is True for result in summary.results)
+
+
+def test_run_full_browser_parity_matrix_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["full_browser_parity_matrix_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(FULL_BROWSER_PARITY_MATRIX_V1_SCENARIO_NAMES)
+    assert all(result.details["provider_modes_covered"] is True for result in summary.results)
+    assert all(result.details["all_boundaries_enforced"] is True for result in summary.results)
+    assert all(result.details["full_browser_parity_not_claimed"] is True for result in summary.results)
+
+
+def test_run_real_site_drift_recovery_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["real_site_drift_recovery_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(REAL_SITE_DRIFT_RECOVERY_V2_SCENARIO_NAMES)
+    assert all(result.details["real_site_drift_classes_visible"] is True for result in summary.results)
+    assert all(result.details["real_site_drift_fails_closed"] is True for result in summary.results)
+
+
+def test_run_browser_session_partition_certification_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_session_partition_certification_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_SESSION_PARTITION_CERTIFICATION_V1_SCENARIO_NAMES)
+    assert all(result.details["partition_certification_scope_visible"] is True for result in summary.results)
+    assert all(result.details["partition_claim_lift_blocked"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
+def test_run_browser_computer_use_production_safety_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["browser_computer_use_production_safety_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(BROWSER_COMPUTER_USE_PRODUCTION_SAFETY_V1_SCENARIO_NAMES)
+    assert all(result.details["provider_modes_visible"] is True for result in summary.results)
+    assert all(result.details["production_boundary_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["production_boundaries_enforced"] is True for result in summary.results)
+    assert all(result.details["hostile_pages_fail_closed"] is True for result in summary.results)
+    assert all(result.details["dangerous_action_policy_visible"] is True for result in summary.results)
+    assert all(result.details["browser_claims_blocked"] is True for result in summary.results)
+
+
+def test_run_browser_computer_use_production_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "safe_browser_automation_live_ops_v1",
+            "credentialed_site_recovery_v1",
+            "browser_provider_parity_candidate_v1",
+            "browser_session_partition_attestation_v2",
+            "browser_false_claim_scan_v1",
+        ])
+    )
+
+    result_names = {result.name for result in summary.results}
+    expected = (
+        set(SAFE_BROWSER_AUTOMATION_LIVE_OPS_V1_SCENARIO_NAMES)
+        | set(CREDENTIALED_SITE_RECOVERY_V1_SCENARIO_NAMES)
+        | set(BROWSER_PROVIDER_PARITY_CANDIDATE_V1_SCENARIO_NAMES)
+        | set(BROWSER_SESSION_PARTITION_ATTESTATION_V2_SCENARIO_NAMES)
+        | set(BROWSER_FALSE_CLAIM_SCAN_V1_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert result_names == expected
+    assert all(result.details["live_ops_receipts_visible"] is True for result in summary.results)
+    assert all(result.details["credentialed_site_recovery_visible"] is True for result in summary.results)
+    assert all(result.details["credentialed_site_recovery_fails_closed"] is True for result in summary.results)
+    assert all(result.details["provider_parity_candidate_visible"] is True for result in summary.results)
+    assert all(result.details["remote_degradation_cases_visible"] is True for result in summary.results)
+    assert all(result.details["partition_attestation_v2_visible"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_visible"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+
+
+def test_run_post_dp_browser_computer_use_reliability_benchmark_suites_pass():
+    summary = asyncio.run(
+        run_benchmark_suites([
+            "post_dp_browser_computer_use_reliability_v1",
+            "browser_live_provider_reliability_v2",
+            "browser_session_boundary_enforcement_v3",
+            "browser_credentialed_recovery_v2",
+            "browser_site_drift_recovery_v3",
+            "browser_hostile_page_safety_v2",
+            "browser_provider_degradation_v2",
+            "browser_computer_use_false_claim_scan_v2",
+        ])
+    )
+
+    result_names = {result.name for result in summary.results}
+    expected = (
+        set(POST_DP_BROWSER_COMPUTER_USE_RELIABILITY_SCENARIO_NAMES)
+        | set(BROWSER_LIVE_PROVIDER_RELIABILITY_V2_SCENARIO_NAMES)
+        | set(BROWSER_SESSION_BOUNDARY_ENFORCEMENT_V3_SCENARIO_NAMES)
+        | set(BROWSER_CREDENTIALED_RECOVERY_V2_SCENARIO_NAMES)
+        | set(BROWSER_SITE_DRIFT_RECOVERY_V3_SCENARIO_NAMES)
+        | set(BROWSER_HOSTILE_PAGE_SAFETY_V2_SCENARIO_NAMES)
+        | set(BROWSER_PROVIDER_DEGRADATION_V2_SCENARIO_NAMES)
+        | set(BROWSER_COMPUTER_USE_FALSE_CLAIM_SCAN_V2_SCENARIO_NAMES)
+    )
+
+    assert summary.failed == 0
+    assert result_names == expected
+    assert all(result.details["non_duplicate_delta_matrix_visible"] is True for result in summary.results)
+    assert all(result.details["artifact_provenance_complete"] is True for result in summary.results)
+    assert all(result.details["provider_reliability_visible"] is True for result in summary.results)
+    assert all(result.details["session_boundaries_enforced"] is True for result in summary.results)
+    assert all(result.details["credentialed_recovery_fails_closed"] is True for result in summary.results)
+    assert all(result.details["site_drift_preserves_authority"] is True for result in summary.results)
+    assert all(result.details["hostile_pages_fail_closed"] is True for result in summary.results)
+    assert all(result.details["provider_degradation_fails_closed"] is True for result in summary.results)
+    assert all(result.details["safe_receipts_redacted"] is True for result in summary.results)
+    assert all(result.details["negative_validator_clean"] is True for result in summary.results)
+    assert all(result.details["false_claim_scan_command_backed"] is True for result in summary.results)
+
+
+def test_operator_governed_capability_pack_hardening_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_governed_capability_pack_hardening_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["review_receipt_state_visible"] is True
+    assert details["rollback_state_visible"] is True
+    assert details["failure_taxonomy_covers_issue_cases"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_count_matches"] is True
+
+
+def test_m9_lifecycle_review_gate_behavior_exercises_real_fail_closed_paths():
+    summary = asyncio.run(run_runtime_evals(["m9_lifecycle_review_gate_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["all_lifecycle_actions_gated"] is True
+    assert details["real_configure_blocked"] is True
+    assert details["real_source_save_blocked"] is True
+    assert details["real_mcp_runtime_disabled"] is True
+    assert details["real_managed_connector_disabled"] is True
+    assert details["real_persisted_connector_disabled"] is True
+
+
+def test_operator_m9_governed_ecosystem_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m9_governed_ecosystem_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["benchmark_posture_green"] is True
+    assert details["manifest_governance_state_visible"] is True
+    assert details["connector_health_state_visible"] is True
+    assert details["marketplace_governance_state_visible"] is True
+    assert details["diagnostics_update_triage_state_visible"] is True
+    assert details["dimensions_visible"] is True
+    assert details["failure_taxonomy_visible"] is True
+    assert details["policy_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_count_matches"] is True
+
+
+def test_workflow_endurance_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_workflow_endurance_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["fidelity_state_visible"] is True
+    assert details["backup_branch_policy_visible"] is True
+
+
+def test_trust_boundary_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_trust_boundary_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["secret_egress_state_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["ci_gate_mode_visible"] is True
+
+
+def test_computer_use_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_computer_use_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["browser_replay_state_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+    assert details["ci_gate_mode_visible"] is True
+
+
+def test_governed_improvement_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_governed_improvement_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["anti_misevolution_state_visible"] is True
+    assert details["rollback_state_visible"] is True
+    assert details["recent_receipts_visible"] is True
+    assert details["receipt_surface_count"] == 4
+
+
+def test_run_benchmark_suites_executes_trust_boundary_and_safety_receipts_suite():
+    summary = asyncio.run(run_benchmark_suites(["trust_boundary_and_safety_receipts"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "secret_ref_egress_boundary_behavior",
+        "tool_policy_guardrails_behavior",
+        "delegation_secret_boundary_behavior",
+        "process_recovery_boundary_behavior",
+        "background_session_handoff_behavior",
+        "workflow_boundary_blocked_surface_behavior",
+        "source_mutation_boundary_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_secure_capability_host_suite():
+    summary = asyncio.run(run_benchmark_suites(["secure_capability_host"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "secure_host_secret_ref_fail_closed_behavior",
+        "secure_host_isolation_strategy_report_behavior",
+        "secure_host_browser_cookie_session_partition_behavior",
+        "secure_host_workspace_secret_path_boundary_behavior",
+        "secure_host_workspace_escape_boundary_behavior",
+        "secure_host_process_env_isolation_behavior",
+        "secure_host_prompt_injection_quarantine_behavior",
+        "secure_host_delegation_partition_behavior",
+        "secure_host_provider_fallback_boundary_behavior",
+        "secure_host_hostile_provider_replay_behavior",
+        "secure_host_capability_trust_matrix_behavior",
+        "secure_host_receipt_surface_completeness_behavior",
+        "operator_secure_capability_host_benchmark_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_production_secure_host_hardening_suite():
+    summary = asyncio.run(run_benchmark_suites(["production_secure_host_hardening"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "production_secure_host_batch_contract_behavior",
+        "production_secure_host_receipt_schema_behavior",
+        "production_secure_host_claim_boundary_behavior",
+        "operator_production_secure_host_hardening_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_secure_capability_host_live_isolation_v2_suite():
+    summary = asyncio.run(run_benchmark_suites(["secure_capability_host_live_isolation_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "secure_host_live_secret_redaction_replay_behavior",
+        "secure_host_live_browser_recovery_partition_behavior",
+        "secure_host_live_private_network_egress_behavior",
+        "secure_host_live_extension_revocation_behavior",
+        "secure_host_live_workflow_replay_trust_drift_behavior",
+    }
+
+
+def test_run_production_isolation_hardening_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["production_isolation_hardening_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRODUCTION_ISOLATION_HARDENING_V2_SCENARIO_NAMES)
+
+
+def test_run_privileged_path_red_team_gauntlet_v2_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["privileged_path_red_team_gauntlet_v2"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(PRIVILEGED_PATH_RED_TEAM_GAUNTLET_V2_SCENARIO_NAMES)
+
+
+def test_run_security_incident_recovery_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["security_incident_recovery_drill"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SECURITY_INCIDENT_RECOVERY_DRILL_SCENARIO_NAMES)
+
+
+def test_run_independent_secure_host_review_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["independent_secure_host_review"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(INDEPENDENT_SECURE_HOST_REVIEW_SCENARIO_NAMES)
+
+
+def test_run_live_hostile_isolation_drills_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["live_hostile_isolation_drills"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(LIVE_HOSTILE_ISOLATION_DRILLS_SCENARIO_NAMES)
+
+
+def test_run_secure_host_recovery_authority_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["secure_host_recovery_authority"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SECURE_HOST_RECOVERY_AUTHORITY_SCENARIO_NAMES)
+
+
+def test_run_container_grade_capability_isolation_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["container_grade_capability_isolation"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CONTAINER_GRADE_CAPABILITY_ISOLATION_SCENARIO_NAMES)
+
+
+def test_run_external_security_validation_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["external_security_validation_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(EXTERNAL_SECURITY_VALIDATION_V1_SCENARIO_NAMES)
+
+
+def test_run_secret_egress_certification_drill_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["secret_egress_certification_drill"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(SECRET_EGRESS_CERTIFICATION_DRILL_SCENARIO_NAMES)
+
+
+def test_run_runtime_isolation_implementation_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["runtime_isolation_implementation_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(RUNTIME_ISOLATION_IMPLEMENTATION_SCENARIO_NAMES)
+
+
+def test_run_credential_broker_egress_enforcement_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["credential_broker_egress_enforcement_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(CREDENTIAL_BROKER_EGRESS_ENFORCEMENT_SCENARIO_NAMES)
+
+
+def test_run_external_security_certification_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["external_security_certification_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(EXTERNAL_SECURITY_CERTIFICATION_SCENARIO_NAMES)
+
+
+def test_run_hostile_runtime_escape_gauntlet_v1_benchmark_suite_passes():
+    summary = asyncio.run(run_benchmark_suites(["hostile_runtime_escape_gauntlet_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == set(HOSTILE_RUNTIME_ESCAPE_GAUNTLET_SCENARIO_NAMES)
+
+
+def test_operator_secure_capability_host_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_secure_capability_host_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["host_isolation_state_visible"] is True
+    assert details["credential_egress_state_visible"] is True
+    assert details["workspace_escape_state_visible"] is True
+    assert details["process_environment_state_visible"] is True
+    assert details["browser_cookie_session_state_visible"] is True
+    assert details["hostile_provider_replay_state_visible"] is True
+    assert details["capability_trust_matrix_visible"] is True
+    assert details["receipt_surface_completeness_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+
+
+def test_operator_production_secure_host_hardening_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_production_secure_host_hardening_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["live_isolation_state_visible"] is True
+    assert details["browser_recovery_partition_state_visible"] is True
+    assert details["private_network_egress_state_visible"] is True
+    assert details["extension_revocation_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["dedicated_surface_visible"] is True
+    assert details["failure_report_empty_when_healthy"] is True
+
+
+def test_operator_m6_memory_superiority_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m6_memory_superiority_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["long_horizon_state_visible"] is True
+    assert details["source_trust_privacy_state_visible"] is True
+    assert details["behavior_change_receipt_state_visible"] is True
+    assert details["ci_gate_mode_visible"] is True
+
+
+def test_run_benchmark_suites_executes_workflow_endurance_and_repair_suite():
+    summary = asyncio.run(run_benchmark_suites(["workflow_endurance_and_repair"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "workflow_anticipatory_repair_behavior",
+        "workflow_condensation_fidelity_behavior",
+        "workflow_backup_branch_surface_behavior",
+        "workflow_multi_session_endurance_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_live_workflow_endurance_canary_suite():
+    summary = asyncio.run(run_benchmark_suites(["live_workflow_endurance_canary"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "live_workflow_canary_protocol_behavior",
+        "live_workflow_canary_failure_recovery_behavior",
+        "live_workflow_canary_approval_preservation_behavior",
+        "operator_live_workflow_canary_surface_behavior",
+    }
+
+
+def test_live_workflow_endurance_canary_runtime_eval_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "live_workflow_canary_protocol_behavior",
+                "live_workflow_canary_failure_recovery_behavior",
+                "live_workflow_canary_approval_preservation_behavior",
+                "operator_live_workflow_canary_surface_behavior",
+            ]
+        )
+    )
+
+    assert summary.total == 4
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    protocol = details_by_name["live_workflow_canary_protocol_behavior"]
+    assert protocol["suite_name_visible"] is True
+    assert protocol["durable_engine_not_claimed"] is True
+    assert protocol["receipt_contract_covers_core_fields"] is True
+
+    recovery = details_by_name["live_workflow_canary_failure_recovery_behavior"]
+    assert recovery["multi_session_visible"] is True
+    assert recovery["failure_injection_visible"] is True
+    assert recovery["retry_recovery_visible"] is True
+    assert recovery["artifact_comparison_visible"] is True
+
+    approval = details_by_name["live_workflow_canary_approval_preservation_behavior"]
+    assert approval["fingerprint_preserved"] is True
+    assert approval["trust_boundary_drift_blocks_replay"] is True
+    assert approval["drift_checkpoint_suppressed"] is True
+
+    surface = details_by_name["operator_live_workflow_canary_surface_behavior"]
+    assert surface["operator_story_complete"] is True
+    assert surface["benchmark_surface_visible"] is True
+
+
+def test_run_benchmark_suites_executes_live_long_horizon_eval_replay_suite():
+    summary = asyncio.run(run_benchmark_suites(["live_long_horizon_eval_replay_v1"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "live_replay_fixture_contract_behavior",
+        "live_replay_cross_surface_failure_taxonomy_behavior",
+        "live_replay_surface_coverage_behavior",
+        "live_replay_operator_receipt_behavior",
+        "operator_live_replay_benchmark_surface_behavior",
+    }
+
+
+def test_operator_live_replay_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_live_replay_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["fixture_state_visible"] is True
+    assert details["coverage_state_visible"] is True
+    assert details["taxonomy_state_visible"] is True
+    assert details["operator_receipt_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["fixture_count_matches_surfaces"] is True
+
+
+def test_run_benchmark_suites_executes_computer_use_browser_desktop_suite():
+    summary = asyncio.run(run_benchmark_suites(["computer_use_browser_desktop"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "browser_execution_task_replay_behavior",
+        "browser_runtime_audit",
+        "native_desktop_shell_behavior",
+        "desktop_notification_action_replay_behavior",
+        "cross_surface_notification_controls_behavior",
+        "cross_surface_continuity_behavior",
+        "workflow_boundary_blocked_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_channels_presence_device_pairing_suite():
+    summary = asyncio.run(run_benchmark_suites(["channels_presence_device_pairing"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "channel_identity_boundary_metadata_behavior",
+        "external_channel_continuity_behavior",
+        "device_pairing_revocation_fail_closed",
+        "channel_mutation_boundary_behavior",
+        "channel_abuse_failure_review_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_one_excellent_reach_channel_canary_suite():
+    summary = asyncio.run(run_benchmark_suites(["one_excellent_reach_channel_canary"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "one_reach_channel_selection_scope_behavior",
+        "native_notification_pairing_revocation_behavior",
+        "native_notification_health_retry_degraded_behavior",
+        "native_notification_continuity_approval_audit_behavior",
+        "operator_one_reach_channel_canary_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_m5_jobs_routines_workflows_delegation_suite():
+    summary = asyncio.run(run_benchmark_suites(["m5_jobs_routines_workflows_delegation"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "m5_operating_layer_payload_behavior",
+        "scheduled_job_run_history_behavior",
+        "scheduled_job_pause_resume_no_fire_behavior",
+        "delegation_trust_partition_receipt_behavior",
+        "operator_m5_benchmark_surface_behavior",
+    }
+
+
+def test_run_benchmark_suites_executes_m7_operator_cockpit_legibility_suite():
+    summary = asyncio.run(run_benchmark_suites(["m7_operator_cockpit_legibility"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "operator_cockpit_receipt_legibility_behavior",
+        "operator_fast_control_availability_behavior",
+        "operator_control_plane_handoff_legibility_behavior",
+        "operator_m7_cockpit_benchmark_surface_behavior",
+    }
+
+
+def test_operator_m7_cockpit_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_m7_cockpit_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["receipt_legibility_state_visible"] is True
+    assert details["fast_control_state_visible"] is True
+    assert details["claim_boundary_visible"] is True
+    assert details["receipt_surfaces_visible"] is True
+
+
+def test_run_benchmark_suites_executes_cockpit_operator_efficiency_suite():
+    summary = asyncio.run(run_benchmark_suites(["cockpit_operator_efficiency_benchmark"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "cockpit_efficiency_task_fixture_behavior",
+        "cockpit_efficiency_threshold_behavior",
+        "cockpit_efficiency_receipt_coverage_behavior",
+        "cockpit_efficiency_baseline_claim_boundary_behavior",
+        "operator_cockpit_efficiency_benchmark_surface_behavior",
+    }
+
+
+def test_operator_cockpit_efficiency_benchmark_surface_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["operator_cockpit_efficiency_benchmark_surface_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["suite_name_visible"] is True
+    assert details["operator_status_visible"] is True
+    assert details["scenario_count_matches"] is True
+    assert details["scripted_task_state_visible"] is True
+    assert details["threshold_state_visible"] is True
+    assert details["receipt_coverage_state_visible"] is True
+    assert details["scorecard_task_count_matches"] is True
+    assert details["claim_boundary_visible"] is True
+
+
+def test_cockpit_efficiency_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals([
+        "cockpit_efficiency_task_fixture_behavior",
+        "cockpit_efficiency_threshold_behavior",
+        "cockpit_efficiency_receipt_coverage_behavior",
+        "cockpit_efficiency_baseline_claim_boundary_behavior",
+    ]))
+
+    assert summary.total == 4
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    task_details = details_by_name["cockpit_efficiency_task_fixture_behavior"]
+    assert task_details["required_tasks_present"] is True
+    assert task_details["all_tasks_have_initial_state"] is True
+    assert task_details["all_tasks_have_success_condition"] is True
+    assert task_details["all_tasks_have_measured_counters"] is True
+    assert task_details["task_count"] == 11
+
+    threshold_details = details_by_name["cockpit_efficiency_threshold_behavior"]
+    assert threshold_details["baseline_is_current_seraph"] is True
+    assert threshold_details["baseline_scope_visible"] is True
+    assert threshold_details["no_regression_rule_visible"] is True
+    assert threshold_details["confidence_is_proxy_bounded"] is True
+    assert threshold_details["action_budget_visible"] is True
+    assert threshold_details["time_budget_visible"] is True
+
+    receipt_details = details_by_name["cockpit_efficiency_receipt_coverage_behavior"]
+    assert receipt_details["unique_receipts_for_tasks"] is True
+    assert receipt_details["dedicated_surface_visible"] is True
+
+    boundary_details = details_by_name["cockpit_efficiency_baseline_claim_boundary_behavior"]
+    assert boundary_details["competitor_claim_policy_visible"] is True
+    assert boundary_details["claim_boundary_visible"] is True
+
+
+def test_run_benchmark_suites_executes_memory_provider_quality_gate_suite():
+    summary = asyncio.run(run_benchmark_suites(["memory_provider_quality_gate"]))
+
+    result_names = {result.name for result in summary.results}
+
+    assert summary.failed == 0
+    assert result_names == {
+        "memory_provider_quality_gate_contract_behavior",
+        "memory_provider_quality_gate_improvement_behavior",
+        "memory_provider_quality_gate_suppression_behavior",
+        "operator_memory_provider_quality_gate_surface_behavior",
+    }
+
+
+def test_memory_provider_quality_gate_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals([
+        "memory_provider_quality_gate_contract_behavior",
+        "memory_provider_quality_gate_improvement_behavior",
+        "memory_provider_quality_gate_suppression_behavior",
+        "operator_memory_provider_quality_gate_surface_behavior",
+    ]))
+
+    assert summary.total == 4
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    contract = details_by_name["memory_provider_quality_gate_contract_behavior"]
+    assert contract["provider_declaration_complete"] is True
+    assert contract["provider_declares_suppression_rules"] is True
+    assert contract["quality_controls_declaration_complete"] is True
+
+    improvement = details_by_name["memory_provider_quality_gate_improvement_behavior"]
+    assert improvement["baseline_without_provider_would_be_empty"] is True
+    assert improvement["provider_improved_recall"] is True
+    assert improvement["provider_secret_redacted_from_summary"] is True
+    assert improvement["provider_secret_redacted_from_notes"] is True
+
+    suppression = details_by_name["memory_provider_quality_gate_suppression_behavior"]
+    assert suppression["low_confidence_suppressed"] is True
+    assert suppression["unsafe_privacy_suppressed"] is True
+    assert suppression["conflict_policy_drift_suppressed"] is True
+    assert suppression["suppressed_before_context"] is True
+
+    surface = details_by_name["operator_memory_provider_quality_gate_surface_behavior"]
+    assert surface["suite_name_visible"] is True
+    assert surface["suppression_state_visible"] is True
+    assert surface["policy_requires_declarations"] is True
+    assert surface["claim_boundary_visible"] is True
+
+
+def test_m7_cockpit_legibility_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals([
+        "operator_cockpit_receipt_legibility_behavior",
+        "operator_fast_control_availability_behavior",
+        "operator_control_plane_handoff_legibility_behavior",
+    ]))
+
+    assert summary.total == 3
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    receipt_details = details_by_name["operator_cockpit_receipt_legibility_behavior"]
+    assert receipt_details["all_receipts_readable"] is True
+    assert receipt_details["routing_receipt_visible"] is True
+
+    control_details = details_by_name["operator_fast_control_availability_behavior"]
+    assert control_details["endpoint_operator_status_visible"] is True
+    assert control_details["work_item_controls_labeled"] is True
+    assert control_details["work_item_approval_not_overstated"] is True
+    assert control_details["approval_direct_control_visible"] is True
+    assert control_details["repair_control_routed_visible"] is True
+    assert control_details["branch_control_draft_visible"] is True
+    assert control_details["revoke_not_overstated"] is True
+
+    handoff_details = details_by_name["operator_control_plane_handoff_legibility_behavior"]
+    assert handoff_details["workspace_mode_visible"] is True
+    assert handoff_details["connector_boundary_visible"] is True
+    assert handoff_details["blocked_workflow_boundary_visible"] is True
+
+
+def test_channels_presence_device_pairing_runtime_eval_details():
+    summary = asyncio.run(run_benchmark_suites(["channels_presence_device_pairing"]))
+
+    assert summary.total == 5
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    boundary = details_by_name["channel_identity_boundary_metadata_behavior"]
+    assert boundary["surface_count"] == 4
+    assert boundary["boundary_metadata_complete"] is True
+    assert boundary["external_surfaces_require_approval"] is True
+    assert boundary["operator_visible"] is True
+    assert "paired_device" in boundary["identity_scopes"]
+    assert "approved_device_action_only" in boundary["mutation_boundaries"]
+    assert "paired_device_node" in boundary["trust_boundaries"]
+
+    pairing = details_by_name["device_pairing_revocation_fail_closed"]
+    assert pairing["active_pair_count"] == 1
+    assert pairing["revoked_pair_count"] == 1
+    assert pairing["revocation_visible"] is True
+    assert pairing["revoked_state_visible"] is True
+    assert pairing["revoked_follow_up_blocked"] is True
+    assert pairing["blocked_reasons"] == ["device_pairing_revoked"]
+
+    continuity = details_by_name["external_channel_continuity_behavior"]
+    assert continuity["follow_up_count"] == 2
+    assert continuity["same_thread_follow_up"] is True
+    assert continuity["continuation_modes"] == ["resume_thread"]
+    assert continuity["boundary_metadata_preserved"] is True
+    assert continuity["resume_messages_present"] is True
+
+    mutation = details_by_name["channel_mutation_boundary_behavior"]
+    assert mutation["external_surface_count"] == 2
+    assert mutation["direct_external_mutation_allowed"] is False
+    assert mutation["approval_gated_external_boundaries"] is True
+    assert mutation["revoked_identity_mutation_blocked"] is True
+    assert mutation["claim_boundary"] == "deterministic_receipts_only_not_live_broad_transport_mutation"
+
+    review = details_by_name["channel_abuse_failure_review_behavior"]
+    assert review["review_case_count"] == 3
+    assert review["abuse_review_visible"] is True
+    assert review["failure_review_visible"] is True
+    assert review["operator_receipts_visible"] is True
+    assert review["blocked_case_count"] == 1
+
+
+def test_one_excellent_reach_channel_canary_runtime_eval_details():
+    summary = asyncio.run(run_benchmark_suites(["one_excellent_reach_channel_canary"]))
+
+    assert summary.total == 5
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+    selection = details_by_name["one_reach_channel_selection_scope_behavior"]
+    assert selection["native_notification_selected"] is True
+    assert selection["channel_sprawl_rejected"] is True
+    assert selection["broad_live_reach_not_claimed"] is True
+
+    pairing = details_by_name["native_notification_pairing_revocation_behavior"]
+    assert pairing["pairing_state_visible"] is True
+    assert pairing["revoked_follow_up_hidden"] is True
+
+    health = details_by_name["native_notification_health_retry_degraded_behavior"]
+    assert health["ready_health_visible"] is True
+    assert health["degraded_health_visible"] is True
+    assert health["retry_policy_visible"] is True
+    assert health["unsafe_follow_up_hidden"] is True
+
+    continuity = details_by_name["native_notification_continuity_approval_audit_behavior"]
+    assert continuity["thread_continuity_visible"] is True
+    assert continuity["memory_context_visible"] is True
+    assert continuity["approval_handoff_visible"] is True
+    assert continuity["audit_receipts_visible"] is True
+    assert continuity["e2e_flow_visible"] is True
+    assert continuity["content_redacted"] is True
+
+    surface = details_by_name["operator_one_reach_channel_canary_surface_behavior"]
+    assert surface["selected_channel_visible"] is True
+    assert surface["operator_story_complete"] is True
+    assert surface["claim_boundary_visible"] is True
+
+
+def test_browser_execution_task_replay_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["browser_execution_task_replay_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["extract_contains_checklist"] is True
+    assert details["html_contains_button"] is True
+    assert details["screenshot_contains_base64"] is True
+    assert details["all_actions_logged"] is True
+    assert details["allowlist_rule_visible"] is True
+
+
+def test_desktop_notification_action_replay_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["desktop_notification_action_replay_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+    assert details["listed_pending_count"] >= 1
+    assert details["dismissed"] is True
+    assert details["dismiss_event_source"] == "browser_controls"
+    assert details["polled_notification_matches"] is True
+    assert details["poll_pending_count_visible"] is True
+    assert details["acked"] is True
+    assert details["ack_event_matches"] is True
+    assert details["final_pending_count"] == 0
+
+
+def test_process_recovery_boundary_behavior_runtime_eval_details():
+    summary = asyncio.run(run_runtime_evals(["process_recovery_boundary_behavior"]))
+
+    assert summary.total == 1
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert details["session_scoped"] is True
+    assert details["output_path_within_workspace"] is False
+    assert details["owner_list_includes_process"] is True
+    assert details["owner_output_visible"] is True
+    assert details["owner_stop_succeeds"] is True
+    assert details["other_list_hidden"] is True
+    assert details["other_read_hidden"] is True
+    assert details["other_stop_hidden"] is True
+
+
 def test_main_lists_available_scenarios(capsys):
     exit_code = main(["--list"])
 
@@ -54,6 +3731,10 @@ def test_main_lists_available_scenarios(capsys):
     assert "strategist_tick_learning_continuity_behavior" in captured.out
     assert "guardian_state_synthesis" in captured.out
     assert "guardian_world_model_behavior" in captured.out
+    assert "guardian_judgment_behavior" in captured.out
+    assert "guardian_user_model_continuity_behavior" in captured.out
+    assert "guardian_clarification_restraint_behavior" in captured.out
+    assert "guardian_long_horizon_learning_behavior" in captured.out
     assert "observer_refresh_behavior" in captured.out
     assert "observer_delivery_decision_behavior" in captured.out
     assert "native_presence_notification_behavior" in captured.out
@@ -71,13 +3752,47 @@ def test_main_lists_available_scenarios(capsys):
     assert "context_window_summary_audit" in captured.out
     assert "agent_local_runtime_profile" in captured.out
     assert "delegation_local_runtime_profile" in captured.out
+    assert "delegation_secret_boundary_behavior" in captured.out
+    assert "secret_ref_egress_boundary_behavior" in captured.out
     assert "delegated_tool_workflow_behavior" in captured.out
     assert "delegated_tool_workflow_degraded_behavior" in captured.out
     assert "workflow_composition_behavior" in captured.out
     assert "workflow_approval_threading_behavior" in captured.out
     assert "threaded_operator_timeline_behavior" in captured.out
+    assert "background_session_handoff_behavior" in captured.out
+    assert "workflow_context_condenser_behavior" in captured.out
+    assert "workflow_operating_layer_behavior" in captured.out
+    assert "workflow_anticipatory_repair_behavior" in captured.out
+    assert "workflow_condensation_fidelity_behavior" in captured.out
+    assert "workflow_backup_branch_surface_behavior" in captured.out
+    assert "workflow_multi_session_endurance_behavior" in captured.out
+    assert "live_workflow_canary_protocol_behavior" in captured.out
+    assert "operator_live_workflow_canary_surface_behavior" in captured.out
+    assert "engineering_memory_bundle_behavior" in captured.out
+    assert "operator_continuity_graph_behavior" in captured.out
+    assert "operator_guardian_state_surface_behavior" in captured.out
+    assert "workflow_boundary_blocked_surface_behavior" in captured.out
+    assert "approval_explainability_surface_behavior" in captured.out
+    assert "source_report_action_workflow_behavior" in captured.out
+    assert "governed_self_evolution_behavior" in captured.out
+    assert "governed_preference_diversity_behavior" in captured.out
+    assert "governed_canary_rollout_behavior" in captured.out
+    assert "benchmark_proof_surface_behavior" in captured.out
+    assert "operator_workflow_endurance_benchmark_surface_behavior" in captured.out
+    assert "operator_trust_boundary_benchmark_surface_behavior" in captured.out
+    assert "operator_computer_use_benchmark_surface_behavior" in captured.out
+    assert "channel_identity_boundary_metadata_behavior" in captured.out
+    assert "external_channel_continuity_behavior" in captured.out
+    assert "device_pairing_revocation_fail_closed" in captured.out
+    assert "channel_mutation_boundary_behavior" in captured.out
+    assert "channel_abuse_failure_review_behavior" in captured.out
+    assert "one_reach_channel_selection_scope_behavior" in captured.out
+    assert "operator_one_reach_channel_canary_surface_behavior" in captured.out
+    assert "operator_governed_improvement_benchmark_surface_behavior" in captured.out
     assert "capability_repair_behavior" in captured.out
     assert "capability_preflight_behavior" in captured.out
+    assert "activity_ledger_attribution_behavior" in captured.out
+    assert "imported_capability_surface_behavior" in captured.out
     assert "mcp_specialist_local_runtime_profile" in captured.out
     assert "embedding_runtime_audit" in captured.out
     assert "vector_store_runtime_audit" in captured.out
@@ -92,31 +3807,552 @@ def test_main_lists_available_scenarios(capsys):
     assert "provider_policy_scoring" in captured.out
     assert "provider_policy_safeguards" in captured.out
     assert "provider_routing_decision_audit" in captured.out
+    assert "memory_engineering_retrieval_benchmark_behavior" in captured.out
+    assert "memory_contradiction_ranking_behavior" in captured.out
+    assert "memory_selective_forgetting_surface_behavior" in captured.out
+    assert "operator_memory_benchmark_surface_behavior" in captured.out
     assert "session_bound_llm_trace" in captured.out
     assert "session_consolidation_behavior" in captured.out
+    assert "memory_commitment_continuity_behavior" in captured.out
+    assert "memory_collaborator_lookup_behavior" in captured.out
+    assert "memory_provider_user_model_behavior" in captured.out
+    assert "memory_provider_stale_evidence_behavior" in captured.out
+    assert "memory_provider_writeback_behavior" in captured.out
+    assert "bounded_memory_snapshot_behavior" in captured.out
+    assert "memory_supersession_filter_behavior" in captured.out
+    assert "memory_decay_contradiction_cleanup_behavior" in captured.out
+    assert "memory_reconciliation_policy_behavior" in captured.out
+    assert "procedural_memory_adaptation_behavior" in captured.out
+    assert "m6_long_horizon_recall_behavior" in captured.out
+    assert "m6_source_trust_privacy_boundary_behavior" in captured.out
+    assert "operator_m6_memory_superiority_benchmark_surface_behavior" in captured.out
     assert "scheduled_local_runtime_profile" in captured.out
+    assert "process_recovery_boundary_behavior" in captured.out
     assert "daily_briefing_delivery_behavior" in captured.out
+    assert "browser_execution_task_replay_behavior" in captured.out
+    assert "desktop_notification_action_replay_behavior" in captured.out
     assert "shell_tool_runtime_audit" in captured.out
     assert "browser_runtime_audit" in captured.out
-    assert "web_search_runtime_audit" in captured.out
-    assert "web_search_empty_result_audit" in captured.out
-    assert "observer_calendar_source_audit" in captured.out
-    assert "observer_git_source_audit" in captured.out
-    assert "observer_goal_source_audit" in captured.out
-    assert "observer_time_source_audit" in captured.out
-    assert "observer_delivery_gate_audit" in captured.out
-    assert "observer_delivery_transport_audit" in captured.out
-    assert "observer_daemon_ingest_audit" in captured.out
-    assert "mcp_test_api_audit" in captured.out
-    assert "skills_api_audit" in captured.out
-    assert "tool_policy_guardrails_behavior" in captured.out
-    assert "screen_repository_runtime_audit" in captured.out
-    assert "daily_briefing_degraded_memories_audit" in captured.out
-    assert "activity_digest_degraded_delivery_behavior" in captured.out
-    assert "activity_digest_degraded_summary_audit" in captured.out
-    assert "evening_review_degraded_delivery_behavior" in captured.out
-    assert "evening_review_degraded_inputs_audit" in captured.out
-    assert "guardian_learning_policy_v2_behavior" in captured.out
+
+
+def test_main_lists_available_benchmark_suites(capsys):
+    exit_code = main(["--list-benchmark-suites"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "production_parity_readiness" in captured.out
+    assert "guardian_memory_quality" in captured.out
+    assert "guardian_user_model_restraint" in captured.out
+    assert "memory_continuity_workflows" in captured.out
+    assert "m6_memory_superiority" in captured.out
+    assert "memory_provider_quality_gate" in captured.out
+    assert "workflow_endurance_and_repair" in captured.out
+    assert "live_workflow_endurance_canary" in captured.out
+    assert "production_workflow_state_machine_v1" in captured.out
+    assert "crash_proof_orchestration_fault_campaign" in captured.out
+    assert "external_side_effect_reconciliation_v3" in captured.out
+    assert "production_orchestration_hard_guarantees_v1" in captured.out
+    assert "distributed_workflow_recovery_operations_v1" in captured.out
+    assert "external_side_effect_correctness_v4" in captured.out
+    assert "scheduler_failover_soak_v1" in captured.out
+    assert "orchestration_false_claim_scan_v1" in captured.out
+    assert "post_dp_durable_orchestration_v1" in captured.out
+    assert "multi_agent_handoff_recovery_v1" in captured.out
+    assert "scheduler_crash_restart_recovery_v1" in captured.out
+    assert "side_effect_reconciliation_v5" in captured.out
+    assert "orchestration_false_claim_scan_v2" in captured.out
+    assert "post_dx_live_durable_orchestration_v1" in captured.out
+    assert "recorded_live_orchestration_window_v1" in captured.out
+    assert "crash_restart_failover_drill_v3" in captured.out
+    assert "multi_agent_handoff_durability_v2" in captured.out
+    assert "side_effect_reconciliation_v6" in captured.out
+    assert "operator_recovery_control_v4" in captured.out
+    assert "orchestration_false_claim_scan_v3" in captured.out
+    assert "m5_jobs_routines_workflows_delegation" in captured.out
+    assert "trust_boundary_and_safety_receipts" in captured.out
+    assert "secure_capability_host" in captured.out
+    assert "production_secure_host_hardening" in captured.out
+    assert "secure_capability_host_live_isolation_v2" in captured.out
+    assert "production_isolation_hardening_v2" in captured.out
+    assert "privileged_path_red_team_gauntlet_v2" in captured.out
+    assert "security_incident_recovery_drill" in captured.out
+    assert "container_grade_capability_isolation" in captured.out
+    assert "external_security_validation_v1" in captured.out
+    assert "secret_egress_certification_drill" in captured.out
+    assert "runtime_isolation_implementation_v1" in captured.out
+    assert "credential_broker_egress_enforcement_v1" in captured.out
+    assert "external_security_certification_v1" in captured.out
+    assert "hostile_runtime_escape_gauntlet_v1" in captured.out
+    assert "production_grade_secure_capability_host_evidence_v1" in captured.out
+    assert "secure_host_cross_surface_attack_chain_v1" in captured.out
+    assert "credential_broker_egress_soak_v1" in captured.out
+    assert "runtime_isolation_attestation_matrix_v1" in captured.out
+    assert "secure_host_operator_recovery_authority_v1" in captured.out
+    assert "secure_host_false_claim_scan_v1" in captured.out
+    assert "post_dp_secure_capability_host_gap_closure_v1" in captured.out
+    assert "runtime_profile_selection_v2" in captured.out
+    assert "deny_default_credential_egress_v2" in captured.out
+    assert "hostile_capability_chain_quarantine_v2" in captured.out
+    assert "secure_host_recovery_authority_v2" in captured.out
+    assert "secure_host_false_claim_scan_v2" in captured.out
+    assert "post_dx_formal_secure_runtime_isolation_v1" in captured.out
+    assert "runtime_isolation_attestation_evidence_v2" in captured.out
+    assert "credential_broker_egress_enforcement_v3" in captured.out
+    assert "hostile_chain_containment_v4" in captured.out
+    assert "external_security_review_certification_track_v2" in captured.out
+    assert "secure_runtime_recovery_authority_v3" in captured.out
+    assert "secure_runtime_false_claim_scan_v3" in captured.out
+    assert "computer_use_browser_desktop" in captured.out
+    assert "channels_presence_device_pairing" in captured.out
+    assert "one_excellent_reach_channel_canary" in captured.out
+    assert "m2_execution_supremacy" in captured.out
+    assert "m7_operator_cockpit_legibility" in captured.out
+    assert "cockpit_operator_efficiency_benchmark" in captured.out
+    assert "m8_guardian_intervention_quality" in captured.out
+    assert "production_reach_channel_hardening" in captured.out
+    assert "browser_computer_use_reliability_v2" in captured.out
+    assert "guardian_safe_voice_media_runtime" in captured.out
+    assert "live_broad_reach_channel_attestation" in captured.out
+    assert "production_voice_media_provider_runtime" in captured.out
+    assert "cross_surface_continuity_recovery" in captured.out
+    assert "broad_channel_sla_operations" in captured.out
+    assert "production_voice_media_quality_gates" in captured.out
+    assert "mobile_execution_continuity" in captured.out
+    assert "broad_reach_field_operations" in captured.out
+    assert "voice_media_quality_operations" in captured.out
+    assert "always_available_reach_slo" in captured.out
+    assert "always_available_reach_operations_v1" in captured.out
+    assert "voice_media_parity_runtime_v1" in captured.out
+    assert "mobile_cross_surface_continuity_v1" in captured.out
+    assert "reach_degraded_recovery_field_campaign" in captured.out
+    assert "always_available_reach_live_ops_v1" in captured.out
+    assert "voice_media_production_parity_candidate_v1" in captured.out
+    assert "channel_incident_response_v1" in captured.out
+    assert "cross_surface_reach_continuity_v2" in captured.out
+    assert "reach_media_false_claim_scan_v1" in captured.out
+    assert "post_dp_reach_channel_gap_closure_v1" in captured.out
+    assert "selected_reach_surface_readiness_v2" in captured.out
+    assert "channel_degraded_recovery_v2" in captured.out
+    assert "guardian_reach_continuity_v2" in captured.out
+    assert "voice_media_privacy_fallback_v2" in captured.out
+    assert "reach_channel_false_claim_scan_v2" in captured.out
+    assert "post_dx_reach_voice_media_parity_proof_v1" in captured.out
+    assert "multi_channel_reach_reliability_v3" in captured.out
+    assert "voice_media_quality_latency_v3" in captured.out
+    assert "reach_abuse_recovery_v3" in captured.out
+    assert "cross_surface_reach_continuity_v3" in captured.out
+    assert "reach_voice_media_false_claim_scan_v3" in captured.out
+    assert "managed_browser_provider_attestation" in captured.out
+    assert "live_multi_operator_usability_study" in captured.out
+    assert "browser_computer_use_recovery_drill" in captured.out
+    assert "live_browser_task_depth" in captured.out
+    assert "autonomous_browser_safety_controls" in captured.out
+    assert "browser_session_partitioning_security" in captured.out
+    assert "site_specific_recovery_drills" in captured.out
+    assert "browser_provider_reliability_matrix" in captured.out
+    assert "independent_browser_usability_review" in captured.out
+    assert "browser_task_breadth_matrix" in captured.out
+    assert "browser_auth_partition_operations" in captured.out
+    assert "site_drift_recovery_slo" in captured.out
+    assert "safe_autonomous_browser_runtime_v1" in captured.out
+    assert "full_browser_parity_matrix_v1" in captured.out
+    assert "real_site_drift_recovery_v2" in captured.out
+    assert "browser_session_partition_certification_v1" in captured.out
+    assert "browser_computer_use_production_safety_v1" in captured.out
+    assert "safe_browser_automation_live_ops_v1" in captured.out
+    assert "credentialed_site_recovery_v1" in captured.out
+    assert "browser_provider_parity_candidate_v1" in captured.out
+    assert "browser_session_partition_attestation_v2" in captured.out
+    assert "browser_false_claim_scan_v1" in captured.out
+    assert "post_dp_browser_computer_use_reliability_v1" in captured.out
+    assert "browser_live_provider_reliability_v2" in captured.out
+    assert "browser_session_boundary_enforcement_v3" in captured.out
+    assert "browser_credentialed_recovery_v2" in captured.out
+    assert "browser_site_drift_recovery_v3" in captured.out
+    assert "browser_hostile_page_safety_v2" in captured.out
+    assert "browser_provider_degradation_v2" in captured.out
+    assert "browser_computer_use_false_claim_scan_v2" in captured.out
+    assert "live_guardian_learning_quality" in captured.out
+    assert "guardian_intervention_outcome_cohorts" in captured.out
+    assert "memory_provider_ecosystem_maturity_v1" in captured.out
+    assert "canonical_memory_reconciliation_v2" in captured.out
+    assert "provider_usefulness_regression" in captured.out
+    assert "live_human_outcome_quality_study" in captured.out
+    assert "guardian_learning_causal_attribution" in captured.out
+    assert "memory_provider_live_regression_monitor" in captured.out
+    assert "independent_outcome_cohort_review" in captured.out
+    assert "task_scoped_causal_learning" in captured.out
+    assert "memory_provider_parity_matrix" in captured.out
+    assert "longitudinal_guardian_outcome_study" in captured.out
+    assert "named_baseline_memory_comparison" in captured.out
+    assert "learning_safety_monitor_v2" in captured.out
+    assert "generalized_guardian_outcome_study_v1" in captured.out
+    assert "full_memory_provider_parity_matrix_v1" in captured.out
+    assert "causal_learning_outcome_thresholds_v1" in captured.out
+    assert "memory_baseline_comparison_v1" in captured.out
+    assert "live_long_horizon_guardian_learning_field_study_v1" in captured.out
+    assert "memory_behavior_change_ablation_v1" in captured.out
+    assert "live_memory_provider_parity_operations_v1" in captured.out
+    assert "independent_guardian_outcome_candidate_review_v1" in captured.out
+    assert "longitudinal_learning_safety_monitor_v3" in captured.out
+    assert "guardian_memory_false_claim_scan_v1" in captured.out
+    assert "post_dp_guardian_learning_memory_gap_closure_v1" in captured.out
+    assert "long_horizon_learning_quality_v2" in captured.out
+    assert "memory_behavior_ablation_v2" in captured.out
+    assert "memory_provider_operation_v2" in captured.out
+    assert "learning_safety_regression_v2" in captured.out
+    assert "guardian_memory_false_claim_scan_v2" in captured.out
+    assert "live_long_horizon_eval_replay_v1" in captured.out
+    assert "planning_retrieval_reporting" in captured.out
+    assert "governed_improvement" in captured.out
+    assert "m9_governed_ecosystem" in captured.out
+    assert "governed_capability_pack_hardening" in captured.out
+    assert "marketplace_grade_capability_lifecycle" in captured.out
+    assert "governed_capability_lifecycle_v2" in captured.out
+    assert "capability_rollback_failure_diagnostics" in captured.out
+    assert "third_party_marketplace_attestation" in captured.out
+    assert "marketplace_operations_incident_drill" in captured.out
+    assert "publisher_review_and_package_trust" in captured.out
+    assert "independent_package_security_review" in captured.out
+    assert "hostile_ecosystem_package_drills" in captured.out
+    assert "package_network_incident_operations" in captured.out
+    assert "publisher_trust_vulnerability_handling" in captured.out
+    assert "marketplace_rollback_quarantine_diagnostics" in captured.out
+    assert "marketplace_security_corpus_v1" in captured.out
+    assert "continuous_vulnerability_monitoring" in captured.out
+    assert "publisher_trust_operations" in captured.out
+    assert "production_secure_marketplace_v1" in captured.out
+    assert "third_party_package_security_certification_v1" in captured.out
+    assert "marketplace_live_corpus_operations_v2" in captured.out
+    assert "hostile_package_lifecycle_gauntlet_v1" in captured.out
+    assert "marketplace_security_certification_track_v1" in captured.out
+    assert "production_secure_marketplace_live_ops_v2" in captured.out
+    assert "ecosystem_supply_chain_operations_v1" in captured.out
+    assert "hostile_package_lifecycle_gauntlet_v2" in captured.out
+    assert "publisher_trust_vulnerability_ops_v1" in captured.out
+    assert "marketplace_false_claim_scan_v1" in captured.out
+    assert "production_operator_control_parity" in captured.out
+    assert "production_parity_train" in captured.out
+    assert "long_work_debugging_recovery" in captured.out
+    assert "operator_control_density" in captured.out
+    assert "independent_operator_usability_accessibility" in captured.out
+    assert "operator_control_population_study" in captured.out
+    assert "named_baseline_cockpit_comparison" in captured.out
+    assert "long_work_debugging_slo" in captured.out
+    assert "operator_control_certification_v1" in captured.out
+    assert "mission_control_population_study_v2" in captured.out
+    assert "long_work_recovery_slo_v2" in captured.out
+    assert "operator_error_detectability_v1" in captured.out
+    assert "operator_control_certification_v2" in captured.out
+    assert "operator_control_live_population_v1" in captured.out
+    assert "tamper_evident_audit_candidate_v1" in captured.out
+    assert "authority_transfer_recovery_v1" in captured.out
+    assert "operator_control_false_claim_scan_v1" in captured.out
+    assert "post_dp_operator_debugging_recovery_control_v1" in captured.out
+    assert "dense_long_work_debugging_v2" in captured.out
+    assert "operator_recovery_slo_v3" in captured.out
+    assert "operator_effort_reduction_v2" in captured.out
+    assert "authority_transfer_integrity_v2" in captured.out
+    assert "operator_audit_accessibility_v2" in captured.out
+    assert "operator_control_false_claim_scan_v2" in captured.out
+    assert "final_source_backed_parity_audit" in captured.out
+    assert "final_claim_ledger_reconciliation" in captured.out
+    assert "operator_final_parity_readiness_report" in captured.out
+    assert "post_cq_claim_ledger_reconciliation" in captured.out
+    assert "reference_system_source_refresh_v2" in captured.out
+    assert "false_completion_scan_v2" in captured.out
+    assert "production_readiness_soak_v1" in captured.out
+    assert "final_full_parity_claim_lift_v1" in captured.out
+    assert "reference_system_source_refresh_v3" in captured.out
+    assert "false_completion_scan_v3" in captured.out
+    assert "board_pr_issue_reconciliation_v3" in captured.out
+    assert "full_parity_claim_lift_audit_v1" in captured.out
+    assert "production_readiness_reconciliation_v2" in captured.out
+    assert "reference_system_source_refresh_v4" in captured.out
+    assert "post_di_do_board_pr_issue_reconciliation_v1" in captured.out
+    assert "false_completion_scan_v4" in captured.out
+    assert "final_critic_contrarian_no_block_v1" in captured.out
+    assert "post_dq_dw_board_pr_issue_reconciliation_v1" in captured.out
+    assert "post_dq_dw_claim_ledger_reconciliation_v1" in captured.out
+    assert "reference_system_source_refresh_v5" in captured.out
+    assert "false_completion_scan_v5" in captured.out
+    assert "post_dq_dw_critic_contrarian_no_block_v1" in captured.out
+    assert "live_external_orchestration_attestation" in captured.out
+    assert "orchestration_crash_recovery_study" in captured.out
+    assert "production_sla_orchestration" in captured.out
+    assert "exactly_once_recovery_evidence" in captured.out
+    assert "duplicate_side_effect_audit" in captured.out
+    assert "continuous_orchestration_slo_monitor" in captured.out
+    assert "crash_failover_soak_v1" in captured.out
+    assert "side_effect_reconciliation_v2" in captured.out
+    assert available_benchmark_suites() == (
+        "production_parity_readiness",
+        "guardian_memory_quality",
+        "guardian_user_model_restraint",
+        "m8_guardian_intervention_quality",
+        "guardian_safe_multimodal_voice",
+        "production_reach_channel_hardening",
+        "browser_computer_use_reliability_v2",
+        "guardian_safe_voice_media_runtime",
+        "live_broad_reach_channel_attestation",
+        "production_voice_media_provider_runtime",
+        "cross_surface_continuity_recovery",
+        "broad_channel_sla_operations",
+        "production_voice_media_quality_gates",
+        "mobile_execution_continuity",
+        "broad_reach_field_operations",
+        "voice_media_quality_operations",
+        "always_available_reach_slo",
+        "always_available_reach_operations_v1",
+        "voice_media_parity_runtime_v1",
+        "mobile_cross_surface_continuity_v1",
+        "reach_degraded_recovery_field_campaign",
+        "always_available_reach_live_ops_v1",
+        "voice_media_production_parity_candidate_v1",
+        "channel_incident_response_v1",
+        "cross_surface_reach_continuity_v2",
+        "reach_media_false_claim_scan_v1",
+        "post_dp_reach_channel_gap_closure_v1",
+        "selected_reach_surface_readiness_v2",
+        "channel_degraded_recovery_v2",
+        "guardian_reach_continuity_v2",
+        "voice_media_privacy_fallback_v2",
+        "reach_channel_false_claim_scan_v2",
+        "post_dx_reach_voice_media_parity_proof_v1",
+        "multi_channel_reach_reliability_v3",
+        "voice_media_quality_latency_v3",
+        "reach_abuse_recovery_v3",
+        "cross_surface_reach_continuity_v3",
+        "reach_voice_media_false_claim_scan_v3",
+        "managed_browser_provider_attestation",
+        "live_multi_operator_usability_study",
+        "browser_computer_use_recovery_drill",
+        "live_browser_task_depth",
+        "autonomous_browser_safety_controls",
+        "browser_session_partitioning_security",
+        "site_specific_recovery_drills",
+        "browser_provider_reliability_matrix",
+        "independent_browser_usability_review",
+        "browser_task_breadth_matrix",
+        "browser_auth_partition_operations",
+        "site_drift_recovery_slo",
+        "safe_autonomous_browser_runtime_v1",
+        "full_browser_parity_matrix_v1",
+        "real_site_drift_recovery_v2",
+        "browser_session_partition_certification_v1",
+        "browser_computer_use_production_safety_v1",
+        "safe_browser_automation_live_ops_v1",
+        "credentialed_site_recovery_v1",
+        "browser_provider_parity_candidate_v1",
+        "browser_session_partition_attestation_v2",
+        "browser_false_claim_scan_v1",
+        "post_dp_browser_computer_use_reliability_v1",
+        "browser_live_provider_reliability_v2",
+        "browser_session_boundary_enforcement_v3",
+        "browser_credentialed_recovery_v2",
+        "browser_site_drift_recovery_v3",
+        "browser_hostile_page_safety_v2",
+        "browser_provider_degradation_v2",
+        "browser_computer_use_false_claim_scan_v2",
+        "guardian_learning_arbitration_v2",
+        "live_guardian_learning_quality",
+        "guardian_intervention_outcome_cohorts",
+        "memory_provider_ecosystem_maturity_v1",
+        "canonical_memory_reconciliation_v2",
+        "provider_usefulness_regression",
+        "live_human_outcome_quality_study",
+        "guardian_learning_causal_attribution",
+        "memory_provider_live_regression_monitor",
+        "independent_outcome_cohort_review",
+        "task_scoped_causal_learning",
+        "memory_provider_parity_matrix",
+        "longitudinal_guardian_outcome_study",
+        "named_baseline_memory_comparison",
+        "learning_safety_monitor_v2",
+        "generalized_guardian_outcome_study_v1",
+        "full_memory_provider_parity_matrix_v1",
+        "causal_learning_outcome_thresholds_v1",
+        "memory_baseline_comparison_v1",
+        "live_long_horizon_guardian_learning_field_study_v1",
+        "memory_behavior_change_ablation_v1",
+        "live_memory_provider_parity_operations_v1",
+        "independent_guardian_outcome_candidate_review_v1",
+        "longitudinal_learning_safety_monitor_v3",
+        "guardian_memory_false_claim_scan_v1",
+        "post_dp_guardian_learning_memory_gap_closure_v1",
+        "long_horizon_learning_quality_v2",
+        "memory_behavior_ablation_v2",
+        "memory_provider_operation_v2",
+        "learning_safety_regression_v2",
+        "guardian_memory_false_claim_scan_v2",
+        "memory_continuity_workflows",
+        "m6_memory_superiority",
+        "memory_provider_quality_gate",
+        "workflow_endurance_and_repair",
+        "live_workflow_endurance_canary",
+        "durable_workflow_engine_v1",
+        "production_durable_orchestration",
+        "durable_workflow_engine_v2",
+        "live_external_orchestration_attestation",
+        "orchestration_crash_recovery_study",
+        "production_sla_orchestration",
+        "exactly_once_recovery_evidence",
+        "duplicate_side_effect_audit",
+        "continuous_orchestration_slo_monitor",
+        "crash_failover_soak_v1",
+        "side_effect_reconciliation_v2",
+        "production_workflow_state_machine_v1",
+        "crash_proof_orchestration_fault_campaign",
+        "external_side_effect_reconciliation_v3",
+        "production_orchestration_hard_guarantees_v1",
+        "distributed_workflow_recovery_operations_v1",
+        "external_side_effect_correctness_v4",
+        "scheduler_failover_soak_v1",
+        "orchestration_false_claim_scan_v1",
+        "post_dp_durable_orchestration_v1",
+        "multi_agent_handoff_recovery_v1",
+        "scheduler_crash_restart_recovery_v1",
+        "side_effect_reconciliation_v5",
+        "orchestration_false_claim_scan_v2",
+        "post_dx_live_durable_orchestration_v1",
+        "recorded_live_orchestration_window_v1",
+        "crash_restart_failover_drill_v3",
+        "multi_agent_handoff_durability_v2",
+        "side_effect_reconciliation_v6",
+        "operator_recovery_control_v4",
+        "orchestration_false_claim_scan_v3",
+        "live_long_horizon_eval_replay_v1",
+        "m5_jobs_routines_workflows_delegation",
+        "trust_boundary_and_safety_receipts",
+        "secure_capability_host",
+        "production_secure_host_hardening",
+        "secure_capability_host_live_isolation_v2",
+        "production_isolation_hardening_v2",
+        "privileged_path_red_team_gauntlet_v2",
+        "security_incident_recovery_drill",
+        "independent_secure_host_review",
+        "live_hostile_isolation_drills",
+        "secure_host_recovery_authority",
+        "container_grade_capability_isolation",
+        "external_security_validation_v1",
+        "secret_egress_certification_drill",
+        "runtime_isolation_implementation_v1",
+        "credential_broker_egress_enforcement_v1",
+        "external_security_certification_v1",
+        "hostile_runtime_escape_gauntlet_v1",
+        "production_grade_secure_capability_host_evidence_v1",
+        "secure_host_cross_surface_attack_chain_v1",
+        "credential_broker_egress_soak_v1",
+        "runtime_isolation_attestation_matrix_v1",
+        "secure_host_operator_recovery_authority_v1",
+        "secure_host_false_claim_scan_v1",
+        "post_dp_secure_capability_host_gap_closure_v1",
+        "runtime_profile_selection_v2",
+        "deny_default_credential_egress_v2",
+        "hostile_capability_chain_quarantine_v2",
+        "secure_host_recovery_authority_v2",
+        "secure_host_false_claim_scan_v2",
+        "post_dx_formal_secure_runtime_isolation_v1",
+        "runtime_isolation_attestation_evidence_v2",
+        "credential_broker_egress_enforcement_v3",
+        "hostile_chain_containment_v4",
+        "external_security_review_certification_track_v2",
+        "secure_runtime_recovery_authority_v3",
+        "secure_runtime_false_claim_scan_v3",
+        "computer_use_browser_desktop",
+        "channels_presence_device_pairing",
+        "one_excellent_reach_channel_canary",
+        "m2_execution_supremacy",
+        "m7_operator_cockpit_legibility",
+        "cockpit_operator_efficiency_benchmark",
+        "planning_retrieval_reporting",
+        "governed_improvement",
+        "m9_governed_ecosystem",
+        "governed_capability_pack_hardening",
+        "marketplace_grade_capability_lifecycle",
+        "governed_capability_lifecycle_v2",
+        "capability_rollback_failure_diagnostics",
+        "third_party_marketplace_attestation",
+        "marketplace_operations_incident_drill",
+        "publisher_review_and_package_trust",
+        "independent_package_security_review",
+        "hostile_ecosystem_package_drills",
+        "package_network_incident_operations",
+        "publisher_trust_vulnerability_handling",
+        "marketplace_rollback_quarantine_diagnostics",
+        "marketplace_security_corpus_v1",
+        "continuous_vulnerability_monitoring",
+        "publisher_trust_operations",
+        "production_secure_marketplace_v1",
+        "third_party_package_security_certification_v1",
+        "marketplace_live_corpus_operations_v2",
+        "hostile_package_lifecycle_gauntlet_v1",
+        "marketplace_security_certification_track_v1",
+        "production_secure_marketplace_live_ops_v2",
+        "ecosystem_supply_chain_operations_v1",
+        "hostile_package_lifecycle_gauntlet_v2",
+        "publisher_trust_vulnerability_ops_v1",
+        "marketplace_false_claim_scan_v1",
+        "post_dp_capability_marketplace_lifecycle_gap_closure_v1",
+        "marketplace_lifecycle_operations_v3",
+        "package_review_waiver_policy_v2",
+        "marketplace_vulnerability_monitoring_v2",
+        "hostile_package_lifecycle_gauntlet_v3",
+        "marketplace_rollback_quarantine_diagnostics_v2",
+        "marketplace_secure_host_audit_integration_v1",
+        "marketplace_lifecycle_false_claim_scan_v2",
+        "long_work_debugging_recovery",
+        "operator_control_density",
+        "independent_operator_usability_accessibility",
+        "operator_control_population_study",
+        "named_baseline_cockpit_comparison",
+        "long_work_debugging_slo",
+        "operator_control_certification_v1",
+        "mission_control_population_study_v2",
+        "long_work_recovery_slo_v2",
+        "operator_error_detectability_v1",
+        "operator_control_certification_v2",
+        "operator_control_live_population_v1",
+        "tamper_evident_audit_candidate_v1",
+        "authority_transfer_recovery_v1",
+        "operator_control_false_claim_scan_v1",
+        "post_dp_operator_debugging_recovery_control_v1",
+        "dense_long_work_debugging_v2",
+        "operator_recovery_slo_v3",
+        "operator_effort_reduction_v2",
+        "authority_transfer_integrity_v2",
+        "operator_audit_accessibility_v2",
+        "operator_control_false_claim_scan_v2",
+        "production_operator_control_parity",
+        "production_parity_train",
+        "final_source_backed_parity_audit",
+        "final_claim_ledger_reconciliation",
+        "operator_final_parity_readiness_report",
+        "post_cq_claim_ledger_reconciliation",
+        "reference_system_source_refresh_v2",
+        "false_completion_scan_v2",
+        "production_readiness_soak_v1",
+        "final_full_parity_claim_lift_v1",
+        "reference_system_source_refresh_v3",
+        "false_completion_scan_v3",
+        "board_pr_issue_reconciliation_v3",
+        "full_parity_claim_lift_audit_v1",
+        "production_readiness_reconciliation_v2",
+        "reference_system_source_refresh_v4",
+        "post_di_do_board_pr_issue_reconciliation_v1",
+        "false_completion_scan_v4",
+        "final_critic_contrarian_no_block_v1",
+        "post_dq_dw_board_pr_issue_reconciliation_v1",
+        "post_dq_dw_claim_ledger_reconciliation_v1",
+        "reference_system_source_refresh_v5",
+        "false_completion_scan_v5",
+        "post_dq_dw_critic_contrarian_no_block_v1",
+        "post_dx_final_board_pr_issue_reconciliation_v1",
+        "post_dx_final_claim_ledger_reconciliation_v1",
+        "reference_system_source_refresh_v6",
+        "false_completion_scan_v6",
+        "post_dx_final_critic_contrarian_no_block_v1",
+    )
 
 
 def test_main_emits_json_summary(capsys):
@@ -159,6 +4395,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "strategist_tick_learning_continuity_behavior",
                 "guardian_state_synthesis",
                 "guardian_world_model_behavior",
+                "guardian_judgment_behavior",
+                "guardian_long_horizon_learning_behavior",
                 "observer_refresh_behavior",
                 "observer_delivery_decision_behavior",
                 "native_presence_notification_behavior",
@@ -173,13 +4411,29 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "guardian_learning_policy_v2_behavior",
                 "agent_local_runtime_profile",
                 "delegation_local_runtime_profile",
+                "delegation_secret_boundary_behavior",
+                "secret_ref_egress_boundary_behavior",
+                "secure_host_secret_ref_fail_closed_behavior",
                 "delegated_tool_workflow_behavior",
                 "delegated_tool_workflow_degraded_behavior",
                 "workflow_composition_behavior",
                 "workflow_approval_threading_behavior",
                 "threaded_operator_timeline_behavior",
+                "background_session_handoff_behavior",
+                "workflow_context_condenser_behavior",
+                "workflow_operating_layer_behavior",
+                "engineering_memory_bundle_behavior",
+                "operator_continuity_graph_behavior",
+                "workflow_boundary_blocked_surface_behavior",
+                "approval_explainability_surface_behavior",
+                "source_adapter_evidence_behavior",
+                "source_mutation_boundary_behavior",
+                "source_review_routine_behavior",
+                "source_report_action_workflow_behavior",
                 "capability_repair_behavior",
                 "capability_preflight_behavior",
+                "activity_ledger_attribution_behavior",
+                "imported_capability_surface_behavior",
                 "mcp_specialist_local_runtime_profile",
                 "embedding_runtime_audit",
                 "vector_store_runtime_audit",
@@ -196,7 +4450,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "provider_routing_decision_audit",
                 "session_bound_llm_trace",
                 "session_consolidation_behavior",
+                "memory_commitment_continuity_behavior",
+                "memory_collaborator_lookup_behavior",
+                "memory_engineering_retrieval_benchmark_behavior",
+                "memory_contradiction_ranking_behavior",
+                "memory_selective_forgetting_surface_behavior",
+                "operator_memory_benchmark_surface_behavior",
+                "memory_provider_user_model_behavior",
+                "memory_provider_stale_evidence_behavior",
+                "memory_provider_writeback_behavior",
+                "bounded_memory_snapshot_behavior",
+                "memory_supersession_filter_behavior",
+                "memory_decay_contradiction_cleanup_behavior",
+                "memory_reconciliation_policy_behavior",
+                "procedural_memory_adaptation_behavior",
                 "scheduled_local_runtime_profile",
+                "process_recovery_boundary_behavior",
                 "daily_briefing_delivery_behavior",
                 "shell_tool_runtime_audit",
                 "browser_runtime_audit",
@@ -284,42 +4553,42 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["strategist_tick_behavior"]["reasoning"] == "Focus drift"
     assert details_by_name["strategist_tick_learning_continuity_behavior"]["message_type"] == "proactive"
     assert details_by_name["strategist_tick_learning_continuity_behavior"]["urgency"] == 2
-    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "deliver"
+    assert details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_delivery"] == "queue"
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["scheduler_policy_action"]
-        == "act"
+        == "bundle"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["policy_reason"]
-        == "learned_direct_delivery"
+        == "high_interruption_cost"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["learning_bias"]
-        == "prefer_direct_delivery"
+        == "neutral"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["learning_channel_bias"]
-        == "prefer_native_notification"
+        == "neutral"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["transport"]
-        == "native_notification"
+        is None
     )
     assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["broadcast_delivered_connections"]
+        details_by_name["strategist_tick_learning_continuity_behavior"]["delivered_connections"]
         == 0
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_notification_count"]
-        == 1
-    )
-    assert (
-        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
         == 0
     )
     assert (
+        details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_queued_insight_count"]
+        == 1
+    )
+    assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_surface"]
-        == "native_notification"
+        == "bundle_queue"
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["continuity_excerpt_mentions_workflow"]
@@ -327,60 +4596,152 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["notification_intervention_matches"]
-        is True
+        is False
     )
     assert (
         details_by_name["strategist_tick_learning_continuity_behavior"]["remaining_notifications_before_cleanup"]
-        == 1
+        == 0
     )
-    assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
     assert details_by_name["guardian_state_synthesis"]["observer_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["world_model_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["observer_salience"] == "high"
     assert details_by_name["guardian_state_synthesis"]["observer_interruption_cost"] == "low"
     assert details_by_name["guardian_state_synthesis"]["world_model_focus"] == "Ship guardian state while in VS Code"
     assert details_by_name["guardian_state_synthesis"]["world_model_alignment"] == "medium"
-    assert details_by_name["guardian_state_synthesis"]["world_model_memory_signals"] >= 1
-    assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "grounded"
+    assert details_by_name["guardian_state_synthesis"]["world_model_memory_signals"] == 0
+    assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "degraded"
     assert details_by_name["guardian_state_synthesis"]["current_session_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_confidence"] == "grounded"
     assert details_by_name["guardian_state_synthesis"]["goal_summary"] == "Ship guardian state"
     assert details_by_name["guardian_state_synthesis"]["recent_sessions_contains_title"] is True
     assert details_by_name["guardian_state_synthesis"]["current_history_mentions_guardian_state"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_guardian_state"] is True
-    assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "grounded"
+    assert details_by_name["guardian_world_model_behavior"]["world_model_confidence"] == "partial"
     assert details_by_name["guardian_world_model_behavior"]["current_focus"] == "Prepare investor brief while in Arc"
+    assert details_by_name["guardian_world_model_behavior"]["focus_source"] == "observer_goal_window"
     assert details_by_name["guardian_world_model_behavior"]["focus_alignment"] == "high"
     assert details_by_name["guardian_world_model_behavior"]["intervention_receptivity"] == "low"
-    assert details_by_name["guardian_world_model_behavior"]["active_blockers"] == [
-        "Recent intervention friction is present",
-    ]
-    assert details_by_name["guardian_world_model_behavior"]["next_up"][:2] == [
-        "Investor brief",
-        "Prepare investor brief",
-    ]
+    assert "Recent intervention friction is present" in details_by_name["guardian_world_model_behavior"]["active_blockers"]
+    assert "Workflow investor-brief degraded at write_file" in details_by_name["guardian_world_model_behavior"]["active_blockers"]
     assert (
-        details_by_name["guardian_world_model_behavior"]["next_up"][2].startswith("Investor follow-up")
+        "Follow-through risk remains open for live project 'Investor brief'"
+        in details_by_name["guardian_world_model_behavior"]["active_blockers"]
     )
     assert (
-        details_by_name["guardian_world_model_behavior"]["dominant_thread"].startswith("Investor follow-up")
+        details_by_name["guardian_world_model_behavior"]["next_up"][0].startswith(
+            'Investor brief follow-up: assistant said "Close the investor brief loop before tomorrow."'
+        )
+    )
+    assert "Investor brief" in details_by_name["guardian_world_model_behavior"]["next_up"]
+    assert len(details_by_name["guardian_world_model_behavior"]["next_up"]) == 2
+    assert (
+        details_by_name["guardian_world_model_behavior"]["dominant_thread"].startswith("Investor brief follow-up")
     )
     assert details_by_name["guardian_world_model_behavior"]["active_commitments_count"] >= 2
     assert details_by_name["guardian_world_model_behavior"]["active_projects_count"] >= 1
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_sync"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_investor_project"] is True
-    assert details_by_name["guardian_world_model_behavior"]["includes_memory_signal"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_memory_signal"] is False
     assert details_by_name["guardian_world_model_behavior"]["includes_attention_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_feedback_pressure"] is True
     assert details_by_name["guardian_world_model_behavior"]["includes_execution_pressure"] is True
+    assert details_by_name["guardian_world_model_behavior"]["continuity_thread_matches_live_project"] is True
+    assert details_by_name["guardian_world_model_behavior"]["includes_follow_through_risk"] is True
+    assert details_by_name["guardian_world_model_behavior"]["project_ranking_diagnostics_count"] >= 1
+    assert details_by_name["guardian_world_model_behavior"]["includes_project_ranking_diagnostics"] is True
+    assert details_by_name["guardian_world_model_behavior"]["user_model_confidence"] == "grounded"
+    assert details_by_name["guardian_world_model_behavior"]["user_model_signal_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["preference_inference_diagnostics_count"] >= 2
+    assert details_by_name["guardian_world_model_behavior"]["has_guarded_async_user_model_signal"] is True
+    assert details_by_name["guardian_world_model_behavior"]["has_brief_literal_user_model_signal"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_learning_diagnostics"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_world_model"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_focus"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_projects"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_active_blockers"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_next_up"] is True
     assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_dominant_thread"] is True
-    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_memory_signals"] is True
+    assert details_by_name["guardian_world_model_behavior"]["agent_instructions_include_memory_signals"] is False
     assert details_by_name["guardian_world_model_behavior"]["strategist_instructions_include_receptivity"] is True
+    assert details_by_name["guardian_judgment_behavior"]["overall_confidence"] == "partial"
+    assert details_by_name["guardian_judgment_behavior"]["world_model_confidence"] == "degraded"
+    assert details_by_name["guardian_judgment_behavior"]["focus_source"] == "observer_goal_window"
+    assert details_by_name["guardian_judgment_behavior"]["judgment_risk_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["includes_project_mismatch"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_supporting_context_mismatch"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_execution_context_mismatch"] is True
+    assert details_by_name["guardian_judgment_behavior"]["dominant_thread_prefers_hermes"] is True
+    assert details_by_name["guardian_judgment_behavior"]["project_state_includes_hermes_execution"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_project_anchor_drift"] is True
+    assert details_by_name["guardian_judgment_behavior"]["project_ranking_diagnostics_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["stale_signal_arbitration_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["includes_ranked_project_diagnostics"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_stale_signal_arbitration"] is True
+    assert details_by_name["guardian_judgment_behavior"]["includes_conservative_ambiguity_guardrail"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_learning_conflict_diagnostic"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_live_override_diagnostic"] is True
+    assert details_by_name["guardian_judgment_behavior"]["user_model_confidence"] == "grounded"
+    assert details_by_name["guardian_judgment_behavior"]["user_model_signal_count"] >= 2
+    assert details_by_name["guardian_judgment_behavior"]["has_user_model_signal"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_user_model_sources_diagnostic"] is True
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_intent_uncertainty_level"]
+        == "high"
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_resolution"]
+        == "clarify"
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_has_referent_diagnostic"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_has_project_anchor_diagnostic"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["ambiguous_request_prompt_includes_intent_uncertainty"]
+        is True
+    )
+    assert details_by_name["guardian_judgment_behavior"]["judgment_proof_count"] >= 1
+    assert details_by_name["guardian_judgment_behavior"]["has_project_target_proof"] is True
+    assert details_by_name["guardian_judgment_behavior"]["has_referent_proof"] is True
+    assert details_by_name["guardian_judgment_behavior"]["prompt_includes_judgment_proof"] is True
+    assert (
+        details_by_name["guardian_judgment_behavior"]["split_preference_has_interaction_style_proof"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["split_preference_has_observer_proof"]
+        is True
+    )
+    assert (
+        details_by_name["guardian_judgment_behavior"]["split_preference_prompt_includes_judgment_proof"]
+        is True
+    )
+    assert details_by_name["guardian_judgment_behavior"]["decision_action"] == "defer"
+    assert details_by_name["guardian_judgment_behavior"]["decision_reason"] == "low_guardian_confidence"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["multi_day_negative_days"] == 3
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["scheduled_negative_days"] == 2
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["intervention_receptivity"] == "low"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["abstention_action"] == "defer"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["abstention_reason"] == "long_horizon_negative_trend"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["scheduled_action"] == "defer"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["scheduled_reason"] == "scheduled_outcome_instability"
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["learning_diagnostics_count"] >= 2
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_goal_alignment_signal"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_unstable_review_signal"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_routine_watchpoint"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_collaborator_watchpoint"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_multi_day_risk"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_abstention_risk"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_scheduled_deferral_risk"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_learning_scope_diagnostic"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_learning_spread_diagnostic"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_learning_abstention_diagnostic"] is True
+    assert details_by_name["guardian_long_horizon_learning_behavior"]["has_learning_scheduled_diagnostic"] is True
     assert details_by_name["native_presence_notification_behavior"]["action"] == "act"
     assert details_by_name["native_presence_notification_behavior"]["delivery_decision"] == "deliver"
     assert details_by_name["native_presence_notification_behavior"]["transport"] == "native_notification"
@@ -415,10 +4776,36 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["cross_surface_continuity_behavior"]["daemon_pending_notifications"] == 1
     assert details_by_name["cross_surface_continuity_behavior"]["notification_count"] == 1
     assert details_by_name["cross_surface_continuity_behavior"]["notification_intervention_matches"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["notification_continuation_mode"] == "resume_thread"
+    assert details_by_name["cross_surface_continuity_behavior"]["notification_thread_id"] == "continuity-session"
     assert details_by_name["cross_surface_continuity_behavior"]["queued_insight_count"] == 1
     assert details_by_name["cross_surface_continuity_behavior"]["queued_bundle_matches"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["queued_continuation_mode"] == "resume_thread"
+    assert details_by_name["cross_surface_continuity_behavior"]["queued_thread_id"] == "continuity-session"
+    assert details_by_name["cross_surface_continuity_behavior"]["recent_continuation_mode"] == "resume_thread"
+    assert details_by_name["cross_surface_continuity_behavior"]["recent_thread_id"] == "continuity-session"
+    assert details_by_name["cross_surface_continuity_behavior"]["live_route_status"] == "fallback_active"
+    assert details_by_name["cross_surface_continuity_behavior"]["live_route_transport"] == "native_notification"
     assert details_by_name["cross_surface_continuity_behavior"]["native_surface_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["bundle_surface_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["degraded_source_adapter_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["attention_family_count"] == 1
+    assert details_by_name["cross_surface_continuity_behavior"]["presence_surface_count"] == 4
+    assert details_by_name["cross_surface_continuity_behavior"]["attention_presence_surface_count"] == 2
+    assert details_by_name["cross_surface_continuity_behavior"]["source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["presence_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["presence_follow_up_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["browser_provider_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["node_adapter_follow_up_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["imported_reach_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_presence_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_imported_reach_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["operator_presence_follow_up_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_source_adapter_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_presence_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_imported_reach_recovery_present"] is True
+    assert details_by_name["cross_surface_continuity_behavior"]["activity_presence_follow_up_present"] is True
     assert details_by_name["guardian_state_synthesis"]["instructions_include_recent_sessions"] is True
     assert details_by_name["observer_refresh_behavior"]["new_user_state"] == "transitioning"
     assert details_by_name["observer_refresh_behavior"]["data_quality"] == "good"
@@ -505,23 +4892,23 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["guardian_feedback_loop"]["prompt_contains_feedback_section"] is True
     assert details_by_name["guardian_feedback_loop"]["instructions_include_feedback"] is True
     assert details_by_name["guardian_feedback_loop"]["remaining_notifications"] == 0
-    assert details_by_name["guardian_outcome_learning"]["action"] == "bundle"
-    assert details_by_name["guardian_outcome_learning"]["reason"] == "recent_negative_feedback"
-    assert details_by_name["guardian_outcome_learning"]["queued"] is True
+    assert details_by_name["guardian_outcome_learning"]["action"] == "defer"
+    assert details_by_name["guardian_outcome_learning"]["reason"] == "learned_suppression_window"
+    assert details_by_name["guardian_outcome_learning"]["queued"] is False
     assert details_by_name["guardian_outcome_learning"]["broadcast_skipped"] is True
-    assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "reduce_interruptions"
+    assert details_by_name["guardian_outcome_learning"]["learning_bias"] == "neutral"
     assert details_by_name["guardian_outcome_learning"]["learning_not_helpful_count"] == 2
-    assert details_by_name["guardian_outcome_learning"]["positive_action"] == "act"
-    assert details_by_name["guardian_outcome_learning"]["positive_reason"] == "learned_direct_delivery"
-    assert details_by_name["guardian_outcome_learning"]["positive_transport"] == "native_notification"
-    assert details_by_name["guardian_outcome_learning"]["positive_learning_bias"] == "prefer_direct_delivery"
+    assert details_by_name["guardian_outcome_learning"]["positive_action"] == "bundle"
+    assert details_by_name["guardian_outcome_learning"]["positive_reason"] == "high_interruption_cost"
+    assert details_by_name["guardian_outcome_learning"]["positive_transport"] is None
+    assert details_by_name["guardian_outcome_learning"]["positive_learning_bias"] == "neutral"
     assert (
         details_by_name["guardian_outcome_learning"]["positive_learning_channel_bias"]
-        == "prefer_native_notification"
+        == "neutral"
     )
     assert details_by_name["guardian_outcome_learning"]["positive_helpful_count"] == 2
     assert details_by_name["guardian_outcome_learning"]["positive_acknowledged_count"] == 2
-    assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 1
+    assert details_by_name["guardian_outcome_learning"]["remaining_native_notifications"] == 0
     assert details_by_name["guardian_learning_policy_v2_behavior"]["timing_bias"] == "avoid_focus_windows"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_state_bias"] == "avoid_blocked_state_interruptions"
     assert details_by_name["guardian_learning_policy_v2_behavior"]["blocked_action"] == "bundle"
@@ -533,9 +4920,25 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["strategist_agent"] == "ollama/llama3.2"
     assert details_by_name["agent_local_runtime_profile"]["routed_models"]["memory_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["orchestrator_agent"] == "ollama/llama3.2"
+    assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["vault_keeper"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["goal_planner"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["web_researcher"] == "ollama/llama3.2"
     assert details_by_name["delegation_local_runtime_profile"]["routed_models"]["file_worker"] == "ollama/llama3.2"
+    assert details_by_name["delegation_secret_boundary_behavior"]["memory_excludes_secret_tools"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["vault_only_secret_tools"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_routed_to_vault_keeper"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["memory_task_routed_to_memory_keeper"] is True
+    assert details_by_name["delegation_secret_boundary_behavior"]["secret_task_result"] == "vault handled"
+    assert details_by_name["delegation_secret_boundary_behavior"]["memory_task_result"] == "memory handled"
+    assert details_by_name["delegation_secret_boundary_behavior"]["explicit_vault_alias_result"] == "vault handled"
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["allowlisted_header_resolves"] is True
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["allowlisted_result_redacted"] is True
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["body_field_blocked"] is True
+    assert details_by_name["secret_ref_egress_boundary_behavior"]["missing_egress_allowlist_blocked"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["allowlisted_destination_resolves"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["allowlisted_result_redacted"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["non_allowlisted_destination_blocked"] is True
+    assert details_by_name["secure_host_secret_ref_fail_closed_behavior"]["cross_session_secret_ref_blocked"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_web_researcher"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["delegated_to_file_worker"] is True
     assert details_by_name["delegated_tool_workflow_behavior"]["tool_steps_present"] == {
@@ -670,6 +5073,100 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert details_by_name["threaded_operator_timeline_behavior"]["intervention_source"] == "native_notification"
     assert details_by_name["threaded_operator_timeline_behavior"]["audit_thread_label"] == "Research thread"
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_continue_message_mentions_boundary"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_replay_draft_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_recommended_actions_empty"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_resume_plan_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["operator_checkpoint_candidates_empty"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_continue_message_mentions_boundary"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_replay_draft_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_recommended_actions_empty"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_resume_plan_is_none"] is True
+    assert details_by_name["workflow_boundary_blocked_surface_behavior"]["activity_checkpoint_candidates_empty"] is True
+    assert details_by_name["approval_explainability_surface_behavior"][
+        "pending_requires_lifecycle_approval"
+    ] is True
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["pending_scope_target_reference"]
+        == "workflows/write-note.md"
+    )
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["operator_scope_target_reference"]
+        == "workflows/write-note.md"
+    )
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["activity_scope_target_reference"]
+        == "workflows/write-note.md"
+    )
+    assert (
+        details_by_name["approval_explainability_surface_behavior"]["activity_extension_action"]
+        == "source_save"
+    )
+    assert details_by_name["source_adapter_evidence_behavior"]["adapter_count"] >= 4
+    assert details_by_name["source_adapter_evidence_behavior"]["ready_adapter_count"] >= 3
+    assert details_by_name["source_adapter_evidence_behavior"]["github_adapter_state"] == "ready"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_work_item_tool"] == "search_issues"
+    assert details_by_name["source_adapter_evidence_behavior"]["search_status"] == "ok"
+    assert details_by_name["source_adapter_evidence_behavior"]["search_item_kind"] == "search_result"
+    assert details_by_name["source_adapter_evidence_behavior"]["page_status"] == "ok"
+    assert details_by_name["source_adapter_evidence_behavior"]["page_item_kind"] == "webpage"
+    assert details_by_name["source_adapter_evidence_behavior"]["session_status"] == "ok"
+    assert details_by_name["source_adapter_evidence_behavior"]["session_item_kind"] == "browser_snapshot"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_bundle_status"] == "ok"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_item_kind"] == "work_item"
+    assert details_by_name["source_adapter_evidence_behavior"]["github_runtime_server"] == "github"
+    assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_total"] >= 4
+    assert details_by_name["source_adapter_evidence_behavior"]["overview_source_adapters_ready"] >= 3
+    assert details_by_name["source_review_routine_behavior"]["daily_plan_status"] == "ready"
+    assert details_by_name["source_review_routine_behavior"]["daily_ready_step_count"] >= 4
+    assert details_by_name["source_review_routine_behavior"]["daily_work_items_source"] == "github-managed"
+    assert details_by_name["source_review_routine_behavior"]["daily_code_activity_source"] == "github-managed"
+    assert details_by_name["source_review_routine_behavior"]["daily_context_source"] == "web_search"
+    assert details_by_name["source_review_routine_behavior"]["daily_explicit_page_source"] == "browse_webpage"
+    assert details_by_name["source_review_routine_behavior"]["goal_plan_status"] == "ready"
+    assert details_by_name["source_review_routine_behavior"]["goal_runbook"] == "runbook:source-goal-alignment"
+    assert details_by_name["source_review_routine_behavior"]["goal_starter_pack"] == "source-goal-alignment"
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_status"] == "approval_required"
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_requires_approval"] is True
+    assert (
+        details_by_name["source_mutation_boundary_behavior"]["ready_scope_reference"]
+        == "seraph-quest/seraph#342"
+    )
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_field_count"] == 2
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_runtime_server"] == "github"
+    assert details_by_name["source_mutation_boundary_behavior"]["ready_execution_boundaries"] == [
+        "external_mcp",
+        "authenticated_external_source",
+        "connector_mutation",
+    ]
+    assert details_by_name["source_mutation_boundary_behavior"]["degraded_status"] == "degraded"
+    assert details_by_name["source_mutation_boundary_behavior"]["degraded_warning_mentions_route"] is True
+    assert details_by_name["source_mutation_boundary_behavior"]["degraded_route_executable"] is False
+    assert details_by_name["source_report_action_workflow_behavior"]["report_status"] == "ready"
+    assert details_by_name["source_report_action_workflow_behavior"]["publish_status"] == "approval_required"
+    assert details_by_name["source_report_action_workflow_behavior"]["publish_action_kind"] == "comment"
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["publish_target_reference"]
+        == "seraph-quest/seraph#343"
+    )
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["recommended_runbook"]
+        == "runbook:source-progress-report"
+    )
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["recommended_starter_pack"]
+        == "source-progress-report"
+    )
+    assert details_by_name["source_report_action_workflow_behavior"]["execution_status"] == "ok"
+    assert (
+        details_by_name["source_report_action_workflow_behavior"]["execution_tool_name"]
+        == "add_comment_to_issue"
+    )
+    assert details_by_name["source_report_action_workflow_behavior"]["execution_argument_keys"] == [
+        "comment",
+        "issue_number",
+        "repo_full_name",
+    ]
     assert details_by_name["capability_repair_behavior"]["starter_pack_availability"] == "blocked"
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["starter_pack_repair_actions"]
     assert "set_tool_policy" in details_by_name["capability_repair_behavior"]["workflow_repair_actions"]
@@ -679,7 +5176,7 @@ def test_runtime_eval_scenarios_expose_expected_details():
     )
     assert details_by_name["capability_repair_behavior"]["runbooks_ready"] >= 1
     assert details_by_name["capability_preflight_behavior"]["workflow_ready"] is False
-    assert details_by_name["capability_preflight_behavior"]["workflow_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["workflow_can_autorepair"] is False
     assert details_by_name["capability_preflight_behavior"]["workflow_blocking_reasons"] == [
         "missing tool: write_file",
     ]
@@ -690,19 +5187,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["capability_preflight_behavior"]["workflow_recommended_action_types"] == [
         "set_tool_policy",
     ]
-    assert details_by_name["capability_preflight_behavior"]["workflow_autorepair_action_types"] == [
-        "set_tool_policy",
-    ]
-    assert details_by_name["capability_preflight_behavior"]["starter_pack_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["workflow_autorepair_action_types"] == []
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_can_autorepair"] is False
     assert "skill web-briefing missing tool: write_file" in (
         details_by_name["capability_preflight_behavior"]["starter_pack_blocking_reasons"]
     )
     assert details_by_name["capability_preflight_behavior"]["starter_pack_command_present"] is True
-    assert details_by_name["capability_preflight_behavior"]["starter_pack_autorepair_action_types"] == [
-        "set_tool_policy",
-    ]
+    assert details_by_name["capability_preflight_behavior"]["starter_pack_autorepair_action_types"] == []
     assert details_by_name["capability_preflight_behavior"]["runbook_ready"] is False
-    assert details_by_name["capability_preflight_behavior"]["runbook_can_autorepair"] is True
+    assert details_by_name["capability_preflight_behavior"]["runbook_can_autorepair"] is False
     assert details_by_name["capability_preflight_behavior"]["runbook_parameter_schema_keys"] == [
         "file_path",
         "query",
@@ -715,8 +5208,34 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["capability_preflight_behavior"]["runbook_blocking_reasons"] == [
         "missing tool: write_file",
     ]
-    assert details_by_name["capability_preflight_behavior"]["runbook_autorepair_action_types"] == [
-        "set_tool_policy",
+    assert details_by_name["capability_preflight_behavior"]["runbook_autorepair_action_types"] == []
+    assert details_by_name["activity_ledger_attribution_behavior"]["runtime_path_bucket_keys"] == [
+        "browser_agent",
+        "chat_agent",
+        "unattributed",
+    ]
+    assert details_by_name["activity_ledger_attribution_behavior"]["capability_family_bucket_keys"] == [
+        "browser",
+        "conversation",
+        "unattributed",
+    ]
+    assert details_by_name["activity_ledger_attribution_behavior"]["chat_runtime_path"] == "chat_agent"
+    assert details_by_name["activity_ledger_attribution_behavior"]["chat_budget_class"] == "medium"
+    assert details_by_name["activity_ledger_attribution_behavior"]["browser_selected_source"] == "browser_provider"
+    assert details_by_name["activity_ledger_attribution_behavior"]["unattributed_family"] == "unattributed"
+    assert details_by_name["imported_capability_surface_behavior"]["catalog_extension_package_count"] >= 10
+    assert details_by_name["imported_capability_surface_behavior"]["browser_provider_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["messaging_connector_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["automation_trigger_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["node_adapter_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["canvas_output_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["workflow_runtime_pack_count"] >= 1
+    assert details_by_name["imported_capability_surface_behavior"]["extension_payload_has_governance"] is True
+    assert "channel_adapters" in details_by_name["imported_capability_surface_behavior"][
+        "installed_extension_contribution_types"
+    ]
+    assert "managed_connectors" in details_by_name["imported_capability_surface_behavior"][
+        "installed_extension_contribution_types"
     ]
     assert details_by_name["mcp_specialist_local_runtime_profile"]["runtime_path"] == "mcp_github_actions"
     assert details_by_name["mcp_specialist_local_runtime_profile"]["routed_model"] == "ollama/llama3.2"
@@ -806,8 +5325,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["provider_policy_capabilities"]["chat_runtime_profile"] == "local"
     assert details_by_name["provider_policy_capabilities"]["chat_fallback_models"] == [
-        "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-mini",
+        "openrouter/anthropic/claude-sonnet-4",
         "openai/gpt-4.1-nano",
         "openai/gpt-4o-mini",
     ]
@@ -859,6 +5378,32 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-nano",
         "openai/gpt-4.1-mini",
     ]
+    assert details_by_name["provider_routing_decision_audit"]["completion_budget_steering_mode"] == "prefer_lower_budget"
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_route_score"] < 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selection_policy_mode"] == (
+        "retain_primary_until_reroute"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_model"] == (
+        "openai/gpt-4o-mini"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_planning_winner_selected"] is False
+    assert details_by_name["provider_routing_decision_audit"]["completion_best_alternate_model"] == (
+        "openai/gpt-4o-mini"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_vs_best_alternate_margin"] < 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_failure_risk_score"] == 0.0
+    assert details_by_name["provider_routing_decision_audit"]["completion_selected_production_readiness"] == "ready"
+    assert details_by_name["provider_routing_decision_audit"]["completion_route_explanation"].startswith(
+        "selected openrouter/anthropic/claude-sonnet-4"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_route_comparison_summary"].startswith(
+        "retained primary openrouter/anthropic/claude-sonnet-4 even though openai/gpt-4o-mini"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_simulated_route_count"] == 4
+    assert details_by_name["provider_routing_decision_audit"]["completion_first_route_entry"] == (
+        "openrouter/anthropic/claude-sonnet-4"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["completion_rejected_summary_count"] == 3
     assert details_by_name["provider_routing_decision_audit"]["completion_rejected_models"] == [
         "openai/gpt-4o-mini",
         "openai/gpt-4.1-nano",
@@ -870,7 +5415,22 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "openai/gpt-4.1-nano",
         "openai/gpt-4o-mini",
     ]
+    assert details_by_name["provider_routing_decision_audit"]["agent_budget_steering_mode"] == "none"
+    assert details_by_name["provider_routing_decision_audit"]["agent_selection_policy_mode"] == (
+        "highest_ranked_attemptable"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_model"] == "ollama/llama3.2"
+    assert details_by_name["provider_routing_decision_audit"]["agent_planning_winner_selected"] is True
+    assert details_by_name["provider_routing_decision_audit"]["agent_best_alternate_model"] == (
+        "openai/gpt-4.1-nano"
+    )
+    assert details_by_name["provider_routing_decision_audit"]["agent_selected_vs_best_alternate_margin"] >= 0.0
     assert details_by_name["provider_routing_decision_audit"]["agent_primary_decision"] == "skipped"
+    assert details_by_name["provider_routing_decision_audit"]["agent_primary_feedback_state"] == "cooldown"
+    assert details_by_name["provider_routing_decision_audit"]["agent_primary_failure_risk_score"] > 0.0
+    assert details_by_name["provider_routing_decision_audit"]["agent_route_comparison_summary"].startswith(
+        "selected ollama/llama3.2 over openai/gpt-4.1-nano"
+    )
     assert "unhealthy_cooldown" in details_by_name["provider_routing_decision_audit"][
         "agent_primary_reason_codes"
     ]
@@ -887,6 +5447,106 @@ def test_runtime_eval_scenarios_expose_expected_details():
     ]
     assert details_by_name["session_consolidation_behavior"]["updated_soul_section"] == "Goals"
     assert details_by_name["session_consolidation_behavior"]["updated_soul_mentions_workspace"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_issue_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_pr_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_approval_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_artifact_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_audit_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_repository_reference"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["engineering_memory_has_session_match"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["benchmark_suite_named"] is True
+    assert details_by_name["memory_engineering_retrieval_benchmark_behavior"]["benchmark_dimensions_visible"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["keeps_current_truth"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["suppresses_lower_ranked_contradiction"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["suppressed_contradiction_count"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["ranking_policy_visible"] is True
+    assert details_by_name["memory_contradiction_ranking_behavior"]["suppressed_example_reports_winner"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["selective_forgetting_state_active"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["policy_declares_lower_ranked_contradiction"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["policy_declares_stale_provider_suppression"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["failure_report_has_conflict"] is True
+    assert details_by_name["memory_selective_forgetting_surface_behavior"]["failure_report_has_archive"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["suite_name_visible"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["operator_status_visible"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["scenario_count_matches"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["failure_taxonomy_visible"] is True
+    assert details_by_name["operator_memory_benchmark_surface_behavior"]["ci_gate_mode_visible"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["baseline_bucket_excludes_linked_commitment"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["baseline_context_excludes_linked_commitment"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["linked_project_present"] is True
+    assert details_by_name["memory_commitment_continuity_behavior"]["memory_context_has_commitment"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["baseline_bucket_excludes_linked_collaborator"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["baseline_context_excludes_linked_collaborator"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["collaborator_present"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["memory_context_has_collaborator"] is True
+    assert details_by_name["memory_collaborator_lookup_behavior"]["active_projects_has_atlas"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_runtime_ready"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_user_model_ready"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_contract_authoritative_guardian"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_contract_advisory_provenance"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_adapter_model_user_sync_policy"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_collaborator"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["world_model_has_provider_obligation"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_context_has_provider_project"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_diagnostics_visible"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_quality_focused"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["provider_query_hint_without_recent_project"] is True
+    assert details_by_name["memory_provider_user_model_behavior"]["memory_provider_diagnostics_show_authority"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_hit_count"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_bucket"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["quality_state_guarded"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_contract_is_guarded"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_adapter_model_writeback_requires_canonical"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["canonical_memory_kept_project"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_missing_project_anchor"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_sync_policy_guarded"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_runtime_contract_visible"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_is_stable_within_session"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_includes_todo_overlay"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["bounded_snapshot_line_count"] <= 8
+    assert details_by_name["bounded_memory_snapshot_behavior"]["same_session_excludes_new_project"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["new_session_sees_new_project"] is True
+    assert details_by_name["bounded_memory_snapshot_behavior"]["new_session_uses_real_session_record"] is True
+    assert details_by_name["memory_supersession_filter_behavior"]["active_project_present"] is True
+    assert details_by_name["memory_supersession_filter_behavior"]["superseded_project_filtered"] is True
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["contradiction_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_memory_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_filters_superseded"] is True
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_keeps_current"] is True
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_filters_superseded"]
+        is True
+    )
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_keeps_current"]
+        is True
+    )
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_state_conflict_and_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_policy_authoritative_guardian"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_policy_selective_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_superseded_count"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_archived_count"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_conflict_summary_visible"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reconciliation_diagnostics_visible"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_conflict_and_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_policy_contract"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_conflict"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_archival"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["baseline_snapshot_has_no_procedural_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["same_session_snapshot_refreshes"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_delivery_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
+    assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
     assert details_by_name["scheduled_local_runtime_profile"]["runtime_profile"] == "local"
     assert details_by_name["scheduled_local_runtime_profile"]["routed_models"] == {
         "daily_briefing": "ollama/llama3.2",
@@ -901,6 +5561,15 @@ def test_runtime_eval_scenarios_expose_expected_details():
         "weekly_activity_review": "http://localhost:11434/v1",
     }
     assert details_by_name["scheduled_local_runtime_profile"]["delivery_count"] == 4
+    assert details_by_name["process_recovery_boundary_behavior"]["session_scoped"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["output_path_within_workspace"] is False
+    assert details_by_name["process_recovery_boundary_behavior"]["output_path_under_runtime_tmp"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["owner_list_includes_process"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["owner_output_visible"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["owner_stop_succeeds"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["other_list_hidden"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["other_read_hidden"] is True
+    assert details_by_name["process_recovery_boundary_behavior"]["other_stop_hidden"] is True
     assert details_by_name["daily_briefing_delivery_behavior"]["message_type"] == "proactive"
     assert details_by_name["daily_briefing_delivery_behavior"]["intervention_type"] == "advisory"
     assert details_by_name["daily_briefing_delivery_behavior"]["scheduled_delivery"] is True
@@ -1002,15 +5671,28 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_status"] == 200
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_status"] == 200
     assert details_by_name["tool_policy_guardrails_behavior"]["safe_hides_write_file"] is True
-    assert details_by_name["tool_policy_guardrails_behavior"]["safe_hides_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["safe_hides_execute_code"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["safe_hides_run_command"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["balanced_shows_write_file"] is True
-    assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_shell_execute"] is True
-    assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_shell_execute"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_execute_code"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["balanced_hides_run_command"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_execute_code"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_shows_run_command"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_start_process_requires_approval"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_start_process_approval_behavior"] == "always"
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_start_process_boundaries"] == [
+        "container_process_management",
+        "background_execution",
+        "session_process_partition",
+    ]
+    assert details_by_name["tool_policy_guardrails_behavior"]["full_hides_shell_execute_alias"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["write_file_accepts_secret_refs"] is False
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_disabled_hides_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_shows_tool"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_requires_approval"] is True
     assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_accepts_secret_refs"] is True
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_secret_ref_fields"] == ["headers"]
+    assert details_by_name["tool_policy_guardrails_behavior"]["mcp_approval_credential_egress_visible"] is True
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_reason"] == "no_observations"
     assert details_by_name["screen_repository_runtime_audit"]["empty_daily_total_observations"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["success_daily_total_observations"] == 1
@@ -1021,3 +5703,316 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_logged_deleted_count"] == 1
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_count"] == 0
     assert details_by_name["screen_repository_runtime_audit"]["cleanup_skipped_logged_deleted_count"] == 0
+
+
+def test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "vector_store_runtime_audit",
+                "guardian_state_synthesis",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    assert details_by_name["guardian_state_synthesis"]["overall_confidence"] == "partial"
+    assert details_by_name["guardian_state_synthesis"]["memory_confidence"] == "degraded"
+
+
+def test_guardian_judgment_runtime_eval_exposes_conflict_suppression():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "guardian_judgment_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = summary.results[0].details
+
+    assert details["overall_confidence"] == "partial"
+    assert details["world_model_confidence"] == "degraded"
+    assert details["focus_source"] == "observer_goal_window"
+    assert details["judgment_risk_count"] >= 1
+    assert details["includes_project_mismatch"] is True
+    assert details["decision_action"] == "defer"
+    assert details["decision_reason"] == "low_guardian_confidence"
+
+
+def test_memory_runtime_eval_scenarios_expose_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "memory_decay_contradiction_cleanup_behavior",
+                "memory_reconciliation_policy_behavior",
+                "procedural_memory_adaptation_behavior",
+                "memory_provider_stale_evidence_behavior",
+                "memory_provider_writeback_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details_by_name = {result.name: result.details for result in summary.results}
+
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["contradiction_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["superseded_memory_count"] == 1
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_filters_superseded"] is True
+    assert details_by_name["memory_decay_contradiction_cleanup_behavior"]["hybrid_keeps_current"] is True
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_filters_superseded"]
+        is True
+    )
+    assert (
+        details_by_name["memory_decay_contradiction_cleanup_behavior"]["guardian_context_keeps_current"]
+        is True
+    )
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_state_conflict_and_forgetting"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["inventory_policy_authoritative_guardian"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_policy_contract"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_conflict"] is True
+    assert details_by_name["memory_reconciliation_policy_behavior"]["state_reports_recent_archival"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["baseline_snapshot_has_no_procedural_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["same_session_snapshot_refreshes"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_memory_context_has_delivery_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["adapted_bounded_context_has_timing_rule"] is True
+    assert details_by_name["procedural_memory_adaptation_behavior"]["active_procedural_memory_count"] == 8
+    assert details_by_name["procedural_memory_adaptation_behavior"]["bounded_snapshot_line_count"] <= 8
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["fresh_project_kept"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["stale_collaborator_suppressed"] is True
+    assert details_by_name["memory_provider_stale_evidence_behavior"]["quality_state_guarded"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_consolidation_ready"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_called"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["audit_has_provider_writeback"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["audit_has_no_provider_failures"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_low_quality"] is True
+    assert details_by_name["memory_provider_writeback_behavior"]["provider_writeback_suppressed_missing_project_anchor"] is True
+
+
+def test_background_session_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "background_session_handoff_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["background_session_handoff_behavior"]
+    assert details["tracked_sessions"] is True
+    assert details["running_background_process_count"] is True
+    assert details["sessions_with_branch_handoff"] is True
+    assert details["lead_session_is_branch_thread"] is True
+    assert details["lead_session_has_running_process"] is True
+    assert details["lead_session_branch_handoff_available"] is True
+    assert details["lead_session_branch_target_type"] is True
+    assert details["lead_session_continue_message"] is True
+    assert details["lead_session_artifact_visible"] is True
+    assert details["lead_session_partition_visible"] is True
+    assert details["lead_session_disposable_worker_visible"] is True
+    assert details["lead_session_branch_partition_visible"] is True
+    assert details["blocked_session_continue_message"] is True
+    assert details["blocked_session_handoff_present"] is True
+
+
+def test_engineering_memory_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "engineering_memory_bundle_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["engineering_memory_bundle_behavior"]
+    assert details["tracked_bundles"] is True
+    assert details["search_match_count"] is True
+    assert details["pull_request_bundle_count"] is True
+    assert details["first_bundle_is_pull_request"] is True
+    assert details["first_bundle_has_workflow"] is True
+    assert details["first_bundle_has_approval"] is True
+    assert details["first_bundle_has_audit_receipt"] is True
+    assert details["first_bundle_has_session_match"] is True
+    assert details["first_bundle_artifact_visible"] is True
+    assert details["second_bundle_is_repository"] is True
+    assert details["second_bundle_has_session_match"] is True
+    assert details["summary_totals_match_all_bundles"] is True
+
+
+def test_workflow_context_condenser_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "workflow_context_condenser_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["workflow_context_condenser_behavior"]
+    assert details["long_running_summary_visible"] is True
+    assert details["compacted_summary_visible"] is True
+    assert details["total_step_count_visible"] is True
+    assert details["compacted_step_count_visible"] is True
+    assert details["session_capsule_mentions_steps"] is True
+    assert details["session_compaction_count_visible"] is True
+    assert details["first_workflow_compacted"] is True
+    assert details["first_workflow_steps_trimmed"] is True
+    assert details["first_workflow_preserves_checkpoint"] is True
+    assert details["first_workflow_preserves_approval"] is True
+    assert details["first_workflow_recent_steps_trimmed"] is True
+    assert details["second_workflow_preserves_repair"] is True
+    assert details["second_workflow_boundary_receipt_visible"] is True
+    assert details["second_workflow_approval_not_hallucinated"] is True
+
+
+def test_workflow_operating_layer_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "workflow_operating_layer_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["workflow_operating_layer_behavior"]
+    assert details["attention_sessions_visible"] is True
+    assert details["repair_ready_summary_visible"] is True
+    assert details["branch_ready_summary_visible"] is True
+    assert details["debugger_ready_summary_visible"] is True
+    assert details["stalled_summary_visible"] is True
+    assert details["atlas_queue_state_visible"] is True
+    assert details["atlas_queue_reason_visible"] is True
+    assert details["atlas_queue_draft_visible"] is True
+    assert details["atlas_attention_summary_visible"] is True
+    assert details["brief_queue_state_visible"] is True
+    assert details["brief_handoff_draft_visible"] is True
+    assert details["brief_related_output_visible"] is True
+    assert details["brief_output_history_visible"] is True
+    assert details["brief_branch_reference_visible"] is True
+    assert details["approval_workflow_recovery_path_visible"] is True
+    assert details["approval_workflow_checkpoint_visible"] is True
+    assert details["approval_workflow_history_visible"] is True
+    assert details["brief_workflow_fresh_run_visible"] is True
+    assert details["brief_workflow_repair_action_visible"] is True
+    assert details["brief_workflow_compare_ready"] is True
+    assert details["cleanup_workflow_stalled_visible"] is True
+
+
+def test_operator_continuity_graph_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "operator_continuity_graph_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}["operator_continuity_graph_behavior"]
+    assert details["tracked_sessions"] is True
+    assert details["workflow_count"] is True
+    assert details["approval_count"] is True
+    assert details["notification_count"] is True
+    assert details["queued_insight_count"] is True
+    assert details["artifact_count"] is True
+    assert details["atlas_session_continue_message"] is True
+    assert details["atlas_session_workflow_count"] is True
+    assert details["atlas_session_artifact_count"] is True
+    assert details["has_session_workflow_edge"] is True
+    assert details["has_workflow_artifact_edge"] is True
+    assert details["has_notification_intervention_edge"] is True
+    assert details["has_queued_intervention_edge"] is True
+    assert details["has_inferred_notification_intervention_edge"] is True
+    assert details["inferred_intervention_marks_missing_recent_context"] is True
+
+
+def test_operator_guardian_state_surface_runtime_eval_exposes_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "operator_guardian_state_surface_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}[
+        "operator_guardian_state_surface_behavior"
+    ]
+    assert details["session_id_matches"] is True
+    assert details["overall_confidence"] == "partial"
+    assert details["intent_resolution"] == "clarify_first"
+    assert details["action_posture"] == "clarify_first"
+    assert details["focus_source"] == "observer_goal_window"
+    assert details["user_model_confidence"] == "grounded"
+    assert details["has_project_target_proof"] is True
+    assert details["has_judgment_risk"] is True
+    assert details["has_learning_diagnostic"] is True
+    assert details["has_restraint_reason"] is True
+    assert details["user_model_facets_visible"] is True
+    assert details["user_model_restraint_posture"] == "clarify_before_personalizing"
+    assert details["next_up_mentions_clarify"] is True
+    assert details["observer_project"] == "Atlas"
+
+
+def test_guardian_user_model_and_restraint_runtime_evals_expose_expected_details():
+    summary = asyncio.run(
+        run_runtime_evals(
+            [
+                "guardian_user_model_continuity_behavior",
+                "guardian_clarification_restraint_behavior",
+            ]
+        )
+    )
+
+    assert summary.failed == 0
+
+    details = {result.name: result.details for result in summary.results}
+
+    assert details["guardian_user_model_continuity_behavior"]["confidence"] == "grounded"
+    assert details["guardian_user_model_continuity_behavior"]["facet_count"] >= 3
+    assert details["guardian_user_model_continuity_behavior"]["evidence_store_count"] >= 3
+    assert details["guardian_user_model_continuity_behavior"]["restraint_posture"] in {
+        "clarify_before_personalizing",
+        "guard_async_delivery",
+    }
+    assert details["guardian_user_model_continuity_behavior"]["continuity_strategy"] == "prefer_existing_thread"
+    assert details["guardian_user_model_continuity_behavior"]["has_clarification_watchpoint"] is True
+    assert details["guardian_user_model_continuity_behavior"]["has_existing_thread_facet"] is True
+    assert details["guardian_user_model_continuity_behavior"]["has_brief_literal_facet"] is True
+    assert details["guardian_user_model_continuity_behavior"]["prompt_includes_user_model_profile"] is True
+
+    assert details["guardian_clarification_restraint_behavior"]["intent_uncertainty_level"] in {"medium", "high"}
+    assert details["guardian_clarification_restraint_behavior"]["intent_resolution"] in {
+        "clarify",
+        "proceed_with_caution",
+        "defer_or_clarify",
+    }
+    assert details["guardian_clarification_restraint_behavior"]["action_posture"] in {
+        "clarify_first",
+        "guarded_action",
+    }
+    assert details["guardian_clarification_restraint_behavior"]["restraint_reason_count"] >= 1
+    assert details["guardian_clarification_restraint_behavior"]["user_model_benchmark_diagnostic_count"] >= 1
+    assert details["guardian_clarification_restraint_behavior"]["has_benchmark_state_line"] is True
+    assert details["guardian_clarification_restraint_behavior"]["prompt_includes_restraint_reasons"] is True
+    assert details["guardian_clarification_restraint_behavior"]["prompt_includes_user_model_benchmark"] is True

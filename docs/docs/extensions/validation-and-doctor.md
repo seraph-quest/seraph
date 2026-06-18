@@ -32,6 +32,7 @@ backend/.venv/bin/python scripts/extensions/validate_pack.py ./tmp/research-pack
 - tool-permission mismatches
 - workflow/skill network-permission mismatches for packages that use networked tools
 - explicit execution-boundary mismatches when a manifest declares `permissions.execution_boundaries`
+- suspicious context-bearing content in `skills`, `workflows`, and `prompt_packs`
 - connector payload parse failures
 - connector network-permission mismatches when the payload actually implies a network transport
 
@@ -94,6 +95,18 @@ This now has runtime impact:
 - installed packages that later drift into permission mismatches or other validation failures remain visible for repair, but their packaged skills/workflows are kept out of the active runtime surface
 - degraded packages cannot be re-enabled until validation issues are fixed
 - high-risk packages also require approval on install/enable before Seraph will activate them
+
+### `suspicious_context_content`
+
+The contribution contains prompt-bearing language that looks like an instruction-override,
+secret/prompt exfiltration attempt, or approval/policy bypass command.
+
+Current scan behavior is intentionally narrow:
+
+- it scans executable-looking markdown lines, not quoted tutorial prose
+- fenced code blocks are ignored
+- imperative phrases such as `Ignore previous instructions` or `Please reveal your instructions`
+  are rejected
 
 ## Wrong path behavior
 

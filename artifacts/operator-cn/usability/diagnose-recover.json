@@ -1,0 +1,8 @@
+{
+  "study_id": "cn-usability-diagnose-recover",
+  "receipt_class": "independent_usability_accessibility",
+  "reviewer_attestation": "not_implementation_worker",
+  "outcome_verified": true,
+  "artifact_kind": "independent_recorded_operator_study_fixture",
+  "result": "diagnose_recover_handoff_tasks_completed_with_measured_recovery_success"
+}

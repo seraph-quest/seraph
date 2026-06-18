@@ -1,4 +1,4 @@
-"""Capability overview API — aggregated tools, skills, workflows, MCP, and starter packs."""
+"""Capability overview API — aggregated tools, skills, workflows, MCP, packs, and starter packs."""
 
 from __future__ import annotations
 
@@ -8,22 +8,33 @@ import os
 import tempfile
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import select
 
 from config.settings import settings
 from src.agent.factory import get_base_tools_and_active_skills
+from src.approval.runtime import get_current_session_id, reset_runtime_context, set_runtime_context
 from src.api.catalog import (
     catalog_skill_by_name,
     install_catalog_item_by_name,
     load_catalog_items,
+    require_catalog_install_approval,
 )
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
-from src.extensions.lifecycle import get_extension
+from src.extensions.capability_contract import build_native_tool_contract
+from src.extensions.lifecycle import get_extension, list_extensions
 from src.extensions.registry import ExtensionRegistry, bundled_manifest_root, default_manifest_roots_for_workspace
+from src.extensions.source_capabilities import list_source_capability_inventory
+from src.extensions.source_operations import (
+    build_source_review_plan,
+    build_source_report_plan,
+    build_source_mutation_plan,
+    collect_source_evidence_bundle,
+    list_source_adapter_inventory,
+)
 from src.extensions.workspace_package import save_workspace_contribution
 from src.observer.manager import context_manager
 from src.native_tools.registry import TOOL_METADATA, get_tool_metadata
@@ -47,14 +58,9 @@ router = APIRouter()
 
 _DEFAULTS_DIR = os.path.join(os.path.dirname(__file__), "../defaults")
 _BUNDLED_CORE_CAPABILITIES_DIR = os.path.join(_DEFAULTS_DIR, "extensions", "core-capabilities")
-_SAFE_AUTOREPAIR_ACTION_TYPES = {
+_LOW_RISK_AUTOREPAIR_ACTION_TYPES = {
     "toggle_skill",
     "toggle_workflow",
-    "toggle_mcp_server",
-    "set_tool_policy",
-    "set_mcp_policy",
-    "install_catalog_item",
-    "activate_starter_pack",
 }
 _BOOTSTRAP_ACTION_PRIORITY = {
     "install_catalog_item": 0,
@@ -65,6 +71,24 @@ _BOOTSTRAP_ACTION_PRIORITY = {
     "set_mcp_policy": 5,
     "set_tool_policy": 6,
 }
+
+
+@router.get("/capabilities/source-surfaces")
+async def source_surfaces():
+    inventory = list_source_capability_inventory()
+    adapter_inventory = list_source_adapter_inventory(inventory)
+    return {
+        **inventory,
+        "adapter_summary": adapter_inventory["summary"],
+        "adapters": adapter_inventory["adapters"],
+        "selection_rules": adapter_inventory["selection_rules"],
+    }
+
+
+@router.get("/capabilities/source-adapters")
+async def source_adapters():
+    inventory = list_source_capability_inventory()
+    return list_source_adapter_inventory(inventory)
 
 
 def _ensure_workflow_manager_workspace_extensions_loaded() -> None:
@@ -84,8 +108,129 @@ class CapabilityBootstrapRequest(BaseModel):
     name: str
 
 
+class SourceEvidenceRequest(BaseModel):
+    contract: str
+    source: str = ""
+    query: str = ""
+    url: str = ""
+    ref: str = ""
+    session_id: str = ""
+    owner_session_id: str = ""
+    max_results: int = 5
+
+
+class SourceReviewPlanRequest(BaseModel):
+    intent: str
+    focus: str = ""
+    goal_context: str = ""
+    time_window: str = ""
+    source: str = ""
+    url: str = ""
+
+
+class SourceMutationPlanRequest(BaseModel):
+    contract: str
+    source: str = ""
+    action_kind: str = ""
+    action_summary: str = ""
+    target_reference: str = ""
+    fields: list[str] = []
+
+
+class SourceReportPlanRequest(BaseModel):
+    intent: str
+    focus: str = ""
+    goal_context: str = ""
+    time_window: str = ""
+    source: str = ""
+    target_reference: str = ""
+    publish_action_kind: str = ""
+    publish_contract: str = ""
+
+
 class WorkflowDraftRequest(BaseModel):
     content: str
+
+
+@router.post("/capabilities/source-evidence")
+async def source_evidence(req: SourceEvidenceRequest, x_seraph_session_id: str | None = Header(default=None)):
+    active_session_id = (x_seraph_session_id or "").strip()
+    existing_session_id = get_current_session_id()
+    if existing_session_id and active_session_id and existing_session_id != active_session_id:
+        return {
+            "status": "failed",
+            "request": {
+                "contract": req.contract,
+                "source": req.source,
+                "query": req.query,
+                "url": req.url,
+                "ref": req.ref,
+                "session_id": req.session_id,
+                "owner_session_id": req.owner_session_id,
+                "max_results": req.max_results,
+            },
+            "adapter": None,
+            "items": [],
+            "warnings": ["source evidence session header does not match the active runtime session."],
+            "next_best_sources": [],
+            "summary": {"item_count": 0, "contract": req.contract},
+        }
+
+    tokens = None
+    if active_session_id and not existing_session_id:
+        tokens = set_runtime_context(active_session_id, context_manager.get_context().approval_mode)
+    try:
+        return collect_source_evidence_bundle(
+            contract=req.contract,
+            source=req.source,
+            query=req.query,
+            url=req.url,
+            ref=req.ref,
+            session_id=req.session_id,
+            owner_session_id=req.owner_session_id,
+            max_results=req.max_results,
+        )
+    finally:
+        if tokens is not None:
+            reset_runtime_context(tokens)
+
+
+@router.post("/capabilities/source-review-plan")
+async def source_review_plan(req: SourceReviewPlanRequest):
+    return build_source_review_plan(
+        intent=req.intent,
+        focus=req.focus,
+        goal_context=req.goal_context,
+        time_window=req.time_window,
+        source=req.source,
+        url=req.url,
+    )
+
+
+@router.post("/capabilities/source-report-plan")
+async def source_report_plan(req: SourceReportPlanRequest):
+    return build_source_report_plan(
+        intent=req.intent,
+        focus=req.focus,
+        goal_context=req.goal_context,
+        time_window=req.time_window,
+        source=req.source,
+        target_reference=req.target_reference,
+        publish_action_kind=req.publish_action_kind,
+        publish_contract=req.publish_contract,
+    )
+
+
+@router.post("/capabilities/source-mutation-plan")
+async def source_mutation_plan(req: SourceMutationPlanRequest):
+    return build_source_mutation_plan(
+        contract=req.contract,
+        source=req.source,
+        action_kind=req.action_kind,
+        action_summary=req.action_summary,
+        target_reference=req.target_reference,
+        fields=req.fields,
+    )
 
 
 def _load_starter_packs() -> list[dict[str, Any]]:
@@ -252,6 +397,10 @@ def _workflow_blocking_reasons(workflow: dict[str, Any]) -> list[str]:
 
 def _starter_pack_blocking_reasons(pack: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    for item_name in pack.get("missing_install_items", []) or []:
+        item = str(item_name or "").strip()
+        if item:
+            reasons.append(f"missing install item: {item}")
     for blocked in pack.get("blocked_skills", []) or []:
         if not isinstance(blocked, dict):
             continue
@@ -436,6 +585,7 @@ def _explicit_runbook_entries(
             "label": title,
             "description": summary,
             "source": "extension_runbook",
+            "starter_pack_name": starter_pack_name,
             "command": command,
             "availability": availability,
             "blocking_reasons": blocking_reasons,
@@ -535,6 +685,58 @@ def _recommended_actions(
                 "description": server.get("description", ""),
                 "action": {"type": "install_catalog_item", "label": "Install MCP server", "name": name},
             })
+
+    for extension in catalog.get("extension_packages", []):
+        if not isinstance(extension, dict):
+            continue
+        catalog_id = str(extension.get("catalog_id") or "").strip()
+        display_name = str(extension.get("name") or catalog_id or "extension-pack").strip()
+        if not catalog_id:
+            continue
+        installed = bool(extension.get("installed"))
+        update_available = bool(extension.get("update_available"))
+        status = str(extension.get("status") or "ready")
+        action_label = "Update pack" if installed and update_available else "Install pack"
+        recommended_actions = (
+            []
+            if status != "ready" or (installed and not update_available)
+            else [{"type": "install_catalog_item", "label": action_label, "name": catalog_id}]
+        )
+        catalog_items.append({
+            "name": display_name,
+            "catalog_id": catalog_id,
+            "type": "extension_pack",
+            "description": extension.get("description", ""),
+            "category": extension.get("category", ""),
+            "bundled": bool(extension.get("bundled", False)),
+            "installed": installed,
+            "update_available": update_available,
+            "version": extension.get("version"),
+            "version_line": extension.get("version_line"),
+            "installed_version": extension.get("installed_version"),
+            "compatibility": extension.get("compatibility"),
+            "publisher": extension.get("publisher"),
+            "trust": extension.get("trust"),
+            "contribution_types": list(extension.get("contribution_types") or []),
+            "status": status,
+            "doctor_ok": bool(extension.get("doctor_ok", status == "ready")),
+            "issues": list(extension.get("issues") or []),
+            "load_errors": list(extension.get("load_errors") or []),
+            "diagnostics_summary": extension.get("diagnostics_summary"),
+            "recommended_actions": recommended_actions,
+        })
+        if status != "ready" or (installed and not update_available):
+            continue
+        add_recommendation({
+            "id": f"catalog-extension:{catalog_id}",
+            "label": f"{action_label} {display_name}",
+            "description": str(extension.get("description") or ""),
+            "action": {
+                "type": "install_catalog_item",
+                "label": action_label,
+                "name": catalog_id,
+            },
+        })
 
     for workflow_name, workflow in workflows_by_name.items():
         for missing_skill in workflow.get("missing_skills", []):
@@ -733,7 +935,12 @@ async def _activate_starter_pack_by_name(name: str) -> dict[str, Any]:
     installed_catalog_items: list[dict[str, Any]] = []
     missing_entries: list[str] = []
 
-    for item_name in [str(item) for item in pack.get("install_items", [])]:
+    install_item_names = [str(item) for item in pack.get("install_items", [])]
+    for item_name in install_item_names:
+        await require_catalog_install_approval(item_name, consume=False)
+
+    for item_name in install_item_names:
+        await require_catalog_install_approval(item_name)
         install_result = install_catalog_item_by_name(item_name)
         if install_result["ok"] or install_result["status"] == "already_installed":
             installed_catalog_items.append({
@@ -876,7 +1083,7 @@ async def _apply_safe_capability_action(action: dict[str, Any]) -> dict[str, Any
     name = str(action.get("name") or "") or None
     mode = str(action.get("mode") or "") or None
 
-    if action_type not in _SAFE_AUTOREPAIR_ACTION_TYPES:
+    if action_type not in _LOW_RISK_AUTOREPAIR_ACTION_TYPES:
         return {"type": action_type, "label": label, "status": "unsupported"}
 
     match action_type:
@@ -970,7 +1177,7 @@ def _manual_bootstrap_actions(preflight: dict[str, Any], *, seen: set[tuple[str,
             continue
         if _action_key(action) in seen:
             continue
-        if str(action.get("type") or "") in _SAFE_AUTOREPAIR_ACTION_TYPES:
+        if str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES:
             continue
         results.append(action)
     return results
@@ -1181,6 +1388,38 @@ def _attach_mcp_actions(mcp_servers: list[dict[str, Any]], *, mcp_mode: str) -> 
         server["recommended_actions"] = actions
 
 
+def _mcp_toolset_preset_map() -> dict[str, list[dict[str, Any]]]:
+    registry = ExtensionRegistry(
+        manifest_roots=default_manifest_roots_for_workspace(settings.workspace_dir),
+        skill_dirs=[],
+        workflow_dirs=[],
+        mcp_runtime=None,
+    )
+    preset_map: dict[str, list[dict[str, Any]]] = {}
+    for extension in registry.snapshot().extensions:
+        for contribution in extension.contributions:
+            if contribution.contribution_type != "toolset_presets":
+                continue
+            preset_name = str(contribution.metadata.get("name") or "").strip()
+            servers = [
+                server_name
+                for server_name in contribution.metadata.get("include_mcp_servers", []) or []
+                if isinstance(server_name, str) and server_name.strip()
+            ]
+            if not preset_name or not servers:
+                continue
+            summary = {
+                "name": preset_name,
+                "description": str(contribution.metadata.get("description") or ""),
+                "reference": contribution.reference,
+                "extension_id": extension.id,
+                "extension_display_name": extension.display_name,
+            }
+            for server_name in servers:
+                preset_map.setdefault(server_name, []).append(summary)
+    return preset_map
+
+
 def _workflow_status_map(
     available_tool_names: list[str],
     active_skill_names: list[str],
@@ -1213,21 +1452,36 @@ def _tool_status_list(tool_mode: str) -> list[dict[str, Any]]:
     for tool_name in sorted(TOOL_METADATA.keys()):
         metadata = get_tool_metadata(tool_name) or {}
         allowed = is_tool_allowed(tool_name, tool_mode)
+        availability = "ready" if allowed else "blocked"
+        blocked_reason = None if allowed else f"tool_policy_{tool_mode}"
+        execution_boundaries = get_tool_execution_boundaries(tool_name)
+        risk_level = get_tool_risk_level(tool_name)
         result.append({
             "name": tool_name,
             "description": metadata.get("description", ""),
             "policy_modes": metadata.get("policy_modes", []),
-            "risk_level": get_tool_risk_level(tool_name),
-            "execution_boundaries": get_tool_execution_boundaries(tool_name),
+            "risk_level": risk_level,
+            "execution_boundaries": execution_boundaries,
             "accepts_secret_refs": bool(metadata.get("accepts_secret_refs", False)),
-            "availability": "ready" if allowed else "blocked",
-            "blocked_reason": None if allowed else f"tool_policy_{tool_mode}",
+            "availability": availability,
+            "blocked_reason": blocked_reason,
+            "capability_contract": build_native_tool_contract(
+                name=tool_name,
+                description=str(metadata.get("description") or ""),
+                policy_modes=list(metadata.get("policy_modes", [])),
+                risk_level=risk_level,
+                execution_boundaries=execution_boundaries,
+                availability=availability,
+                blocked_reason=blocked_reason,
+                execution=metadata.get("execution") if isinstance(metadata.get("execution"), dict) else None,
+            ),
         })
     return result
 
 
 def _mcp_status_list(mcp_mode: str) -> list[dict[str, Any]]:
     servers = []
+    preset_map = _mcp_toolset_preset_map()
     for server in mcp_manager.get_config():
         status = server.get("status", "disconnected")
         enabled = bool(server.get("enabled", False))
@@ -1249,10 +1503,19 @@ def _mcp_status_list(mcp_mode: str) -> list[dict[str, Any]]:
         else:
             availability = "blocked"
             blocked_reason = "disconnected"
+        tool_names = sorted(
+            {
+                str(getattr(tool, "name", "")).strip()
+                for tool in mcp_manager.get_server_tools(str(server.get("name") or ""))
+                if str(getattr(tool, "name", "")).strip()
+            }
+        )
         servers.append({
             **server,
             "availability": availability,
             "blocked_reason": blocked_reason,
+            "tool_names": tool_names,
+            "toolset_presets": preset_map.get(str(server.get("name") or ""), []),
         })
     return servers
 
@@ -1354,10 +1617,197 @@ def _starter_pack_statuses(
     return packs
 
 
+def _runbook_labels_by_starter_pack(runbooks: list[dict[str, Any]]) -> dict[str, list[str]]:
+    labels_by_pack: dict[str, list[str]] = {}
+    for runbook in runbooks:
+        if not isinstance(runbook, dict):
+            continue
+        starter_pack_name = str(runbook.get("starter_pack_name") or "")
+        if not starter_pack_name and str(runbook.get("source") or "") == "starter_pack":
+            starter_pack_name = str(runbook.get("name") or "")
+        if not starter_pack_name:
+            continue
+        labels_by_pack.setdefault(starter_pack_name, []).append(
+            str(runbook.get("label") or starter_pack_name)
+        )
+    return labels_by_pack
+
+
+def _marketplace_flows(
+    *,
+    starter_packs: list[dict[str, Any]],
+    catalog_items: list[dict[str, Any]],
+    runbooks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    flows: list[dict[str, Any]] = []
+    runbook_labels = _runbook_labels_by_starter_pack(runbooks)
+
+    for pack in starter_packs:
+        if not isinstance(pack, dict):
+            continue
+        ready_count = (
+            len(pack.get("ready_skills", []) or [])
+            + len(pack.get("ready_workflows", []) or [])
+            + len(pack.get("ready_install_items", []) or [])
+        )
+        total_count = (
+            len(pack.get("skills", []) or [])
+            + len(pack.get("workflows", []) or [])
+            + len(pack.get("install_items", []) or [])
+        )
+        missing_install_items = [str(item) for item in pack.get("missing_install_items", []) or [] if str(item)]
+        blocked_skill_names = [
+            str(item.get("name"))
+            for item in pack.get("blocked_skills", []) or []
+            if isinstance(item, dict) and str(item.get("name") or "")
+        ]
+        blocked_workflow_names = [
+            str(item.get("name"))
+            for item in pack.get("blocked_workflows", []) or []
+            if isinstance(item, dict) and str(item.get("name") or "")
+        ]
+        detail_parts = [
+            f"{ready_count}/{total_count} ready" if total_count else "no components",
+            f"{len(missing_install_items)} install items missing" if missing_install_items else None,
+            f"{len(blocked_skill_names)} skills blocked" if blocked_skill_names else None,
+            f"{len(blocked_workflow_names)} workflows blocked" if blocked_workflow_names else None,
+            f"{len(runbook_labels.get(str(pack.get('name') or ''), []))} runbooks" if runbook_labels.get(str(pack.get("name") or ""), []) else None,
+        ]
+        flows.append(
+            {
+                "id": f"starter-pack:{pack['name']}",
+                "label": str(pack.get("label") or pack["name"]),
+                "kind": "starter_pack",
+                "availability": str(pack.get("availability") or "blocked"),
+                "summary": str(pack.get("description") or ""),
+                "detail": " · ".join(part for part in detail_parts if part),
+                "ready_count": ready_count,
+                "total_count": total_count,
+                "primary_action": {"type": "activate_starter_pack", "label": "Activate pack", "name": pack["name"]},
+                "recommended_actions": [item for item in pack.get("recommended_actions", []) or [] if isinstance(item, dict)],
+                "draft_command": str(pack.get("sample_prompt") or "") or None,
+                "blocking_reasons": _starter_pack_blocking_reasons(pack),
+                "install_items": [str(item) for item in pack.get("install_items", []) or [] if str(item)],
+                "skills": [str(item) for item in pack.get("skills", []) or [] if str(item)],
+                "workflows": [str(item) for item in pack.get("workflows", []) or [] if str(item)],
+                "related_runbooks": list(runbook_labels.get(str(pack.get("name") or ""), [])),
+            }
+        )
+
+    for item in catalog_items:
+        if not isinstance(item, dict) or str(item.get("type") or "") != "extension_pack":
+            continue
+        status = str(item.get("status") or "ready")
+        installed = bool(item.get("installed"))
+        update_available = bool(item.get("update_available"))
+        availability = "attention" if status != "ready" else "ready"
+        if installed and not update_available and status == "ready":
+            availability = "installed"
+        action = None
+        if item.get("recommended_actions"):
+            first_action = next(
+                (candidate for candidate in item.get("recommended_actions", []) if isinstance(candidate, dict)),
+                None,
+            )
+            action = first_action
+        detail_parts = [
+            str(item.get("version_line") or "") or None,
+            (
+                f"{item.get('installed_version') or 'installed'} -> {item.get('version') or 'candidate'}"
+                if installed and update_available
+                else None
+            ),
+            f"trust {item.get('trust')}" if item.get("trust") else None,
+            f"{len(item.get('contribution_types', []) or [])} contribution types" if item.get("contribution_types") else None,
+        ]
+        diagnostics_summary = item.get("diagnostics_summary")
+        if isinstance(diagnostics_summary, dict):
+            issue_count = int(diagnostics_summary.get("issue_count") or 0)
+            load_error_count = int(diagnostics_summary.get("load_error_count") or 0)
+            if issue_count or load_error_count:
+                detail_parts.append(f"{issue_count} issues")
+        flows.append(
+            {
+                "id": f"extension-pack:{item.get('catalog_id') or item.get('name')}",
+                "label": str(item.get("name") or item.get("catalog_id") or "extension pack"),
+                "kind": "extension_pack",
+                "availability": availability,
+                "summary": str(item.get("description") or ""),
+                "detail": " · ".join(part for part in detail_parts if part),
+                "ready_count": 1 if status == "ready" else 0,
+                "total_count": 1,
+                "primary_action": action,
+                "recommended_actions": [candidate for candidate in item.get("recommended_actions", []) or [] if isinstance(candidate, dict)],
+                "draft_command": None,
+                "blocking_reasons": [],
+                "install_items": [],
+                "skills": [],
+                "workflows": [],
+                "related_runbooks": [],
+                "catalog_id": item.get("catalog_id"),
+                "installed": installed,
+                "update_available": update_available,
+                "version": item.get("version"),
+                "version_line": item.get("version_line"),
+                "installed_version": item.get("installed_version"),
+                "contribution_types": list(item.get("contribution_types") or []),
+                "trust": item.get("trust"),
+                "publisher": item.get("publisher"),
+                "compatibility": item.get("compatibility"),
+                "diagnostics_summary": diagnostics_summary,
+                "status": status,
+            }
+        )
+
+    return flows
+
+
+def _capability_contract_inventory(native_tools: list[dict[str, Any]]) -> dict[str, Any]:
+    contracts = [
+        tool["capability_contract"]
+        for tool in native_tools
+        if isinstance(tool.get("capability_contract"), dict)
+    ]
+    try:
+        extension_payload = list_extensions()
+    except Exception:
+        extension_payload = {"extensions": []}
+    for extension in extension_payload.get("extensions", []) or []:
+        if not isinstance(extension, dict):
+            continue
+        for contribution in extension.get("contributions", []) or []:
+            if not isinstance(contribution, dict):
+                continue
+            contract = contribution.get("capability_contract")
+            if isinstance(contract, dict):
+                contracts.append(contract)
+    enforcement_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    for contract in contracts:
+        family = str(contract.get("family") or contract.get("contribution_type") or "unknown")
+        family_counts[family] = family_counts.get(family, 0) + 1
+        enforcement = contract.get("enforcement")
+        status = (
+            str(enforcement.get("status") or "unknown")
+            if isinstance(enforcement, dict)
+            else str(contract.get("quarantine", {}).get("state") or "unknown")
+        )
+        enforcement_counts[status] = enforcement_counts.get(status, 0) + 1
+    return {
+        "contracts": contracts,
+        "summary": {
+            "total": len(contracts),
+            "families": family_counts,
+            "enforcement": enforcement_counts,
+        },
+    }
+
+
 def _build_capability_overview() -> dict[str, Any]:
     base_tools, active_skill_names, mcp_mode = get_base_tools_and_active_skills()
     tool_mode = get_current_tool_policy_mode()
     available_tool_names = [tool.name for tool in base_tools]
+    source_adapter_inventory = list_source_adapter_inventory()
     native_tools = _tool_status_list(tool_mode)
     skills, skills_by_name = _skill_status_map(available_tool_names)
     workflows, workflows_by_name = _workflow_status_map(available_tool_names, active_skill_names)
@@ -1387,6 +1837,12 @@ def _build_capability_overview() -> dict[str, Any]:
         mcp_servers=mcp_servers,
         tool_mode=tool_mode,
     )
+    marketplace_flows = _marketplace_flows(
+        starter_packs=starter_packs,
+        catalog_items=catalog_items,
+        runbooks=runbooks,
+    )
+    capability_contract_inventory = _capability_contract_inventory(native_tools)
     ready_tools = sum(1 for tool in native_tools if tool["availability"] == "ready")
     ready_skills = sum(1 for skill in skills if skill["availability"] == "ready")
     ready_workflows = sum(1 for workflow in workflows if workflow["availability"] == "ready")
@@ -1406,15 +1862,29 @@ def _build_capability_overview() -> dict[str, Any]:
             "starter_packs_total": len(starter_packs),
             "mcp_servers_ready": sum(1 for server in mcp_servers if server["availability"] == "ready"),
             "mcp_servers_total": len(mcp_servers),
+            "source_adapters_ready": int(source_adapter_inventory["summary"]["ready_adapter_count"]),
+            "source_adapters_total": int(source_adapter_inventory["summary"]["adapter_count"]),
+            "marketplace_flows_ready": sum(
+                1 for flow in marketplace_flows
+                if str(flow.get("availability") or "") in {"ready", "installed"}
+            ),
+            "marketplace_flows_total": len(marketplace_flows),
+            "capability_contracts_total": int(capability_contract_inventory["summary"]["total"]),
+            "capability_contract_families": capability_contract_inventory["summary"]["families"],
+            "capability_contract_enforcement": capability_contract_inventory["summary"]["enforcement"],
         },
         "native_tools": native_tools,
         "skills": skills,
         "workflows": workflows,
         "mcp_servers": mcp_servers,
+        "source_adapters": source_adapter_inventory["adapters"],
+        "source_adapter_rules": source_adapter_inventory["selection_rules"],
         "starter_packs": starter_packs,
         "catalog_items": catalog_items,
         "recommendations": recommendations,
         "runbooks": runbooks,
+        "marketplace_flows": marketplace_flows,
+        "capability_contracts": capability_contract_inventory["contracts"],
     }
 
 
@@ -1519,7 +1989,7 @@ def _capability_preflight_payload(
     autorepair_actions = [
         action
         for action in recommended_actions
-        if isinstance(action.get("type"), str) and action["type"] in _SAFE_AUTOREPAIR_ACTION_TYPES
+        if isinstance(action.get("type"), str) and action["type"] in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
     ]
 
     return {
@@ -1662,7 +2132,7 @@ async def bootstrap_capability(body: CapabilityBootstrapRequest):
             for action in preflight.get("autorepair_actions", []) or []
             if (
                 isinstance(action, dict)
-                and str(action.get("type") or "") in _SAFE_AUTOREPAIR_ACTION_TYPES
+                and str(action.get("type") or "") in _LOW_RISK_AUTOREPAIR_ACTION_TYPES
                 and _action_key(action) not in seen_actions
             )
         ]

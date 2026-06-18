@@ -1,6 +1,6 @@
 ---
 name: research-pack
-description: Research Pack skill
+description: "Research Pack skill"
 requires:
   tools: []
 user_invocable: true

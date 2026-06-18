@@ -6,6 +6,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.extensions.capability_contributions import (
+    parse_automation_trigger_definition,
+    parse_browser_provider_definition,
+    parse_canvas_output_definition,
+    parse_context_pack_definition,
+    parse_messaging_connector_definition,
+    parse_node_adapter_definition,
+    parse_provider_preset_definition,
+    parse_speech_profile_definition,
+    parse_toolset_preset_definition,
+    parse_workflow_runtime_definition,
+)
 from src.extensions.connectors import (
     ConnectorDefinitionError,
     parse_managed_connector_definition,
@@ -13,12 +25,13 @@ from src.extensions.connectors import (
 )
 from src.extensions.channels import parse_channel_adapter_definition
 from src.extensions.observers import parse_observer_definition
-from src.extensions.permissions import evaluate_tool_permissions
+from src.extensions.permissions import evaluate_contribution_permissions, evaluate_tool_permissions
 from src.extensions.registry import (
     ExtensionLoadErrorRecord,
     ExtensionRecord,
     ExtensionRegistrySnapshot,
 )
+from src.security.context_scan import scan_text_for_suspicious_context
 from src.skills.loader import parse_skill_content
 from src.workflows.loader import parse_workflow_content
 import yaml
@@ -26,9 +39,27 @@ import yaml
 _CONNECTOR_CONTRIBUTIONS = {
     "mcp_servers",
     "managed_connectors",
+    "automation_triggers",
+    "browser_providers",
+    "messaging_connectors",
     "observer_connectors",
     "channel_adapters",
+    "node_adapters",
     "workspace_adapters",
+}
+_CONTEXT_SCANNED_CONTRIBUTIONS = {"skills", "workflows", "prompt_packs", "context_packs"}
+
+_DEFINITION_PARSERS = {
+    "toolset_presets": ("invalid_toolset_preset", "toolset preset", parse_toolset_preset_definition),
+    "context_packs": ("invalid_context_pack", "context pack", parse_context_pack_definition),
+    "automation_triggers": ("invalid_automation_trigger", "automation trigger", parse_automation_trigger_definition),
+    "browser_providers": ("invalid_browser_provider", "browser provider", parse_browser_provider_definition),
+    "messaging_connectors": ("invalid_messaging_connector", "messaging connector", parse_messaging_connector_definition),
+    "canvas_outputs": ("invalid_canvas_output", "canvas output", parse_canvas_output_definition),
+    "workflow_runtimes": ("invalid_workflow_runtime", "workflow runtime", parse_workflow_runtime_definition),
+    "speech_profiles": ("invalid_speech_profile", "speech profile", parse_speech_profile_definition),
+    "provider_presets": ("invalid_provider_preset", "provider preset", parse_provider_preset_definition),
+    "node_adapters": ("invalid_node_adapter", "node adapter", parse_node_adapter_definition),
 }
 
 
@@ -156,7 +187,11 @@ def _connector_implies_network(payload: Any) -> bool:
     )
 
 
-def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
+def doctor_extension(
+    extension: ExtensionRecord,
+    *,
+    available_mcp_server_names: set[str] | None = None,
+) -> ExtensionDoctorResult:
     issues: list[ExtensionDoctorIssue] = []
 
     if extension.source != "manifest" or extension.manifest is None:
@@ -186,6 +221,28 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
             issues.append(unreadable_issue)
             continue
         assert content is not None
+
+        if contribution.contribution_type in _CONTEXT_SCANNED_CONTRIBUTIONS:
+            for finding in scan_text_for_suspicious_context(
+                content,
+                include_fenced_blocks=contribution.contribution_type == "context_packs",
+            ):
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="suspicious_context_content",
+                        severity="error",
+                        message=(
+                            "Contribution contains suspicious prompt-bearing content "
+                            f"({finding.description}: '{finding.excerpt}')"
+                        ),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix=(
+                            "remove instruction-override, secret-exfiltration, or policy-bypass "
+                            "language from the package content"
+                        ),
+                    )
+                )
 
         if contribution.contribution_type == "skills":
             errors: list[dict[str, str]] = []
@@ -303,6 +360,119 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
                         contribution_type="workflows",
                         reference=contribution.reference,
                         suggested_fix="set manifest.permissions.network to true for networked workflows",
+                    )
+                )
+            continue
+
+        if contribution.contribution_type in _DEFINITION_PARSERS:
+            issue_code, label, parser = _DEFINITION_PARSERS[contribution.contribution_type]
+            payload, connector_issue = _load_connector_payload(
+                content,
+                contribution_type=contribution.contribution_type,
+                reference=contribution.reference,
+            )
+            if connector_issue is not None:
+                issues.append(connector_issue)
+                continue
+            assert payload is not None
+            try:
+                definition = parser(payload, source=str(resolved))
+            except ConnectorDefinitionError as exc:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code=issue_code,
+                        severity="error",
+                        message=str(exc),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix=f"fix the {label} definition fields so the typed parser accepts the file",
+                    )
+                )
+                continue
+            if contribution.contribution_type == "toolset_presets":
+                permission_profile = evaluate_contribution_permissions(
+                    extension,
+                    contribution_type=contribution.contribution_type,
+                    metadata=definition.as_metadata(),
+                )
+                if permission_profile["missing_tools"]:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="permission_mismatch",
+                            severity="error",
+                            message=(
+                                "Manifest permissions are missing required toolset tools: "
+                                f"{', '.join(permission_profile['missing_tools'])}"
+                            ),
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="add the missing tools to manifest.permissions.tools",
+                        )
+                    )
+                missing_boundaries = list(permission_profile["missing_execution_boundaries"])
+                if missing_boundaries:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="permission_mismatch",
+                            severity="error",
+                            message=(
+                                "Manifest permissions are missing required toolset execution boundaries: "
+                                f"{', '.join(missing_boundaries)}"
+                            ),
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="add the missing boundaries to manifest.permissions.execution_boundaries",
+                        )
+                    )
+                if permission_profile["missing_network"]:
+                    issues.append(
+                        ExtensionDoctorIssue(
+                            code="permission_mismatch",
+                            severity="error",
+                            message="Toolset preset requires network access but manifest.permissions.network is false",
+                            contribution_type=contribution.contribution_type,
+                            reference=contribution.reference,
+                            suggested_fix="set manifest.permissions.network to true for networked toolsets",
+                        )
+                    )
+                if definition.include_mcp_servers:
+                    missing_servers = sorted(
+                        server_name
+                        for server_name in definition.include_mcp_servers
+                        if server_name not in (available_mcp_server_names or set())
+                    )
+                    if missing_servers:
+                        issues.append(
+                            ExtensionDoctorIssue(
+                                code="missing_mcp_server_reference",
+                                severity="error",
+                                message=(
+                                    "Toolset preset references MCP servers that are not available in the current "
+                                    f"registry/runtime: {', '.join(missing_servers)}"
+                                ),
+                                contribution_type=contribution.contribution_type,
+                                reference=contribution.reference,
+                                suggested_fix="fix include_mcp_servers or install/configure the missing MCP server packages first",
+                            )
+                        )
+                continue
+            permission_profile = evaluate_contribution_permissions(
+                extension,
+                contribution_type=contribution.contribution_type,
+                metadata=definition.as_metadata(),
+            )
+            if permission_profile["missing_network"]:
+                issues.append(
+                    ExtensionDoctorIssue(
+                        code="permission_mismatch",
+                        severity="error",
+                        message=(
+                            f"{label.capitalize()} requires network access but "
+                            "manifest.permissions.network is false"
+                        ),
+                        contribution_type=contribution.contribution_type,
+                        reference=contribution.reference,
+                        suggested_fix="set manifest.permissions.network to true for networked connector surfaces",
                     )
                 )
             continue
@@ -430,7 +600,29 @@ def doctor_extension(extension: ExtensionRecord) -> ExtensionDoctorResult:
 
 
 def doctor_snapshot(snapshot: ExtensionRegistrySnapshot) -> ExtensionDoctorReport:
+    try:
+        from src.tools.mcp_manager import mcp_manager
+
+        runtime_mcp_servers = {
+            str(name).strip()
+            for name in getattr(mcp_manager, "_config", {}).keys()
+            if str(name).strip()
+        }
+    except Exception:
+        runtime_mcp_servers = set()
+    packaged_mcp_servers = {
+        str(contribution.metadata.get("name")).strip()
+        for contribution in snapshot.list_contributions("mcp_servers")
+        if isinstance(contribution.metadata.get("name"), str) and str(contribution.metadata.get("name")).strip()
+    }
+    available_mcp_server_names = packaged_mcp_servers | runtime_mcp_servers
     return ExtensionDoctorReport(
-        results=[doctor_extension(extension) for extension in snapshot.extensions],
+        results=[
+            doctor_extension(
+                extension,
+                available_mcp_server_names=available_mcp_server_names,
+            )
+            for extension in snapshot.extensions
+        ],
         load_errors=list(snapshot.load_errors),
     )

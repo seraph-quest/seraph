@@ -1,5 +1,7 @@
 """Goal tree integrity — orphans, parent deletion cascade, path correctness, deep nesting."""
 
+from sqlalchemy import text
+
 import pytest
 
 from src.goals.repository import GoalRepository
@@ -37,52 +39,40 @@ class TestPathCorrectness:
 class TestOrphanDetection:
     async def test_orphan_goal_surfaces_as_root(self, async_db, repo):
         """A goal whose parent_id references a non-existent goal should appear as root."""
-        # Create parent, then child, then delete parent directly from DB
         parent = await repo.create("Parent", level="vision")
-        child = await repo.create("Child", level="annual", parent_id=parent.id)
+        child = await repo.create("Orphan Goal", level="annual", parent_id=parent.id)
 
-        # Delete parent (cascading also deletes child via path)
-        # Instead, simulate an orphan by creating a goal with a bogus parent_id
+        # Simulate legacy/corrupt data by bypassing FK enforcement for one delete.
         from src.db.engine import get_session
-        from src.db.models import Goal
 
         async with get_session() as db:
-            orphan = Goal(
-                id="orphan01",
-                parent_id="nonexistent",
-                path="/",
-                level="daily",
-                title="Orphan Goal",
-                domain="productivity",
-            )
-            db.add(orphan)
+            await db.execute(text("PRAGMA foreign_keys=OFF"))
+            await db.execute(text("DELETE FROM goals WHERE id = :goal_id"), {"goal_id": parent.id})
+            await db.flush()
+            await db.execute(text("PRAGMA foreign_keys=ON"))
 
         tree = await repo.get_tree()
-        orphan_node = next((n for n in tree if n["id"] == "orphan01"), None)
+        orphan_node = next((n for n in tree if n["id"] == child.id), None)
         assert orphan_node is not None, "Orphan should appear as root in tree"
         assert orphan_node["title"] == "Orphan Goal"
 
     async def test_orphan_does_not_appear_under_wrong_parent(self, async_db, repo):
         """Orphan should NOT be attached to any other parent's children list."""
         from src.db.engine import get_session
-        from src.db.models import Goal
 
         real = await repo.create("Real Parent", level="vision")
-
+        vanished_parent = await repo.create("Ghost Parent", level="vision")
+        orphan = await repo.create("Orphan 2", level="daily", parent_id=vanished_parent.id)
         async with get_session() as db:
-            orphan = Goal(
-                id="orphan02",
-                parent_id="ghost",
-                path="/",
-                level="daily",
-                title="Orphan 2",
-                domain="productivity",
-            )
-            db.add(orphan)
+            await db.execute(text("PRAGMA foreign_keys=OFF"))
+            await db.execute(text("DELETE FROM goals WHERE id = :goal_id"), {"goal_id": vanished_parent.id})
+            await db.flush()
+            await db.execute(text("PRAGMA foreign_keys=ON"))
 
         tree = await repo.get_tree()
         real_node = next(n for n in tree if n["id"] == real.id)
         assert len(real_node["children"]) == 0
+        assert any(node["id"] == orphan.id for node in tree)
 
 
 class TestCascadeDeletion:

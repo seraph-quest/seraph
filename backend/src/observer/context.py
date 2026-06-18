@@ -21,6 +21,7 @@ class CurrentContext:
 
     # Goal source
     active_goals_summary: str = ""
+    active_project: Optional[str] = None
 
     # Interaction tracking
     last_interaction: Optional[datetime] = None
@@ -89,6 +90,9 @@ class CurrentContext:
 
         if self.active_goals_summary:
             lines.append(f"Active goals: {self.active_goals_summary}")
+
+        if self.active_project:
+            lines.append(f"Active project: {self.active_project}")
 
         if self.active_window:
             lines.append(f"User is in: {self.active_window}")

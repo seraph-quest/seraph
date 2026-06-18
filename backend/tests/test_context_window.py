@@ -1,7 +1,7 @@
 """Tests for the token-aware context window."""
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -206,7 +206,12 @@ class TestSummaryCache:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "short summary"
 
-        with patch("src.agent.context_window.completion_with_fallback_sync", return_value=mock_response):
+        with patch(
+            "src.agent.context_window.completion_with_fallback_sync",
+            return_value=mock_response,
+        ), patch(
+            "src.agent.context_window.log_background_task_event_sync",
+        ) as mock_audit:
             result = _summarize_middle(
                 [_msg("user", "hello world")],
                 session_id="sess",
@@ -214,21 +219,21 @@ class TestSummaryCache:
             )
 
         assert result == "short summary"
-
-        async def _fetch():
-            events = await audit_repository.list_events(limit=5)
-            return [e for e in events if e["event_type"] == "background_task_succeeded"]
-
-        events = asyncio.run(_fetch())
-        assert events
-        assert events[0]["tool_name"] == "context_window_summary"
-        assert events[0]["details"]["runtime_path"] == "context_window_summary"
-        assert events[0]["details"]["message_count"] == 1
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args.kwargs["task_name"] == "context_window_summary"
+        assert mock_audit.call_args.kwargs["outcome"] == "succeeded"
+        assert mock_audit.call_args.kwargs["details"]["runtime_path"] == "context_window_summary"
+        assert mock_audit.call_args.kwargs["details"]["message_count"] == 1
 
     def test_cache_miss_logs_runtime_audit_degraded(self, async_db):
         from src.agent.context_window import _summarize_middle
 
-        with patch("src.agent.context_window.completion_with_fallback_sync", side_effect=RuntimeError("provider down")):
+        with patch(
+            "src.agent.context_window.completion_with_fallback_sync",
+            side_effect=RuntimeError("provider down"),
+        ), patch(
+            "src.agent.context_window.log_background_task_event_sync",
+        ) as mock_audit:
             result = _summarize_middle(
                 [_msg("user", "hello world")],
                 session_id="sess",
@@ -236,16 +241,11 @@ class TestSummaryCache:
             )
 
         assert "truncated" in result
-
-        async def _fetch():
-            events = await audit_repository.list_events(limit=5)
-            return [e for e in events if e["event_type"] == "background_task_degraded"]
-
-        events = asyncio.run(_fetch())
-        assert events
-        assert events[0]["tool_name"] == "context_window_summary"
-        assert events[0]["details"]["runtime_path"] == "context_window_summary"
-        assert events[0]["details"]["fallback"] == "truncation"
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args.kwargs["task_name"] == "context_window_summary"
+        assert mock_audit.call_args.kwargs["outcome"] == "degraded"
+        assert mock_audit.call_args.kwargs["details"]["runtime_path"] == "context_window_summary"
+        assert mock_audit.call_args.kwargs["details"]["fallback"] == "truncation"
 
 
 class TestSettingsIntegration:
@@ -311,3 +311,28 @@ class TestOfflineReliability:
             assert "message number 19" in result
         finally:
             context_window._load_encoding.cache_clear()
+
+    def test_sync_summary_persists_runtime_audit_without_running_loop(self):
+        from src.agent.context_window import _summarize_middle
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "offline summary"
+
+        with (
+            patch(
+                "src.agent.context_window.completion_with_fallback_sync",
+                return_value=mock_response,
+            ),
+            patch("src.audit.runtime.audit_repository.log_event", AsyncMock()) as mock_log_event,
+        ):
+            result = _summarize_middle(
+                [_msg("user", "hello world")],
+                session_id="offline-sync",
+                range_key="0-1",
+            )
+
+        assert result == "offline summary"
+        mock_log_event.assert_awaited_once()
+        assert mock_log_event.await_args.kwargs["event_type"] == "background_task_succeeded"
+        assert mock_log_event.await_args.kwargs["tool_name"] == "context_window_summary"

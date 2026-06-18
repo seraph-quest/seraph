@@ -1,0 +1,13 @@
+name: guardian-board
+title: Guardian Board
+description: Multi-section operator board for workflow summaries, execution steps, and produced artifacts.
+surface_kind: board
+sections:
+  - Summary
+  - Steps
+  - Artifacts
+artifact_types:
+  - note
+  - report
+  - file
+preferred_panel: operations-inspector

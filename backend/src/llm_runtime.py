@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from dataclasses import dataclass
 import logging
 import math
 from fnmatch import fnmatchcase
@@ -23,12 +24,39 @@ _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
+_target_feedback_lock = Lock()
 _KNOWN_RUNTIME_PROFILES = {"default", "local"}
 _GUARDRAIL_TIERS = {"low": 0, "medium": 1, "high": 2}
+_RECENT_FEEDBACK_WINDOW_SECONDS = 900.0
+_FAILURE_KIND_SCORES = {
+    "auth": 4.0,
+    "rate_limited": 2.5,
+    "timeout": 2.0,
+    "unavailable": 2.0,
+    "server_error": 1.5,
+    "validation": 1.0,
+    "unknown": 1.0,
+}
 _runtime_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "llm_runtime_request_id",
     default=None,
 )
+
+
+@dataclass
+class _TargetFeedback:
+    success_count: int = 0
+    failure_count: int = 0
+    consecutive_failures: int = 0
+    recent_success_count: int = 0
+    recent_failure_count: int = 0
+    last_success_at: float | None = None
+    last_failure_at: float | None = None
+    last_failure_kind: str | None = None
+    last_error: str | None = None
+
+
+_target_feedback: dict[tuple[str, str | None, str | None], _TargetFeedback] = {}
 
 
 def _primary_api_key() -> str:
@@ -626,6 +654,118 @@ def _target_cooldown_seconds() -> int:
 def _reset_target_health() -> None:
     with _target_health_lock:
         _unhealthy_targets.clear()
+    with _target_feedback_lock:
+        _target_feedback.clear()
+
+
+def _target_feedback_entry(
+    *,
+    model_id: str,
+    api_base: str | None,
+    api_key: str | None,
+) -> _TargetFeedback:
+    target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+    with _target_feedback_lock:
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            entry = _TargetFeedback()
+            _target_feedback[target_key] = entry
+        return entry
+
+
+def _classify_runtime_failure(error: Exception) -> str:
+    message = str(error).lower()
+    if any(token in message for token in ("401", "403", "auth", "unauthorized", "forbidden", "invalid api key")):
+        return "auth"
+    if any(token in message for token in ("429", "rate limit", "too many requests")):
+        return "rate_limited"
+    if any(token in message for token in ("timeout", "timed out")):
+        return "timeout"
+    if any(token in message for token in ("503", "unavailable", "connection refused", "connection reset", "down")):
+        return "unavailable"
+    if any(token in message for token in ("500", "502", "504", "server error")):
+        return "server_error"
+    if any(token in message for token in ("context length", "invalid", "bad request")):
+        return "validation"
+    return "unknown"
+
+
+def _feedback_snapshot(
+    *,
+    model_id: str,
+    api_base: str | None,
+    api_key: str | None,
+) -> dict[str, Any]:
+    target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+    now = monotonic()
+    cooldown_remaining_seconds = 0.0
+    with _target_health_lock:
+        unhealthy_until = _unhealthy_targets.get(target_key)
+        if unhealthy_until is not None:
+            cooldown_remaining_seconds = max(0.0, unhealthy_until - now)
+    with _target_feedback_lock:
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            return {
+                "success_count": 0,
+                "failure_count": 0,
+                "consecutive_failures": 0,
+                "recent_success_count": 0,
+                "recent_failure_count": 0,
+                "last_failure_kind": None,
+                "last_error": None,
+                "cooldown_remaining_seconds": 0.0,
+                "failure_risk_score": 0.0,
+                "production_readiness": "ready",
+                "feedback_state": "clear",
+            }
+        recent_failure_count = entry.recent_failure_count
+        recent_success_count = entry.recent_success_count
+        effective_consecutive_failures = entry.consecutive_failures
+        effective_last_failure_kind = entry.last_failure_kind
+        effective_last_error = entry.last_error
+        if entry.last_failure_at is not None and now - entry.last_failure_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            recent_failure_count = 0
+            effective_consecutive_failures = 0
+            effective_last_failure_kind = None
+            effective_last_error = None
+        if entry.last_success_at is not None and now - entry.last_success_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            recent_success_count = 0
+        failure_kind_score = _FAILURE_KIND_SCORES.get(effective_last_failure_kind or "", 0.0)
+        failure_risk_score = max(
+            0.0,
+            failure_kind_score
+            + (float(effective_consecutive_failures) * 1.5)
+            + (float(recent_failure_count) * 0.75)
+            + (1.0 if cooldown_remaining_seconds > 0 else 0.0)
+            - min(float(recent_success_count) * 0.5, 1.5),
+        )
+        feedback_state = "clear"
+        production_readiness = "ready"
+        if cooldown_remaining_seconds > 0:
+            feedback_state = "cooldown"
+            production_readiness = "degraded"
+        elif effective_consecutive_failures >= 2 or recent_failure_count >= 2:
+            feedback_state = "unstable"
+            production_readiness = "degraded"
+        elif recent_failure_count > 0:
+            feedback_state = "recovering"
+            production_readiness = "guarded"
+        elif recent_success_count > 0:
+            feedback_state = "stable"
+        return {
+            "success_count": entry.success_count,
+            "failure_count": entry.failure_count,
+            "consecutive_failures": effective_consecutive_failures,
+            "recent_success_count": recent_success_count,
+            "recent_failure_count": recent_failure_count,
+            "last_failure_kind": effective_last_failure_kind,
+            "last_error": effective_last_error,
+            "cooldown_remaining_seconds": round(cooldown_remaining_seconds, 3),
+            "failure_risk_score": round(failure_risk_score, 3),
+            "production_readiness": production_readiness,
+            "feedback_state": feedback_state,
+        }
 
 
 def _mark_target_failed(
@@ -633,14 +773,29 @@ def _mark_target_failed(
     model_id: str,
     api_base: str | None,
     api_key: str | None,
+    error: Exception | None = None,
 ) -> None:
     cooldown_seconds = _target_cooldown_seconds()
-    if cooldown_seconds <= 0:
-        return
-    with _target_health_lock:
-        _unhealthy_targets[_target_key(model_id=model_id, api_base=api_base, api_key=api_key)] = (
-            monotonic() + cooldown_seconds
-        )
+    now = monotonic()
+    if cooldown_seconds > 0:
+        with _target_health_lock:
+            _unhealthy_targets[_target_key(model_id=model_id, api_base=api_base, api_key=api_key)] = now + cooldown_seconds
+    with _target_feedback_lock:
+        target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            entry = _TargetFeedback()
+            _target_feedback[target_key] = entry
+        entry.failure_count += 1
+        if entry.last_failure_at is None or now - entry.last_failure_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            entry.recent_failure_count = 1
+        else:
+            entry.recent_failure_count += 1
+        entry.consecutive_failures += 1
+        entry.last_failure_at = now
+        if error is not None:
+            entry.last_failure_kind = _classify_runtime_failure(error)
+            entry.last_error = str(error)
 
 
 def _mark_target_succeeded(
@@ -654,6 +809,21 @@ def _mark_target_succeeded(
             _target_key(model_id=model_id, api_base=api_base, api_key=api_key),
             None,
         )
+    now = monotonic()
+    with _target_feedback_lock:
+        target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+        entry = _target_feedback.get(target_key)
+        if entry is None:
+            entry = _TargetFeedback()
+            _target_feedback[target_key] = entry
+        entry.success_count += 1
+        if entry.last_success_at is None or now - entry.last_success_at > _RECENT_FEEDBACK_WINDOW_SECONDS:
+            entry.recent_success_count = 1
+        else:
+            entry.recent_success_count += 1
+        entry.last_success_at = now
+        entry.consecutive_failures = 0
+        entry.last_error = None
 
 
 def _is_target_healthy(
@@ -696,6 +866,53 @@ def _tier_within_guardrail(actual: str | None, maximum: str | None) -> bool:
     if actual is None:
         return False
     return _GUARDRAIL_TIERS[actual] <= _GUARDRAIL_TIERS[maximum]
+
+
+def _tier_rank(actual: str | None) -> int | None:
+    if actual is None:
+        return None
+    return _GUARDRAIL_TIERS.get(actual)
+
+
+def _budget_headroom(actual: str | None, maximum: str | None) -> int | None:
+    actual_rank = _tier_rank(actual)
+    maximum_rank = _tier_rank(maximum)
+    if actual_rank is None or maximum_rank is None:
+        return None
+    return maximum_rank - actual_rank
+
+
+def _budget_steering_mode(
+    *,
+    policy_intents: list[str],
+    max_budget_class: str | None,
+) -> str:
+    if "cheap" in policy_intents:
+        return "prefer_lower_budget"
+    if max_budget_class in {"low", "medium"}:
+        return "preserve_budget_headroom"
+    if max_budget_class is not None:
+        return "stay_within_guardrail"
+    return "none"
+
+
+def _budget_preference_score(
+    *,
+    budget_class: str | None,
+    max_budget_class: str | None,
+    steering_mode: str,
+) -> float:
+    budget_rank = _tier_rank(budget_class)
+    if budget_rank is None:
+        return 0.0
+    if steering_mode == "prefer_lower_budget":
+        return float(len(_GUARDRAIL_TIERS) - 1 - budget_rank)
+    if steering_mode == "preserve_budget_headroom":
+        headroom = _budget_headroom(budget_class, max_budget_class)
+        return float(headroom) if headroom is not None else 0.0
+    if steering_mode == "stay_within_guardrail" and _tier_within_guardrail(budget_class, max_budget_class):
+        return 0.5
+    return 0.0
 
 
 def _target_policy_assessment(
@@ -761,6 +978,11 @@ def _order_targets_by_policy(
 ) -> list[dict[str, Any]]:
     intents = runtime_policy_intents(runtime_path)
     score_weights = runtime_policy_scores(runtime_path)
+    max_budget_class = runtime_max_budget_class(runtime_path)
+    budget_steering_mode = _budget_steering_mode(
+        policy_intents=intents,
+        max_budget_class=max_budget_class,
+    )
     annotated_targets: list[tuple[int, dict[str, Any]]] = []
     any_compliant = False
     for index, target in enumerate(targets):
@@ -771,6 +993,21 @@ def _order_targets_by_policy(
             runtime_path=runtime_path,
         )
         annotated_target["policy_assessment"] = assessment
+        annotated_target["budget_steering_mode"] = budget_steering_mode
+        annotated_target["budget_headroom"] = _budget_headroom(
+            assessment["budget_class"],
+            assessment["max_budget_class"],
+        )
+        annotated_target["budget_preference_score"] = _budget_preference_score(
+            budget_class=assessment["budget_class"],
+            max_budget_class=assessment["max_budget_class"],
+            steering_mode=budget_steering_mode,
+        )
+        annotated_target["live_feedback"] = _feedback_snapshot(
+            model_id=str(annotated_target["model_id"]),
+            api_base=annotated_target.get("api_base"),
+            api_key=annotated_target.get("api_key"),
+        )
         if assessment["policy_compliant"]:
             any_compliant = True
         annotated_targets.append((index, annotated_target))
@@ -788,41 +1025,34 @@ def _order_targets_by_policy(
     desired_capabilities = [intent for intent in intents if intent != "local_first"]
     prefer_local = "local_first" in intents
 
-    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], int]:
+    def _sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, float, tuple[int, ...], float, float, int]:
         index, target = item
-        assessment = target["policy_assessment"]
-        capabilities = set(
-            provider_capabilities(
-                str(target["model_id"]),
-                profile=target.get("profile"),
-            )
+        live_feedback = target["live_feedback"]
+        healthy = _is_target_healthy(
+            model_id=str(target["model_id"]),
+            api_base=target.get("api_base"),
+            api_key=target.get("api_key"),
         )
-        local_score = score_weights.get("local_first", 1.0) if prefer_local and target.get("profile") == "local" else 0.0
-        capability_priority = tuple(
-            0 if capability in capabilities else 1
-            for capability in desired_capabilities
+        priority = _candidate_priority_components(
+            target=target,
+            policy_intents=intents,
+            score_weights=score_weights,
+            prefer_local=prefer_local,
+            desired_capabilities=desired_capabilities,
+            any_compliant=any_compliant,
+            healthy=healthy,
+            live_feedback=live_feedback,
         )
-        capability_score = 0.0
-        if score_weights:
-            capability_score = sum(
-                score_weights.get(capability, 0.0)
-                for capability in desired_capabilities
-                if capability in capabilities
-            )
-        compliance_penalty = 0
-        safeguard_penalty = 0
-        if any_compliant and not assessment["policy_compliant"]:
-            compliance_penalty = 1
-            safeguard_penalty = len(assessment["missing_required_intents"])
-            if not assessment["within_cost_guardrail"]:
-                safeguard_penalty += 1
-            if not assessment["within_latency_guardrail"]:
-                safeguard_penalty += 1
-            if not assessment["matched_task_class"]:
-                safeguard_penalty += 1
-            if not assessment["within_budget_guardrail"]:
-                safeguard_penalty += 1
-        return (compliance_penalty, safeguard_penalty, -local_score - capability_score, capability_priority, index)
+        target["priority_components"] = priority
+        return (
+            int(priority["compliance_penalty"] > 0.0),
+            int(priority["guardrail_penalty"]),
+            -float(priority["local_preference_score"] + priority["policy_score"]),
+            tuple(int(value) for value in priority["capability_priority"]),
+            float(priority["live_feedback_penalty"]),
+            -float(priority["budget_preference_score"]),
+            index,
+        )
 
     return [
         target
@@ -863,6 +1093,124 @@ def _policy_score(
         policy_intents=policy_intents,
     )
     return sum(policy_scores.get(intent, 0.0) for intent in matched)
+
+
+def _capability_priority(
+    *,
+    model_id: str,
+    profile: str | None,
+    desired_capabilities: list[str],
+) -> tuple[int, ...]:
+    capabilities = set(provider_capabilities(model_id, profile=profile))
+    return tuple(
+        0 if capability in capabilities else 1
+        for capability in desired_capabilities
+    )
+
+
+def _capability_gap_penalty(capability_priority: tuple[int, ...]) -> float:
+    total = 0.0
+    size = len(capability_priority)
+    for index, missing in enumerate(capability_priority):
+        if missing:
+            total += float(size - index)
+    return total
+
+
+def _candidate_priority_components(
+    *,
+    target: dict[str, Any],
+    policy_intents: list[str],
+    score_weights: dict[str, float],
+    prefer_local: bool,
+    desired_capabilities: list[str],
+    any_compliant: bool,
+    healthy: bool,
+    live_feedback: dict[str, Any],
+) -> dict[str, Any]:
+    assessment = target["policy_assessment"]
+    local_preference_score = (
+        score_weights.get("local_first", 1.0)
+        if prefer_local and target.get("profile") == "local"
+        else 0.0
+    )
+    capability_priority = _capability_priority(
+        model_id=str(target["model_id"]),
+        profile=target.get("profile"),
+        desired_capabilities=desired_capabilities,
+    )
+    capability_gap_count = sum(capability_priority)
+    capability_gap_penalty = _capability_gap_penalty(capability_priority)
+    policy_score = _policy_score(
+        model_id=str(target["model_id"]),
+        profile=target.get("profile"),
+        policy_intents=policy_intents,
+        policy_scores=score_weights,
+    )
+    budget_preference_score = float(target.get("budget_preference_score", 0.0))
+    live_feedback_penalty = float(live_feedback.get("failure_risk_score", 0.0))
+    health_penalty = 10.0 if not healthy else 0.0
+    guardrail_penalty = 0.0
+    compliance_penalty = 0.0
+    if any_compliant and not assessment["policy_compliant"]:
+        guardrail_penalty = float(len(assessment["missing_required_intents"]))
+        if not assessment["within_cost_guardrail"]:
+            guardrail_penalty += 1.0
+        if not assessment["within_latency_guardrail"]:
+            guardrail_penalty += 1.0
+        if not assessment["matched_task_class"]:
+            guardrail_penalty += 1.0
+        if not assessment["within_budget_guardrail"]:
+            guardrail_penalty += 1.0
+        compliance_penalty = 100.0
+    preference_score = local_preference_score + policy_score + budget_preference_score
+    planning_score = (
+        preference_score
+        - capability_gap_penalty
+        - live_feedback_penalty
+        - health_penalty
+        - guardrail_penalty
+        - compliance_penalty
+    )
+    return {
+        "local_preference_score": local_preference_score,
+        "policy_score": policy_score,
+        "capability_priority": capability_priority,
+        "capability_gap_count": capability_gap_count,
+        "capability_gap_penalty": capability_gap_penalty,
+        "budget_preference_score": budget_preference_score,
+        "preference_score": preference_score,
+        "live_feedback_penalty": live_feedback_penalty,
+        "health_penalty": health_penalty,
+        "guardrail_penalty": guardrail_penalty,
+        "compliance_penalty": compliance_penalty,
+        "planning_score": round(planning_score, 3),
+    }
+
+
+def _candidate_planning_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(candidate.get("planning_score", 0.0)),
+        -float(candidate.get("capability_gap_count", 0.0)),
+        float(candidate.get("preference_score", 0.0)),
+        -float(candidate.get("live_feedback_penalty", 0.0)),
+    )
+
+
+def _candidate_route_label(candidate: dict[str, Any], *, disambiguate: bool = False) -> str:
+    label = str(candidate["model_id"])
+    if not disambiguate:
+        return label
+    qualifiers: list[str] = []
+    profile = str(candidate.get("profile") or "").strip()
+    source = str(candidate.get("source") or "").strip()
+    if profile:
+        qualifiers.append(profile)
+    if source:
+        qualifiers.append(source)
+    if qualifiers:
+        label += f" ({'/'.join(qualifiers)})"
+    return label
 
 
 def _candidate_reason_codes(
@@ -985,6 +1333,12 @@ def _build_routing_decision_details(
     max_latency_tier = runtime_max_latency_tier(runtime_path)
     required_task_class = runtime_task_class(runtime_path)
     max_budget_class = runtime_max_budget_class(runtime_path)
+    budget_steering_mode = _budget_steering_mode(
+        policy_intents=policy_intents,
+        max_budget_class=max_budget_class,
+    )
+    prefer_local = "local_first" in policy_intents
+    desired_capabilities = [intent for intent in policy_intents if intent != "local_first"]
     primary_unhealthy = not _is_target_healthy(
         model_id=primary_model,
         api_base=primary_api_base,
@@ -1004,6 +1358,11 @@ def _build_routing_decision_details(
     candidate_targets: list[dict[str, Any]] = []
     for target in ordered_targets:
         assessment = target["policy_assessment"]
+        live_feedback = target.get("live_feedback") or _feedback_snapshot(
+            model_id=str(target["model_id"]),
+            api_base=target.get("api_base"),
+            api_key=target.get("api_key"),
+        )
         healthy = _is_target_healthy(
             model_id=str(target["model_id"]),
             api_base=target.get("api_base"),
@@ -1027,11 +1386,29 @@ def _build_routing_decision_details(
         else:
             decision = "deferred"
 
+        priority = target.get("priority_components")
+        if not isinstance(priority, dict):
+            priority = _candidate_priority_components(
+                target=target,
+                policy_intents=policy_intents,
+                score_weights=policy_scores,
+                prefer_local=prefer_local,
+                desired_capabilities=desired_capabilities,
+                any_compliant=compliant_targets_present,
+                healthy=healthy,
+                live_feedback=live_feedback,
+            )
+        budget_headroom = target.get("budget_headroom")
+        attemptable_route = (
+            assessment["policy_compliant"] or not compliant_targets_present
+        )
+
         candidate_targets.append(
             {
                 "model_id": str(target["model_id"]),
                 "profile": target.get("profile"),
                 "source": target["source"],
+                "route_key": target_key,
                 "healthy": healthy,
                 "decision": decision,
                 "matched_policy_intents": _matched_policy_intents(
@@ -1053,12 +1430,24 @@ def _build_routing_decision_details(
                 "max_budget_class": assessment["max_budget_class"],
                 "within_budget_guardrail": assessment["within_budget_guardrail"],
                 "policy_compliant": assessment["policy_compliant"],
-                "policy_score": _policy_score(
-                    model_id=str(target["model_id"]),
-                    profile=target.get("profile"),
-                    policy_intents=policy_intents,
-                    policy_scores=policy_scores,
-                ),
+                "policy_score": priority["policy_score"],
+                "budget_steering_mode": budget_steering_mode,
+                "budget_headroom": budget_headroom,
+                "budget_preference_score": priority["budget_preference_score"],
+                "local_preference_score": priority["local_preference_score"],
+                "preference_score": priority["preference_score"],
+                "capability_gap_count": priority["capability_gap_count"],
+                "capability_gap_penalty": priority["capability_gap_penalty"],
+                "live_feedback_penalty": priority["live_feedback_penalty"],
+                "health_penalty": priority["health_penalty"],
+                "guardrail_penalty": priority["guardrail_penalty"],
+                "compliance_penalty": priority["compliance_penalty"],
+                "planning_score": priority["planning_score"],
+                "failure_risk_score": live_feedback["failure_risk_score"],
+                "feedback_state": live_feedback["feedback_state"],
+                "production_readiness": live_feedback["production_readiness"],
+                "live_feedback": live_feedback,
+                "attemptable_route": attemptable_route,
                 "reason_codes": _candidate_reason_codes(
                     source=target["source"],
                     decision=decision,
@@ -1074,6 +1463,43 @@ def _build_routing_decision_details(
             }
         )
 
+    attemptable_candidate_targets = [
+        target
+        for target in candidate_targets
+        if target["policy_compliant"] or not compliant_targets_present
+    ]
+    simulated_routes: list[dict[str, Any]] = []
+    for route_rank, candidate in enumerate(candidate_targets, start=1):
+        attempt_order: list[str] = []
+        if candidate["attemptable_route"]:
+            attempt_order = [candidate["model_id"]] + [
+                other["model_id"]
+                for other in attemptable_candidate_targets
+                if not (
+                    other["model_id"] == candidate["model_id"]
+                    and other.get("profile") == candidate.get("profile")
+                    and other["source"] == candidate["source"]
+                )
+            ]
+        simulated_routes.append(
+            {
+                "rank": route_rank,
+                "entry_model": candidate["model_id"],
+                "entry_profile": candidate.get("profile"),
+                "entry_source": candidate["source"],
+                "healthy_entry_target": candidate["healthy"],
+                "policy_compliant_entry_target": candidate["policy_compliant"],
+                "policy_score": candidate["policy_score"],
+                "budget_steering_mode": candidate["budget_steering_mode"],
+                "budget_headroom": candidate["budget_headroom"],
+                "budget_preference_score": candidate["budget_preference_score"],
+                "route_score": candidate["planning_score"],
+                "attempt_order": attempt_order,
+                "selected": candidate["decision"] == "selected",
+                "reason_codes": candidate["reason_codes"],
+            }
+        )
+
     attempt_order = [
         target["model_id"]
         for target in candidate_targets
@@ -1082,6 +1508,71 @@ def _build_routing_decision_details(
     selected_candidate = next(
         target for target in candidate_targets if target["decision"] == "selected"
     )
+    planning_candidates = [
+        target for target in candidate_targets if target["attemptable_route"]
+    ] or candidate_targets
+    ambiguous_model_ids = {
+        model_id
+        for model_id in {target["model_id"] for target in candidate_targets}
+        if sum(1 for target in candidate_targets if target["model_id"] == model_id) > 1
+    }
+    planning_winner = max(planning_candidates, key=_candidate_planning_sort_key)
+    alternate_candidates = [
+        target
+        for target in planning_candidates
+        if target["route_key"] != selected_candidate["route_key"]
+    ]
+    best_alternate = max(alternate_candidates, key=_candidate_planning_sort_key) if alternate_candidates else None
+    selection_policy_mode = "highest_ranked_attemptable"
+    if (
+        selected_candidate["source"] == "primary"
+        and not rerouted
+        and not primary_unhealthy
+        and not rerouted_due_to_policy
+    ):
+        selection_policy_mode = "retain_primary_until_reroute"
+    elif planning_winner["route_key"] != selected_candidate["route_key"]:
+        selection_policy_mode = "legacy_ordered_attemptable"
+    selected_vs_best_alternate_margin = None
+    selected_label = _candidate_route_label(
+        selected_candidate,
+        disambiguate=selected_candidate["model_id"] in ambiguous_model_ids,
+    )
+    planning_winner_label = _candidate_route_label(
+        planning_winner,
+        disambiguate=planning_winner["model_id"] in ambiguous_model_ids,
+    )
+    route_comparison_summary = f"selected {selected_label}; no alternate route remained"
+    if best_alternate is not None:
+        best_alternate_label = _candidate_route_label(
+            best_alternate,
+            disambiguate=best_alternate["model_id"] in ambiguous_model_ids,
+        )
+        selected_vs_best_alternate_margin = round(
+            float(selected_candidate["planning_score"]) - float(best_alternate["planning_score"]),
+            3,
+        )
+        if (
+            selection_policy_mode == "retain_primary_until_reroute"
+            and planning_winner["route_key"] != selected_candidate["route_key"]
+        ):
+            route_comparison_summary = (
+                f"retained primary {selected_label} even though "
+                f"{planning_winner_label} had higher planning_score "
+                f"({planning_winner['planning_score']} vs {selected_candidate['planning_score']}) "
+                "because no reroute trigger was active"
+            )
+        elif planning_winner["route_key"] != selected_candidate["route_key"]:
+            route_comparison_summary = (
+                f"selected {selected_label} by legacy ordering even though "
+                f"{planning_winner_label} had higher planning_score "
+                f"({planning_winner['planning_score']} vs {selected_candidate['planning_score']})"
+            )
+        else:
+            route_comparison_summary = (
+                f"selected {selected_label} over {best_alternate_label} "
+                f"by planning_score margin {selected_vs_best_alternate_margin}"
+            )
     reroute_cause = "none"
     if rerouted_due_to_policy:
         reroute_cause = "policy_guardrails"
@@ -1094,6 +1585,28 @@ def _build_routing_decision_details(
         for target in candidate_targets
         if target["decision"] != "selected"
     ]
+    rejected_target_summaries = [
+        {
+            "model_id": target["model_id"],
+            "source": target["source"],
+            "decision": target["decision"],
+            "production_readiness": target["production_readiness"],
+            "failure_risk_score": target["failure_risk_score"],
+            "reason_codes": target["reason_codes"],
+        }
+        for target in rejected_targets
+    ]
+    route_explanation_parts = [
+        f"selected {selected_candidate['model_id']}",
+        f"readiness={selected_candidate['production_readiness']}",
+        f"failure_risk={selected_candidate['failure_risk_score']}",
+    ]
+    if selected_candidate["matched_policy_intents"]:
+        route_explanation_parts.append(
+            "matched=" + ",".join(selected_candidate["matched_policy_intents"])
+        )
+    if rejected_targets:
+        route_explanation_parts.append(f"rejected={len(rejected_targets)}")
 
     return {
         "runtime_path": runtime_path,
@@ -1105,19 +1618,43 @@ def _build_routing_decision_details(
         "max_latency_tier": max_latency_tier,
         "required_task_class": required_task_class,
         "max_budget_class": max_budget_class,
+        "budget_steering_mode": budget_steering_mode,
         "primary_model": primary_model,
         "selected_model": str(selected_target["model_id"]),
         "selected_profile": selected_target.get("profile"),
         "selected_source": selected_target["source"],
         "selected_reason_codes": selected_candidate["reason_codes"],
         "selected_policy_score": selected_candidate["policy_score"],
+        "selected_budget_headroom": selected_candidate["budget_headroom"],
+        "selected_budget_preference_score": selected_candidate["budget_preference_score"],
+        "selected_route_score": selected_candidate["planning_score"],
+        "selected_failure_risk_score": selected_candidate["failure_risk_score"],
+        "selected_production_readiness": selected_candidate["production_readiness"],
+        "selected_live_feedback": selected_candidate["live_feedback"],
+        "selected_preference_score": selected_candidate["preference_score"],
+        "selected_capability_gap_count": selected_candidate["capability_gap_count"],
+        "selected_live_feedback_penalty": selected_candidate["live_feedback_penalty"],
+        "selection_policy_mode": selection_policy_mode,
+        "planning_winner_model": planning_winner["model_id"],
+        "planning_winner_profile": planning_winner.get("profile"),
+        "planning_winner_source": planning_winner["source"],
+        "planning_winner_selected": planning_winner["route_key"] == selected_candidate["route_key"],
+        "best_alternate_model": best_alternate["model_id"] if best_alternate else None,
+        "best_alternate_profile": best_alternate.get("profile") if best_alternate else None,
+        "best_alternate_source": best_alternate["source"] if best_alternate else None,
+        "best_alternate_route_score": best_alternate["planning_score"] if best_alternate else None,
+        "selected_vs_best_alternate_margin": selected_vs_best_alternate_margin,
+        "route_comparison_summary": route_comparison_summary,
         "attempt_order": attempt_order,
         "reroute_cause": reroute_cause,
         "rerouted_from_unhealthy_primary": rerouted and primary_unhealthy,
         "rerouted_from_policy_guardrails": rerouted_due_to_policy,
         "guardrail_compliant_targets_present": compliant_targets_present,
+        "route_explanation": "; ".join(route_explanation_parts),
         "candidate_targets": candidate_targets,
+        "simulated_routes": simulated_routes,
         "rejected_targets": rejected_targets,
+        "rejected_target_summaries": rejected_target_summaries,
         "rejected_target_count": len(rejected_targets),
     }
 
@@ -1463,6 +2000,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         model_id=primary_model,
                         api_base=self.api_base,
                         api_key=self.api_key,
+                        error=error,
                     )
                 else:
                     fallback_model = target["model"]
@@ -1470,6 +2008,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         model_id=fallback_model.model_id,
                         api_base=fallback_model.api_base,
                         api_key=fallback_model.api_key,
+                        error=error,
                     )
                     fallback_errors.append(
                         {
@@ -1706,6 +2245,7 @@ def completion_with_fallback_sync(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),
                         api_key=primary_kwargs.get("api_key"),
+                        error=error,
                     )
                 else:
                     fallback_model = str(target["model_id"])
@@ -1713,6 +2253,7 @@ def completion_with_fallback_sync(
                         model_id=fallback_model,
                         api_base=target["api_base"],
                         api_key=target["api_key"],
+                        error=error,
                     )
                     fallback_errors.append(
                         {

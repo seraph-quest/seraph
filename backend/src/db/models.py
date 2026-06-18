@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import Index, text
 from sqlmodel import Field, SQLModel, Relationship
 
 
@@ -38,6 +39,56 @@ class MemoryCategory(str, enum.Enum):
     pattern = "pattern"
     goal = "goal"
     reflection = "reflection"
+
+
+class MemoryKind(str, enum.Enum):
+    fact = "fact"
+    preference = "preference"
+    pattern = "pattern"
+    goal = "goal"
+    reflection = "reflection"
+    project = "project"
+    collaborator = "collaborator"
+    obligation = "obligation"
+    routine = "routine"
+    timeline = "timeline"
+    commitment = "commitment"
+    communication_preference = "communication_preference"
+    procedural = "procedural"
+
+
+class MemoryStatus(str, enum.Enum):
+    active = "active"
+    archived = "archived"
+    superseded = "superseded"
+
+
+class MemoryEpisodeType(str, enum.Enum):
+    conversation = "conversation"
+    tool = "tool"
+    workflow = "workflow"
+    decision = "decision"
+    observer = "observer"
+
+
+class MemoryEntityType(str, enum.Enum):
+    person = "person"
+    project = "project"
+    routine = "routine"
+    obligation = "obligation"
+    organization = "organization"
+    thread = "thread"
+
+
+class MemorySnapshotKind(str, enum.Enum):
+    bounded_guardian_context = "bounded_guardian_context"
+
+
+class MemoryEdgeType(str, enum.Enum):
+    related = "related"
+    supports = "supports"
+    supersedes = "supersedes"
+    contradicts = "contradicts"
 
 
 # ─── Helper ──────────────────────────────────────────────
@@ -80,17 +131,294 @@ class Message(SQLModel, table=True):
     session: Optional[Session] = Relationship(back_populates="messages")
 
 
+# ─── Session Todo ───────────────────────────────────────
+
+class SessionTodo(SQLModel, table=True):
+    __tablename__ = "session_todos"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: str = Field(foreign_key="sessions.id", index=True)
+    content: str = Field(default="")
+    completed: bool = Field(default=False, index=True)
+    sort_order: int = Field(default=0, index=True)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+# ─── Scheduled Job ─────────────────────────────────────
+
+class ScheduledJob(SQLModel, table=True):
+    __tablename__ = "scheduled_jobs"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    name: str = Field(default="")
+    enabled: bool = Field(default=True, index=True)
+    trigger_type: str = Field(default="cron", index=True)
+    trigger_spec_json: str = Field(default="{}")
+    action_type: str = Field(default="deliver_message", index=True)
+    action_spec_json: str = Field(default="{}")
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    created_by_session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    last_run_at: Optional[datetime] = Field(default=None, index=True)
+    last_outcome: Optional[str] = Field(default=None, index=True)
+    last_error: Optional[str] = Field(default=None)
+    last_approval_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class ScheduledJobRun(SQLModel, table=True):
+    __tablename__ = "scheduled_job_runs"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    scheduled_job_id: str = Field(index=True)
+    job_name: str = Field(default="")
+    trigger_type: str = Field(default="cron", index=True)
+    action_type: str = Field(default="deliver_message", index=True)
+    session_id: Optional[str] = Field(default=None, index=True)
+    created_by_session_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="started", index=True)
+    outcome: Optional[str] = Field(default=None, index=True)
+    error: Optional[str] = Field(default=None)
+    approval_id: Optional[str] = Field(default=None, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
+
+
+class WorkflowRunState(SQLModel, table=True):
+    __tablename__ = "workflow_run_states"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True, unique=True)
+    root_run_identity: str = Field(index=True)
+    parent_run_identity: Optional[str] = Field(default=None, index=True)
+    workflow_name: str = Field(index=True)
+    tool_name: str = Field(default="", index=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    status: str = Field(default="running", index=True)
+    branch_kind: Optional[str] = Field(default=None, index=True)
+    branch_depth: int = Field(default=0)
+    run_fingerprint: str = Field(default="", index=True)
+    arguments_json: str = Field(default="{}")
+    approval_context_json: Optional[str] = Field(default=None)
+    checkpoint_context_json: Optional[str] = Field(default=None)
+    artifact_paths_json: str = Field(default="[]")
+    continued_error_steps_json: str = Field(default="[]")
+    last_completed_step_id: Optional[str] = Field(default=None, index=True)
+    error: Optional[str] = Field(default=None)
+    heartbeat_at: datetime = Field(default_factory=_now, index=True)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
+
+
+class WorkflowStepState(SQLModel, table=True):
+    __tablename__ = "workflow_step_states"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True)
+    workflow_name: str = Field(default="", index=True)
+    step_id: str = Field(index=True)
+    step_index: int = Field(default=0, index=True)
+    tool_name: str = Field(default="", index=True)
+    status: str = Field(default="running", index=True)
+    arguments_json: str = Field(default="{}")
+    result_json: Optional[str] = Field(default=None)
+    result_summary: Optional[str] = Field(default=None)
+    artifact_paths_json: str = Field(default="[]")
+    error_kind: Optional[str] = Field(default=None)
+    error_summary: Optional[str] = Field(default=None)
+    checkpoint_json: Optional[str] = Field(default=None)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    completed_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class WorkflowArtifactReview(SQLModel, table=True):
+    __tablename__ = "workflow_artifact_reviews"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True)
+    root_run_identity: str = Field(index=True)
+    parent_run_identity: Optional[str] = Field(default=None, index=True)
+    workflow_name: str = Field(default="", index=True)
+    artifact_path: str = Field(index=True)
+    owner: str = Field(default="workflow", index=True)
+    review_state: str = Field(default="pending_review", index=True)
+    reviewer: Optional[str] = Field(default=None, index=True)
+    decision: Optional[str] = Field(default=None)
+    approval_id: Optional[str] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+    decided_at: Optional[datetime] = Field(default=None, index=True)
+
+
+class ProductionWorkflowAuthorityState(SQLModel, table=True):
+    __tablename__ = "production_workflow_authority_states"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    run_identity: str = Field(index=True, unique=True)
+    workflow_name: str = Field(default="", index=True)
+    scheduler_state_owner: str = Field(index=True)
+    workflow_lease_id: str = Field(index=True)
+    worker_owner: str = Field(index=True)
+    lease_revision: int = Field(default=0, index=True)
+    workflow_phase: str = Field(default="running", index=True)
+    resumable_step_state: str = Field(default="", index=True)
+    replay_window: str = Field(default="")
+    recovery_authority: str = Field(default="")
+    safe_replay_decision: str = Field(default="unsafe", index=True)
+    blocked_replay_reason: Optional[str] = Field(default=None, index=True)
+    side_effect_status: str = Field(default="not_started", index=True)
+    residual_risk: str = Field(default="")
+    transition_ledger_json: str = Field(default="[]")
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProductionWorkflowFaultReceipt(SQLModel, table=True):
+    __tablename__ = "production_workflow_fault_receipts"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    fault_key: str = Field(index=True, unique=True)
+    run_identity: Optional[str] = Field(default=None, index=True)
+    injection_method: str = Field(index=True)
+    campaign_window: str = Field(default="14d_accelerated_fault_campaign_equivalent", index=True)
+    recovery_result: str = Field(index=True)
+    replay_decision: str = Field(index=True)
+    duplicate_suppressed_count: int = Field(default=0)
+    operator_intervention_required: bool = Field(default=False, index=True)
+    raw_receipt_handle: str = Field(index=True)
+    residual_risk: str = Field(default="")
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProductionWorkflowSideEffectReceipt(SQLModel, table=True):
+    __tablename__ = "production_workflow_side_effect_receipts"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    reconciliation_id: str = Field(index=True, unique=True)
+    run_identity: Optional[str] = Field(default=None, index=True)
+    side_effect_kind: str = Field(index=True)
+    idempotency_scope: str = Field(index=True)
+    idempotency_key: str = Field(index=True, unique=True)
+    external_confirmation_state: str = Field(index=True)
+    provider_receipt: str = Field(default="")
+    duplicate_suppression_receipt: str = Field(default="")
+    reconciliation_outcome: str = Field(index=True)
+    manual_repair_state: str = Field(default="", index=True)
+    operator_replay_decision: str = Field(default="unsafe_retry_blocked", index=True)
+    redacted_receipt_handle: str = Field(default="", index=True)
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now, index=True)
+    updated_at: datetime = Field(default_factory=_now, index=True)
+
+
 # ─── Memory ──────────────────────────────────────────────
 
 class Memory(SQLModel, table=True):
     __tablename__ = "memories"
+    __table_args__ = (
+        Index(
+            "ix_memories_kind_scope_key_unique",
+            "kind",
+            "scope_key",
+            unique=True,
+            sqlite_where=text("scope_key IS NOT NULL"),
+        ),
+    )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     content: str
-    category: str = Field(default=MemoryCategory.fact)
+    category: MemoryCategory = Field(default=MemoryCategory.fact)
+    kind: MemoryKind = Field(default=MemoryKind.fact, index=True)
+    summary: Optional[str] = Field(default=None)
+    confidence: float = Field(default=0.5)
+    importance: float = Field(default=0.5)
+    reinforcement: float = Field(default=1.0)
+    status: MemoryStatus = Field(default=MemoryStatus.active, index=True)
+    subject_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
+    project_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
     source_session_id: Optional[str] = Field(default=None)
     embedding_id: Optional[str] = Field(default=None)
+    scope_key: Optional[str] = Field(default=None, index=True)
+    metadata_json: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+    last_confirmed_at: Optional[datetime] = Field(default=None)
+
+
+class MemoryEntity(SQLModel, table=True):
+    __tablename__ = "memory_entities"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    canonical_key: str = Field(index=True, unique=True)
+    canonical_name: str = Field(index=True)
+    entity_type: MemoryEntityType = Field(default=MemoryEntityType.person, index=True)
+    aliases_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MemorySource(SQLModel, table=True):
+    __tablename__ = "memory_sources"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    memory_id: str = Field(foreign_key="memories.id", index=True)
+    source_type: str = Field(default="session", index=True)
+    source_session_id: Optional[str] = Field(default=None, index=True)
+    source_message_id: Optional[str] = Field(default=None, index=True)
+    snippet: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class MemorySnapshot(SQLModel, table=True):
+    __tablename__ = "memory_snapshots"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    kind: MemorySnapshotKind = Field(default=MemorySnapshotKind.bounded_guardian_context, index=True, unique=True)
+    content: str = Field(default="")
+    source_hash: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MemoryEdge(SQLModel, table=True):
+    __tablename__ = "memory_edges"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    from_memory_id: str = Field(foreign_key="memories.id", index=True)
+    to_memory_id: str = Field(foreign_key="memories.id", index=True)
+    edge_type: MemoryEdgeType = Field(default=MemoryEdgeType.related, index=True)
+    weight: float = Field(default=1.0)
+    metadata_json: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
+
+
+class MemoryEpisode(SQLModel, table=True):
+    __tablename__ = "memory_episodes"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    session_id: Optional[str] = Field(default=None, foreign_key="sessions.id", index=True)
+    episode_type: MemoryEpisodeType = Field(default=MemoryEpisodeType.conversation, index=True)
+    summary: str = Field(default="")
+    content: str = Field(default="")
+    source_message_id: Optional[str] = Field(default=None, foreign_key="messages.id", index=True)
+    source_tool_name: Optional[str] = Field(default=None, index=True)
+    source_role: Optional[str] = Field(default=None, index=True)
+    subject_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
+    project_entity_id: Optional[str] = Field(default=None, foreign_key="memory_entities.id", index=True)
+    salience: float = Field(default=0.5)
+    confidence: float = Field(default=0.5)
+    metadata_json: Optional[str] = Field(default=None)
+    observed_at: datetime = Field(default_factory=_now, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 # ─── Goal ────────────────────────────────────────────────
@@ -163,6 +491,7 @@ class GuardianIntervention(SQLModel, table=True):
     guardian_confidence: Optional[str] = Field(default=None, index=True)
     data_quality: Optional[str] = Field(default=None, index=True)
     user_state: Optional[str] = Field(default=None, index=True)
+    active_project: Optional[str] = Field(default=None, index=True)
     interruption_mode: Optional[str] = Field(default=None, index=True)
     policy_action: str = Field(default="act", index=True)
     policy_reason: str = Field(default="")

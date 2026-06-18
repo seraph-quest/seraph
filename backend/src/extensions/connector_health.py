@@ -289,3 +289,65 @@ def planned_connector_health(summary: str) -> ConnectorHealthSnapshot:
         supports_enable=False,
         supports_disable=False,
     )
+
+
+def planned_configurable_connector_health(
+    summary: str,
+    *,
+    enabled: bool,
+    configured: bool,
+    config_errors: list[str] | None = None,
+    supports_test: bool = False,
+) -> ConnectorHealthSnapshot:
+    if config_errors:
+        return ConnectorHealthSnapshot(
+            state="invalid",
+            summary=config_errors[0],
+            ready=False,
+            enabled=enabled,
+            configured=False,
+            connected=False,
+            error="; ".join(config_errors),
+            supports_test=supports_test,
+            supports_configure=True,
+            supports_enable=True,
+            supports_disable=True,
+        )
+    if not configured:
+        return ConnectorHealthSnapshot(
+            state="requires_config",
+            summary="Connector configuration is required before this surface can be activated.",
+            ready=False,
+            enabled=enabled,
+            configured=False,
+            connected=False,
+            supports_test=supports_test,
+            supports_configure=True,
+            supports_enable=True,
+            supports_disable=True,
+        )
+    if not enabled:
+        return ConnectorHealthSnapshot(
+            state="disabled",
+            summary="Connector surface is configured but disabled.",
+            ready=False,
+            enabled=False,
+            configured=True,
+            connected=False,
+            supports_test=supports_test,
+            supports_configure=True,
+            supports_enable=True,
+            supports_disable=True,
+        )
+    return ConnectorHealthSnapshot(
+        state="planned",
+        summary=summary,
+        ready=False,
+        enabled=True,
+        configured=True,
+        connected=False,
+        supports_test=supports_test,
+        supports_configure=True,
+        supports_enable=True,
+        supports_disable=True,
+    )

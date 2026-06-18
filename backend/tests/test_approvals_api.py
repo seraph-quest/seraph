@@ -88,6 +88,22 @@ async def test_list_pending_approvals_includes_extension_lifecycle_context(clien
                 "requires_lifecycle_approval": True,
                 "lifecycle_boundaries": ["workspace_write"],
             },
+            "approval_scope": {
+                "action": "install",
+                "target": {
+                    "type": "extension_package",
+                    "name": "Test Installable",
+                    "reference": "manifest.yaml",
+                },
+                "config_scope": {
+                    "config_types": ["node_adapters"],
+                    "changed_target_count": 1,
+                },
+            },
+            "approval_context": {
+                "risk_level": "high",
+                "execution_boundaries": ["workspace_write"],
+            },
         },
     )
 
@@ -101,4 +117,8 @@ async def test_list_pending_approvals_includes_extension_lifecycle_context(clien
     assert approval["extension_action"] == "install"
     assert approval["package_path"] == "/tmp/extensions/test-installable"
     assert approval["lifecycle_boundaries"] == ["workspace_write"]
+    assert approval["requires_lifecycle_approval"] is True
     assert approval["permissions"] == {"tool_names": ["write_file"]}
+    assert approval["approval_scope"]["target"]["reference"] == "manifest.yaml"
+    assert approval["approval_scope"]["config_scope"]["config_types"] == ["node_adapters"]
+    assert approval["approval_context"]["execution_boundaries"] == ["workspace_write"]

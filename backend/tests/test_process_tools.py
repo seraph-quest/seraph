@@ -1,0 +1,468 @@
+from __future__ import annotations
+
+import asyncio
+import os
+import stat
+import textwrap
+import time
+from pathlib import Path
+
+import pytest
+
+from config.settings import settings
+from src.agent.session import session_manager
+from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.audit.repository import audit_repository
+from src.tools.audit import wrap_tools_for_audit
+from src.tools.process_tools import (
+    _runtime_root,
+    list_processes,
+    process_runtime_manager,
+    read_process_output,
+    run_command,
+    start_process,
+    stop_process,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_process_runtime():
+    process_runtime_manager.reset_for_tests()
+    yield
+    process_runtime_manager.reset_for_tests()
+
+
+def _write_script(name: str, body: str) -> str:
+    root = Path(settings.workspace_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    script_path = root / name
+    script_path.write_text(textwrap.dedent(body), encoding="utf-8")
+    return script_path.name
+
+
+def _write_workspace_file(name: str, body: str) -> str:
+    root = Path(settings.workspace_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    file_path = root / name
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(body, encoding="utf-8")
+    return name
+
+
+def test_run_command_success():
+    script_name = _write_script(
+        "wave1_process_echo.py",
+        """
+        print("guardian process ready")
+        """,
+    )
+
+    result = run_command(
+        command="python3",
+        args_json=f'["{script_name}"]',
+    )
+
+    assert "guardian process ready" in result
+
+
+def test_run_command_uses_disposable_worker_home_and_cleans_up():
+    script_name = _write_script(
+        "wave1_process_worker_env.py",
+        """
+        import os
+        print(os.environ["HOME"])
+        print(os.environ["TMPDIR"])
+        """,
+    )
+
+    result = run_command(
+        command="python3",
+        args_json=f'["{script_name}"]',
+    )
+
+    lines = [line.strip() for line in result.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert not lines[0].startswith(str(Path(settings.workspace_dir).resolve()))
+    assert lines[0] == lines[1]
+    workers_root = _runtime_root() / "workers"
+    assert not workers_root.exists() or not any(workers_root.iterdir())
+
+
+def test_run_command_scrubs_ambient_secret_environment(monkeypatch):
+    monkeypatch.setenv("SERAPH_SHOULD_NOT_LEAK", "ambient-secret")
+    script_name = _write_script(
+        "wave3_process_env_scrub.py",
+        """
+        import os
+        print(os.environ.get("SERAPH_SHOULD_NOT_LEAK", "missing"))
+        print(os.environ.get("SERAPH_SANDBOX_ENV", "missing"))
+        """,
+    )
+
+    result = run_command(command="python3", args_json=f'["{script_name}"]')
+
+    assert "ambient-secret" not in result
+    assert "missing" in result
+    assert "allowlisted" in result
+
+
+def test_run_command_rejects_inline_python():
+    result = run_command(command="python3", args_json='["-c","print(1)"]')
+    assert result == "Error: Inline Python execution belongs in execute_code, not the process runtime."
+
+
+def test_run_command_rejects_python_network_client_imports():
+    script_name = _write_script(
+        "wave_db_process_network_escape.py",
+        """
+        import socket
+        print(socket.gethostname())
+        """,
+    )
+
+    result = run_command(command="python3", args_json=f'["{script_name}"]')
+
+    assert result == "Error: script network clients are blocked in the process runtime."
+
+
+def test_run_command_rejects_workspace_escape():
+    result = run_command(command="python3", args_json='["missing.py"]', cwd="../")
+    assert result == "Error: cwd must stay within the workspace."
+
+
+def test_run_command_rejects_workspace_escape_via_git_path_flag():
+    result = run_command(command="git", args_json='["-C","/","status"]')
+    assert result == "Error: -C path must stay within the workspace."
+
+
+def test_run_command_rejects_absolute_file_argument_outside_workspace():
+    result = run_command(command="cat", args_json='["/etc/passwd"]')
+    assert result == "Error: path argument must stay within the workspace."
+
+
+def test_run_command_rejects_grep_file_argument_outside_workspace():
+    result = run_command(command="grep", args_json='["localhost","/etc/hosts"]')
+    assert result == "Error: path argument must stay within the workspace."
+
+
+def test_run_command_rejects_cat_secret_like_workspace_file():
+    _write_workspace_file(".env", "SERAPH_TEST_SECRET=do-not-read\n")
+
+    result = run_command(command="cat", args_json='[".env"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_cat_filesystem_secret_name():
+    _write_workspace_file("id_rsa", "PRIVATE KEY\n")
+
+    result = run_command(command="cat", args_json='["id_rsa"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+@pytest.mark.parametrize("command", ["grep", "rg"])
+def test_run_command_rejects_search_of_secret_like_workspace_file(command):
+    _write_workspace_file(".env.local", "SERAPH_TEST_SECRET=do-not-search\n")
+
+    result = run_command(command=command, args_json='["SERAPH_TEST_SECRET",".env.local"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+@pytest.mark.parametrize(
+    ("command", "args_json", "label"),
+    [
+        ("grep", '["-R","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["-R","SERAPH_TEST_SECRET"]', "path argument"),
+        ("rg", '["SERAPH_TEST_SECRET","."]', "path argument"),
+        ("rg", '["SERAPH_TEST_SECRET"]', "path argument"),
+        ("find", '[".","-name",".env","-print"]', "search path"),
+        ("find", '[]', "search path"),
+    ],
+)
+def test_run_command_rejects_recursive_search_paths_containing_secret_like_files(command, args_json, label):
+    _write_workspace_file(".env", "SERAPH_TEST_SECRET=do-not-search\n")
+
+    result = run_command(command=command, args_json=args_json)
+
+    assert result == f"Error: {label} cannot recursively search workspace paths containing secret-like files."
+
+
+def test_run_command_rejects_grep_exclude_from_outside_workspace():
+    result = run_command(command="grep", args_json='["--exclude-from","/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: --exclude-from path must stay within the workspace."
+
+
+def test_run_command_rejects_rg_ignore_file_outside_workspace():
+    result = run_command(command="rg", args_json='["--ignore-file","/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: --ignore-file path must stay within the workspace."
+
+
+def test_run_command_rejects_grep_attached_file_flag_outside_workspace():
+    result = run_command(command="grep", args_json='["-f/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_rg_attached_file_flag_outside_workspace():
+    result = run_command(command="rg", args_json='["-f/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_sed_attached_file_flag_outside_workspace():
+    result = run_command(command="sed", args_json='["-f/etc/hosts","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_grep_clustered_file_flag_outside_workspace():
+    result = run_command(command="grep", args_json='["-rf/etc/hosts","localhost","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+def test_run_command_rejects_sed_clustered_file_flag_outside_workspace():
+    result = run_command(command="sed", args_json='["-nf/etc/hosts","hosts.txt"]')
+    assert result == "Error: -f path must stay within the workspace."
+
+
+@pytest.mark.parametrize("find_action", ["-exec", "-ok"])
+def test_run_command_rejects_dangerous_find_exec_and_ok_actions(find_action):
+    result = run_command(command="find", args_json=f'[".","-name","*.py","{find_action}","cat","{{}}",";"]')
+
+    assert result == f"Error: find action {find_action} is blocked in the process runtime."
+
+
+@pytest.mark.parametrize(
+    ("command", "args_json"),
+    [
+        ("cat", '["outside-link.txt"]'),
+        ("grep", '["needle","outside-link.txt"]'),
+    ],
+)
+def test_run_command_rejects_symlink_to_outside_workspace_path_arguments(tmp_path, command, args_json):
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("needle\n", encoding="utf-8")
+    workspace_link = Path(settings.workspace_dir) / "outside-link.txt"
+    workspace_link.unlink(missing_ok=True)
+    workspace_link.symlink_to(outside_file)
+
+    result = run_command(command=command, args_json=args_json)
+
+    assert result == "Error: path argument must stay within the workspace."
+
+
+def test_start_process_rejects_absolute_script_path_outside_workspace():
+    result = start_process(command="python3", args_json='["/tmp/outside.py"]')
+    assert result == "Error: script path must stay within the workspace."
+
+
+@pytest.mark.asyncio
+async def test_run_command_audit_redacts_command_output(async_db):
+    await session_manager.get_or_create("s1")
+    script_name = _write_script(
+        "wave1_process_secret.py",
+        """
+        print("top-secret process output")
+        """,
+    )
+    audited = wrap_tools_for_audit([run_command])[0]
+
+    tokens = set_runtime_context("s1", "off")
+    try:
+        await asyncio.to_thread(
+            audited,
+            command="python3",
+            args_json=f'["{script_name}"]',
+        )
+    finally:
+        reset_runtime_context(tokens)
+
+    events = await audit_repository.list_events(limit=10)
+    process_events = [
+        event
+        for event in events
+        if event["tool_name"] == "run_command"
+        and event["event_type"] in {"tool_call", "tool_result"}
+    ]
+    assert len(process_events) == 2
+    for event in process_events:
+        assert "top-secret process output" not in event["summary"]
+        assert "top-secret process output" not in str(event["details"])
+
+
+def test_start_list_read_and_stop_process():
+    script_name = _write_script(
+        "wave1_process_long.py",
+        """
+        import time
+        print("started", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    started = start_process(command="python3", args_json=f'["{script_name}"]')
+    process_id = started.split("process=")[1].split(",")[0]
+
+    for _ in range(20):
+        listed = list_processes()
+        if process_id in listed:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("process did not appear in list_processes output")
+
+    output = ""
+    for _ in range(20):
+        output = read_process_output(process_id=process_id)
+        if "started" in output:
+            break
+        time.sleep(0.05)
+    assert "started" in output
+
+    stopped = stop_process(process_id=process_id)
+    assert f"Stopped process '{process_id}'" in stopped
+    payload = next(
+        process
+        for process in process_runtime_manager.list_processes()
+        if process["process_id"] == process_id
+    )
+    assert not Path(payload["worker_root"]).exists()
+
+
+def test_start_process_scrubs_ambient_secret_environment(monkeypatch):
+    monkeypatch.setenv("SERAPH_BACKGROUND_SHOULD_NOT_LEAK", "background-secret")
+    script_name = _write_script(
+        "wave3_process_background_env_scrub.py",
+        """
+        import os
+        print(os.environ.get("SERAPH_BACKGROUND_SHOULD_NOT_LEAK", "missing"), flush=True)
+        print(os.environ.get("SERAPH_SANDBOX_ENV", "missing"), flush=True)
+        """,
+    )
+
+    started = start_process(command="python3", args_json=f'["{script_name}"]')
+    process_id = started.split("process=")[1].split(",")[0]
+    output = ""
+    for _ in range(20):
+        output = read_process_output(process_id=process_id)
+        if "allowlisted" in output:
+            break
+        time.sleep(0.05)
+
+    assert "background-secret" not in output
+    assert "missing" in output
+    assert "allowlisted" in output
+    stop_process(process_id=process_id)
+
+
+def test_stop_process_missing_returns_error():
+    assert stop_process(process_id="missing-process") == "Error: Process 'missing-process' was not found."
+
+
+def test_process_recovery_is_scoped_to_the_starting_session():
+    script_name = _write_script(
+        "wave2_process_scoped.py",
+        """
+        import time
+        print("scoped", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+    finally:
+        reset_runtime_context(owner_tokens)
+
+    other_tokens = set_runtime_context("other-session", "high_risk")
+    try:
+        assert process_id not in list_processes()
+        assert read_process_output(process_id=process_id) == f"Error: Process '{process_id}' was not found."
+        assert stop_process(process_id=process_id) == f"Error: Process '{process_id}' was not found."
+    finally:
+        reset_runtime_context(other_tokens)
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        for _ in range(20):
+            listed = list_processes()
+            if process_id in listed:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("process did not appear in owner session list_processes output")
+
+        output = ""
+        for _ in range(20):
+            output = read_process_output(process_id=process_id)
+            if "scoped" in output:
+                break
+            time.sleep(0.05)
+        assert "scoped" in output
+
+        stopped = stop_process(process_id=process_id)
+        assert f"Stopped process '{process_id}'" in stopped
+    finally:
+        reset_runtime_context(owner_tokens)
+
+
+def test_list_all_processes_ignores_runtime_session_visibility_for_operator_surfaces():
+    script_name = _write_script(
+        "wave3_process_operator_visibility.py",
+        """
+        import time
+        print("operator-visible", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+    finally:
+        reset_runtime_context(owner_tokens)
+
+    other_tokens = set_runtime_context("other-session", "high_risk")
+    try:
+        assert process_id not in list_processes()
+        payload = next(
+            process
+            for process in process_runtime_manager.list_all_processes()
+            if process["process_id"] == process_id
+        )
+        assert payload["session_id"] == "owner-session"
+        assert payload["session_scoped"] is True
+        assert payload["status"] == "running"
+    finally:
+        reset_runtime_context(other_tokens)
+
+
+def test_process_output_logs_live_outside_the_workspace():
+    script_name = _write_script(
+        "wave2_process_log_location.py",
+        """
+        import time
+        print("outside-workspace", flush=True)
+        time.sleep(30)
+        """,
+    )
+
+    owner_tokens = set_runtime_context("owner-session", "high_risk")
+    try:
+        started = start_process(command="python3", args_json=f'["{script_name}"]')
+        process_id = started.split("process=")[1].split(",")[0]
+        payload = next(
+            process
+            for process in process_runtime_manager.list_processes()
+            if process["process_id"] == process_id
+        )
+    finally:
+        reset_runtime_context(owner_tokens)
+
+    assert not str(payload["output_path"]).startswith(str(Path(settings.workspace_dir).resolve()))
+    assert stat.S_IMODE(os.stat(payload["output_path"]).st_mode) == 0o600
+    assert payload["worker_disposable"] is True
+    assert payload["trust_partition"] == "session_disposable_worker"
+    assert not str(payload["worker_root"]).startswith(str(Path(settings.workspace_dir).resolve()))

@@ -11,9 +11,18 @@ const sidebars: SidebarsConfig = {
     'presence-and-reach',
     'embodied-interface',
     'ecosystem-and-delegation',
+    'plugin-system-and-mcp-strategy',
+    'hermes-and-openclaw-capability-import-plan',
+    'seraph-memory-sota-roadmap',
+    'reference-systems-refresh-2026-04',
+    'seraph-state-and-roadmap-corrections-2026-04',
+    'seraph-world-class-strategy',
+    'agent-competition-truth-table',
+    'strategy-claim-ledger',
     'reference-systems-and-evidence',
     'competitive-benchmark',
     'superiority-program',
+    'seraph-agent-parity-and-exceedance-goals',
   ],
 };
 

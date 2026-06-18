@@ -33,6 +33,7 @@ function resetStore() {
     questPanelOpen: false,
     settingsPanelOpen: false,
     cockpitHintsEnabled: true,
+    themePreference: "system",
     onboardingCompleted: null,
     toolRegistry: [],
   });
@@ -62,6 +63,12 @@ describe("chatStore sync actions", () => {
     useChatStore.getState().setCockpitHintsEnabled(false);
     expect(useChatStore.getState().cockpitHintsEnabled).toBe(false);
     expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_cockpit_hints_enabled", "0");
+  });
+
+  it("setThemePreference persists the theme preference", () => {
+    useChatStore.getState().setThemePreference("light");
+    expect(useChatStore.getState().themePreference).toBe("light");
+    expect(localStorageMock.setItem).toHaveBeenCalledWith("seraph_theme_preference", "light");
   });
 
   it("setAgentVisual merges partial state", () => {
@@ -163,6 +170,33 @@ describe("chatStore async actions", () => {
     expect(useChatStore.getState().sessionId).toBe("s1");
     expect(useChatStore.getState().messages).toHaveLength(2);
     expect(useChatStore.getState().messages[1].role).toBe("agent"); // mapped from assistant
+  });
+
+  it("switchSession restores clarification metadata as a clarification message", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: "m1",
+          role: "assistant",
+          content: "Which city should I check?",
+          metadata: {
+            display_role: "clarification",
+            question: "Which city should I check?",
+            reason: "Weather depends on location.",
+            options: ["Wroclaw", "Warsaw"],
+          },
+          created_at: "2024-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    await useChatStore.getState().switchSession("s1");
+
+    expect(useChatStore.getState().messages[0].role).toBe("clarification");
+    expect(useChatStore.getState().messages[0].clarificationQuestion).toBe("Which city should I check?");
+    expect(useChatStore.getState().messages[0].clarificationReason).toBe("Weather depends on location.");
+    expect(useChatStore.getState().messages[0].clarificationOptions).toEqual(["Wroclaw", "Warsaw"]);
   });
 
   it("restoreLastSession reloads the stored thread and marks it restored", async () => {

@@ -62,6 +62,11 @@ class TestIsInternalUrl:
     def test_blocks_ipv6_loopback(self):
         assert _is_internal_url("http://[::1]:8080/") is True
 
+    @patch("server.socket.getaddrinfo", return_value=[(None, None, None, None, ("10.0.0.9", 0))])
+    def test_blocks_private_dns_resolution_preflight(self, _mock_getaddrinfo):
+        assert _is_internal_url("https://public-looking.example", resolve_dns=True) is True
+        assert _is_internal_url("https://public-looking.example") is False
+
 
 class TestHttpRequest:
     def test_rejects_invalid_method(self):
@@ -80,6 +85,7 @@ class TestHttpRequest:
         mock_response.status_code = 200
         mock_response.headers = {"content-type": "application/json"}
         mock_response.text = '{"ok": true}'
+        mock_response.url = "https://api.example.com/test"
 
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
@@ -91,6 +97,25 @@ class TestHttpRequest:
         assert result["status"] == 200
         assert result["body"] == '{"ok": true}'
         assert "headers" in result
+
+    @patch("server.httpx.Client")
+    def test_blocks_redirect_to_internal_url(self, mock_client_cls):
+        mock_response = MagicMock()
+        mock_response.status_code = 302
+        mock_response.headers = {"location": "http://127.0.0.1/secret"}
+        mock_response.url = "https://api.example.com/start"
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.request.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        result = http_request("GET", "https://api.example.com/start")
+
+        assert "error" in result
+        assert "redirect" in result["error"].lower()
+        assert mock_client.request.call_count == 1
 
     @patch("server.httpx.Client")
     def test_timeout_handling(self, mock_client_cls):

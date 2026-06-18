@@ -1,0 +1,16 @@
+name: telegram
+description: Planned Telegram bot relay definition for direct messages, summaries, and approvals.
+platform: telegram
+enabled: false
+delivery_modes:
+  - dm
+  - thread
+config_fields:
+  - key: bot_token
+    label: Bot Token
+    input: password
+    required: true
+  - key: default_chat_id
+    label: Default Chat ID
+    input: text
+    required: false

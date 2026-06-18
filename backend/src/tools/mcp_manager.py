@@ -7,17 +7,65 @@ Server configuration loaded from mcp-servers.json at startup. Servers can be
 added/removed/toggled at runtime via the MCP API endpoints.
 """
 
+import asyncio
+import concurrent.futures
+import hashlib
 import json
 import logging
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from smolagents import MCPClient
 
+from src.audit.formatting import redact_for_audit
 from src.audit.runtime import log_integration_event_sync
+from src.security.site_policy import evaluate_site_access
+from src.vault.repository import vault_repository
 
 logger = logging.getLogger(__name__)
+
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
+_VAULT_SECRET_RE = re.compile(r"\$\{vault:([A-Za-z0-9_.:-]+)\}")
+
+
+class _InstrumentedMCPTool:
+    """Delegate wrapper for MCP tools that cannot accept dynamic attributes."""
+
+    def __init__(
+        self,
+        wrapped_tool: object,
+        *,
+        source_context: dict[str, object],
+        approval_context_fn,
+        audit_call_payload_fn,
+        audit_result_payload_fn,
+        audit_failure_payload_fn,
+    ) -> None:
+        self.wrapped_tool = wrapped_tool
+        self.name = str(getattr(wrapped_tool, "name", "mcp_tool"))
+        description = getattr(wrapped_tool, "description", "")
+        self.description = description if isinstance(description, str) else ""
+        inputs = getattr(wrapped_tool, "inputs", {})
+        self.inputs = inputs if isinstance(inputs, dict) else {}
+        output_type = getattr(wrapped_tool, "output_type", "string")
+        self.output_type = output_type if isinstance(output_type, str) else "string"
+        output_schema = getattr(wrapped_tool, "output_schema", None)
+        self.output_schema = output_schema if isinstance(output_schema, dict) else None
+        self.is_initialized = True
+        self.seraph_source_context = dict(source_context)
+        self.seraph_secret_ref_fields = MCPManager._secret_ref_fields_for_tool(wrapped_tool)
+        self.get_approval_context = approval_context_fn
+        self.get_audit_call_payload = audit_call_payload_fn
+        self.get_audit_result_payload = audit_result_payload_fn
+        self.get_audit_failure_payload = audit_failure_payload_fn
+
+    def forward(self, *args, **kwargs):
+        return self.wrapped_tool(*args, **kwargs)
+
+    def __call__(self, *args, sanitize_inputs_outputs: bool = False, **kwargs):
+        return self.wrapped_tool(*args, sanitize_inputs_outputs=sanitize_inputs_outputs, **kwargs)
 
 
 class MCPManager:
@@ -63,13 +111,177 @@ class MCPManager:
     # --- Connection management ---
 
     @staticmethod
+    def endpoint_policy_issues(url: str) -> list[str]:
+        """Validate MCP endpoints against the shared site/network guard."""
+        normalized = (url or "").strip()
+        if not normalized:
+            return []
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return []
+        decision = evaluate_site_access(normalized, resolve_dns=True)
+        if decision.allowed:
+            return []
+        reason = decision.reason or "blocked"
+        return [f"Server URL host '{decision.hostname}' is blocked by site policy: {reason}."]
+
+    @staticmethod
+    def _raise_for_endpoint_policy(url: str) -> None:
+        issues = MCPManager.endpoint_policy_issues(url)
+        if issues:
+            raise ValueError(" ".join(issues))
+
+    @staticmethod
+    def _build_source_context(
+        *,
+        name: str,
+        url: str,
+        auth_hint: str = "",
+        source: str = "manual",
+        extension_id: str | None = None,
+        extension_reference: str | None = None,
+        extension_display_name: str | None = None,
+        credential_sources: list[str] | None = None,
+        used_headers: bool = False,
+    ) -> dict[str, object]:
+        parsed = urlparse(url)
+        normalized_credential_sources = [
+            item for item in (credential_sources or []) if isinstance(item, str) and item.strip()
+        ]
+        authenticated_source = bool(used_headers or auth_hint.strip() or normalized_credential_sources)
+        credential_egress_policy = {
+            "mode": (
+                "explicit_host_allowlist"
+                if authenticated_source and bool(parsed.hostname)
+                else "no_credentials" if not authenticated_source else "blocked"
+            ),
+            "transport": parsed.scheme or "unknown",
+            "allowed_hosts": [parsed.hostname] if parsed.hostname else [],
+        }
+        return {
+            "server_name": name,
+            "url": url,
+            "hostname": parsed.hostname or "",
+            "authenticated_source": authenticated_source,
+            "auth_hint": auth_hint.strip(),
+            "credential_sources": normalized_credential_sources,
+            "source": source,
+            "extension_id": extension_id,
+            "extension_reference": extension_reference,
+            "extension_display_name": extension_display_name,
+            "credential_egress_policy": credential_egress_policy,
+        }
+
+    @staticmethod
+    def _instrument_mcp_tool(tool: object, source_context: dict[str, object]) -> object:
+        def _get_approval_context(_arguments: dict[str, object], *, _context: dict[str, object] = dict(source_context)) -> dict[str, object]:
+            boundaries = ["external_mcp"]
+            if bool(_context.get("authenticated_source")):
+                boundaries.append("authenticated_external_source")
+            return {
+                "server_name": str(_context.get("server_name") or ""),
+                "hostname": str(_context.get("hostname") or ""),
+                "authenticated_source": bool(_context.get("authenticated_source")),
+                "credential_sources": list(_context.get("credential_sources") or []),
+                "credential_egress_policy": dict(_context.get("credential_egress_policy") or {}),
+                "source": str(_context.get("source") or "manual"),
+                "extension_id": _context.get("extension_id"),
+                "extension_reference": _context.get("extension_reference"),
+                "extension_display_name": _context.get("extension_display_name"),
+                "execution_boundaries": boundaries,
+            }
+
+        def _get_audit_call_payload(
+            arguments: dict[str, object],
+            *,
+            _context: dict[str, object] = dict(source_context),
+            _tool_name: str = str(getattr(tool, "name", "mcp_tool")),
+        ) -> tuple[str, dict[str, object]]:
+            return (
+                f"{_tool_name} called via {_context.get('server_name')}",
+                {
+                    "arguments": redact_for_audit(arguments),
+                    "source_context": dict(_context),
+                },
+            )
+
+        def _get_audit_result_payload(
+            _arguments: dict[str, object],
+            result: object,
+            *,
+            _context: dict[str, object] = dict(source_context),
+            _tool_name: str = str(getattr(tool, "name", "mcp_tool")),
+        ) -> tuple[str, dict[str, object]]:
+            summary = f"{_tool_name} completed via {_context.get('server_name')}"
+            return (
+                summary,
+                {
+                    "result_preview": redact_for_audit(str(result))[:280],
+                    "source_context": dict(_context),
+                },
+            )
+
+        def _get_audit_failure_payload(
+            arguments: dict[str, object],
+            error: Exception,
+            *,
+            _context: dict[str, object] = dict(source_context),
+            _tool_name: str = str(getattr(tool, "name", "mcp_tool")),
+        ) -> tuple[str, dict[str, object]]:
+            return (
+                f"{_tool_name} failed via {_context.get('server_name')}",
+                {
+                    "arguments": redact_for_audit(arguments),
+                    "error": redact_for_audit(str(error)),
+                    "source_context": dict(_context),
+                },
+            )
+
+        try:
+            setattr(tool, "seraph_source_context", dict(source_context))
+            setattr(tool, "seraph_secret_ref_fields", MCPManager._secret_ref_fields_for_tool(tool))
+            setattr(tool, "get_approval_context", _get_approval_context)
+            setattr(tool, "get_audit_call_payload", _get_audit_call_payload)
+            setattr(tool, "get_audit_result_payload", _get_audit_result_payload)
+            setattr(tool, "get_audit_failure_payload", _get_audit_failure_payload)
+            return tool
+        except Exception:
+            return _InstrumentedMCPTool(
+                tool,
+                source_context=source_context,
+                approval_context_fn=_get_approval_context,
+                audit_call_payload_fn=_get_audit_call_payload,
+                audit_result_payload_fn=_get_audit_result_payload,
+                audit_failure_payload_fn=_get_audit_failure_payload,
+            )
+
+    @staticmethod
+    def _secret_ref_fields_for_tool(tool: object) -> list[str]:
+        inputs = getattr(tool, "inputs", None)
+        if not isinstance(inputs, dict):
+            return []
+        allowed: list[str] = []
+        seen: set[str] = set()
+        for field_name in ("headers", "authorization", "auth_header", "api_key", "token", "bearer_token", "password", "secret_ref"):
+            if field_name in inputs and field_name not in seen:
+                allowed.append(field_name)
+                seen.add(field_name)
+        return allowed
+
+    @staticmethod
     def _resolve_env_vars(value: str) -> str:
         """Replace ${VAR} patterns with environment variable values."""
         return re.sub(
-            r"\$\{(\w+)\}",
+            _ENV_VAR_RE,
             lambda m: os.environ.get(m.group(1), m.group(0)),
             value,
         )
+
+    @staticmethod
+    def _run_async(coro):
+        """Run an async coroutine from sync context, even under an active event loop."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
 
     @staticmethod
     def _flatten_exception_text(exc: BaseException) -> str:
@@ -92,17 +304,125 @@ class MCPManager:
         missing: list[str] = []
         for v in headers.values():
             resolved = MCPManager._resolve_env_vars(v)
-            for m in re.finditer(r"\$\{(\w+)\}", resolved):
+            for m in re.finditer(_ENV_VAR_RE, resolved):
                 missing.append(m.group(1))
         return missing
+
+    @staticmethod
+    def _check_missing_vault_secrets(headers: dict[str, str] | None) -> list[str]:
+        """Return vault-backed secret keys referenced by headers that are missing."""
+        if not headers:
+            return []
+        missing: list[str] = []
+        checked: set[str] = set()
+        for value in headers.values():
+            if not isinstance(value, str):
+                continue
+            resolved = MCPManager._resolve_env_vars(value)
+            for match in re.finditer(_VAULT_SECRET_RE, resolved):
+                key = match.group(1)
+                if key in checked:
+                    continue
+                checked.add(key)
+                exists = MCPManager._run_async(vault_repository.exists(key))
+                if not exists:
+                    missing.append(key)
+        return missing
+
+    @staticmethod
+    def inspect_headers(headers: dict[str, str] | None) -> tuple[list[str], list[str], list[str]]:
+        """Inspect headers for missing env/vault credentials without resolving them."""
+        if not headers:
+            return [], [], []
+
+        missing_env_vars = MCPManager._check_unresolved_vars(headers)
+        missing_vault_keys = MCPManager._check_missing_vault_secrets(headers)
+        credential_sources: set[str] = set()
+        for key, value in headers.items():
+            if not isinstance(value, str):
+                continue
+            resolved = MCPManager._resolve_env_vars(value)
+            if re.search(_ENV_VAR_RE, value):
+                credential_sources.add("env")
+            if re.search(_VAULT_SECRET_RE, value) or re.search(_VAULT_SECRET_RE, resolved):
+                credential_sources.add("vault")
+            if (
+                isinstance(key, str)
+                and key.strip().lower() == "authorization"
+                and not re.search(_ENV_VAR_RE, value)
+                and not re.search(_VAULT_SECRET_RE, value)
+                and not re.search(_VAULT_SECRET_RE, resolved)
+            ):
+                credential_sources.add("inline")
+
+        return missing_env_vars, missing_vault_keys, sorted(credential_sources)
+
+    @staticmethod
+    def resolve_headers(
+        headers: dict[str, str] | None,
+    ) -> tuple[dict[str, str] | None, list[str], list[str], list[str]]:
+        """Resolve env vars and vault placeholders inside headers.
+
+        Returns: resolved headers, missing env vars, missing vault keys, credential sources.
+        """
+        if not headers:
+            return None, [], [], []
+
+        missing_env_vars, missing_vault_keys, credential_sources = MCPManager.inspect_headers(headers)
+        if missing_env_vars or missing_vault_keys:
+            return dict(headers), missing_env_vars, missing_vault_keys, credential_sources
+        resolved_headers: dict[str, str] = {}
+
+        for key, value in headers.items():
+            if not isinstance(value, str):
+                continue
+            resolved = MCPManager._resolve_env_vars(value)
+
+            def _replace_vault(match: re.Match[str]) -> str:
+                secret_key = match.group(1)
+                secret_value = MCPManager._run_async(vault_repository.get(secret_key))
+                if secret_value is None:
+                    return match.group(0)
+                return secret_value
+
+            resolved = re.sub(_VAULT_SECRET_RE, _replace_vault, resolved)
+            resolved_headers[key] = resolved
+
+        return resolved_headers, missing_env_vars, missing_vault_keys, credential_sources
+
+    @staticmethod
+    def _token_secret_key(name: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", name.strip()).strip("._-")
+        digest = hashlib.sha1(name.strip().encode("utf-8")).hexdigest()[:10]
+        return f"mcp.server.{normalized or 'default'}.{digest}.bearer_token"
 
     def connect(self, name: str, url: str, headers: dict[str, str] | None = None) -> None:
         """Connect to a named MCP server via HTTP/SSE. Fails gracefully."""
         try:
-            # Check for unresolved env vars before attempting connection
-            missing_vars = self._check_unresolved_vars(headers)
+            endpoint_issues = self.endpoint_policy_issues(url)
+            if endpoint_issues:
+                msg = " ".join(endpoint_issues)
+                self._status[name] = {"status": "blocked", "error": msg}
+                logger.warning("MCP server '%s' blocked by endpoint policy: %s", name, msg)
+                log_integration_event_sync(
+                    integration_type="mcp_server",
+                    name=name,
+                    outcome="blocked",
+                    details={
+                        "url": url,
+                        "status": "site_policy_blocked",
+                        "issues": endpoint_issues,
+                    },
+                )
+                return
+            resolved_headers, missing_vars, missing_vault_keys, credential_sources = self.resolve_headers(headers)
+            missing_details: list[str] = []
             if missing_vars:
-                msg = f"Missing environment variables: {', '.join(missing_vars)}"
+                missing_details.append(f"Missing environment variables: {', '.join(missing_vars)}")
+            if missing_vault_keys:
+                missing_details.append(f"Missing vault secrets: {', '.join(missing_vault_keys)}")
+            if missing_details:
+                msg = "; ".join(missing_details)
                 self._status[name] = {"status": "auth_required", "error": msg}
                 logger.warning("MCP server '%s' requires auth: %s", name, msg)
                 log_integration_event_sync(
@@ -113,17 +433,43 @@ class MCPManager:
                         "url": url,
                         "error": msg,
                         "missing_env_vars": missing_vars,
+                        "missing_vault_keys": missing_vault_keys,
+                        "credential_sources": credential_sources,
                     },
                 )
                 return
 
             params: dict = {"url": url, "transport": "streamable-http"}
-            if headers:
-                params["headers"] = {
-                    k: self._resolve_env_vars(v) for k, v in headers.items()
-                }
+            if resolved_headers:
+                params["headers"] = resolved_headers
             client = MCPClient(params, structured_output=False)
-            tools = client.get_tools()
+            source_context = self._build_source_context(
+                name=name,
+                url=url,
+                auth_hint=str(self._config.get(name, {}).get("auth_hint") or ""),
+                source=str(self._config.get(name, {}).get("source") or "manual"),
+                extension_id=(
+                    str(self._config.get(name, {}).get("extension_id"))
+                    if self._config.get(name, {}).get("extension_id") is not None
+                    else None
+                ),
+                extension_reference=(
+                    str(self._config.get(name, {}).get("extension_reference"))
+                    if self._config.get(name, {}).get("extension_reference") is not None
+                    else None
+                ),
+                extension_display_name=(
+                    str(self._config.get(name, {}).get("extension_display_name"))
+                    if self._config.get(name, {}).get("extension_display_name") is not None
+                    else None
+                ),
+                credential_sources=credential_sources,
+                used_headers=bool(resolved_headers),
+            )
+            tools = [
+                self._instrument_mcp_tool(tool, source_context)
+                for tool in client.get_tools()
+            ]
             self._clients[name] = client
             self._tools[name] = tools
             self._status[name] = {"status": "connected", "error": None}
@@ -135,6 +481,8 @@ class MCPManager:
                 details={
                     "url": url,
                     "tool_count": len(tools),
+                    "used_headers": bool(resolved_headers),
+                    "credential_sources": credential_sources,
                 },
             )
         except BaseException as exc:
@@ -240,13 +588,30 @@ class MCPManager:
         if name not in self._config:
             return False
         server = self._config[name]
+        secret_key = self._token_secret_key(name)
+        self._run_async(vault_repository.store(
+            secret_key,
+            token,
+            description=f"MCP bearer token for server '{name}'",
+        ))
         if "headers" not in server:
             server["headers"] = {}
-        server["headers"]["Authorization"] = f"Bearer {token}"
+        server["headers"]["Authorization"] = f"Bearer ${{vault:{secret_key}}}"
         self._save_config()
         if server.get("enabled", True):
             self.disconnect(name)
             self.connect(name, server["url"], headers=server.get("headers"))
+        log_integration_event_sync(
+            integration_type="mcp_server",
+            name=name,
+            outcome="credential_updated",
+            details={
+                "credential_source": "vault",
+                "header_name": "Authorization",
+                "secret_key": secret_key,
+                "enabled": bool(server.get("enabled", True)),
+            },
+        )
         return True
 
     # --- Runtime config mutations ---
@@ -260,6 +625,7 @@ class MCPManager:
                    extension_display_name: str | None = None,
                    source: str | None = None) -> None:
         """Add a new server to config and optionally connect it."""
+        self._raise_for_endpoint_policy(url)
         self._config[name] = {
             "url": url,
             "enabled": enabled,
@@ -285,6 +651,8 @@ class MCPManager:
         """Update server config. Returns False if server not found."""
         if name not in self._config:
             return False
+        if "url" in kwargs:
+            self._raise_for_endpoint_policy(str(kwargs["url"]))
         server = self._config[name]
         was_enabled = bool(server.get("enabled", True))
         previous_url = server.get("url")

@@ -9,9 +9,16 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from src.agent.session import session_manager
-from src.api.observer import _continuity_surface
-from src.api.workflows import _list_workflow_runs
+from src.api.observer import _continuity_surface, build_observer_continuity_snapshot
+from src.api.workflows import (
+    _list_workflow_runs,
+    workflow_surface_continue_message,
+    workflow_surface_recommended_actions,
+    workflow_surface_replay_draft,
+    workflow_surface_resume_metadata,
+)
 from src.approval.repository import approval_repository
+from src.approval.surfaces import approval_surface_metadata
 from src.audit.repository import audit_repository
 from src.guardian.feedback import guardian_feedback_repository
 from src.llm_logger import list_recent_llm_calls
@@ -27,7 +34,8 @@ def _parse_iso(value: str | datetime | None) -> datetime:
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return datetime.min.replace(tzinfo=timezone.utc)
 
@@ -48,6 +56,94 @@ def _thread_label(session_titles: dict[str, str], thread_id: str | None) -> str 
     if not thread_id:
         return None
     return session_titles.get(thread_id)
+
+
+def _continuity_activity_timestamp(snapshot: dict[str, Any]) -> str:
+    daemon = snapshot.get("daemon") if isinstance(snapshot, dict) else {}
+    if isinstance(daemon, dict):
+        last_post = daemon.get("last_post")
+        if isinstance(last_post, (int, float)):
+            return datetime.fromtimestamp(float(last_post), tz=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _continuity_activity_items(
+    snapshot: dict[str, Any],
+    *,
+    cutoff: datetime,
+    session_id: str | None,
+    session_titles: dict[str, str],
+) -> list[dict[str, Any]]:
+    recovery_actions = snapshot.get("recovery_actions")
+    if not isinstance(recovery_actions, list):
+        return []
+    updated_at = _continuity_activity_timestamp(snapshot)
+    if _parse_iso(updated_at) < cutoff:
+        return []
+    items: list[dict[str, Any]] = []
+    for action in recovery_actions:
+        if not isinstance(action, dict):
+            continue
+        thread_id = action.get("thread_id") if isinstance(action.get("thread_id"), str) else None
+        if session_id and thread_id not in {None, session_id}:
+            continue
+        items.append({
+            "id": f"continuity:{action.get('id') or len(items)}",
+            "kind": "reach_recovery",
+            "category": "system",
+            "title": str(action.get("label") or "Reach recovery"),
+            "summary": str(action.get("detail") or "Inspect live continuity recovery."),
+            "status": str(action.get("status") or "attention"),
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "thread_id": thread_id,
+            "thread_label": _thread_label(session_titles, thread_id),
+            "continue_message": action.get("continue_message"),
+            "replay_draft": None,
+            "replay_allowed": False,
+            "replay_block_reason": None,
+            "recommended_actions": [],
+            "source": "continuity",
+            "model": None,
+            "provider": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "cost_usd": None,
+            "duration_ms": None,
+            "metadata": {
+                "surface": action.get("surface"),
+                "kind": action.get("kind"),
+                "route": action.get("route"),
+                "repair_hint": action.get("repair_hint"),
+                "open_thread_available": bool(action.get("open_thread_available")),
+                "continuity_health": (
+                    snapshot.get("summary", {}).get("continuity_health")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "primary_surface": (
+                    snapshot.get("summary", {}).get("primary_surface")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "recommended_focus": (
+                    snapshot.get("summary", {}).get("recommended_focus")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "presence_surface_count": (
+                    snapshot.get("summary", {}).get("presence_surface_count")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+                "attention_presence_surface_count": (
+                    snapshot.get("summary", {}).get("attention_presence_surface_count")
+                    if isinstance(snapshot.get("summary"), dict)
+                    else None
+                ),
+            },
+        })
+    return items
 
 
 def _category_for_kind(kind: str) -> str:
@@ -202,6 +298,8 @@ def _group_key_for_item(item: dict[str, Any]) -> str:
         return f"workflow:{item['id']}"
     if item["kind"] == "approval":
         return f"approval:{item['id']}"
+    if item["kind"] == "reach_recovery":
+        return f"continuity:{item['id']}"
     if item["kind"] == "extension":
         metadata = item.get("metadata")
         extension_id = metadata.get("extension_id") if isinstance(metadata, dict) and isinstance(metadata.get("extension_id"), str) else item["id"]
@@ -236,6 +334,116 @@ def _entry_metric_count(items: list[dict[str, Any]], key: str) -> float:
         if isinstance(value, (int, float)):
             total += float(value)
     return total
+
+
+def _request_metadata_value(details: dict[str, Any], key: str) -> Any | None:
+    value = details.get(key)
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if trimmed:
+            return trimmed
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _capability_family_for_runtime(
+    runtime_path: str | None,
+    source: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    normalized_path = str(runtime_path or "").strip().lower()
+    normalized_source = str(source or "").strip().lower()
+    metadata = metadata if isinstance(metadata, dict) else {}
+    selected_source = str(metadata.get("selected_source") or "").strip().lower()
+
+    if normalized_path in {"agent_generate", "chat_agent", "session_runtime", "rest_chat", "websocket_chat"}:
+        return "conversation"
+    if normalized_path in {
+        "onboarding_agent",
+        "session_title_generation",
+        "session_consolidation",
+        "context_window_summary",
+    } or normalized_path.startswith("session_") or normalized_path.startswith("context_window"):
+        return "memory"
+    if normalized_path in {"orchestrator_agent", "delegate_task"} or normalized_path.startswith("delegate") or normalized_path.startswith("specialist"):
+        return "delegation"
+    if normalized_path.startswith("workflow") or normalized_path.startswith("openprose") or normalized_path.startswith("lobster"):
+        return "workflow"
+    if normalized_path.startswith("browser") or normalized_source.startswith("browser") or selected_source in {"browser_provider", "browserbase"}:
+        return "browser"
+    if normalized_path.startswith("mcp_") or selected_source == "mcp":
+        return "integration"
+    if normalized_path.startswith("strategist") or normalized_path in {
+        "daily_briefing",
+        "evening_review",
+        "weekly_activity_review",
+        "activity_digest",
+    } or normalized_source in {"strategist_tick", "daily_briefing", "evening_review", "weekly_activity_review", "activity_digest"}:
+        return "guardian"
+    if normalized_path.startswith("automation") or normalized_source in {"webhook", "poll", "pubsub"}:
+        return "automation"
+    if normalized_path.startswith("speech") or normalized_source in {"speech", "voice"}:
+        return "speech"
+    if normalized_path.startswith("session_search"):
+        return "memory"
+    if normalized_path.endswith("_agent"):
+        return "conversation"
+    if normalized_source in {
+        "webhook",
+        "poll",
+        "pubsub",
+        "speech",
+        "voice",
+        "strategist_tick",
+        "daily_briefing",
+        "evening_review",
+        "weekly_activity_review",
+        "activity_digest",
+    }:
+        return _capability_family_for_runtime(normalized_path or normalized_source, normalized_source, metadata)
+    return "unattributed"
+
+
+def _aggregate_llm_breakdown(
+    llm_items: list[dict[str, Any]],
+    *,
+    metadata_key: str,
+    fallback: str,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in llm_items:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        bucket_key = metadata.get(metadata_key) if isinstance(metadata, dict) else None
+        if isinstance(bucket_key, str):
+            bucket_key = bucket_key.strip()
+        if not isinstance(bucket_key, str) or not bucket_key:
+            bucket_key = fallback
+        entry = buckets.setdefault(
+            bucket_key,
+            {
+                "key": bucket_key,
+                "calls": 0,
+                "cost_usd": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
+        )
+        entry["calls"] += 1
+        entry["cost_usd"] += float(item.get("cost_usd") or 0.0)
+        entry["input_tokens"] += int(item.get("prompt_tokens") or 0)
+        entry["output_tokens"] += int(item.get("completion_tokens") or 0)
+    return sorted(
+        [
+            {
+                **entry,
+                "cost_usd": round(float(entry["cost_usd"]), 6),
+            }
+            for entry in buckets.values()
+        ],
+        key=lambda entry: (-float(entry["cost_usd"]), -int(entry["calls"]), str(entry["key"])),
+    )
 
 
 def _slice_visible_groups(items: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], int]:
@@ -290,7 +498,7 @@ async def get_activity_ledger(
     intervention_scan_limit = max(limit * 4, 200)
     audit_scan_limit = 1000
     llm_scan_limit = 1000
-    workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, audit_events, llm_calls = await asyncio.gather(
+    workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, audit_events, llm_calls, continuity_snapshot = await asyncio.gather(
         _list_workflow_runs(limit=workflow_scan_limit, session_id=session_id),
         approval_repository.list_pending(session_id=session_id, limit=approval_scan_limit),
         native_notification_queue.list(),
@@ -298,6 +506,7 @@ async def get_activity_ledger(
         guardian_feedback_repository.list_recent(limit=intervention_scan_limit, session_id=session_id),
         audit_repository.list_events(limit=audit_scan_limit, session_id=session_id, since=cutoff),
         asyncio.to_thread(list_recent_llm_calls, limit=llm_scan_limit, session_id=session_id, since=cutoff),
+        build_observer_continuity_snapshot(),
     )
 
     items: list[dict[str, Any]] = []
@@ -306,6 +515,7 @@ async def get_activity_ledger(
         updated_at = str(run.get("updated_at") or run.get("started_at") or "")
         if _parse_iso(updated_at) < cutoff:
             continue
+        workflow_surface = workflow_surface_resume_metadata(run)
         items.append({
             "id": f"workflow:{run['id']}",
             "kind": "workflow_run",
@@ -317,16 +527,11 @@ async def get_activity_ledger(
             "updated_at": updated_at,
             "thread_id": run.get("thread_id"),
             "thread_label": run.get("thread_label"),
-            "continue_message": (
-                run.get("thread_continue_message")
-                or run.get("approval_recovery_message")
-                or run.get("retry_from_step_draft")
-                or run.get("replay_draft")
-            ),
-            "replay_draft": run.get("replay_draft"),
-            "replay_allowed": run.get("replay_allowed"),
+            "continue_message": workflow_surface_continue_message(run),
+            "replay_draft": workflow_surface_replay_draft(run),
+            "replay_allowed": workflow_surface["replay_allowed"],
             "replay_block_reason": run.get("replay_block_reason"),
-            "recommended_actions": run.get("replay_recommended_actions", []),
+            "recommended_actions": workflow_surface_recommended_actions(run),
             "source": "workflow",
             "model": None,
             "provider": None,
@@ -346,10 +551,11 @@ async def get_activity_ledger(
                 "branch_kind": run.get("branch_kind"),
                 "run_identity": run.get("run_identity"),
                 "run_fingerprint": run.get("run_fingerprint"),
-                "resume_from_step": run.get("resume_from_step"),
-                "resume_checkpoint_label": run.get("resume_checkpoint_label"),
-                "checkpoint_candidates": run.get("checkpoint_candidates", []),
-                "resume_plan": run.get("resume_plan"),
+                "resume_from_step": workflow_surface["resume_from_step"],
+                "resume_checkpoint_label": workflow_surface["resume_checkpoint_label"],
+                "checkpoint_candidates": workflow_surface["checkpoint_candidates"],
+                "resume_plan": workflow_surface["resume_plan"],
+                "trust_boundary": workflow_surface["trust_boundary"],
             },
         })
 
@@ -358,6 +564,7 @@ async def get_activity_ledger(
         if _parse_iso(created_at) < cutoff:
             continue
         approval_session_id = approval.get("session_id")
+        approval_metadata = approval_surface_metadata(approval)
         items.append({
             "id": f"approval:{approval['id']}",
             "kind": "approval",
@@ -384,11 +591,7 @@ async def get_activity_ledger(
             "completion_tokens": None,
             "cost_usd": None,
             "duration_ms": None,
-            "metadata": {
-                "risk_level": approval.get("risk_level"),
-                "tool_name": approval.get("tool_name"),
-                "approval_id": approval.get("id"),
-            },
+            "metadata": approval_metadata,
         })
 
     for notification in notifications:
@@ -529,7 +732,76 @@ async def get_activity_ledger(
             },
         })
 
+    items.extend(
+        _continuity_activity_items(
+            continuity_snapshot,
+            cutoff=cutoff,
+            session_id=session_id,
+            session_titles=session_titles,
+        )
+    )
+
     request_summaries: dict[str, str] = {}
+    request_metadata: dict[str, dict[str, Any]] = {}
+    for event in sorted(
+        audit_events,
+        key=lambda entry: _parse_iso(str(entry.get("created_at") or "")),
+    ):
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        request_id = details.get("request_id") if isinstance(details.get("request_id"), str) else None
+        if not request_id:
+            continue
+        metadata_entry = request_metadata.setdefault(request_id, {})
+        for key in (
+            "runtime_path",
+            "runtime_profile",
+            "selected_model",
+            "selected_profile",
+            "selected_source",
+            "budget_steering_mode",
+            "selected_route_score",
+            "selected_failure_risk_score",
+            "selected_production_readiness",
+            "selected_budget_preference_score",
+            "selected_preference_score",
+            "selected_capability_gap_count",
+            "selected_live_feedback_penalty",
+            "selection_policy_mode",
+            "planning_winner_model",
+            "planning_winner_profile",
+            "planning_winner_source",
+            "best_alternate_model",
+            "best_alternate_profile",
+            "best_alternate_source",
+            "best_alternate_route_score",
+            "selected_vs_best_alternate_margin",
+            "required_task_class",
+            "max_budget_class",
+            "max_cost_tier",
+            "max_latency_tier",
+            "route_explanation",
+            "route_comparison_summary",
+        ):
+            value = _request_metadata_value(details, key)
+            if value is not None:
+                metadata_entry[key] = value
+        required_policy_intents = details.get("required_policy_intents")
+        if isinstance(required_policy_intents, list) and required_policy_intents:
+            metadata_entry["required_policy_intents"] = [
+                str(intent)
+                for intent in required_policy_intents
+                if str(intent).strip()
+            ]
+        selected_live_feedback = details.get("selected_live_feedback")
+        if isinstance(selected_live_feedback, dict) and selected_live_feedback:
+            metadata_entry["selected_live_feedback"] = selected_live_feedback
+        planning_winner_selected = details.get("planning_winner_selected")
+        if isinstance(planning_winner_selected, bool):
+            metadata_entry["planning_winner_selected"] = planning_winner_selected
+        rejected_target_summaries = details.get("rejected_target_summaries")
+        if isinstance(rejected_target_summaries, list) and rejected_target_summaries:
+            metadata_entry["rejected_target_summaries"] = rejected_target_summaries
+
     for event in audit_events:
         details = event.get("details") if isinstance(event.get("details"), dict) else {}
         request_id = details.get("request_id") if isinstance(details.get("request_id"), str) else None
@@ -590,6 +862,13 @@ async def get_activity_ledger(
         title, summary = _llm_title_and_summary(call, session_titles)
         request_id = call.get("request_id") if isinstance(call.get("request_id"), str) else None
         related_summary = request_summaries.get(request_id or "")
+        routing_metadata = request_metadata.get(request_id or "", {})
+        runtime_path = _request_metadata_value(routing_metadata, "runtime_path")
+        capability_family = _capability_family_for_runtime(
+            runtime_path,
+            str(call.get("source") or "background"),
+            routing_metadata,
+        )
         items.append({
             "id": f"llm:{request_id or index}:{created_at}",
             "kind": "llm_call",
@@ -621,6 +900,87 @@ async def get_activity_ledger(
                 "total_tokens": int((call.get("tokens") or {}).get("total", 0)),
                 "actor": call.get("actor"),
                 "error": call.get("error"),
+                "runtime_path": runtime_path,
+                "runtime_profile": _request_metadata_value(routing_metadata, "runtime_profile"),
+                "selected_model": _request_metadata_value(routing_metadata, "selected_model"),
+                "selected_profile": _request_metadata_value(routing_metadata, "selected_profile"),
+                "selected_source": _request_metadata_value(routing_metadata, "selected_source"),
+                "budget_steering_mode": _request_metadata_value(routing_metadata, "budget_steering_mode"),
+                "selected_route_score": _request_metadata_value(routing_metadata, "selected_route_score"),
+                "selected_failure_risk_score": _request_metadata_value(
+                    routing_metadata,
+                    "selected_failure_risk_score",
+                ),
+                "selected_production_readiness": _request_metadata_value(
+                    routing_metadata,
+                    "selected_production_readiness",
+                ),
+                "selected_budget_preference_score": _request_metadata_value(
+                    routing_metadata,
+                    "selected_budget_preference_score",
+                ),
+                "selected_preference_score": _request_metadata_value(
+                    routing_metadata,
+                    "selected_preference_score",
+                ),
+                "selected_capability_gap_count": _request_metadata_value(
+                    routing_metadata,
+                    "selected_capability_gap_count",
+                ),
+                "selected_live_feedback_penalty": _request_metadata_value(
+                    routing_metadata,
+                    "selected_live_feedback_penalty",
+                ),
+                "selection_policy_mode": _request_metadata_value(
+                    routing_metadata,
+                    "selection_policy_mode",
+                ),
+                "planning_winner_model": _request_metadata_value(
+                    routing_metadata,
+                    "planning_winner_model",
+                ),
+                "planning_winner_profile": _request_metadata_value(
+                    routing_metadata,
+                    "planning_winner_profile",
+                ),
+                "planning_winner_source": _request_metadata_value(
+                    routing_metadata,
+                    "planning_winner_source",
+                ),
+                "planning_winner_selected": routing_metadata.get("planning_winner_selected"),
+                "best_alternate_model": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_model",
+                ),
+                "best_alternate_profile": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_profile",
+                ),
+                "best_alternate_source": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_source",
+                ),
+                "best_alternate_route_score": _request_metadata_value(
+                    routing_metadata,
+                    "best_alternate_route_score",
+                ),
+                "selected_vs_best_alternate_margin": _request_metadata_value(
+                    routing_metadata,
+                    "selected_vs_best_alternate_margin",
+                ),
+                "max_budget_class": _request_metadata_value(routing_metadata, "max_budget_class"),
+                "required_task_class": _request_metadata_value(routing_metadata, "required_task_class"),
+                "max_cost_tier": _request_metadata_value(routing_metadata, "max_cost_tier"),
+                "max_latency_tier": _request_metadata_value(routing_metadata, "max_latency_tier"),
+                "required_policy_intents": routing_metadata.get("required_policy_intents", []),
+                "selected_live_feedback": routing_metadata.get("selected_live_feedback"),
+                "route_explanation": _request_metadata_value(routing_metadata, "route_explanation"),
+                "route_comparison_summary": _request_metadata_value(
+                    routing_metadata,
+                    "route_comparison_summary",
+                ),
+                "rejected_target_summaries": routing_metadata.get("rejected_target_summaries", []),
+                "capability_family": capability_family,
             },
         })
 
@@ -670,6 +1030,16 @@ async def get_activity_ledger(
         "autonomous_llm_calls": sum(
             1 for item in llm_items
             if item["kind"] == "llm_call" and item["source"] not in {"rest_chat", "websocket_chat"}
+        ),
+        "llm_cost_by_runtime_path": _aggregate_llm_breakdown(
+            llm_items,
+            metadata_key="runtime_path",
+            fallback="unattributed",
+        ),
+        "llm_cost_by_capability_family": _aggregate_llm_breakdown(
+            llm_items,
+            metadata_key="capability_family",
+            fallback="unattributed",
         ),
         "categories": {
             "llm": sum(1 for item in items if item["category"] == "llm"),

@@ -1,6 +1,6 @@
 ---
-name: Research Pack
-description: Research Pack workflow
+name: research-pack
+description: "Research Pack workflow"
 requires:
   tools: [read_file]
 inputs:

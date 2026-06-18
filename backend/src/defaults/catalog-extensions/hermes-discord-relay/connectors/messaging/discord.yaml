@@ -1,0 +1,16 @@
+name: discord
+description: Planned Discord bot relay definition for channel and thread delivery.
+platform: discord
+enabled: false
+delivery_modes:
+  - channel
+  - thread
+config_fields:
+  - key: bot_token
+    label: Bot Token
+    input: password
+    required: true
+  - key: guild_id
+    label: Guild ID
+    input: text
+    required: false

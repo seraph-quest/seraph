@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.extensions.registry import ExtensionRecord
+from src.native_tools.registry import canonical_tool_name
+from src.tools.mcp_manager import mcp_manager
 from src.tools.policy import (
     get_tool_execution_boundaries,
     get_tool_risk_level,
@@ -19,6 +21,14 @@ LIFECYCLE_APPROVAL_BOUNDARIES = {
     "secret_read",
     "secret_injection",
     "external_mcp",
+}
+CHANNEL_APPROVAL_BOUNDARY_BY_CONTRIBUTION = {
+    "messaging_connectors": "external_channel",
+    "node_adapters": "device_pairing",
+}
+CHANNEL_APPROVAL_BEHAVIOR_BY_CONTRIBUTION = {
+    "messaging_connectors": "external_channel_policy",
+    "node_adapters": "device_pairing_policy",
 }
 
 
@@ -35,6 +45,18 @@ def _dedupe_strings(values: list[str] | tuple[str, ...] | set[str] | None) -> li
             continue
         normalized.append(item)
         seen.add(item)
+    return normalized
+
+
+def _canonicalize_tools(tool_names: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tool_name in tool_names:
+        canonical_name = canonical_tool_name(tool_name)
+        if not canonical_name or canonical_name in seen:
+            continue
+        normalized.append(canonical_name)
+        seen.add(canonical_name)
     return normalized
 
 
@@ -59,8 +81,9 @@ def _tool_boundaries(tool_names: list[str]) -> list[str]:
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        is_mcp = tool_name.startswith("mcp_")
-        for boundary in get_tool_execution_boundaries(tool_name, is_mcp=is_mcp):
+        canonical_name = canonical_tool_name(tool_name)
+        is_mcp = canonical_name.startswith("mcp_")
+        for boundary in get_tool_execution_boundaries(canonical_name, is_mcp=is_mcp):
             if boundary not in boundaries:
                 boundaries.append(boundary)
     return boundaries
@@ -71,15 +94,50 @@ def _tool_risk_level(tool_names: list[str]) -> str:
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        levels.append(get_tool_risk_level(tool_name, is_mcp=tool_name.startswith("mcp_")))
+        canonical_name = canonical_tool_name(tool_name)
+        levels.append(get_tool_risk_level(canonical_name, is_mcp=canonical_name.startswith("mcp_")))
     return _max_risk_level(levels)
 
 
 def _tools_accept_secret_refs(tool_names: list[str]) -> bool:
+    runtime_mcp_tools = _runtime_mcp_tools_by_name()
     for tool_name in tool_names:
         if not isinstance(tool_name, str) or not tool_name.strip():
             continue
-        if tool_accepts_secret_refs(tool_name, is_mcp=tool_name.startswith("mcp_")):
+        canonical_name = canonical_tool_name(tool_name)
+        runtime_tool = runtime_mcp_tools.get(canonical_name) if canonical_name.startswith("mcp_") else None
+        if tool_accepts_secret_refs(
+            canonical_name,
+            is_mcp=canonical_name.startswith("mcp_"),
+            tool=runtime_tool,
+        ):
+            return True
+    return False
+
+
+def _runtime_mcp_tools_by_name() -> dict[str, object]:
+    try:
+        tools = mcp_manager.get_tools()
+    except Exception:
+        return {}
+    by_name: dict[str, object] = {}
+    for tool in tools:
+        tool_name = getattr(tool, "name", None)
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            continue
+        canonical_name = canonical_tool_name(tool_name)
+        by_name[canonical_name] = tool
+    return by_name
+
+
+def _password_config_fields_present(metadata: dict[str, Any]) -> bool:
+    config_fields = metadata.get("config_fields")
+    if not isinstance(config_fields, list):
+        return False
+    for field in config_fields:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("input") or "") == "password":
             return True
     return False
 
@@ -92,12 +150,78 @@ def _runtime_approval_behavior(*, boundaries: list[str], risk_level: str) -> tup
     return "never", False
 
 
+def _merge_explicit_boundaries_into_profile(
+    profile: dict[str, Any],
+    *,
+    explicit_boundaries: list[str],
+) -> dict[str, Any]:
+    required_boundaries = _dedupe_strings(
+        list(profile.get("required_execution_boundaries", [])) + explicit_boundaries
+    )
+    declared_boundaries = _dedupe_strings(profile.get("declared_execution_boundaries"))
+    missing_boundaries = [
+        boundary
+        for boundary in required_boundaries
+        if boundary not in declared_boundaries
+    ]
+    requires_network = bool(profile.get("requires_network")) or any(
+        boundary in NETWORK_BOUNDARIES for boundary in required_boundaries
+    )
+    network_declared = profile.get("network")
+    missing_network = bool(profile.get("missing_network")) or bool(
+        network_declared is False and requires_network
+    )
+    lifecycle_boundaries = [
+        boundary
+        for boundary in required_boundaries
+        if boundary in LIFECYCLE_APPROVAL_BOUNDARIES
+    ]
+    risk_level = str(profile.get("risk_level") or "low")
+    if lifecycle_boundaries and _risk_rank(risk_level) < _risk_rank("high"):
+        risk_level = "high"
+    approval_behavior, runtime_requires_approval = _runtime_approval_behavior(
+        boundaries=required_boundaries,
+        risk_level=risk_level,
+    )
+    requires_approval = runtime_requires_approval or bool(lifecycle_boundaries)
+    if not runtime_requires_approval and lifecycle_boundaries:
+        approval_behavior = "lifecycle"
+    profile.update(
+        {
+            "required_execution_boundaries": required_boundaries,
+            "missing_execution_boundaries": missing_boundaries,
+            "requires_network": requires_network,
+            "missing_network": missing_network,
+            "risk_level": risk_level,
+            "approval_behavior": approval_behavior,
+            "requires_approval": requires_approval,
+            "lifecycle_approval_boundaries": lifecycle_boundaries,
+        }
+    )
+    profile["ok"] = not profile["missing_tools"] and not missing_boundaries and not missing_network
+    profile["status"] = "granted" if profile["ok"] else "insufficient"
+    return profile
+
+
+def _apply_channel_presence_policy(profile: dict[str, Any], *, contribution_type: str) -> dict[str, Any]:
+    boundary = CHANNEL_APPROVAL_BOUNDARY_BY_CONTRIBUTION.get(contribution_type)
+    if boundary is None:
+        return profile
+    profile["risk_level"] = _max_risk_level([str(profile.get("risk_level") or "low"), "medium"])
+    profile["approval_behavior"] = CHANNEL_APPROVAL_BEHAVIOR_BY_CONTRIBUTION[contribution_type]
+    profile["requires_approval"] = True
+    profile["lifecycle_approval_boundaries"] = _dedupe_strings(
+        list(profile.get("lifecycle_approval_boundaries", [])) + [boundary]
+    )
+    return profile
+
+
 def evaluate_tool_permissions(
     extension: ExtensionRecord | None,
     *,
     tool_names: list[str],
 ) -> dict[str, Any]:
-    required_tools = _dedupe_strings(tool_names)
+    required_tools = _canonicalize_tools(_dedupe_strings(tool_names))
     required_boundaries = _tool_boundaries(required_tools)
     requires_network = any(boundary in NETWORK_BOUNDARIES for boundary in required_boundaries)
     risk_level = _tool_risk_level(required_tools)
@@ -140,7 +264,7 @@ def evaluate_tool_permissions(
     missing_boundaries = [
         boundary
         for boundary in required_boundaries
-        if declared_boundaries and boundary not in declared_boundaries
+        if boundary not in declared_boundaries
     ]
     missing_network = requires_network and not manifest_permissions.network
     ok = not missing_tools and not missing_boundaries and not missing_network
@@ -184,6 +308,19 @@ def evaluate_contribution_permissions(
             step_tools = _dedupe_strings(metadata.get("requires_tools"))
         return evaluate_tool_permissions(extension, tool_names=step_tools)
 
+    if contribution_type == "toolset_presets":
+        profile = evaluate_tool_permissions(
+            extension,
+            tool_names=_dedupe_strings(metadata.get("include_tools")),
+        )
+        explicit_boundaries = _dedupe_strings(metadata.get("execution_boundaries"))
+        if _dedupe_strings(metadata.get("include_mcp_servers")) and "external_mcp" not in explicit_boundaries:
+            explicit_boundaries.append("external_mcp")
+        return _merge_explicit_boundaries_into_profile(
+            profile,
+            explicit_boundaries=explicit_boundaries,
+        )
+
     if contribution_type == "mcp_servers":
         tool_profile = evaluate_tool_permissions(extension, tool_names=["mcp_extension_connector"])
         tool_profile.update(
@@ -199,7 +336,6 @@ def evaluate_contribution_permissions(
                     for _ in [0]
                     if extension is not None
                     and extension.manifest is not None
-                    and extension.manifest.permissions.execution_boundaries
                     and "external_mcp" not in extension.manifest.permissions.execution_boundaries
                 ],
                 "requires_network": True,
@@ -217,6 +353,67 @@ def evaluate_contribution_permissions(
         tool_profile["ok"] = not tool_profile["missing_execution_boundaries"] and not tool_profile["missing_network"]
         tool_profile["status"] = "granted" if tool_profile["ok"] else "insufficient"
         return tool_profile
+
+    if contribution_type in {
+        "managed_connectors",
+        "automation_triggers",
+        "browser_providers",
+        "messaging_connectors",
+        "node_adapters",
+    }:
+        profile = {
+            "status": "granted",
+            "ok": True,
+            "declared_tools": (
+                _dedupe_strings(extension.manifest.permissions.tools)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "required_tools": [],
+            "missing_tools": [],
+            "declared_execution_boundaries": (
+                _dedupe_strings(extension.manifest.permissions.execution_boundaries)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "required_execution_boundaries": [],
+            "missing_execution_boundaries": [],
+            "network": (
+                bool(extension.manifest.permissions.network)
+                if extension is not None and extension.manifest is not None
+                else None
+            ),
+            "requires_network": bool(metadata.get("requires_network")),
+            "missing_network": bool(
+                extension is not None
+                and extension.manifest is not None
+                and metadata.get("requires_network")
+                and not extension.manifest.permissions.network
+            ),
+            "secrets": (
+                _dedupe_strings(extension.manifest.permissions.secrets)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "env": (
+                _dedupe_strings(extension.manifest.permissions.env)
+                if extension is not None and extension.manifest is not None
+                else []
+            ),
+            "accepts_secret_refs": False,
+            "risk_level": "low",
+            "approval_behavior": "never",
+            "requires_approval": False,
+            "lifecycle_approval_boundaries": [],
+        }
+        explicit_boundaries: list[str] = []
+        if _password_config_fields_present(metadata):
+            explicit_boundaries.append("secret_management")
+        profile = _merge_explicit_boundaries_into_profile(
+            profile,
+            explicit_boundaries=explicit_boundaries,
+        )
+        return _apply_channel_presence_policy(profile, contribution_type=contribution_type)
 
     requires_network = bool(metadata.get("requires_network"))
     missing_network = bool(
@@ -292,6 +489,21 @@ def summarize_extension_permissions(
         if extension.manifest is not None
         else []
     )
+    declared_data_access = (
+        _dedupe_strings(extension.manifest.permissions.data_access)
+        if extension.manifest is not None
+        else []
+    )
+    declared_mutation_rights = (
+        _dedupe_strings(extension.manifest.permissions.mutation_rights)
+        if extension.manifest is not None
+        else []
+    )
+    declared_audit_events = (
+        _dedupe_strings(extension.manifest.permissions.audit_events)
+        if extension.manifest is not None
+        else []
+    )
     required_tools = _dedupe_strings(
         [tool_name for profile in contribution_profiles for tool_name in profile.get("required_tools", [])]
     )
@@ -335,6 +547,9 @@ def summarize_extension_permissions(
             ),
             "secrets": declared_secrets,
             "env": declared_env,
+            "data_access": declared_data_access,
+            "mutation_rights": declared_mutation_rights,
+            "audit_events": declared_audit_events,
         },
         "required": {
             "tools": required_tools,

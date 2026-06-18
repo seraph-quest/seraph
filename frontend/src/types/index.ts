@@ -1,4 +1,4 @@
-export type MessageRole = "user" | "agent" | "step" | "error" | "proactive" | "approval";
+export type MessageRole = "user" | "agent" | "step" | "error" | "proactive" | "approval" | "clarification";
 
 export interface ChatMessage {
   id: string;
@@ -14,6 +14,9 @@ export interface ChatMessage {
   approvalId?: string;
   riskLevel?: string;
   approvalStatus?: "pending" | "approved" | "denied" | "consumed";
+  clarificationQuestion?: string;
+  clarificationReason?: string;
+  clarificationOptions?: string[];
 }
 
 export interface WSMessage {
@@ -23,7 +26,7 @@ export interface WSMessage {
 }
 
 export interface WSResponse {
-  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient" | "approval_required";
+  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient" | "approval_required" | "clarification_required";
   content: string;
   session_id: string;
   step: number | null;
@@ -32,6 +35,9 @@ export interface WSResponse {
   approval_id?: string;
   tool_name?: string;
   risk_level?: string;
+  question?: string;
+  reason?: string;
+  options?: string[];
   urgency?: number;
   intervention_type?: string;
   reasoning?: string;

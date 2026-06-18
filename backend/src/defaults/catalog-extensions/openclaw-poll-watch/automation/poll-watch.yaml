@@ -1,0 +1,7 @@
+name: openclaw-poll-watch
+description: Staged polling trigger for recurring external checks.
+trigger_type: poll
+schedule: "*/15 * * * *"
+enabled: false
+capabilities:
+  - external_poll

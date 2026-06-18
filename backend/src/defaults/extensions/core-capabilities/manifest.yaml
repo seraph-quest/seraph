@@ -1,24 +1,42 @@
 id: seraph.core-capabilities
-version: 2026.3.21
+version: 2026.4.6
 display_name: Core Capabilities
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.3.19"
+  seraph: ">=2026.4.10"
 publisher:
   name: Seraph
 trust: bundled
 summary: Bundled default skills, workflows, starter packs, and runbooks.
 permissions:
   tools:
+    - browse_webpage
+    - browser_session
+    - collect_source_evidence
     - create_goal
+    - execute_code
+    - execute_source_mutation
     - get_goal_progress
     - get_goals
     - http_request
+    - plan_source_report
+    - plan_source_review
+    - plan_source_mutation
     - read_file
-    - shell_execute
+    - source_capabilities
     - view_soul
     - web_search
     - write_file
+  execution_boundaries:
+    - authenticated_external_source
+    - connector_mutation
+    - external_mcp
+    - external_read
+    - guardian_state_read
+    - guardian_state_write
+    - sandbox_execution
+    - workspace_read
+    - workspace_write
   network: true
 contributes:
   skills:
@@ -28,6 +46,11 @@ contributes:
     - skills/goal-reflection.md
     - skills/moltbook.md
     - skills/morning-intention.md
+    - skills/source-daily-review.md
+    - skills/source-evidence-review.md
+    - skills/source-goal-alignment.md
+    - skills/source-progress-review.md
+    - skills/source-progress-report.md
     - skills/web-briefing.md
     - skills/weekly-planner.md
   workflows:
@@ -36,8 +59,18 @@ contributes:
   runbooks:
     - runbooks/daily-operator-rhythm.yaml
     - runbooks/research-briefing.yaml
+    - runbooks/source-daily-review.yaml
+    - runbooks/source-evidence-review.yaml
+    - runbooks/source-goal-alignment.yaml
+    - runbooks/source-progress-review.yaml
+    - runbooks/source-progress-report.yaml
     - runbooks/weekly-alignment.yaml
   starter_packs:
     - starter-packs/daily-operator-rhythm.json
     - starter-packs/research-briefing.json
+    - starter-packs/source-daily-review.json
+    - starter-packs/source-evidence-review.json
+    - starter-packs/source-goal-alignment.json
+    - starter-packs/source-progress-review.json
+    - starter-packs/source-progress-report.json
     - starter-packs/weekly-alignment.json

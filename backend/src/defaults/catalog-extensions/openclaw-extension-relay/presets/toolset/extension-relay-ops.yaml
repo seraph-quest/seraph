@@ -1,0 +1,11 @@
+name: extension-relay-ops
+description: Prefer the staged browser-extension relay lane when paired browser reach matters more than generic browsing.
+mode: balanced
+include_tools:
+  - browser_session
+  - browse_webpage
+capabilities:
+  - browser
+  - paired-browser
+execution_boundaries:
+  - external_read

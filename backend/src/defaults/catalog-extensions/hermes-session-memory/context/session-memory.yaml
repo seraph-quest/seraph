@@ -1,0 +1,12 @@
+name: session-memory
+description: Bias guardian context toward recent session history and active checklist state.
+instructions: |
+  Prefer bounded session recall and current todo state before broader long-horizon memory when a request is clearly about ongoing thread continuity.
+domains:
+  - continuity
+  - operator
+memory_tags:
+  - active-thread
+  - checklist
+prompt_refs:
+  - guardian_state

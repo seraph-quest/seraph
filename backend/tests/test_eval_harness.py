@@ -4347,6 +4347,11 @@ def test_main_lists_available_benchmark_suites(capsys):
         "reference_system_source_refresh_v5",
         "false_completion_scan_v5",
         "post_dq_dw_critic_contrarian_no_block_v1",
+        "post_dx_final_board_pr_issue_reconciliation_v1",
+        "post_dx_final_claim_ledger_reconciliation_v1",
+        "reference_system_source_refresh_v6",
+        "false_completion_scan_v6",
+        "post_dx_final_critic_contrarian_no_block_v1",
     )
 
 

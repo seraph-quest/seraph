@@ -321,7 +321,9 @@ class BrowserSessionRuntime:
         with self._lock:
             self._sessions[session_id] = session
             self._refs[snapshot.ref] = (session_id, 0)
-        return session.as_summary()
+        payload = session.as_summary()
+        payload["content"] = snapshot.content
+        return payload
 
     def snapshot_session(
         self,
@@ -369,7 +371,9 @@ class BrowserSessionRuntime:
                     "artifact_handle": snapshot.artifact_provenance["handle"],
                 }
             )
-            return session.as_summary()
+            payload = session.as_summary()
+            payload["content"] = snapshot.content
+            return payload
 
     def get_session(self, session_id: str, *, owner_session_id: str) -> dict[str, object] | None:
         with self._lock:

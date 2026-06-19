@@ -14,6 +14,12 @@ from config.settings import settings
 from src.agent.session import session_manager
 from src.app import _runtime_model_label, _runtime_provider_label
 from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
+from src.operators.local_codex import (
+    LocalCodexConfigurationError,
+    local_codex_status,
+    local_operator_statuses,
+    run_local_codex,
+)
 from src.extensions.lifecycle import list_extensions
 from src.llm_logger import list_recent_llm_calls
 from src.observer.manager import context_manager
@@ -171,10 +177,44 @@ class MemoryLiveControlActionRequest(BaseModel):
     privacy_boundary: str | None = None
 
 
+class LocalCodexExecRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=40_000)
+    cwd: str | None = None
+    model: str | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    session_id: str | None = None
+
+
 def _memory_live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bool:
     if str(request.action or "").strip().lower() == "rollback_memory":
         return request.acknowledge_rollback_boundary
     return request.acknowledged or request.acknowledge_rollback_boundary
+
+
+@router.get("/operator/local-codex/status")
+async def operator_local_codex_status():
+    return local_codex_status()
+
+
+@router.post("/operator/local-codex/exec")
+async def operator_local_codex_exec(request: LocalCodexExecRequest):
+    try:
+        return await run_local_codex(
+            request.prompt,
+            cwd=request.cwd,
+            model=request.model,
+            timeout_seconds=request.timeout_seconds,
+            session_id=request.session_id,
+        )
+    except LocalCodexConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "adapter": "codex-local",
+                "status": "blocked",
+                "failure_reason": str(exc),
+            },
+        ) from exc
 
 
 _ENGINEERING_PULL_REQUEST_RE = re.compile(
@@ -1208,6 +1248,7 @@ def _runtime_status_payload() -> dict[str, Any]:
         "api_base": settings.llm_api_base.strip(),
         "active_profile": active_profile,
         "provider_profiles": provider_profile_statuses(),
+        "local_operators": local_operator_statuses(),
         "timezone": settings.user_timezone,
         "llm_logging_enabled": settings.llm_log_enabled,
     }

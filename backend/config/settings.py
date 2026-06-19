@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     provider_task_classes: str = ""  # semicolon-separated model_or_glob=task_class entries
     provider_budget_classes: str = ""  # semicolon-separated model_or_glob=low|medium|high entries
     llm_target_cooldown_seconds: int = 300  # temporarily deprioritize failed LLM targets across requests
+    codex_local_enabled: bool = True
+    codex_local_command: str = "codex"
+    codex_local_model: str = "gpt-5.5"
+    codex_local_sandbox: str = "workspace-write"
+    codex_local_approval_policy: str = "never"
+    codex_local_timeout_seconds: int = 600
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10

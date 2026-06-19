@@ -3,12 +3,75 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from src.api.activity import _category_for_kind, _kind_for_audit_event, _status_for_audit_event
+
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def _iso_offset(*, hours: int = 0, minutes: int = 0, seconds: int = 0) -> str:
     return (NOW + timedelta(hours=hours, minutes=minutes, seconds=seconds)).isoformat().replace("+00:00", "Z")
+
+
+def test_activity_classifier_keeps_local_operator_events_visible():
+    event = {
+        "event_type": "local_operator_completed",
+        "tool_name": "codex-local",
+        "details": {"operator_id": "codex-local"},
+    }
+
+    kind = _kind_for_audit_event(event)
+
+    assert kind == "local_operator"
+    assert _category_for_kind(kind) == "agent"
+    assert _status_for_audit_event("local_operator_unavailable") == "failed"
+
+
+@pytest.mark.asyncio
+async def test_activity_ledger_surfaces_local_operator_events(client):
+    with (
+        patch("src.api.activity._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.activity.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.activity.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.activity.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.activity.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.activity.audit_repository.list_events",
+            AsyncMock(
+                return_value=[
+                    {
+                        "id": "audit-local-operator-1",
+                        "event_type": "local_operator_completed",
+                        "tool_name": "codex-local",
+                        "summary": "Local Codex operator completed",
+                        "created_at": _iso_offset(minutes=-1),
+                        "session_id": "session-1",
+                        "details": {
+                            "operator_id": "codex-local",
+                            "operator_kind": "local_command",
+                            "ok": True,
+                            "duration_ms": 123,
+                            "prompt_sha256": "abc123",
+                        },
+                    }
+                ]
+            ),
+        ),
+        patch("src.api.activity.list_recent_llm_calls", return_value=[]),
+        patch(
+            "src.api.activity.session_manager.list_sessions",
+            AsyncMock(return_value=[{"id": "session-1", "title": "Local operator thread"}]),
+        ),
+    ):
+        response = await client.get("/api/activity/ledger", params={"session_id": "session-1", "limit": 20})
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["id"] == "audit:audit-local-operator-1")
+    assert item["kind"] == "local_operator"
+    assert item["category"] == "agent"
+    assert item["title"] == "codex-local"
+    assert item["status"] == "recorded"
+    assert item["thread_label"] == "Local operator thread"
 
 
 @pytest.fixture(autouse=True)

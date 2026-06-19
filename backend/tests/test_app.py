@@ -30,7 +30,9 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["model_label"] == settings.default_model.split("/")[-1]
     assert payload["active_profile"] == "default"
     assert isinstance(payload["provider_profiles"], list)
+    assert isinstance(payload["local_operators"], list)
     assert any(item["id"] == "openrouter" for item in payload["provider_profiles"])
+    assert any(item["id"] == "codex-local" for item in payload["local_operators"])
     assert all("api_key" not in item for item in payload["provider_profiles"])
 
 

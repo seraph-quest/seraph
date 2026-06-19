@@ -28,6 +28,10 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["provider"] == "openrouter"
     assert payload["model"] == settings.default_model
     assert payload["model_label"] == settings.default_model.split("/")[-1]
+    assert payload["active_profile"] == "default"
+    assert isinstance(payload["provider_profiles"], list)
+    assert any(item["id"] == "openrouter" for item in payload["provider_profiles"])
+    assert all("api_key" not in item for item in payload["provider_profiles"])
 
 
 @pytest.mark.asyncio

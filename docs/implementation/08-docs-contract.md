@@ -86,6 +86,9 @@ Expected flow:
 4. Run review.
    - set `Code Review=Running` while review is active
    - move to `Changes Requested` or `Passed`
+   - every PR-sized slice must be reviewed before merge; non-trivial PR-sized slices require an independent subagent review
+   - material findings must be fixed, explicitly rejected with rationale, or converted into tracked follow-up work before merge
+   - PR bodies must record material findings or an explicit no-findings result, plus validation receipts
 5. Merge and close.
    - set `PR=Merged`
    - set `Status=Done`

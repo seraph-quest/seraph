@@ -72,7 +72,7 @@ Receive (streamed):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENROUTER_API_KEY` | - | OpenRouter API key used by the default example profile |
-| `OPENAI_API_KEY` | - | OpenAI API key used by the `codex-openai` and `gpt-5.5-low` built-in profiles |
+| `OPENAI_API_KEY` | - | Remote OpenAI API key used by the `codex-openai` and `gpt-5.5-low` built-in profiles; this does not configure a local Codex command/operator process |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key used by the `claude-anthropic` built-in profile |
 | `DEFAULT_MODEL` | `openrouter/anthropic/claude-sonnet-4` | LLM model identifier |
 | `LLM_API_KEY` | - | Generic primary API key override for LiteLLM-compatible providers |
@@ -86,6 +86,12 @@ Receive (streamed):
 | `LOCAL_MODEL` | - | Model id for the local runtime profile |
 | `LOCAL_LLM_API_KEY` | - | Optional API key for the local runtime profile |
 | `LOCAL_LLM_API_BASE` | - | API base for the local runtime profile |
+| `CODEX_LOCAL_ENABLED` | `true` | Enables the local command-backed Codex operator adapter |
+| `CODEX_LOCAL_COMMAND` | `codex` | Local Codex executable name or path |
+| `CODEX_LOCAL_MODEL` | `gpt-5.5` | Model option passed to `codex exec` |
+| `CODEX_LOCAL_SANDBOX` | `workspace-write` | Sandbox option passed to local `codex exec` |
+| `CODEX_LOCAL_APPROVAL_POLICY` | `never` | Approval policy option passed to local `codex exec` |
+| `CODEX_LOCAL_TIMEOUT_SECONDS` | `600` | Timeout for local Codex operator invocations |
 | `LOCAL_RUNTIME_PATHS` | - | Comma-separated runtime paths or glob patterns that should prefer the local profile |
 | `RUNTIME_PROFILE_PREFERENCES` | - | Semicolon-separated `runtime_path=profile_a|profile_b` chains; `runtime_path` may be an exact path or glob |
 | `RUNTIME_POLICY_INTENTS` | - | Semicolon-separated `runtime_path=intent_a|intent_b` entries for capability-aware routing; `runtime_path` may be an exact path or glob |
@@ -142,10 +148,21 @@ LLM_API_BASE=https://openrouter.ai/api/v1
 DEFAULT_MODEL=openrouter/anthropic/claude-sonnet-4
 FALLBACK_MODELS=openai/gpt-4.1-mini,openai/gpt-4.1-nano
 
-# OpenAI/Codex-oriented operator routes. The low reasoning setting is an
-# option on the profile, not part of the model id.
+# Remote OpenAI API operator profiles. `codex-openai` and `gpt-5.5-low`
+# select cloud API routing for Seraph; they are separate from any local Codex
+# command/operator process. The low reasoning setting is an option on the
+# profile, not part of the model id.
 OPENAI_API_KEY=your-openai-key
 RUNTIME_PROFILE_PREFERENCES=chat_agent=codex-openai|openrouter
+
+# Local Codex command-backed operator. This does not use OPENAI_API_KEY and is
+# exposed separately from provider profiles as codex-local.
+CODEX_LOCAL_ENABLED=true
+CODEX_LOCAL_COMMAND=codex
+CODEX_LOCAL_MODEL=gpt-5.5
+CODEX_LOCAL_SANDBOX=workspace-write
+CODEX_LOCAL_APPROVAL_POLICY=never
+CODEX_LOCAL_TIMEOUT_SECONDS=600
 
 # Anthropic/Claude-oriented routes.
 ANTHROPIC_API_KEY=your-anthropic-key
@@ -160,7 +177,7 @@ RUNTIME_PROFILE_PREFERENCES=chat_agent=openai-compatible|openrouter
 FALLBACK_MODELS=your-provider/smaller-model
 ```
 
-These examples configure routing and operator posture only. They do not assert that a local model, Codex-oriented route, Claude-oriented route, or generic endpoint has equivalent behavior.
+These examples configure routing and operator posture only. They do not assert that a local model, remote OpenAI API route, local Codex operator, Claude-oriented route, or generic endpoint has equivalent behavior.
 
 Runtime routing examples:
 

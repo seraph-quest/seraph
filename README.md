@@ -94,11 +94,12 @@ Seraph's provider setup is intentionally routing-oriented rather than provider-l
 
 - **Local Ollama** through `local-ollama` when `LOCAL_MODEL` and `LOCAL_LLM_API_BASE=http://localhost:11434/v1` are configured
 - **OpenRouter** through the `openrouter` built-in profile and `OPENROUTER_API_KEY`
-- **OpenAI/Codex-oriented operator routes** through `codex-openai` or `gpt-5.5-low`, using the LiteLLM-routable `openai/gpt-5.5` model id plus `reasoning_effort=low` as a request option
+- **Remote OpenAI API operator profiles** through `codex-openai` or `gpt-5.5-low`, using the LiteLLM-routable `openai/gpt-5.5` model id plus `reasoning_effort=low` as a request option. These profile names select cloud API routing for Seraph and are distinct from any local Codex command/operator process.
+- **Local Codex operator** through the command-backed `codex-local` operator adapter, which invokes the installed `codex exec` command on this machine and does not require `OPENAI_API_KEY`
 - **Anthropic/Claude-oriented operator routes** through `claude-anthropic` and `ANTHROPIC_API_KEY`
 - **Generic OpenAI-compatible endpoints** through `openai-compatible` or custom `LLM_PROVIDER_PROFILES` entries backed by `LLM_API_BASE`, `LLM_API_KEY`, and compatible model IDs
 
-These profiles only configure provider/operator routing, fallback, capability tags, and audit visibility. They do not claim provider parity or that one provider reproduces another provider's behavior.
+Provider profiles only configure LLM routing, fallback, capability tags, and audit visibility. Local operators such as `codex-local` are separate executable adapters with their own readiness, audit, timeout, and failure surfaces. Neither surface claims provider parity or that one provider reproduces another provider's behavior.
 
 ### Docker Dev Stack
 

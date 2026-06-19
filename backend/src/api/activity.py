@@ -155,7 +155,7 @@ def _category_for_kind(kind: str) -> str:
         return "approval"
     if kind in {"notification", "queued_insight", "intervention"}:
         return "guardian"
-    if kind in {"agent_run", "tool_call", "tool_result", "tool_failed"}:
+    if kind in {"agent_run", "tool_call", "tool_result", "tool_failed", "local_operator"}:
         return "agent"
     return "system"
 
@@ -165,6 +165,12 @@ def _status_for_audit_event(event_type: str) -> str:
         return "running"
     if event_type == "tool_result":
         return "succeeded"
+    if event_type == "local_operator_started":
+        return "running"
+    if event_type == "local_operator_completed":
+        return "recorded"
+    if event_type == "local_operator_unavailable":
+        return "failed"
     if event_type.endswith("_failed") or event_type in {"tool_failed", "integration_failed", "llm_primary_failure", "llm_fallback_failure"}:
         return "failed"
     if event_type.endswith("_timed_out"):
@@ -197,6 +203,8 @@ def _title_for_audit_event(event: dict[str, Any]) -> str:
         return tool_name or "Scheduler job"
     if event_type.startswith("background_task_"):
         return tool_name or "Background task"
+    if event_type.startswith("local_operator_"):
+        return tool_name or "Local operator"
     if event_type.startswith("observer_delivery_"):
         return "Guardian delivery"
     if event_type.startswith("integration_"):
@@ -221,6 +229,8 @@ def _kind_for_audit_event(event: dict[str, Any]) -> str | None:
         return "scheduler_job"
     if event_type.startswith("background_task_"):
         return "background_task"
+    if event_type.startswith("local_operator_"):
+        return "local_operator"
     if event_type.startswith("observer_delivery_"):
         return "delivery"
     if event_type.startswith("integration_"):

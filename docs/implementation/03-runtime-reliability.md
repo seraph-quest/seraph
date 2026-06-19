@@ -31,8 +31,9 @@
 - [x] workflow endurance now also has a replayable canary proof: the named `live_workflow_endurance_canary` suite and `/api/operator/live-workflow-endurance-canary` surface pin a deterministic multi-session receipt for delegated ownership, checkpoint/branch lineage, failure injection, repair, artifact comparison, approval preservation, trust-boundary drift blocking, and audit trail without claiming a durable workflow state machine
 - [x] governed improvement now also has a dedicated benchmark surface: the named `governed_improvement` suite proves anti-misevolution blocking, preference-diversity guardrails, canary-only rollout posture, rollback-ready receipt policy, and operator-visible recent saved proposal receipts instead of leaving self-improvement safety at the raw proposal endpoint
 - [x] Seraph now also has a dedicated computer-use benchmark surface: the named `computer_use_browser_desktop` suite plus the operator computer-use benchmark surface prove replayable browser task receipts, desktop notification action replay, shared browser/native continuity, operator-visible failure taxonomy, and CI-gated execution proof instead of leaving computer-use claims at the catalog-summary level
-- [x] named provider/operator profiles are first-class runtime configuration: built-ins cover OpenRouter, generic OpenAI-compatible routing, Codex/OpenAI-oriented routing with LiteLLM-routable `openai/gpt-5.5` plus `reasoning_effort=low` as an option, Anthropic/Claude-oriented routing with a pinned Anthropic Sonnet model id, and local Ollama when configured; custom `LLM_PROVIDER_PROFILES` entries separate provider kind, model, API base, env secret, request options, capability/cost/latency/task/budget metadata, fallback policy, enabled state, and safety notes while leaving tool permissions in the existing tool policy layer
-- [x] provider/operator profile examples are documented in `README.md`, `backend/README.md`, `env.dev.example`, and `env.prod.example` for local Ollama, OpenRouter, OpenAI/Codex-oriented routes, Anthropic/Claude-oriented routes, and generic OpenAI-compatible endpoints; the documented contract is configurable routing, fallback, capability tagging, guardrails, and audit visibility rather than provider parity
+- [x] named provider/operator profiles are first-class runtime configuration: built-ins cover OpenRouter, generic OpenAI-compatible routing, remote OpenAI API routing with LiteLLM-routable `openai/gpt-5.5` plus `reasoning_effort=low` as an option, Anthropic/Claude-oriented routing with a pinned Anthropic Sonnet model id, and local Ollama when configured; custom `LLM_PROVIDER_PROFILES` entries separate provider kind, model, API base, env secret, request options, capability/cost/latency/task/budget metadata, fallback policy, enabled state, and safety notes while leaving tool permissions in the existing tool policy layer
+- [x] local Codex is now represented separately from LiteLLM provider profiles as the command-backed `codex-local` operator adapter: it invokes the installed `codex exec` command, exposes readiness under runtime/operator status, fails closed when unavailable, records audit receipts without raw prompts or terminal output, and does not require `OPENAI_API_KEY`
+- [x] provider/operator profile examples are documented in `README.md`, `backend/README.md`, `env.dev.example`, and `env.prod.example` for local Ollama, OpenRouter, remote OpenAI API routes, Anthropic/Claude-oriented routes, generic OpenAI-compatible endpoints, and the separate command-backed local Codex operator; the documented contract is configurable routing, fallback, capability tagging, guardrails, audit visibility, and local-operator readiness rather than provider parity
 
 ## Working On Now
 
@@ -165,7 +166,7 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 
 - pretending the runtime is done because the fallback baseline works
 - live-provider eval dependence for every reliability check
-- claiming Codex/OpenAI, Claude/Anthropic, OpenRouter, local Ollama, or generic OpenAI-compatible endpoints are behaviorally equivalent just because they can be configured behind the same routing controls
+- claiming remote OpenAI API profiles, local Codex, Claude/Anthropic, OpenRouter, local Ollama, or generic OpenAI-compatible endpoints are behaviorally equivalent just because they can be configured behind Seraph controls
 
 ## Acceptance Checklist
 
@@ -173,6 +174,6 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 - [x] runtime paths can force distinct primary and fallback routing without changing the global baseline
 - [x] dynamic runtime paths can inherit wildcard routing rules without losing exact-path control
 - [x] a local or non-OpenRouter path is demonstrably possible across helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist flows
-- [x] env examples describe local Ollama, OpenRouter, OpenAI/Codex-oriented, Anthropic/Claude-oriented, and generic OpenAI-compatible setup as provider/operator routing profiles with bounded claims
+- [x] env examples describe local Ollama, OpenRouter, remote OpenAI API, Anthropic/Claude-oriented, generic OpenAI-compatible setup, and local Codex command-backed operation with bounded claims
 - [x] key flows are observable and easy to debug
 - [ ] the project has broad repeatable eval coverage for core guardian behavior beyond the shipped REST, WebSocket, observer refresh, delivery policy, consolidation, proactive, tool-policy guardrail, threaded workflow recovery, capability repair/bootstrap, delegated workflow, and workflow-composition behavioral contracts

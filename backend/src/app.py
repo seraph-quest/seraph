@@ -14,6 +14,7 @@ from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
 from src.memory.soul import ensure_soul_exists
+from src.operators.local_codex import local_operator_statuses
 from src.runbooks.manager import runbook_manager
 from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
 from src.skills.manager import skill_manager
@@ -162,6 +163,7 @@ def create_app() -> FastAPI:
             "api_base": settings.llm_api_base.strip(),
             "active_profile": active_profile,
             "provider_profiles": provider_profile_statuses(),
+            "local_operators": local_operator_statuses(),
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

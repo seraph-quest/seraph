@@ -9,9 +9,12 @@ DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 class Settings(BaseSettings):
     openrouter_api_key: str = ""
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
     default_model: str = "openrouter/anthropic/claude-sonnet-4"
     llm_api_key: str = ""
     llm_api_base: str = "https://openrouter.ai/api/v1"
+    llm_provider_profiles: str = ""  # JSON object of named provider/operator profiles
     fallback_model: str = ""
     fallback_models: str = ""  # comma-separated ordered fallback chain
     fallback_llm_api_key: str = ""

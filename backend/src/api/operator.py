@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from config.settings import settings
 from src.agent.session import session_manager
 from src.app import _runtime_model_label, _runtime_provider_label
+from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
 from src.extensions.lifecycle import list_extensions
 from src.llm_logger import list_recent_llm_calls
 from src.observer.manager import context_manager
@@ -1197,6 +1198,7 @@ def _continuity_operator_items(
 
 def _runtime_status_payload() -> dict[str, Any]:
     model = settings.default_model.strip()
+    active_profile = resolve_runtime_profile(runtime_path="chat_agent")
     return {
         "version": "2026.4.10",
         "build_id": "SERAPH_PRIME_v2026.4.10",
@@ -1204,6 +1206,8 @@ def _runtime_status_payload() -> dict[str, Any]:
         "model": model,
         "model_label": _runtime_model_label(model),
         "api_base": settings.llm_api_base.strip(),
+        "active_profile": active_profile,
+        "provider_profiles": provider_profile_statuses(),
         "timezone": settings.user_timezone,
         "llm_logging_enabled": settings.llm_log_enabled,
     }

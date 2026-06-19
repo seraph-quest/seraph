@@ -66,7 +66,10 @@ Start with:
 ```bash
 # 1. Configure
 cp env.dev.example .env.dev
-# Edit .env.dev and set OPENROUTER_API_KEY=your-key-here
+# Edit .env.dev and choose a provider profile.
+# OpenRouter is the default example:
+#   OPENROUTER_API_KEY=your-key-here
+#   DEFAULT_MODEL=openrouter/anthropic/claude-sonnet-4
 
 # 2. Launch
 ./manage.sh -e dev local up
@@ -87,6 +90,16 @@ open http://localhost:8004/docs   # Swagger API docs
 
 `./manage.sh -e dev local up` is the canonical direct browser-development path. It explicitly loads the repo-root `.env.dev`, starts the backend on `8004`, starts the frontend on `3001`, and avoids the cwd-sensitive env drift that can otherwise change the active model/provider.
 
+Seraph's provider setup is intentionally routing-oriented rather than provider-locked. The examples support:
+
+- **Local Ollama** through `local-ollama` when `LOCAL_MODEL` and `LOCAL_LLM_API_BASE=http://localhost:11434/v1` are configured
+- **OpenRouter** through the `openrouter` built-in profile and `OPENROUTER_API_KEY`
+- **OpenAI/Codex-oriented operator routes** through `codex-openai` or `gpt-5.5-low`, using `model=gpt-5.5` plus `reasoning_effort=low` as a request option
+- **Anthropic/Claude-oriented operator routes** through `claude-anthropic` and `ANTHROPIC_API_KEY`
+- **Generic OpenAI-compatible endpoints** through `openai-compatible` or custom `LLM_PROVIDER_PROFILES` entries backed by `LLM_API_BASE`, `LLM_API_KEY`, and compatible model IDs
+
+These profiles only configure provider/operator routing, fallback, capability tags, and audit visibility. They do not claim provider parity or that one provider reproduces another provider's behavior.
+
 ### Docker Dev Stack
 
 ```bash
@@ -102,7 +115,7 @@ open http://localhost:8004/docs
 | Layer | Stack |
 |-------|-------|
 | **Frontend** | React 19, Vite 6, TypeScript, Tailwind CSS, Zustand |
-| **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM (OpenRouter) |
+| **Backend** | Python 3.12, FastAPI, uvicorn, smolagents, LiteLLM-compatible provider routing |
 | **Database** | SQLite (aiosqlite) + LanceDB (vector memory) |
 | **Tools** | 17 built-in tool capabilities (auto-discovered) + reusable workflows + plug-and-play MCP servers |
 | **Scheduler** | APScheduler — 9 jobs across briefings, reviews, strategist, observer cleanup, and memory/goal maintenance |

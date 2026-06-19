@@ -94,7 +94,7 @@ Seraph's provider setup is intentionally routing-oriented rather than provider-l
 
 - **Local Ollama** through `local-ollama` when `LOCAL_MODEL` and `LOCAL_LLM_API_BASE=http://localhost:11434/v1` are configured
 - **OpenRouter** through the `openrouter` built-in profile and `OPENROUTER_API_KEY`
-- **OpenAI/Codex-oriented operator routes** through `codex-openai` or `gpt-5.5-low`, using `model=gpt-5.5` plus `reasoning_effort=low` as a request option
+- **OpenAI/Codex-oriented operator routes** through `codex-openai` or `gpt-5.5-low`, using the LiteLLM-routable `openai/gpt-5.5` model id plus `reasoning_effort=low` as a request option
 - **Anthropic/Claude-oriented operator routes** through `claude-anthropic` and `ANTHROPIC_API_KEY`
 - **Generic OpenAI-compatible endpoints** through `openai-compatible` or custom `LLM_PROVIDER_PROFILES` entries backed by `LLM_API_BASE`, `LLM_API_KEY`, and compatible model IDs
 

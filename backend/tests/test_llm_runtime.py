@@ -67,6 +67,8 @@ def test_default_profile_does_not_attach_provider_scoped_cloud_keys(monkeypatch)
 
 
 def test_build_model_kwargs_uses_named_codex_openai_profile_with_reasoning_effort(monkeypatch):
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret-key")
     with (
         patch.object(settings, "llm_provider_profiles", ""),
@@ -80,14 +82,21 @@ def test_build_model_kwargs_uses_named_codex_openai_profile_with_reasoning_effor
             runtime_path="chat_agent",
         )
 
-    assert kwargs["model_id"] == "gpt-5.5"
+    assert kwargs["model_id"] == "openai/gpt-5.5"
     assert kwargs["runtime_profile"] == "codex-openai"
     assert kwargs["api_key"] == "openai-secret-key"
     assert kwargs["api_base"] == "https://api.openai.com/v1"
     assert kwargs["reasoning_effort"] == "low"
+    _, provider, _, _ = get_llm_provider(
+        model=kwargs["model_id"],
+        api_base=kwargs["api_base"],
+    )
+    assert provider == "openai"
 
 
 def test_build_model_kwargs_supports_gpt55_low_alias_without_encoding_reasoning_in_model(monkeypatch):
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret-key")
     with (
         patch.object(settings, "llm_provider_profiles", ""),
@@ -100,9 +109,14 @@ def test_build_model_kwargs_supports_gpt55_low_alias_without_encoding_reasoning_
             runtime_path="chat_agent",
         )
 
-    assert kwargs["model_id"] == "gpt-5.5"
+    assert kwargs["model_id"] == "openai/gpt-5.5"
     assert kwargs["runtime_profile"] == "gpt-5.5-low"
     assert kwargs["reasoning_effort"] == "low"
+    _, provider, _, _ = get_llm_provider(
+        model=kwargs["model_id"],
+        api_base=kwargs["api_base"],
+    )
+    assert provider == "openai"
 
 
 def test_build_model_kwargs_named_profile_missing_secret_fails_closed(monkeypatch):
@@ -213,11 +227,34 @@ def test_built_in_profile_statuses_include_expected_operator_profiles(monkeypatc
         profiles = {item["id"]: item for item in provider_profile_statuses()}
 
     assert {"openrouter", "openai-compatible", "codex-openai", "claude-anthropic", "gpt-5.5-low"} <= profiles.keys()
-    assert profiles["codex-openai"]["model"] == "gpt-5.5"
+    assert profiles["codex-openai"]["model"] == "openai/gpt-5.5"
     assert profiles["codex-openai"]["options"] == {"reasoning_effort": "low"}
     assert profiles["codex-openai"]["missing_secret"] is True
     assert profiles["openai-compatible"]["secret_ref"] == "LLM_API_KEY"
     assert all("api_key" not in profile for profile in profiles.values())
+
+
+def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret-key")
+    with (
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=claude-anthropic"),
+        patch.object(settings, "anthropic_api_key", ""),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "anthropic/claude-sonnet-4-20250514"
+    assert kwargs["runtime_profile"] == "claude-anthropic"
+    assert kwargs["api_key"] == "anthropic-secret-key"
+    resolved_model, provider, _, _ = get_llm_provider(model=kwargs["model_id"])
+    assert resolved_model == "claude-sonnet-4-20250514"
+    assert provider == "anthropic"
 
 
 def test_safe_error_redacts_local_and_fallback_keys():

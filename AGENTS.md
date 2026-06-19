@@ -89,6 +89,7 @@ The lead should incorporate the critique, explicitly reject it with rationale, o
 
 ## Review Rule
 
-- Run a subagent review for non-trivial PR-sized slices.
+- Every PR-sized slice must be reviewed before merge. Non-trivial PR-sized slices require an independent subagent review.
 - Verify subagent claims before acting on them.
 - Record material review findings, or an explicit no-findings result, in the PR body and in affected implementation docs when the slice changes shipped truth or workflow contract.
+- Do not merge a PR until material review findings are either fixed, explicitly rejected with rationale, or turned into tracked follow-up work.

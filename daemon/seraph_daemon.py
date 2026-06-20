@@ -15,8 +15,13 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
+import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -25,6 +30,51 @@ import time
 import httpx
 
 logger = logging.getLogger("seraph_daemon")
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip().lower()).strip("-")
+    return slug[:40] or "screen"
+
+
+def _archive_provider_capture(
+    *,
+    archive_dir: str,
+    png_bytes: bytes,
+    app_name: str,
+    provider_name: str,
+    analysis: dict,
+) -> dict[str, str]:
+    now = datetime.now(timezone.utc)
+    root = Path(archive_dir).expanduser().resolve()
+    day_dir = root / now.strftime("%Y-%m-%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+    analysis_json = json.dumps(analysis, indent=2, sort_keys=True)
+    digest = hashlib.sha256(
+        png_bytes + provider_name.encode("utf-8") + analysis_json.encode("utf-8")
+    ).hexdigest()[:16]
+    stem = f"{now.strftime('%H%M%S')}-{_slug(app_name)}-{digest}"
+    image_path = day_dir / f"{stem}.png"
+    provider_output_path = day_dir / f"{stem}.{_slug(provider_name)}.json"
+    analysis_path = day_dir / f"{stem}.analysis.json"
+    provider_payload = {
+        "artifact_schema": "seraph.screen_analysis.v1",
+        "provider": provider_name,
+        "app": app_name,
+        "created_at": now.isoformat(),
+        "analysis": analysis,
+    }
+    image_path.write_bytes(png_bytes)
+    provider_output_path.write_text(json.dumps(provider_payload, indent=2, sort_keys=True), encoding="utf-8")
+    analysis_path.write_text(analysis_json, encoding="utf-8")
+    return {
+        "id": digest,
+        "provider": provider_name,
+        "image_path": str(image_path),
+        "provider_output_path": str(provider_output_path),
+        "analysis_path": str(analysis_path),
+        "created_at": now.isoformat(),
+    }
 
 # ─── macOS helpers ────────────────────────────────────────
 
@@ -170,6 +220,8 @@ async def poll_loop(
     verbose: bool,
     ocr_provider: "ocr.base.OCRProvider | None" = None,
     blocklist: set[str] | None = None,
+    preserve_captures: bool = False,
+    capture_archive_dir: str = "",
 ) -> None:
     """Core polling loop — detect window changes, post to backend.
 
@@ -256,6 +308,14 @@ async def poll_loop(
                                 result = await ocr_provider.analyze_screen(png_bytes, app_name)
                                 if result.success:
                                     observation.update(result.data)
+                                    if preserve_captures and "capture_artifacts" not in observation:
+                                        observation["capture_artifacts"] = _archive_provider_capture(
+                                            archive_dir=capture_archive_dir,
+                                            png_bytes=png_bytes,
+                                            app_name=app_name,
+                                            provider_name=ocr_provider.name,
+                                            analysis=result.data,
+                                        )
                                     if verbose:
                                         ts = time.strftime("%H:%M:%S")
                                         logger.info(
@@ -303,6 +363,8 @@ async def periodic_capture_loop(
     verbose: bool,
     ocr_provider: "ocr.base.OCRProvider | None" = None,
     blocklist: set[str] | None = None,
+    preserve_captures: bool = False,
+    capture_archive_dir: str = "",
 ) -> None:
     """Periodic capture loop — takes screenshots at intervals within the same app.
 
@@ -367,6 +429,14 @@ async def periodic_capture_loop(
                             result = await ocr_provider.analyze_screen(png_bytes, app_name)
                             if result.success:
                                 observation.update(result.data)
+                                if preserve_captures and "capture_artifacts" not in observation:
+                                    observation["capture_artifacts"] = _archive_provider_capture(
+                                        archive_dir=capture_archive_dir,
+                                        png_bytes=png_bytes,
+                                        app_name=app_name,
+                                        provider_name=ocr_provider.name,
+                                        analysis=result.data,
+                                    )
                                 if verbose:
                                     ts = time.strftime("%H:%M:%S")
                                     logger.info(
@@ -465,8 +535,8 @@ async def main() -> None:
         "--capture-archive-dir",
         default=os.environ.get("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR")
         or os.environ.get("SCREEN_CAPTURE_ARCHIVE_DIR")
-        or "/tmp/seraph-screen-captures",
-        help="Directory for preserved capture artifacts (default: /tmp/seraph-screen-captures)",
+        or "~/Library/Application Support/Seraph/artifacts/screen-captures",
+        help="Directory for preserved capture artifacts (default: ~/Library/Application Support/Seraph/artifacts/screen-captures)",
     )
     parser.add_argument(
         "--openrouter-api-key",
@@ -562,6 +632,8 @@ async def main() -> None:
             args.verbose,
             ocr_provider=ocr_provider,
             blocklist=blocklist,
+            preserve_captures=args.preserve_captures,
+            capture_archive_dir=args.capture_archive_dir,
         )
     )
     periodic_task = asyncio.create_task(
@@ -571,6 +643,8 @@ async def main() -> None:
             args.verbose,
             ocr_provider=ocr_provider,
             blocklist=blocklist,
+            preserve_captures=args.preserve_captures,
+            capture_archive_dir=args.capture_archive_dir,
         )
     ) if ocr_provider is not None else None
 

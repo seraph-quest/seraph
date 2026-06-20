@@ -63,6 +63,7 @@ async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client
     assert item["observation_id"] == observation.id
     assert item["artifacts"]["image_url"].endswith(f"/{observation.id}/image")
     assert item["artifacts"]["codex_output_url"].endswith(f"/{observation.id}/codex-output")
+    assert item["artifacts"]["provider_output_url"].endswith(f"/{observation.id}/codex-output")
 
     image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
     assert image_resp.status_code == 200

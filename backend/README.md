@@ -92,7 +92,8 @@ Receive (streamed):
 | `CODEX_LOCAL_SANDBOX` | `workspace-write` | Sandbox option passed to local `codex exec` |
 | `CODEX_LOCAL_APPROVAL_POLICY` | `never` | Approval policy option passed to local `codex exec` |
 | `CODEX_LOCAL_TIMEOUT_SECONDS` | `600` | Timeout for local Codex operator invocations |
-| `SCREEN_CAPTURE_ARCHIVE_DIR` | `/tmp/seraph-screen-captures` | Local archive root for preserved screen capture images, redacted Codex output, and normalized JSON served by observer artifact endpoints |
+| `SCREEN_CAPTURE_ARCHIVE_DIR` | `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local archive root for preserved screen capture images, redacted provider output, and normalized JSON served by localhost-only observer artifact endpoints |
+| `REPORT_ARCHIVE_DIR` | `$WORKSPACE_DIR/artifacts/reports` | Durable local archive root for stored report text/JSON artifacts used by future analysis |
 | `END_OF_DAY_REPORT_ENABLED` | `true` | Enables the stored end-of-day goal report scheduler job |
 | `END_OF_DAY_REPORT_HOUR` | `21` | Local hour for the end-of-day goal report |
 | `END_OF_DAY_REPORT_LLM_ENABLED` | `false` | Enables LLM drafting for the report; default deterministic mode avoids sending screen-derived summaries to a provider |

@@ -402,7 +402,10 @@ async def post_screen_context(body: ScreenContextRequest):
 
 
 def _screen_artifact_root() -> Path:
-    return Path(settings.screen_capture_archive_dir).expanduser().resolve()
+    configured = settings.screen_capture_archive_dir.strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()
 
 
 def _require_local_artifact_request(request: Request) -> None:
@@ -457,8 +460,10 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "artifacts": {
             "id": artifacts.get("id"),
             "created_at": artifacts.get("created_at"),
+            "provider": artifacts.get("provider"),
             "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
             "codex_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
+            "provider_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
             "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
         },
     }
@@ -516,7 +521,7 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("codex_output_path") or ""))
+    path = _screen_artifact_path(str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""))
     return PlainTextResponse(path.read_text(encoding="utf-8"))
 
 

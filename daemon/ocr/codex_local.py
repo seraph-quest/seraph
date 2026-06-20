@@ -23,7 +23,7 @@ logger = logging.getLogger("seraph_daemon")
 _DEFAULT_MODEL = "gpt-5.5"
 _DEFAULT_REASONING_EFFORT = "low"
 _DEFAULT_TIMEOUT_SECONDS = 60
-_DEFAULT_ARCHIVE_DIR = "/tmp/seraph-screen-captures"
+_DEFAULT_ARCHIVE_DIR = "~/Library/Application Support/Seraph/artifacts/screen-captures"
 _OUTPUT_LIMIT = 12_000
 _ENV_ALLOWLIST = {
     "PATH",

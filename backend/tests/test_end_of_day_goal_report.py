@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -115,6 +117,43 @@ async def test_run_report_stores_episode_and_keeps_email_preview_only(async_db):
         and event["details"]["email_status"] == "preview_required"
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_store_report_writes_durable_artifacts(async_db, tmp_path):
+    from src.db.models import MemoryEpisode
+    from sqlmodel import select
+    from src.scheduler.jobs.end_of_day_goal_report import store_end_of_day_goal_report
+
+    report = {
+        "date": "2026-06-20",
+        "timezone": "UTC",
+        "body": "Stored durable EOD report",
+        "summary": {"total_observations": 2, "total_tracked_minutes": 45},
+        "goal_alignment": [{"goal_id": "g1", "status": "aligned"}],
+        "completed_goal_count": 0,
+        "active_goal_count": 1,
+        "analysis_provider": "deterministic-local",
+        "artifact_schema": "seraph.end_of_day_goal_report.v1",
+    }
+
+    with patch.object(settings, "report_archive_dir", str(tmp_path / "reports")):
+        episode_id = await store_end_of_day_goal_report(report)
+
+    async with async_db() as db:
+        episode = (await db.execute(select(MemoryEpisode))).scalar_one()
+
+    assert episode.id == episode_id
+    metadata = json.loads(episode.metadata_json or "{}")
+    artifacts = metadata["artifacts"]
+    text_path = Path(artifacts["report_text_path"])
+    json_path = Path(artifacts["report_json_path"])
+    assert text_path.read_text(encoding="utf-8") == "Stored durable EOD report"
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["artifact_schema"] == "seraph.end_of_day_goal_report.v1"
+    assert payload["report"]["analysis_provider"] == "deterministic-local"
+    assert artifacts["report_text_sha256"]
+    assert artifacts["report_json_sha256"]
 
 
 @pytest.mark.asyncio

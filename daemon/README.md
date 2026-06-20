@@ -113,8 +113,8 @@ Screen analysis is opt-in and runs **on context switch** (not a timer). When you
 | `--ocr` | off | Enable screenshot analysis on context switch |
 | `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local), `codex-local` (local Codex CLI), or `openrouter` (cloud, structured JSON) |
 | `--ocr-model` | provider default | Model for OpenRouter or local Codex provider |
-| `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted local Codex output, and normalized JSON artifacts |
-| `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `/tmp/seraph-screen-captures` | Local directory for preserved artifacts |
+| `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts for future re-analysis |
+| `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local directory for preserved artifacts |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
 | `--blocklist-file` | (none) | Path to JSON blocklist config (extends built-in defaults) |
 | `--ocr-interval` | (deprecated) | Ignored — OCR now runs on context switch |
@@ -191,7 +191,7 @@ OCR mode captures screenshots to extract visible text. This requires the Screen 
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots are captured only to produce a structured activity observation. `apple-vision` keeps analysis local. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure unless capture preservation is enabled. With `--preserve-captures`, allowed screenshots, redacted local Codex output, and normalized JSON are archived under `--capture-archive-dir` for local inspection. `openrouter` sends the image to the configured OpenRouter model and should only be used when that external provider is acceptable.
+**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots are captured only to produce a structured activity observation. `apple-vision` keeps analysis local. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure unless capture preservation is enabled. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir` for future re-analysis by better models. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured. `openrouter` sends the image to the configured OpenRouter model and should only be used when that external provider is acceptable.
 
 Preserved local Codex artifacts can be inspected through the backend from localhost only:
 
@@ -214,9 +214,9 @@ The daemon posts to `POST /api/observer/context`:
     "details": ["file: main.py", "language: Python"],
     "capture_artifacts": {
       "id": "artifact-digest",
-      "image_path": "/tmp/seraph-screen-captures/2026-06-20/120000-vs-code-artifact.png",
-      "codex_output_path": "/tmp/seraph-screen-captures/2026-06-20/120000-vs-code-artifact.codex.txt",
-      "analysis_path": "/tmp/seraph-screen-captures/2026-06-20/120000-vs-code-artifact.analysis.json"
+      "image_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.png",
+      "codex_output_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.codex.txt",
+      "analysis_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.analysis.json"
     }
   },
   "switch_timestamp": 1700000000.0

@@ -5,9 +5,11 @@ They are automatically skipped on non-macOS platforms.
 """
 
 import asyncio
+import json
 import platform
 import sys
 import os
+from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -21,7 +23,28 @@ httpx = pytest.importorskip("httpx")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from seraph_daemon import fetch_capture_mode, periodic_capture_loop
+from seraph_daemon import _archive_provider_capture, fetch_capture_mode, periodic_capture_loop
+
+
+def test_archive_provider_capture_stores_image_and_analysis_for_any_provider(tmp_path):
+    artifacts = _archive_provider_capture(
+        archive_dir=str(tmp_path),
+        png_bytes=b"png bytes",
+        app_name="Preview",
+        provider_name="apple-vision",
+        analysis={"activity": "reading", "summary": "Reading a PDF"},
+    )
+
+    image_path = Path(artifacts["image_path"])
+    output_path = Path(artifacts["provider_output_path"])
+    analysis_path = Path(artifacts["analysis_path"])
+    assert artifacts["provider"] == "apple-vision"
+    assert image_path.read_bytes() == b"png bytes"
+    provider_payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert provider_payload["provider"] == "apple-vision"
+    assert provider_payload["analysis"]["summary"] == "Reading a PDF"
+    analysis_payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert analysis_payload["activity"] == "reading"
 
 
 class TestFetchCaptureMode:

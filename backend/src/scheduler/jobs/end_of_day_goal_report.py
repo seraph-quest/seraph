@@ -11,6 +11,7 @@ import smtplib
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from email.message import EmailMessage
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -97,6 +98,49 @@ def _parse_csv(value: str) -> list[str]:
 
 def _recipient_hash(recipient: str) -> str:
     return hashlib.sha256(recipient.strip().lower().encode("utf-8")).hexdigest()[:16]
+
+
+def _report_archive_root() -> Path:
+    configured = settings.report_archive_dir.strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "reports"
+
+
+def _report_artifact_paths(report: dict[str, Any]) -> dict[str, str]:
+    report_date = str(report.get("date") or "unknown")
+    digest = hashlib.sha256(
+        json.dumps(report, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    report_dir = _report_archive_root() / "end-of-day" / report_date
+    stem = f"end-of-day-{report_date}-{digest}"
+    return {
+        "report_text_path": str(report_dir / f"{stem}.txt"),
+        "report_json_path": str(report_dir / f"{stem}.json"),
+    }
+
+
+def archive_end_of_day_goal_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Persist a durable report artifact bundle for future re-analysis."""
+    paths = _report_artifact_paths(report)
+    text_path = Path(paths["report_text_path"])
+    json_path = Path(paths["report_json_path"])
+    text_path.parent.mkdir(parents=True, exist_ok=True)
+
+    text_payload = str(report.get("body") or "")
+    json_payload = {
+        "artifact_schema": "seraph.end_of_day_goal_report.v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "report": report,
+    }
+    text_path.write_text(text_payload, encoding="utf-8")
+    json_path.write_text(json.dumps(json_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    return {
+        **paths,
+        "report_text_sha256": hashlib.sha256(text_payload.encode("utf-8")).hexdigest(),
+        "report_json_sha256": hashlib.sha256(json_path.read_bytes()).hexdigest(),
+    }
 
 
 def _safe_timezone() -> ZoneInfo:
@@ -332,12 +376,16 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         "goal_alignment": alignment,
         "completed_goal_count": len(completed_goals),
         "active_goal_count": len(active_goals),
+        "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "deterministic-local",
+        "artifact_schema": "seraph.end_of_day_goal_report.v1",
     }
 
 
 async def store_end_of_day_goal_report(report: dict[str, Any]) -> str:
     from src.memory.repository import memory_repository
 
+    report_artifacts = archive_end_of_day_goal_report(report)
+    report["artifacts"] = report_artifacts
     episode = await memory_repository.create_episode(
         episode_type=MemoryEpisodeType.observer,
         summary=f"End-of-day goal report for {report['date']}",
@@ -354,6 +402,9 @@ async def store_end_of_day_goal_report(report: dict[str, Any]) -> str:
             "active_goal_count": report["active_goal_count"],
             "completed_goal_count": report["completed_goal_count"],
             "goal_alignment": report["goal_alignment"],
+            "analysis_provider": report.get("analysis_provider"),
+            "artifact_schema": report.get("artifact_schema"),
+            "artifacts": report_artifacts,
         },
     )
     return episode.id
@@ -444,6 +495,7 @@ async def run_end_of_day_goal_report() -> None:
                 "email_status": email_result.status,
                 "email_reason": email_result.reason,
                 "email_recipient_hash": email_result.recipient_hash,
+                "report_artifacts": report.get("artifacts"),
             },
         )
     except Exception as exc:

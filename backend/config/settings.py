@@ -101,7 +101,8 @@ class Settings(BaseSettings):
     activity_digest_hour: int = 20                    # 8 PM daily digest
     weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
     screen_observation_retention_days: int = 90        # keep 90 days of observations
-    screen_capture_archive_dir: str = "/tmp/seraph-screen-captures"
+    screen_capture_archive_dir: str = ""
+    report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21
     end_of_day_report_llm_enabled: bool = False

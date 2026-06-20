@@ -282,6 +282,26 @@ def _read_output(output_path: Path) -> str:
     return ""
 
 
+def _ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with suppress(OSError):
+        path.chmod(0o700)
+
+
+def _write_private_bytes(path: Path, content: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+    finally:
+        with suppress(OSError):
+            os.chmod(path, 0o600)
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    _write_private_bytes(path, content.encode("utf-8"))
+
+
 def _archive_capture(
     *,
     archive_dir: Path,
@@ -291,16 +311,17 @@ def _archive_capture(
     normalized: dict[str, Any],
 ) -> dict[str, str]:
     now = datetime.now(timezone.utc)
+    _ensure_private_dir(archive_dir)
     day_dir = archive_dir / now.strftime("%Y-%m-%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(day_dir)
     digest = hashlib.sha256(png_bytes + raw_output.encode("utf-8", errors="replace")).hexdigest()[:16]
     stem = f"{now.strftime('%H%M%S')}-{_slug(app_name)}-{digest}"
     image_path = day_dir / f"{stem}.png"
     raw_output_path = day_dir / f"{stem}.codex.txt"
     normalized_path = day_dir / f"{stem}.analysis.json"
-    image_path.write_bytes(png_bytes)
-    raw_output_path.write_text(raw_output, encoding="utf-8")
-    normalized_path.write_text(json.dumps(normalized, indent=2, sort_keys=True), encoding="utf-8")
+    _write_private_bytes(image_path, png_bytes)
+    _write_private_text(raw_output_path, raw_output)
+    _write_private_text(normalized_path, json.dumps(normalized, indent=2, sort_keys=True))
     return {
         "id": digest,
         "image_path": str(image_path),

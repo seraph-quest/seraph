@@ -16,6 +16,7 @@ Usage:
 import argparse
 import asyncio
 import hashlib
+import contextlib
 import json
 import logging
 import os
@@ -47,8 +48,13 @@ def _archive_provider_capture(
 ) -> dict[str, str]:
     now = datetime.now(timezone.utc)
     root = Path(archive_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        root.chmod(0o700)
     day_dir = root / now.strftime("%Y-%m-%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
+    day_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        day_dir.chmod(0o700)
     analysis_json = json.dumps(analysis, indent=2, sort_keys=True)
     digest = hashlib.sha256(
         png_bytes + provider_name.encode("utf-8") + analysis_json.encode("utf-8")
@@ -64,9 +70,9 @@ def _archive_provider_capture(
         "created_at": now.isoformat(),
         "analysis": analysis,
     }
-    image_path.write_bytes(png_bytes)
-    provider_output_path.write_text(json.dumps(provider_payload, indent=2, sort_keys=True), encoding="utf-8")
-    analysis_path.write_text(analysis_json, encoding="utf-8")
+    _write_private_bytes(image_path, png_bytes)
+    _write_private_text(provider_output_path, json.dumps(provider_payload, indent=2, sort_keys=True))
+    _write_private_text(analysis_path, analysis_json)
     return {
         "id": digest,
         "provider": provider_name,
@@ -75,6 +81,20 @@ def _archive_provider_capture(
         "analysis_path": str(analysis_path),
         "created_at": now.isoformat(),
     }
+
+
+def _write_private_bytes(path: Path, content: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+    finally:
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    _write_private_bytes(path, content.encode("utf-8"))
 
 # ─── macOS helpers ────────────────────────────────────────
 

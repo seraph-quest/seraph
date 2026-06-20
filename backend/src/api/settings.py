@@ -77,7 +77,8 @@ def _report_archive_dir() -> tuple[Path, str]:
 def _archive_dir_status(path: Path) -> dict[str, object]:
     creation_error = None
     try:
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.chmod(0o700)
     except OSError as exc:
         creation_error = str(exc)
     return {

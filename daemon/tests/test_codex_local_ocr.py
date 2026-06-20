@@ -3,6 +3,7 @@
 import json
 import os
 import platform
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -88,6 +89,11 @@ async def test_codex_local_provider_preserves_capture_artifacts_when_enabled(tmp
     analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
     assert analysis["summary"] == "Reviewing preserved captures"
     assert analysis["confidence"] == 0.91
+    assert stat.S_IMODE(archive_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(image_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(image_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(codex_output_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(analysis_path.stat().st_mode) == 0o600
     assert list(temp_dir.iterdir()) == []
 
 

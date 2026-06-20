@@ -1,8 +1,10 @@
 """Tests for settings API — GET/PUT interruption mode."""
 
+import stat
+from unittest.mock import patch
+
 import pytest
 import pytest_asyncio
-from unittest.mock import patch
 
 from config.settings import settings
 from src.db.models import UserProfile
@@ -123,12 +125,14 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     assert data["screen"]["exists"] is True
     assert data["screen"]["writable"] is True
     assert data["screen"]["creation_error"] is None
+    assert stat.S_IMODE((tmp_path / "screen").stat().st_mode) == 0o700
     assert data["screen"]["stored_artifacts"] == ["image", "provider_output", "analysis_json"]
     assert data["screen"]["inspection_visibility"] == "localhost_only"
     assert data["reports"]["archive_dir"].endswith("/reports")
     assert data["reports"]["exists"] is True
     assert data["reports"]["writable"] is True
     assert data["reports"]["creation_error"] is None
+    assert stat.S_IMODE((tmp_path / "reports").stat().st_mode) == 0o700
     assert data["reports"]["analysis_provider"] == "deterministic-local"
     assert data["email"]["enabled"] is True
     assert data["email"]["smtp_configured"] is True

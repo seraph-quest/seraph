@@ -7,6 +7,7 @@ They are automatically skipped on non-macOS platforms.
 import asyncio
 import json
 import platform
+import stat
 import sys
 import os
 from pathlib import Path
@@ -45,6 +46,11 @@ def test_archive_provider_capture_stores_image_and_analysis_for_any_provider(tmp
     assert provider_payload["analysis"]["summary"] == "Reading a PDF"
     analysis_payload = json.loads(analysis_path.read_text(encoding="utf-8"))
     assert analysis_payload["activity"] == "reading"
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(image_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(image_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(analysis_path.stat().st_mode) == 0o600
 
 
 class TestFetchCaptureMode:

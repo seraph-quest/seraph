@@ -439,7 +439,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--ocr-provider",
-        choices=["apple-vision", "openrouter"],
+        choices=["apple-vision", "openrouter", "codex-local"],
         default="apple-vision",
         help="OCR provider (default: apple-vision)",
     )
@@ -451,8 +451,8 @@ async def main() -> None:
     )
     parser.add_argument(
         "--ocr-model",
-        default="google/gemini-2.5-flash-lite",
-        help="Model for OpenRouter OCR (default: google/gemini-2.5-flash-lite)",
+        default=None,
+        help="Model for OCR provider (OpenRouter default: google/gemini-2.5-flash-lite; codex-local default: gpt-5.5)",
     )
     parser.add_argument(
         "--openrouter-api-key",
@@ -503,10 +503,14 @@ async def main() -> None:
         from blocklist import load_blocklist
         from ocr import create_provider
 
+        ocr_model = args.ocr_model
+        if ocr_model is None and args.ocr_provider == "openrouter":
+            ocr_model = "google/gemini-2.5-flash-lite"
+
         ocr_provider = create_provider(
             name=args.ocr_provider,
             api_key=args.openrouter_api_key,
-            model=args.ocr_model,
+            model=ocr_model,
         )
 
         if not ocr_provider.is_available():

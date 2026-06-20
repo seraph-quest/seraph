@@ -92,6 +92,19 @@ Receive (streamed):
 | `CODEX_LOCAL_SANDBOX` | `workspace-write` | Sandbox option passed to local `codex exec` |
 | `CODEX_LOCAL_APPROVAL_POLICY` | `never` | Approval policy option passed to local `codex exec` |
 | `CODEX_LOCAL_TIMEOUT_SECONDS` | `600` | Timeout for local Codex operator invocations |
+| `END_OF_DAY_REPORT_ENABLED` | `true` | Enables the stored end-of-day goal report scheduler job |
+| `END_OF_DAY_REPORT_HOUR` | `21` | Local hour for the end-of-day goal report |
+| `END_OF_DAY_REPORT_LLM_ENABLED` | `false` | Enables LLM drafting for the report; default deterministic mode avoids sending screen-derived summaries to a provider |
+| `EMAIL_REPORTS_ENABLED` | `false` | Enables SMTP delivery for reports after local storage |
+| `EMAIL_REPORTS_PREVIEW_REQUIRED` | `true` | Blocks outbound report email until operator preview is deliberately disabled |
+| `EMAIL_REPORTS_TO` | - | Recipient for report email |
+| `EMAIL_REPORTS_TO_ALLOWLIST` | - | Comma-separated recipient allowlist; recipient must be present before sending |
+| `EMAIL_REPORTS_FROM` | - | Sender address for report email |
+| `SMTP_HOST` | - | SMTP host for report delivery |
+| `SMTP_PORT` | `587` | SMTP port for report delivery |
+| `SMTP_USERNAME` | - | SMTP username |
+| `SMTP_PASSWORD` | - | SMTP password |
+| `SMTP_USE_TLS` | `true` | Use STARTTLS before SMTP login/send |
 | `LOCAL_RUNTIME_PATHS` | - | Comma-separated runtime paths or glob patterns that should prefer the local profile |
 | `RUNTIME_PROFILE_PREFERENCES` | - | Semicolon-separated `runtime_path=profile_a|profile_b` chains; `runtime_path` may be an exact path or glob |
 | `RUNTIME_POLICY_INTENTS` | - | Semicolon-separated `runtime_path=intent_a|intent_b` entries for capability-aware routing; `runtime_path` may be an exact path or glob |

@@ -63,6 +63,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
+    from src.scheduler.jobs.end_of_day_goal_report import run_end_of_day_goal_report
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
 
@@ -117,6 +118,15 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "activity_digest",
             "name": "Activity digest",
+        },
+        {
+            "func": _async_job_wrapper(run_end_of_day_goal_report, loop),
+            "trigger": CronTrigger(
+                hour=settings.end_of_day_report_hour,
+                timezone=validated_tz,
+            ),
+            "id": "end_of_day_goal_report",
+            "name": "End-of-day goal report",
         },
         {
             "func": _async_job_wrapper(run_weekly_activity_review, loop),

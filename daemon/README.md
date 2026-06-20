@@ -111,8 +111,8 @@ Screen analysis is opt-in and runs **on context switch** (not a timer). When you
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--ocr` | off | Enable screenshot analysis on context switch |
-| `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local) or `openrouter` (cloud, structured JSON) |
-| `--ocr-model` | `google/gemini-2.5-flash-lite` | Model for OpenRouter provider |
+| `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local), `codex-local` (local Codex CLI), or `openrouter` (cloud, structured JSON) |
+| `--ocr-model` | provider default | Model for OpenRouter or local Codex provider |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
 | `--blocklist-file` | (none) | Path to JSON blocklist config (extends built-in defaults) |
 | `--ocr-interval` | (deprecated) | Ignored — OCR now runs on context switch |
@@ -122,6 +122,9 @@ Examples:
 ```bash
 # Local analysis — Apple Vision framework (free, offline, ~200ms per capture)
 ./daemon/run.sh --ocr --verbose
+
+# Local structured analysis — Codex CLI on this machine
+./daemon/run.sh --ocr --ocr-provider codex-local --verbose
 
 # Cloud analysis — OpenRouter with Gemini (structured JSON, ~$1.30/mo at ~150 switches/day)
 OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
@@ -183,7 +186,7 @@ OCR mode captures screenshots to extract visible text. This requires the Screen 
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** keystrokes, clipboard, file contents. Screenshots are only captured in memory when `--ocr` is enabled and are never written to disk.
+**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots are captured only to produce a structured activity observation. `apple-vision` keeps analysis local. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure. `openrouter` sends the image to the configured OpenRouter model and should only be used when that external provider is acceptable.
 
 The daemon posts to `POST /api/observer/context`:
 ```json

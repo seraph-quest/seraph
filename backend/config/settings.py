@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     codex_local_enabled: bool = True
     codex_local_command: str = "codex"
     codex_local_model: str = "gpt-5.5"
+    codex_local_reasoning_effort: str = "low"
     codex_local_sandbox: str = "workspace-write"
     codex_local_approval_policy: str = "never"
     codex_local_timeout_seconds: int = 600
@@ -100,6 +101,20 @@ class Settings(BaseSettings):
     activity_digest_hour: int = 20                    # 8 PM daily digest
     weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
     screen_observation_retention_days: int = 90        # keep 90 days of observations
+    end_of_day_report_enabled: bool = True
+    end_of_day_report_hour: int = 21
+    end_of_day_report_llm_enabled: bool = False
+    email_reports_enabled: bool = False
+    email_reports_preview_required: bool = True
+    email_reports_to: str = ""
+    email_reports_to_allowlist: str = ""
+    email_reports_from: str = ""
+    email_reports_reply_to: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
 
     # Vault
     vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty

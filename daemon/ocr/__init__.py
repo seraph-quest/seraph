@@ -11,9 +11,9 @@ def create_provider(
     """Create an OCR provider by name.
 
     Args:
-        name: "apple-vision" or "openrouter"
+        name: "apple-vision", "openrouter", or "codex-local"
         api_key: Required for openrouter provider
-        model: Model name for openrouter (has default)
+        model: Model name for openrouter or codex-local (has provider defaults)
 
     Raises:
         ValueError: Unknown provider or missing api_key for openrouter
@@ -30,4 +30,9 @@ def create_provider(
 
         return OpenRouterProvider(api_key=api_key, model=model)
 
-    raise ValueError(f"Unknown OCR provider: {name!r} (choose 'apple-vision' or 'openrouter')")
+    if name == "codex-local":
+        from ocr.codex_local import CodexLocalProvider
+
+        return CodexLocalProvider(model=model)
+
+    raise ValueError(f"Unknown OCR provider: {name!r} (choose 'apple-vision', 'openrouter', or 'codex-local')")

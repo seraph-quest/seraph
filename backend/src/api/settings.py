@@ -1,12 +1,15 @@
 """Settings API — runtime mode management."""
 
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlmodel import select
 
+from config.settings import settings
 from src.db.engine import get_session as get_db
 from src.db.models import UserProfile
 from src.observer.manager import context_manager
@@ -41,6 +44,31 @@ _VALID_CAPTURE_MODES = {"on_switch", "balanced", "detailed"}
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRUE_VALUES
+
+
+def _screen_archive_dir() -> tuple[str, str]:
+    configured = settings.screen_capture_archive_dir.strip()
+    if configured:
+        return str(Path(configured).expanduser().resolve()), "SCREEN_CAPTURE_ARCHIVE_DIR"
+    return (
+        str(Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()),
+        "default",
+    )
+
+
+def _report_archive_dir() -> tuple[str, str]:
+    configured = settings.report_archive_dir.strip()
+    if configured:
+        return str(Path(configured).expanduser().resolve()), "REPORT_ARCHIVE_DIR"
+    return str(Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "reports"), "default"
 
 
 @router.get("/settings/interruption-mode")
@@ -118,6 +146,54 @@ async def set_capture_mode(body: CaptureModeRequest):
             db.add(profile)
 
     return {"mode": body.mode}
+
+
+@router.get("/settings/artifact-storage")
+async def get_artifact_storage_settings():
+    """Return operator-visible evidence/report archive configuration."""
+    screen_archive_dir, screen_archive_source = _screen_archive_dir()
+    report_archive_dir, report_archive_source = _report_archive_dir()
+    return {
+        "screen": {
+            "preservation_enabled": _env_enabled("SERAPH_PRESERVE_SCREEN_CAPTURES", False),
+            "archive_dir": screen_archive_dir,
+            "archive_dir_source": screen_archive_source,
+            "stored_artifacts": ["image", "provider_output", "analysis_json"],
+            "inspection_endpoint": "/api/observer/screen-artifacts",
+            "inspection_visibility": "localhost_only",
+            "control_env": {
+                "enabled": "SERAPH_PRESERVE_SCREEN_CAPTURES",
+                "archive_dir": "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+            },
+        },
+        "reports": {
+            "enabled": settings.end_of_day_report_enabled,
+            "hour": settings.end_of_day_report_hour,
+            "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "deterministic-local",
+            "archive_dir": report_archive_dir,
+            "archive_dir_source": report_archive_source,
+            "stored_artifacts": ["report_text", "report_json"],
+            "control_env": {
+                "archive_dir": "REPORT_ARCHIVE_DIR",
+                "enabled": "END_OF_DAY_REPORT_ENABLED",
+                "llm": "END_OF_DAY_REPORT_LLM_ENABLED",
+            },
+        },
+        "email": {
+            "enabled": settings.email_reports_enabled,
+            "preview_required": settings.email_reports_preview_required,
+            "smtp_configured": bool(settings.smtp_host.strip()),
+            "recipient_configured": bool(settings.email_reports_to.strip()),
+            "allowlist_configured": bool(settings.email_reports_to_allowlist.strip()),
+            "control_env": {
+                "enabled": "EMAIL_REPORTS_ENABLED",
+                "preview_required": "EMAIL_REPORTS_PREVIEW_REQUIRED",
+                "smtp_host": "SMTP_HOST",
+                "recipient": "EMAIL_REPORTS_TO",
+                "allowlist": "EMAIL_REPORTS_TO_ALLOWLIST",
+            },
+        },
+    }
 
 
 @router.get("/settings/tool-policy-mode")

@@ -9,6 +9,7 @@ import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
 import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
 import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
+import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
 
 interface SkillInfo {
   name: string;
@@ -636,6 +637,8 @@ export function SettingsPanel() {
           <DaemonStatus />
 
           <CaptureModeToggle />
+
+          <ArtifactStoragePanel />
 
           <ToolPolicyModeToggle />
 

@@ -4,6 +4,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import patch
 
+from config.settings import settings
 from src.db.models import UserProfile
 from src.observer.context import CurrentContext
 
@@ -95,3 +96,34 @@ async def test_get_reflects_put(client, async_db):
 
     resp = await client.get("/api/settings/interruption-mode")
     assert resp.json()["mode"] == "focus"
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_settings_exposes_safe_operator_posture(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_PRESERVE_SCREEN_CAPTURES", "true")
+    with (
+        patch.object(settings, "screen_capture_archive_dir", str(tmp_path / "screen")),
+        patch.object(settings, "report_archive_dir", str(tmp_path / "reports")),
+        patch.object(settings, "end_of_day_report_enabled", True),
+        patch.object(settings, "end_of_day_report_hour", 21),
+        patch.object(settings, "end_of_day_report_llm_enabled", False),
+        patch.object(settings, "email_reports_enabled", True),
+        patch.object(settings, "email_reports_preview_required", True),
+        patch.object(settings, "smtp_host", "smtp.example.test"),
+        patch.object(settings, "smtp_password", "secret-password"),
+        patch.object(settings, "email_reports_to", "user@example.test"),
+        patch.object(settings, "email_reports_to_allowlist", "hash-value"),
+    ):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screen"]["preservation_enabled"] is True
+    assert data["screen"]["archive_dir"].endswith("/screen")
+    assert data["screen"]["stored_artifacts"] == ["image", "provider_output", "analysis_json"]
+    assert data["screen"]["inspection_visibility"] == "localhost_only"
+    assert data["reports"]["archive_dir"].endswith("/reports")
+    assert data["reports"]["analysis_provider"] == "deterministic-local"
+    assert data["email"]["enabled"] is True
+    assert data["email"]["smtp_configured"] is True
+    assert "secret-password" not in str(data)

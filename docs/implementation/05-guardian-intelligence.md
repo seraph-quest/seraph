@@ -17,6 +17,7 @@
 - [x] strategist agent with restricted guardian tool set
 - [x] daily briefing, evening review, activity digest, and weekly activity review foundations
 - [x] end-of-day goal report generation now compares local screen-derived activity summaries with active/completed goals, stores the redacted report as an observer memory episode, defaults to deterministic local drafting unless `END_OF_DAY_REPORT_LLM_ENABLED=true`, and can deliver by SMTP only when email is explicitly configured, preview is deliberately disabled, and the recipient is allowlisted
+- [x] preserved local Codex screen artifacts give the end-of-day loop an operator-inspectable evidence trail: allowed images, redacted Codex output, and normalized analysis JSON stay local under the configured archive root
 - [x] observer-driven user-state and attention-budget modeling
 - [x] observer salience, confidence, and interruption-cost scoring that feeds guardian state and proactive policy
 - [x] explicit guardian-state synthesis that unifies observer context, memory, current session, recent sessions, confidence, and observer salience signals for downstream agent paths

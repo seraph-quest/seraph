@@ -1,14 +1,21 @@
 """Observer API — context state and daemon integration endpoints."""
 
+import json
 import logging
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
+from sqlmodel import col, select
 
+from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.agent.session import session_manager
+from src.db.engine import get_session
+from src.db.models import ScreenObservation
 from src.observer.manager import context_manager
 from src.observer.native_notification_queue import native_notification_queue
 
@@ -30,6 +37,7 @@ class ScreenObservationData(BaseModel):
     project: str | None = None
     summary: str | None = None
     details: list[str] | None = None
+    capture_artifacts: dict[str, Any] | None = None
     blocked: bool = False
 
 
@@ -348,13 +356,20 @@ async def post_screen_context(body: ScreenContextRequest):
                 else None
             )
 
+            details = list(obs_data.details or [])
+            if obs_data.capture_artifacts:
+                details.append(
+                    "capture_artifacts:"
+                    + json.dumps(obs_data.capture_artifacts, sort_keys=True, separators=(",", ":"))
+                )
+
             await screen_observation_repo.create(
                 app_name=obs_data.app or "",
                 window_title=obs_data.window_title or "",
                 activity_type=obs_data.activity or "other",
                 project=obs_data.project,
                 summary=obs_data.summary,
-                details=obs_data.details,
+                details=details or None,
                 blocked=obs_data.blocked,
                 timestamp=timestamp,
             )
@@ -384,6 +399,139 @@ async def post_screen_context(body: ScreenContextRequest):
             logger.exception("Failed to persist screen observation")
 
     return {"status": "ok"}
+
+
+def _screen_artifact_root() -> Path:
+    return Path(settings.screen_capture_archive_dir).expanduser().resolve()
+
+
+def _require_local_artifact_request(request: Request) -> None:
+    client_host = request.client.host if request.client is not None else ""
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(status_code=403, detail="Screen artifacts are only available from localhost")
+
+
+def _screen_artifact_path(raw_path: str | None) -> Path:
+    if not raw_path:
+        raise HTTPException(status_code=404, detail="Screen artifact is missing")
+    root = _screen_artifact_root()
+    path = Path(raw_path).expanduser().resolve()
+    if not path.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="Screen artifact is outside the configured archive")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Screen artifact file not found")
+    return path
+
+
+def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] | None:
+    if not observation.details_json:
+        return None
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(details, list):
+        return None
+    for item in details:
+        if isinstance(item, str) and item.startswith("capture_artifacts:"):
+            try:
+                payload = json.loads(item.removeprefix("capture_artifacts:"))
+            except json.JSONDecodeError:
+                return None
+            return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] | None:
+    artifacts = _screen_capture_artifacts(observation)
+    if artifacts is None:
+        return None
+    return {
+        "observation_id": observation.id,
+        "timestamp": observation.timestamp.isoformat(),
+        "app": observation.app_name,
+        "window_title": observation.window_title,
+        "activity": observation.activity_type,
+        "project": observation.project,
+        "summary": observation.summary,
+        "artifacts": {
+            "id": artifacts.get("id"),
+            "created_at": artifacts.get("created_at"),
+            "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
+            "codex_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
+            "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
+        },
+    }
+
+
+async def _screen_artifact_observation(observation_id: str) -> ScreenObservation:
+    async with get_session() as db:
+        result = await db.execute(
+            select(ScreenObservation).where(col(ScreenObservation.id) == observation_id)
+        )
+        observation = result.scalar_one_or_none()
+    if observation is None or _screen_capture_artifacts(observation) is None:
+        raise HTTPException(status_code=404, detail="Screen artifact not found")
+    return observation
+
+
+@router.get("/observer/screen-artifacts")
+async def list_screen_artifacts(request: Request, limit: int = 20) -> dict[str, Any]:
+    """List recent preserved screen captures with links to image and Codex output."""
+    _require_local_artifact_request(request)
+    capped_limit = min(max(limit, 1), 100)
+    async with get_session() as db:
+        result = await db.execute(
+            select(ScreenObservation)
+            .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
+            .order_by(col(ScreenObservation.timestamp).desc())
+            .limit(capped_limit)
+        )
+        observations = list(result.scalars().all())
+
+    items = [
+        payload
+        for observation in observations
+        if (payload := _screen_artifact_response(observation)) is not None
+    ]
+    return {
+        "archive_dir": str(_screen_artifact_root()),
+        "items": items,
+    }
+
+
+@router.get("/observer/screen-artifacts/{observation_id}/image")
+async def get_screen_artifact_image(observation_id: str, request: Request) -> FileResponse:
+    """Return a preserved screenshot image for local operator inspection."""
+    _require_local_artifact_request(request)
+    observation = await _screen_artifact_observation(observation_id)
+    artifacts = _screen_capture_artifacts(observation) or {}
+    path = _screen_artifact_path(str(artifacts.get("image_path") or ""))
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/observer/screen-artifacts/{observation_id}/codex-output")
+async def get_screen_artifact_codex_output(observation_id: str, request: Request) -> PlainTextResponse:
+    """Return the redacted local Codex text output for a preserved screenshot."""
+    _require_local_artifact_request(request)
+    observation = await _screen_artifact_observation(observation_id)
+    artifacts = _screen_capture_artifacts(observation) or {}
+    path = _screen_artifact_path(str(artifacts.get("codex_output_path") or ""))
+    return PlainTextResponse(path.read_text(encoding="utf-8"))
+
+
+@router.get("/observer/screen-artifacts/{observation_id}/analysis")
+async def get_screen_artifact_analysis(observation_id: str, request: Request) -> dict[str, Any]:
+    """Return the normalized JSON analysis saved beside the preserved screenshot."""
+    _require_local_artifact_request(request)
+    observation = await _screen_artifact_observation(observation_id)
+    artifacts = _screen_capture_artifacts(observation) or {}
+    path = _screen_artifact_path(str(artifacts.get("analysis_path") or ""))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Saved analysis artifact is invalid") from exc
+    return payload if isinstance(payload, dict) else {"value": payload}
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)

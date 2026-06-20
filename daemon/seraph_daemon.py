@@ -455,6 +455,20 @@ async def main() -> None:
         help="Model for OCR provider (OpenRouter default: google/gemini-2.5-flash-lite; codex-local default: gpt-5.5)",
     )
     parser.add_argument(
+        "--preserve-captures",
+        action="store_true",
+        default=os.environ.get("SERAPH_PRESERVE_SCREEN_CAPTURES", "").strip().lower()
+        in {"1", "true", "yes", "on"},
+        help="Preserve allowed screenshots, local Codex output, and normalized analysis artifacts",
+    )
+    parser.add_argument(
+        "--capture-archive-dir",
+        default=os.environ.get("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR")
+        or os.environ.get("SCREEN_CAPTURE_ARCHIVE_DIR")
+        or "/tmp/seraph-screen-captures",
+        help="Directory for preserved capture artifacts (default: /tmp/seraph-screen-captures)",
+    )
+    parser.add_argument(
         "--openrouter-api-key",
         default=os.environ.get("OPENROUTER_API_KEY"),
         help="OpenRouter API key (or set OPENROUTER_API_KEY env var)",
@@ -511,6 +525,8 @@ async def main() -> None:
             name=args.ocr_provider,
             api_key=args.openrouter_api_key,
             model=ocr_model,
+            preserve_captures=args.preserve_captures,
+            archive_dir=args.capture_archive_dir,
         )
 
         if not ocr_provider.is_available():

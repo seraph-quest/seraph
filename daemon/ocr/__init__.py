@@ -7,6 +7,8 @@ def create_provider(
     name: str,
     api_key: str | None = None,
     model: str | None = None,
+    preserve_captures: bool | None = None,
+    archive_dir: str | None = None,
 ) -> OCRProvider:
     """Create an OCR provider by name.
 
@@ -33,6 +35,10 @@ def create_provider(
     if name == "codex-local":
         from ocr.codex_local import CodexLocalProvider
 
-        return CodexLocalProvider(model=model)
+        return CodexLocalProvider(
+            model=model,
+            preserve_captures=preserve_captures,
+            archive_dir=archive_dir,
+        )
 
     raise ValueError(f"Unknown OCR provider: {name!r} (choose 'apple-vision', 'openrouter', or 'codex-local')")

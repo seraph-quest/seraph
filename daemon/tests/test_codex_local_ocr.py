@@ -1,5 +1,6 @@
 """Tests for the local Codex screen OCR provider."""
 
+import json
 import os
 import platform
 import sys
@@ -55,6 +56,39 @@ async def test_codex_local_provider_parses_structured_json_and_cleans_temp_files
     }
     mock_run.assert_awaited_once()
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_codex_local_provider_preserves_capture_artifacts_when_enabled(tmp_path):
+    temp_dir = tmp_path / "tmp"
+    archive_dir = tmp_path / "archive"
+    temp_dir.mkdir()
+    provider = CodexLocalProvider(
+        model="gpt-5.5",
+        temp_dir=str(temp_dir),
+        preserve_captures=True,
+        archive_dir=str(archive_dir),
+    )
+    raw_output = (
+        '{"activity":"coding","project":"Seraph","summary":"Reviewing preserved captures",'
+        '"details":["screen artifact API"],'
+        '"sensitive_detected":false,"confidence":0.91}'
+    )
+
+    with patch.object(provider, "_run_codex", new=AsyncMock(return_value=raw_output)):
+        result = await provider.analyze_screen(b"valid png bytes", "VS Code")
+
+    assert result.success is True
+    artifacts = result.data["capture_artifacts"]
+    image_path = Path(artifacts["image_path"])
+    codex_output_path = Path(artifacts["codex_output_path"])
+    analysis_path = Path(artifacts["analysis_path"])
+    assert image_path.read_bytes() == b"valid png bytes"
+    assert codex_output_path.read_text(encoding="utf-8") == raw_output
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    assert analysis["summary"] == "Reviewing preserved captures"
+    assert analysis["confidence"] == 0.91
+    assert list(temp_dir.iterdir()) == []
 
 
 @pytest.mark.asyncio

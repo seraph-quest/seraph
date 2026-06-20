@@ -31,6 +31,7 @@ _PATCH_TARGETS = [
     "src.audit.repository.get_session",
     "src.profile.service.get_db",
     "src.api.settings.get_db",  # aliased: `import get_session as get_db`
+    "src.api.observer.get_session",
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.scheduler.scheduled_jobs.get_session",
     "src.observer.insight_queue.get_session",

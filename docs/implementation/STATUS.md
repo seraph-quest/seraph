@@ -209,7 +209,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
-- [x] screen analysis provider choice now includes local Apple Vision, local Codex CLI parsing, and explicit OpenRouter cloud OCR, with local Codex temp-image cleanup documented
+- [x] screen analysis provider choice now includes local Apple Vision, local Codex CLI parsing, and explicit OpenRouter cloud OCR, with local Codex temp-image cleanup documented and optional preserved local image/output artifacts available through observer inspection endpoints
 - [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control

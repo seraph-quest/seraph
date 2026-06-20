@@ -55,6 +55,18 @@ function dirStateTone(exists: boolean, writable: boolean, creationError: string 
   return "good";
 }
 
+function isArtifactStorageSettings(value: unknown): value is ArtifactStorageSettings {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<ArtifactStorageSettings>;
+  return (
+    typeof candidate.screen?.archive_dir === "string" &&
+    typeof candidate.screen?.preservation_enabled === "boolean" &&
+    typeof candidate.reports?.archive_dir === "string" &&
+    typeof candidate.reports?.enabled === "boolean" &&
+    typeof candidate.email?.enabled === "boolean"
+  );
+}
+
 function ArtifactRow({
   label,
   value,
@@ -90,10 +102,14 @@ export function ArtifactStoragePanel() {
           if (!cancelled) setFailed(true);
           return;
         }
-        const data = (await response.json()) as ArtifactStorageSettings;
+        const data = await response.json();
         if (!cancelled) {
-          setSettings(data);
-          setFailed(false);
+          if (isArtifactStorageSettings(data)) {
+            setSettings(data);
+            setFailed(false);
+          } else {
+            setFailed(true);
+          }
         }
       } catch {
         if (!cancelled) setFailed(true);

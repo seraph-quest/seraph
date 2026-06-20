@@ -133,3 +133,18 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     assert data["email"]["enabled"] is True
     assert data["email"]["smtp_configured"] is True
     assert "secret-password" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_path, monkeypatch):
+    preferred = tmp_path / "seraph-screen"
+    fallback = tmp_path / "fallback-screen"
+    monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(preferred))
+    with patch.object(settings, "screen_capture_archive_dir", str(fallback)):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screen"]["archive_dir"] == str(preferred)
+    assert data["screen"]["archive_dir_source"] == "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR"
+    assert data["screen"]["exists"] is True

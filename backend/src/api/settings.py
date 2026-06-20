@@ -55,9 +55,12 @@ def _env_enabled(name: str, default: bool = False) -> bool:
 
 
 def _screen_archive_dir() -> tuple[Path, str]:
-    configured = settings.screen_capture_archive_dir.strip()
-    if configured:
-        return Path(configured).expanduser().resolve(), "SCREEN_CAPTURE_ARCHIVE_DIR"
+    seraph_configured = os.environ.get("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", "").strip()
+    if seraph_configured:
+        return Path(seraph_configured).expanduser().resolve(), "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR"
+    settings_configured = settings.screen_capture_archive_dir.strip()
+    if settings_configured:
+        return Path(settings_configured).expanduser().resolve(), "SCREEN_CAPTURE_ARCHIVE_DIR"
     return (
         Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve(),
         "default",

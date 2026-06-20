@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -402,9 +403,12 @@ async def post_screen_context(body: ScreenContextRequest):
 
 
 def _screen_artifact_root() -> Path:
-    configured = settings.screen_capture_archive_dir.strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
+    seraph_configured = os.environ.get("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", "").strip()
+    if seraph_configured:
+        return Path(seraph_configured).expanduser().resolve()
+    settings_configured = settings.screen_capture_archive_dir.strip()
+    if settings_configured:
+        return Path(settings_configured).expanduser().resolve()
     return Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()
 
 

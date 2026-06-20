@@ -115,3 +115,15 @@ async def test_screen_artifact_endpoints_are_localhost_only(app, async_db, tmp_p
 
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Screen artifacts are only available from localhost"
+
+
+@pytest.mark.asyncio
+async def test_screen_artifact_root_prefers_seraph_archive_env(tmp_path, monkeypatch):
+    from src.api.observer import _screen_artifact_root
+
+    preferred = tmp_path / "seraph-screen"
+    fallback = tmp_path / "fallback-screen"
+    monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(preferred))
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(fallback))
+
+    assert _screen_artifact_root() == preferred.resolve()

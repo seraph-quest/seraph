@@ -54,21 +54,34 @@ def _env_enabled(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in _TRUE_VALUES
 
 
-def _screen_archive_dir() -> tuple[str, str]:
+def _screen_archive_dir() -> tuple[Path, str]:
     configured = settings.screen_capture_archive_dir.strip()
     if configured:
-        return str(Path(configured).expanduser().resolve()), "SCREEN_CAPTURE_ARCHIVE_DIR"
+        return Path(configured).expanduser().resolve(), "SCREEN_CAPTURE_ARCHIVE_DIR"
     return (
-        str(Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve()),
+        Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve(),
         "default",
     )
 
 
-def _report_archive_dir() -> tuple[str, str]:
+def _report_archive_dir() -> tuple[Path, str]:
     configured = settings.report_archive_dir.strip()
     if configured:
-        return str(Path(configured).expanduser().resolve()), "REPORT_ARCHIVE_DIR"
-    return str(Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "reports"), "default"
+        return Path(configured).expanduser().resolve(), "REPORT_ARCHIVE_DIR"
+    return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "reports", "default"
+
+
+def _archive_dir_status(path: Path) -> dict[str, object]:
+    creation_error = None
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        creation_error = str(exc)
+    return {
+        "exists": path.exists(),
+        "writable": path.is_dir() and os.access(path, os.W_OK),
+        "creation_error": creation_error,
+    }
 
 
 @router.get("/settings/interruption-mode")
@@ -153,11 +166,14 @@ async def get_artifact_storage_settings():
     """Return operator-visible evidence/report archive configuration."""
     screen_archive_dir, screen_archive_source = _screen_archive_dir()
     report_archive_dir, report_archive_source = _report_archive_dir()
+    screen_dir_status = _archive_dir_status(screen_archive_dir)
+    report_dir_status = _archive_dir_status(report_archive_dir)
     return {
         "screen": {
             "preservation_enabled": _env_enabled("SERAPH_PRESERVE_SCREEN_CAPTURES", False),
-            "archive_dir": screen_archive_dir,
+            "archive_dir": str(screen_archive_dir),
             "archive_dir_source": screen_archive_source,
+            **screen_dir_status,
             "stored_artifacts": ["image", "provider_output", "analysis_json"],
             "inspection_endpoint": "/api/observer/screen-artifacts",
             "inspection_visibility": "localhost_only",
@@ -170,8 +186,9 @@ async def get_artifact_storage_settings():
             "enabled": settings.end_of_day_report_enabled,
             "hour": settings.end_of_day_report_hour,
             "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "deterministic-local",
-            "archive_dir": report_archive_dir,
+            "archive_dir": str(report_archive_dir),
             "archive_dir_source": report_archive_source,
+            **report_dir_status,
             "stored_artifacts": ["report_text", "report_json"],
             "control_env": {
                 "archive_dir": "REPORT_ARCHIVE_DIR",

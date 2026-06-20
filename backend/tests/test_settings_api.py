@@ -120,9 +120,15 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     data = resp.json()
     assert data["screen"]["preservation_enabled"] is True
     assert data["screen"]["archive_dir"].endswith("/screen")
+    assert data["screen"]["exists"] is True
+    assert data["screen"]["writable"] is True
+    assert data["screen"]["creation_error"] is None
     assert data["screen"]["stored_artifacts"] == ["image", "provider_output", "analysis_json"]
     assert data["screen"]["inspection_visibility"] == "localhost_only"
     assert data["reports"]["archive_dir"].endswith("/reports")
+    assert data["reports"]["exists"] is True
+    assert data["reports"]["writable"] is True
+    assert data["reports"]["creation_error"] is None
     assert data["reports"]["analysis_provider"] == "deterministic-local"
     assert data["email"]["enabled"] is True
     assert data["email"]["smtp_configured"] is True

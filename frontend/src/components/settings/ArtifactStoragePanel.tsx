@@ -6,6 +6,9 @@ interface ArtifactStorageSettings {
     preservation_enabled: boolean;
     archive_dir: string;
     archive_dir_source: string;
+    exists: boolean;
+    writable: boolean;
+    creation_error: string | null;
     stored_artifacts: string[];
     inspection_endpoint: string;
     inspection_visibility: string;
@@ -17,6 +20,9 @@ interface ArtifactStorageSettings {
     analysis_provider: string;
     archive_dir: string;
     archive_dir_source: string;
+    exists: boolean;
+    writable: boolean;
+    creation_error: string | null;
     stored_artifacts: string[];
     control_env: Record<string, string>;
   };
@@ -36,6 +42,17 @@ function boolLabel(value: boolean): string {
 
 function sourceLabel(value: string): string {
   return value === "default" ? "default" : value;
+}
+
+function dirStateLabel(exists: boolean, writable: boolean, creationError: string | null): string {
+  if (creationError) return `creation failed: ${creationError}`;
+  if (!exists) return "missing";
+  return writable ? "ready" : "read-only";
+}
+
+function dirStateTone(exists: boolean, writable: boolean, creationError: string | null): "normal" | "good" | "warn" {
+  if (creationError || !exists || !writable) return "warn";
+  return "good";
 }
 
 function ArtifactRow({
@@ -118,6 +135,11 @@ export function ArtifactStoragePanel() {
             </div>
 
             <ArtifactRow label="Screen dir" value={settings.screen.archive_dir} />
+            <ArtifactRow
+              label="Dir state"
+              value={dirStateLabel(settings.screen.exists, settings.screen.writable, settings.screen.creation_error)}
+              tone={dirStateTone(settings.screen.exists, settings.screen.writable, settings.screen.creation_error)}
+            />
             <ArtifactRow label="Source" value={sourceLabel(settings.screen.archive_dir_source)} />
             <ArtifactRow
               label="Inspect"
@@ -134,6 +156,11 @@ export function ArtifactStoragePanel() {
                 </div>
               </div>
               <ArtifactRow label="Report dir" value={settings.reports.archive_dir} />
+              <ArtifactRow
+                label="Dir state"
+                value={dirStateLabel(settings.reports.exists, settings.reports.writable, settings.reports.creation_error)}
+                tone={dirStateTone(settings.reports.exists, settings.reports.writable, settings.reports.creation_error)}
+              />
               <ArtifactRow label="Provider" value={settings.reports.analysis_provider} />
               <ArtifactRow label="Hour" value={`${settings.reports.hour}:00`} />
             </div>

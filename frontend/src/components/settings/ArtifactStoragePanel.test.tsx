@@ -29,6 +29,9 @@ describe("ArtifactStoragePanel", () => {
           preservation_enabled: true,
           archive_dir: "/Users/test/Library/Application Support/Seraph/artifacts/screen-captures",
           archive_dir_source: "default",
+          exists: true,
+          writable: true,
+          creation_error: null,
           stored_artifacts: ["image", "provider_output", "analysis_json"],
           inspection_endpoint: "/api/observer/screen-artifacts",
           inspection_visibility: "localhost_only",
@@ -43,6 +46,9 @@ describe("ArtifactStoragePanel", () => {
           analysis_provider: "deterministic-local",
           archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
           archive_dir_source: "default",
+          exists: true,
+          writable: true,
+          creation_error: null,
           stored_artifacts: ["report_text", "report_json"],
           control_env: {
             archive_dir: "REPORT_ARCHIVE_DIR",
@@ -74,6 +80,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("images, provider output, analysis JSON")).toBeInTheDocument();
     expect(screen.getByText("/api/observer/screen-artifacts (localhost only)")).toBeInTheDocument();
     expect(screen.getByText("SERAPH_PRESERVE_SCREEN_CAPTURES")).toBeInTheDocument();
+    expect(screen.getAllByText("ready")).toHaveLength(2);
     expect(screen.getByText("End-of-day reports")).toBeInTheDocument();
     expect(screen.getByText("deterministic-local")).toBeInTheDocument();
     expect(screen.getByText("Email delivery")).toBeInTheDocument();

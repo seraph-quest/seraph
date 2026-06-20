@@ -128,6 +128,7 @@ class TestSchedulerEngine:
                     "daily_briefing",
                     "evening_review",
                     "activity_digest",
+                    "end_of_day_goal_report",
                     "weekly_activity_review",
                     "screen_cleanup",
                 }

@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
     screen_observation_retention_days: int = 90        # keep 90 days of observations
     screen_capture_archive_dir: str = ""
+    screen_analysis_min_seconds_between_captures: int = 0
+    screen_analysis_max_daily_captures: int = 0
+    screen_capture_archive_retention_days: int = 365
+    screen_capture_archive_max_mb: int = 0
     report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21

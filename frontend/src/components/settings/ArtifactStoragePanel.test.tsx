@@ -30,8 +30,15 @@ function settingsFromScreenAnalysisFixture(screen: {
       capture_mode: screen.capture_mode,
       cadence_seconds: screen.cadence_seconds,
       daemon_connected: screen.daemon_connected,
+      daemon_alive: screen.daemon_connected,
       artifact_count: screen.artifact_count,
       last_artifact_at: screen.last_artifact_at,
+      budget: {
+        min_seconds_between_captures: 0,
+        max_daily_captures: 0,
+        archive_retention_days: 365,
+        archive_max_mb: 0,
+      },
       preservation_enabled: screen.preserve_captures,
       archive_dir: screen.archive_dir,
       archive_dir_source: "screen-analysis-settings",
@@ -65,6 +72,8 @@ function settingsFromScreenAnalysisFixture(screen: {
       writable: true,
       creation_error: null,
       stored_artifacts: ["report_text", "report_json"],
+      receipt_count: 0,
+      last_receipt_at: null,
       control_env: {
         archive_dir: "REPORT_ARCHIVE_DIR",
         enabled: "END_OF_DAY_REPORT_ENABLED",
@@ -77,6 +86,7 @@ function settingsFromScreenAnalysisFixture(screen: {
       smtp_configured: false,
       recipient_configured: false,
       allowlist_configured: false,
+      sender_configured: false,
       control_env: {
         enabled: "EMAIL_REPORTS_ENABLED",
         preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
@@ -185,7 +195,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("deterministic-local")).toBeInTheDocument();
     expect(screen.getByText("Email delivery")).toBeInTheDocument();
     expect(screen.getByText("SMTP")).toBeInTheDocument();
-    expect(screen.getAllByText("Missing")).toHaveLength(2);
+    expect(screen.getAllByText("Missing")).toHaveLength(3);
   });
 
   it("updates capture mode from settings", async () => {
@@ -280,6 +290,68 @@ describe("ArtifactStoragePanel", () => {
     await waitFor(() => expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument());
   });
 
+  it("runs manual report preview and shows safe receipt metadata", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "codex-local",
+      model: "gpt-5.5",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 1,
+      last_artifact_at: null,
+    });
+    artifactStorage.email.enabled = true;
+    artifactStorage.email.smtp_configured = true;
+    artifactStorage.email.recipient_configured = true;
+    artifactStorage.email.allowlist_configured = true;
+    artifactStorage.email.sender_configured = true;
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(
+        mockResponse({
+          status: "ok",
+          action: "manual-preview",
+          report: {
+            date: "2026-06-20",
+            analysis_provider: "deterministic-local",
+          },
+          email: {
+            status: "preview_only",
+            reason: "manual_preview",
+            recipient_hash: null,
+          },
+          receipt: {
+            receipt_sha256: "abcdef1234567890",
+            status: "succeeded",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse(artifactStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    const sendButton = await screen.findByRole("button", { name: "Send" });
+    expect(sendButton).toBeDisabled();
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/end-of-day-report/manual"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ send_email: false, preview_acknowledged: false }),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/manual-preview/)).toBeInTheDocument();
+    expect(screen.getByText(/receipt abcdef123456/)).toBeInTheDocument();
+    expect(screen.queryByText(/user@example/)).not.toBeInTheDocument();
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+  });
+
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {
     const artifactStorage = {
       screen: {
@@ -366,7 +438,7 @@ describe("ArtifactStoragePanel", () => {
     resolveSave(mockResponse({ mode: "detailed" }));
     await Promise.resolve();
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/settings/capture-mode"))).toHaveLength(1);
   });
 
   it("explains on_switch mode even when the daemon is capture-ready", async () => {

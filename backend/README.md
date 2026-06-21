@@ -93,12 +93,16 @@ Receive (streamed):
 | `CODEX_LOCAL_APPROVAL_POLICY` | `never` | Approval policy option passed to local `codex exec` |
 | `CODEX_LOCAL_TIMEOUT_SECONDS` | `600` | Timeout for local Codex operator invocations |
 | `SCREEN_CAPTURE_ARCHIVE_DIR` | `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local archive root for preserved screen capture images, redacted provider output, and normalized JSON served by localhost-only observer artifact endpoints |
+| `SCREEN_ANALYSIS_MIN_SECONDS_BETWEEN_CAPTURES` | `0` | Minimum seconds between screen-analysis captures; `0` disables this throttle |
+| `SCREEN_ANALYSIS_MAX_DAILY_CAPTURES` | `0` | Daily screen-analysis capture cap; `0` means unlimited |
+| `SCREEN_CAPTURE_ARCHIVE_RETENTION_DAYS` | `365` | Operator-visible retention posture for preserved captures |
+| `SCREEN_CAPTURE_ARCHIVE_MAX_MB` | `0` | Operator-visible archive size budget; `0` means unlimited |
 | `REPORT_ARCHIVE_DIR` | `$WORKSPACE_DIR/artifacts/reports` | Durable local archive root for stored report text/JSON artifacts used by future analysis |
 | `END_OF_DAY_REPORT_ENABLED` | `true` | Enables the stored end-of-day goal report scheduler job |
 | `END_OF_DAY_REPORT_HOUR` | `21` | Local hour for the end-of-day goal report |
 | `END_OF_DAY_REPORT_LLM_ENABLED` | `false` | Enables LLM drafting for the report; default deterministic mode avoids sending screen-derived summaries to a provider |
 | `EMAIL_REPORTS_ENABLED` | `false` | Enables SMTP delivery for reports after local storage |
-| `EMAIL_REPORTS_PREVIEW_REQUIRED` | `true` | Blocks outbound report email until operator preview is deliberately disabled |
+| `EMAIL_REPORTS_PREVIEW_REQUIRED` | `true` | Blocks scheduled outbound report email unless operator preview is acknowledged for manual sends or deliberately disabled for scheduled delivery |
 | `EMAIL_REPORTS_TO` | - | Recipient for report email |
 | `EMAIL_REPORTS_TO_ALLOWLIST` | - | Comma-separated recipient allowlist; recipient must be present before sending |
 | `EMAIL_REPORTS_FROM` | - | Sender address for report email |

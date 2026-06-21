@@ -9,8 +9,15 @@ interface ArtifactStorageSettings {
     capture_mode: string;
     cadence_seconds: number | null;
     daemon_connected: boolean;
+    daemon_alive: boolean;
     artifact_count: number;
     last_artifact_at: string | null;
+    budget: {
+      min_seconds_between_captures: number;
+      max_daily_captures: number;
+      archive_retention_days: number;
+      archive_max_mb: number;
+    };
     preservation_enabled: boolean;
     archive_dir: string;
     archive_dir_source: string;
@@ -47,6 +54,8 @@ interface ArtifactStorageSettings {
     writable: boolean;
     creation_error: string | null;
     stored_artifacts: string[];
+    receipt_count: number;
+    last_receipt_at: string | null;
     control_env: Record<string, string>;
   };
   email: {
@@ -55,6 +64,7 @@ interface ArtifactStorageSettings {
     smtp_configured: boolean;
     recipient_configured: boolean;
     allowlist_configured: boolean;
+    sender_configured: boolean;
     control_env: Record<string, string>;
   };
 }
@@ -68,8 +78,35 @@ interface ScreenAnalysisSettings {
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
+  daemon_alive: boolean;
   artifact_count: number;
   last_artifact_at: string | null;
+  min_seconds_between_captures: number;
+  max_daily_captures: number;
+  archive_retention_days: number;
+  archive_max_mb: number;
+}
+
+interface ReportActionResult {
+  action?: string;
+  status?: string;
+  reason?: string | null;
+  recipient_hash?: string | null;
+  email?: {
+    status?: string;
+    reason?: string | null;
+    recipient_hash?: string | null;
+  };
+  report?: {
+    date?: string;
+    analysis_provider?: string;
+    artifacts?: Record<string, string>;
+  };
+  receipt?: {
+    receipt_sha256?: string;
+    status?: string;
+    reason?: string | null;
+  };
 }
 
 function boolLabel(value: boolean): string {
@@ -155,8 +192,15 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       capture_mode: screen.capture_mode,
       cadence_seconds: screen.cadence_seconds,
       daemon_connected: screen.daemon_connected,
+      daemon_alive: screen.daemon_alive ?? screen.daemon_connected,
       artifact_count: screen.artifact_count ?? 0,
       last_artifact_at: screen.last_artifact_at ?? null,
+      budget: {
+        min_seconds_between_captures: screen.min_seconds_between_captures ?? 0,
+        max_daily_captures: screen.max_daily_captures ?? 0,
+        archive_retention_days: screen.archive_retention_days ?? 365,
+        archive_max_mb: screen.archive_max_mb ?? 0,
+      },
       preservation_enabled: screen.preserve_captures,
       archive_dir: screen.archive_dir,
       archive_dir_source: "screen-analysis-settings",
@@ -190,6 +234,8 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       writable: false,
       creation_error: "Archive metadata unavailable.",
       stored_artifacts: ["report_text", "report_json"],
+      receipt_count: 0,
+      last_receipt_at: null,
       control_env: {
         archive_dir: "REPORT_ARCHIVE_DIR",
         enabled: "END_OF_DAY_REPORT_ENABLED",
@@ -202,6 +248,7 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       smtp_configured: false,
       recipient_configured: false,
       allowlist_configured: false,
+      sender_configured: false,
       control_env: {
         enabled: "EMAIL_REPORTS_ENABLED",
         preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
@@ -242,6 +289,9 @@ export function ArtifactStoragePanel() {
   const [failed, setFailed] = useState(false);
   const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [reportAction, setReportAction] = useState<"idle" | "previewing" | "sending" | "testing">("idle");
+  const [reportActionResult, setReportActionResult] = useState<ReportActionResult | null>(null);
+  const [reportActionError, setReportActionError] = useState<string | null>(null);
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -352,6 +402,51 @@ export function ArtifactStoragePanel() {
     }
   };
 
+  const screenBudget = settings?.screen.budget ?? {
+    min_seconds_between_captures: 0,
+    max_daily_captures: 0,
+    archive_retention_days: 365,
+    archive_max_mb: 0,
+  };
+  const previewReadyForSend =
+    reportActionResult?.action === "manual-preview" &&
+    reportActionResult?.status === "ok" &&
+    reportActionResult?.receipt?.status === "succeeded";
+
+  const runReportAction = async (action: "preview" | "send" | "test") => {
+    if (reportAction !== "idle") return;
+    if (action === "send" && !previewReadyForSend) {
+      setReportActionError("Preview the report before sending.");
+      return;
+    }
+    setReportAction(action === "preview" ? "previewing" : action === "send" ? "sending" : "testing");
+    setReportActionError(null);
+    try {
+      const response = await fetch(
+        `${API_URL}${action === "test" ? "/api/settings/end-of-day-report/test-email" : "/api/settings/end-of-day-report/manual"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+              body: action === "test"
+                ? undefined
+                : JSON.stringify({
+                    send_email: action === "send",
+                    preview_acknowledged: action === "send" && previewReadyForSend,
+                  }),
+            }
+          );
+      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      const payload = (await response.json()) as ReportActionResult;
+      if (!mountedRef.current) return;
+      setReportActionResult(payload);
+      await fetchSettings(() => !mountedRef.current);
+    } catch {
+      if (mountedRef.current) setReportActionError("Report action failed.");
+    } finally {
+      if (mountedRef.current) setReportAction("idle");
+    }
+  };
+
   return (
     <div className="px-1">
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
@@ -427,8 +522,8 @@ export function ArtifactStoragePanel() {
             </div>
             <ArtifactRow
               label="Daemon"
-              value={settings.screen.daemon_connected ? "linked" : "offline - no new captures"}
-              tone={settings.screen.daemon_connected ? "good" : "warn"}
+              value={settings.screen.daemon_connected ? "linked" : settings.screen.daemon_alive ? "alive, waiting for context post" : "offline - no new captures"}
+              tone={settings.screen.daemon_connected || settings.screen.daemon_alive ? "good" : "warn"}
             />
             <ArtifactRow
               label="Capture"
@@ -467,6 +562,14 @@ export function ArtifactStoragePanel() {
             </div>
             <ArtifactRow label="Screen dir" value={settings.screen.archive_dir} />
             <ArtifactRow
+              label="Budget"
+              value={`min ${screenBudget.min_seconds_between_captures}s · day ${screenBudget.max_daily_captures || "unlimited"}`}
+            />
+            <ArtifactRow
+              label="Retention"
+              value={`${screenBudget.archive_retention_days}d · ${screenBudget.archive_max_mb || "unlimited"} MB`}
+            />
+            <ArtifactRow
               label="Dir state"
               value={dirStateLabel(settings.screen.exists, settings.screen.writable, settings.screen.creation_error)}
               tone={dirStateTone(settings.screen.exists, settings.screen.writable, settings.screen.creation_error)}
@@ -495,6 +598,51 @@ export function ArtifactStoragePanel() {
               />
               <ArtifactRow label="Provider" value={settings.reports.analysis_provider} />
               <ArtifactRow label="Hour" value={`${settings.reports.hour}:00`} />
+              <ArtifactRow
+                label="Receipts"
+                value={`${settings.reports.receipt_count ?? 0} receipts${settings.reports.last_receipt_at ? ` · latest ${settings.reports.last_receipt_at}` : ""}`}
+              />
+              <div className="flex flex-wrap gap-1 pt-1">
+                <button
+                  type="button"
+                  disabled={reportAction !== "idle"}
+                  onClick={() => void runReportAction("preview")}
+                  className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                >
+                  Preview
+                </button>
+                  <button
+                    type="button"
+                    disabled={reportAction !== "idle" || !settings.email.enabled || !previewReadyForSend}
+                    onClick={() => void runReportAction("send")}
+                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                  Send
+                </button>
+                <button
+                  type="button"
+                  disabled={reportAction !== "idle" || !settings.email.enabled}
+                  onClick={() => void runReportAction("test")}
+                  className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                >
+                  Test
+                </button>
+              </div>
+              {reportActionError && (
+                <div className="text-[9px] text-red-400">{reportActionError}</div>
+              )}
+              {reportActionResult && (
+                <div className="border border-retro-text/10 px-2 py-1 text-[9px] text-retro-text/60">
+                  {(reportActionResult.action ?? reportActionResult.status ?? "report")} ·{" "}
+                  {reportActionResult.email?.status ?? reportActionResult.status ?? "ok"}
+                  {reportActionResult.email?.recipient_hash || reportActionResult.recipient_hash
+                    ? ` · recipient ${reportActionResult.email?.recipient_hash ?? reportActionResult.recipient_hash}`
+                    : ""}
+                  {reportActionResult.receipt?.receipt_sha256
+                    ? ` · receipt ${reportActionResult.receipt.receipt_sha256.slice(0, 12)}`
+                    : ""}
+                </div>
+              )}
             </div>
 
             <div className="border-t border-retro-text/10 pt-2 mt-1">
@@ -514,6 +662,11 @@ export function ArtifactStoragePanel() {
                   label="SMTP"
                   value={settings.email.smtp_configured ? "Configured" : "Missing"}
                   tone={settings.email.smtp_configured ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Sender"
+                  value={settings.email.sender_configured ? "Configured" : "Missing"}
+                  tone={settings.email.sender_configured ? "good" : "warn"}
                 />
                 <ArtifactRow
                   label="Allowlist"

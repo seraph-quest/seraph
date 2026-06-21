@@ -3,7 +3,7 @@
 import json
 import stat
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -142,9 +142,11 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     data = resp.json()
     assert data["screen"]["analysis_enabled"] is True
     assert data["screen"]["provider"] == "codex-local"
-    assert data["screen"]["daemon_connected"] is True
+    assert data["screen"]["daemon_connected"] is False
     assert data["screen"]["artifact_count"] == 0
+    assert data["screen"]["daemon_alive"] is True
     assert data["screen"]["preservation_enabled"] is True
+    assert data["screen"]["budget"]["archive_retention_days"] >= 1
     assert data["screen"]["archive_dir"].endswith("/screen")
     assert data["screen"]["exists"] is True
     assert data["screen"]["writable"] is True
@@ -162,8 +164,10 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     assert data["reports"]["creation_error"] is None
     assert stat.S_IMODE((tmp_path / "reports").stat().st_mode) == 0o700
     assert data["reports"]["analysis_provider"] == "deterministic-local"
+    assert data["reports"]["receipt_count"] == 0
     assert data["email"]["enabled"] is True
     assert data["email"]["smtp_configured"] is True
+    assert data["email"]["sender_configured"] is False
     assert "secret-password" not in str(data)
 
 
@@ -204,12 +208,45 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert data["model"] == "gpt-5.5"
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
+        assert data["max_daily_captures"] == 0
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
         assert storage["screen"]["analysis_enabled"] is True
         assert storage["screen"]["provider"] == "codex-local"
         assert storage["screen"]["archive_dir"] == str(archive)
         assert storage["screen"]["preservation_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_persist_budget_controls(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={
+                "min_seconds_between_captures": 45,
+                "max_daily_captures": 200,
+                "archive_retention_days": 180,
+                "archive_max_mb": 1024,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["min_seconds_between_captures"] == 45
+    assert data["max_daily_captures"] == 200
+    assert data["archive_retention_days"] == 180
+    assert data["archive_max_mb"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_negative_budget(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={"max_daily_captures": -1},
+        )
+
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -237,3 +274,48 @@ def test_screen_artifact_summary_skips_files_deleted_during_stat(tmp_path, monke
     monkeypatch.setattr(type(image), "stat", flaky_stat)
 
     assert _screen_artifact_summary(tmp_path) == {"artifact_count": 0, "last_artifact_at": None}
+
+
+@pytest.mark.asyncio
+async def test_manual_report_endpoint_returns_safe_preview(client):
+    with patch(
+        "src.scheduler.jobs.end_of_day_goal_report.run_manual_end_of_day_goal_report",
+        new=AsyncMock(
+            return_value={
+                "status": "ok",
+                "action": "manual-preview",
+                "report": {"date": "2026-06-20", "body": "Preview body"},
+                "email": {"status": "preview_only", "reason": "manual_preview", "recipient_hash": None},
+                "receipt": {"receipt_sha256": "abc123", "status": "succeeded"},
+            }
+        ),
+    ) as manual:
+        resp = await client.post("/api/settings/end-of-day-report/manual", json={"send_email": False})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["action"] == "manual-preview"
+    assert data["email"]["status"] == "preview_only"
+    manual.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_test_email_endpoint_returns_safe_status(client):
+    with patch(
+        "src.scheduler.jobs.end_of_day_goal_report.send_end_of_day_report_test_email",
+        new=AsyncMock(
+            return_value={
+                "status": "blocked",
+                "reason": "recipient_not_allowlisted",
+                "recipient_hash": "hash123",
+                "receipt": {"receipt_sha256": "def456", "status": "blocked"},
+            }
+        ),
+    ):
+        resp = await client.post("/api/settings/end-of-day-report/test-email")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "blocked"
+    assert data["recipient_hash"] == "hash123"
+    assert "user@example" not in str(data)

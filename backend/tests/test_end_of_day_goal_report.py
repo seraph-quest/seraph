@@ -160,6 +160,36 @@ async def test_store_report_writes_durable_artifacts(async_db, tmp_path):
     assert artifacts["report_json_sha256"]
 
 
+def test_archive_report_receipt_writes_private_metadata(tmp_path):
+    from src.scheduler.jobs.end_of_day_goal_report import (
+        EmailDeliveryResult,
+        archive_end_of_day_report_receipt,
+    )
+
+    report = {
+        "date": "2026-06-20",
+        "analysis_provider": "deterministic-local",
+        "artifacts": {"report_text_sha256": "abc123"},
+    }
+
+    with patch.object(settings, "report_archive_dir", str(tmp_path / "reports")):
+        receipt = archive_end_of_day_report_receipt(
+            action="manual-preview",
+            report=report,
+            episode_id="episode-1",
+            email_result=EmailDeliveryResult(status="preview_only", reason="manual_preview"),
+        )
+
+    receipt_path = Path(receipt["receipt_path"])
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert payload["artifact_schema"] == "seraph.end_of_day_report_receipt.v1"
+    assert payload["action"] == "manual-preview"
+    assert payload["episode_id"] == "episode-1"
+    assert payload["email"]["status"] == "preview_only"
+    assert stat.S_IMODE(receipt_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+
+
 @pytest.mark.asyncio
 async def test_email_delivery_requires_allowlisted_recipient_hash():
     from src.scheduler.jobs.end_of_day_goal_report import deliver_report_email
@@ -204,3 +234,68 @@ async def test_email_delivery_sends_only_when_configured_and_preview_disabled():
     smtp.starttls.assert_called_once()
     smtp.login.assert_called_once_with("user", "pass")
     smtp.send_message.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_report_preview_stores_report_and_receipt(async_db, tmp_path):
+    from src.scheduler.jobs.end_of_day_goal_report import run_manual_end_of_day_goal_report
+
+    with patch.object(settings, "report_archive_dir", str(tmp_path / "reports")), patch(
+        "src.scheduler.jobs.end_of_day_goal_report.build_end_of_day_goal_report",
+        new=AsyncMock(
+            return_value={
+                "date": "2026-06-20",
+                "timezone": "UTC",
+                "body": "Manual preview body",
+                "summary": {"total_observations": 1, "total_tracked_minutes": 5},
+                "goal_alignment": [],
+                "completed_goal_count": 0,
+                "active_goal_count": 1,
+                "analysis_provider": "deterministic-local",
+                "artifact_schema": "seraph.end_of_day_goal_report.v1",
+            }
+        ),
+    ):
+        result = await run_manual_end_of_day_goal_report(send_email=False)
+
+    assert result["action"] == "manual-preview"
+    assert result["email"]["status"] == "preview_only"
+    assert result["report"]["body"] == "Manual preview body"
+    assert result["report"]["artifacts"]["report_text_sha256"]
+    assert result["report"]["artifacts"]["report_json_sha256"]
+    assert result["report"]["artifacts"]["raw_artifact_path_exposed"] is False
+    assert "report_text_path" not in result["report"]["artifacts"]
+    assert "report_json_path" not in result["report"]["artifacts"]
+    assert result["receipt"]["receipt_id"]
+    assert result["receipt"]["receipt_sha256"]
+    assert result["receipt"]["raw_receipt_path_exposed"] is False
+    assert "receipt_path" not in result["receipt"]
+
+
+@pytest.mark.asyncio
+async def test_manual_report_send_respects_preview_required(async_db, tmp_path):
+    from src.scheduler.jobs.end_of_day_goal_report import run_manual_end_of_day_goal_report
+
+    with patch.object(settings, "report_archive_dir", str(tmp_path / "reports")), patch.object(
+        settings, "email_reports_enabled", True
+    ), patch.object(settings, "email_reports_preview_required", True), patch(
+        "src.scheduler.jobs.end_of_day_goal_report.build_end_of_day_goal_report",
+        new=AsyncMock(
+            return_value={
+                "date": "2026-06-20",
+                "timezone": "UTC",
+                "body": "Manual send body",
+                "summary": {"total_observations": 1, "total_tracked_minutes": 5},
+                "goal_alignment": [],
+                "completed_goal_count": 0,
+                "active_goal_count": 1,
+                "analysis_provider": "deterministic-local",
+                "artifact_schema": "seraph.end_of_day_goal_report.v1",
+            }
+        ),
+    ):
+        result = await run_manual_end_of_day_goal_report(send_email=True, preview_acknowledged=False)
+
+    assert result["action"] == "manual-send"
+    assert result["email"]["status"] == "preview_required"
+    assert result["email"]["reason"] == "operator_preview_required"

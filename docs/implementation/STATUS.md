@@ -209,6 +209,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] browser-based guardian workspace as the only supported browser shell
 - [x] FastAPI backend with chat, WebSocket, goals, tools, observer, settings, audit, approvals, vault, skills, and MCP APIs
 - [x] native macOS observer daemon for screen/window ingest
+- [x] screen analysis provider choice now includes local Apple Vision, local Codex CLI parsing, and explicit OpenRouter cloud OCR, with local Codex temp-image cleanup documented and optional durable local image/output/analysis artifacts available through localhost-only observer inspection endpoints
 - [x] persistent guardian record, vector memory, sessions, and goal storage
 
 ### Trust and control
@@ -292,7 +293,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] deterministic guardian behavioral proof that grounded high-salience observer state can still deliver through high interruption cost while degraded observer confidence defers before transport
 - [x] deterministic guardian behavioral proof that strategist tick can use learned direct/native-delivery bias and still surface the resulting intervention through continuity state
 - [x] strategist agent and strategist scheduler tick
-- [x] daily briefing, evening review, activity digest, and weekly review surfaces
+- [x] daily briefing, evening review, activity digest, end-of-day goal report, and weekly review surfaces
 - [x] observer refresh across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle behavior
 - [x] first coherent desktop presence surface with daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, native-notification fallback delivery when browser sockets are unavailable but the daemon is connected, browser-side inspect/dismiss controls for queued desktop notifications, runtime route-health visibility for ready/fallback/unavailable delivery, a unified continuity snapshot for daemon state, queued bundle items, route reachability, and recent interventions, and an actionable cockpit desktop-shell card for follow-up, dismiss, continue, and fallback inspection flows

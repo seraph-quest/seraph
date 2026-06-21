@@ -33,6 +33,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/seraph-uv-cache}"
 
 # Create venv if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then

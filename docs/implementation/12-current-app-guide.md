@@ -143,4 +143,3 @@ these distinctions clear:
 - `docs/research/` is product thesis, target shape, and evidence logic.
 - GitHub issues, Project items, and PRs are the live execution layer.
 - `/legacy` is historical archive material and may contradict the current app.
-

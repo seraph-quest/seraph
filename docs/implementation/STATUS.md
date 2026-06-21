@@ -7,6 +7,10 @@ title: Seraph Development Status
 
 Seraph is an AI guardian that remembers, watches, and acts. This page is the fastest answer to what is real on `develop` right now.
 
+For a shorter reader-facing overview of the current app, start with
+[Current App Guide](./12-current-app-guide.md). This status page remains the
+dense shipped-state record.
+
 ## Legend
 
 - `[x]` shipped on `develop`
@@ -20,6 +24,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 ## Current Snapshot
 
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
+- [x] Public docs target the `v2026.4.11` app era; the published GitHub Pages site updates only after a `main` push touches `docs/**` and the Pages workflow succeeds.
 - [x] The live truth surface is now `docs/research/` plus `docs/implementation/`, while the GitHub Project, issues, and PRs carry active execution state.
 - [x] Trust Boundaries, Execution Plane, and Runtime Reliability have strong foundations on `develop`.
 - [x] The target product shape is now a power-user guardian workspace, not a village-first shell.

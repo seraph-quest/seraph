@@ -20,6 +20,7 @@ Use these for current truth:
 
 - `docs/implementation/00-master-roadmap.md`
 - `docs/implementation/STATUS.md`
+- `docs/implementation/12-current-app-guide.md`
 - `docs/research/00-synthesis.md`
 
-Use this archive only when you need historical context or to recover an older design decision from git history.
+Use this archive only when you need historical context or to recover an older design decision from git history. Many pages in this route intentionally preserve older wording and may contradict the current cockpit-first app.

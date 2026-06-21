@@ -43,13 +43,13 @@ This website is built using [Docusaurus](https://docusaurus.io/), a modern stati
 ## Installation
 
 ```bash
-yarn
+npm ci
 ```
 
 ## Local Development
 
 ```bash
-yarn start
+npm run start
 ```
 
 This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
@@ -57,23 +57,30 @@ This command starts a local development server and opens up a browser window. Mo
 ## Build
 
 ```bash
-yarn build
+npm run build
 ```
 
 This command generates static content into the `build` directory and can be served using any static contents hosting service.
 
 ## Deployment
 
-Using SSH:
+The public docs site deploys through GitHub Pages Actions, not the legacy
+`gh-pages` branch flow.
+
+Normal docs changes still land through a PR to `develop`. The public site is
+published when `develop` is explicitly promoted to `main` with `docs/**`
+changes. The workflow is `.github/workflows/deploy-docs.yml` and runs:
 
 ```bash
-USE_SSH=true yarn deploy
+cd docs
+npm ci
+npm run build
 ```
 
-Not using SSH:
+The generated artifact in `docs/build` is uploaded with
+`actions/upload-pages-artifact` and deployed with `actions/deploy-pages` to the
+`github-pages` environment at `https://docs.seraph.quest`.
 
-```bash
-GIT_USER=<Your GitHub username> yarn deploy
-```
-
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+Do not use direct `docusaurus deploy` or `gh-pages` branch publication for this
+repo. If a docs-only publication is needed outside the normal `develop` to
+`main` promotion, use the workflow dispatch on `Deploy Docs`.

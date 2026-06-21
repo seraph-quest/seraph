@@ -559,7 +559,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
-    expect(within(consoleRegion).getByText("Revoked Device Bridge Pack")).toBeInTheDocument();
+    expect(await within(consoleRegion).findByText("Revoked Device Bridge Pack")).toBeInTheDocument();
     expect(consoleRegion).toHaveTextContent(/revoked · review required/i);
     expect(consoleRegion).toHaveTextContent(/revoked · lifecycle actions blocked/i);
     expect(consoleRegion).toHaveTextContent(/rollback unavailable · no backend receipt/i);
@@ -641,7 +641,7 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
-    fireEvent.click(within(consoleRegion).getByRole("button", { name: "quarantine" }));
+    fireEvent.click(await within(consoleRegion).findByRole("button", { name: "quarantine" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

@@ -16604,7 +16604,7 @@ def _write_m9_probe_manifest(digest: str, signature: str) -> str:
         "display_name: M9 Probe\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.4.10\"\n"
+        "  seraph: \">=2026.4.11\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: verified\n"

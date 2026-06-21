@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 
 from sqlalchemy import func, or_, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import select, col
 
 from config.settings import settings
@@ -181,34 +182,38 @@ class SessionManager:
             return True
 
     async def list_sessions(self) -> list[dict]:
-        async with get_session() as db:
-            # Single query: fetch sessions with their latest message using window function
-            rows = (await db.execute(text(
-                """
-                SELECT
-                    s.id, s.title, s.created_at, s.updated_at,
-                    lm.content AS last_content, lm.role AS last_role
-                FROM sessions s
-                LEFT JOIN (
-                    SELECT session_id, content, role,
-                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS rn
-                    FROM messages
-                ) lm ON lm.session_id = s.id AND lm.rn = 1
-                ORDER BY s.updated_at DESC
-                """
-            ))).all()
+        try:
+            async with get_session() as db:
+                # Single query: fetch sessions with their latest message using window function
+                rows = (await db.execute(text(
+                    """
+                    SELECT
+                        s.id, s.title, s.created_at, s.updated_at,
+                        lm.content AS last_content, lm.role AS last_role
+                    FROM sessions s
+                    LEFT JOIN (
+                        SELECT session_id, content, role,
+                               ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS rn
+                        FROM messages
+                    ) lm ON lm.session_id = s.id AND lm.rn = 1
+                    ORDER BY s.updated_at DESC
+                    """
+                ))).all()
 
-            return [
-                {
-                    "id": r.id,
-                    "title": r.title,
-                    "created_at": r.created_at if isinstance(r.created_at, str) else r.created_at.isoformat(),
-                    "updated_at": r.updated_at if isinstance(r.updated_at, str) else r.updated_at.isoformat(),
-                    "last_message": r.last_content[:100] if r.last_content else None,
-                    "last_message_role": r.last_role,
-                }
-                for r in rows
-            ]
+                return [
+                    {
+                        "id": r.id,
+                        "title": r.title,
+                        "created_at": r.created_at if isinstance(r.created_at, str) else r.created_at.isoformat(),
+                        "updated_at": r.updated_at if isinstance(r.updated_at, str) else r.updated_at.isoformat(),
+                        "last_message": r.last_content[:100] if r.last_content else None,
+                        "last_message_role": r.last_role,
+                    }
+                    for r in rows
+                ]
+        except SQLAlchemyError as exc:
+            logger.warning("Session list unavailable; returning empty list: %s", exc)
+            return []
 
     async def get_recent_sessions_summary(
         self,
@@ -218,53 +223,57 @@ class SessionManager:
         snippet_chars: int = 140,
     ) -> str:
         """Summarize recent sessions outside the current thread for guardian state."""
-        async with get_session() as db:
-            stmt = select(Session)
-            if exclude_session_id:
-                stmt = stmt.where(Session.id != exclude_session_id)
-            session_result = await db.execute(stmt)
-            sessions = session_result.scalars().all()
-            if not sessions:
-                return ""
+        try:
+            async with get_session() as db:
+                stmt = select(Session)
+                if exclude_session_id:
+                    stmt = stmt.where(Session.id != exclude_session_id)
+                session_result = await db.execute(stmt)
+                sessions = session_result.scalars().all()
+                if not sessions:
+                    return ""
 
-            recency_stmt = (
-                select(Message.session_id, func.max(Message.created_at))
-                .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
-                .group_by(Message.session_id)
-            )
-            if exclude_session_id:
-                recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
-            recency_rows = await db.execute(recency_stmt)
-            conversation_recency = {
-                session_id: latest_at
-                for session_id, latest_at in recency_rows.all()
-            }
-            sessions = sorted(
-                sessions,
-                key=lambda session: conversation_recency.get(session.id) or session.created_at,
-                reverse=True,
-            )[:limit_sessions]
-
-            lines: list[str] = []
-            for session in sessions:
-                msg_result = await db.execute(
-                    select(Message)
-                    .where(Message.session_id == session.id)
+                recency_stmt = (
+                    select(Message.session_id, func.max(Message.created_at))
                     .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
-                    .order_by(col(Message.created_at).desc())
-                    .limit(1)
+                    .group_by(Message.session_id)
                 )
-                latest = msg_result.scalars().first()
-                title = session.title or "Untitled session"
-                if latest and latest.content:
-                    snippet = latest.content.replace("\n", " ").strip()
-                    if len(snippet) > snippet_chars:
-                        snippet = snippet[:snippet_chars] + "..."
-                    lines.append(f"- {title}: {latest.role} said \"{snippet}\"")
-                else:
-                    lines.append(f"- {title}: no user-facing messages yet")
+                if exclude_session_id:
+                    recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
+                recency_rows = await db.execute(recency_stmt)
+                conversation_recency = {
+                    session_id: latest_at
+                    for session_id, latest_at in recency_rows.all()
+                }
+                sessions = sorted(
+                    sessions,
+                    key=lambda session: conversation_recency.get(session.id) or session.created_at,
+                    reverse=True,
+                )[:limit_sessions]
 
-            return "\n".join(lines)
+                lines: list[str] = []
+                for session in sessions:
+                    msg_result = await db.execute(
+                        select(Message)
+                        .where(Message.session_id == session.id)
+                        .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
+                        .order_by(col(Message.created_at).desc())
+                        .limit(1)
+                    )
+                    latest = msg_result.scalars().first()
+                    title = session.title or "Untitled session"
+                    if latest and latest.content:
+                        snippet = latest.content.replace("\n", " ").strip()
+                        if len(snippet) > snippet_chars:
+                            snippet = snippet[:snippet_chars] + "..."
+                        lines.append(f"- {title}: {latest.role} said \"{snippet}\"")
+                    else:
+                        lines.append(f"- {title}: no user-facing messages yet")
+
+                return "\n".join(lines)
+        except SQLAlchemyError as exc:
+            logger.warning("Recent sessions summary unavailable; returning empty summary: %s", exc)
+            return ""
 
     async def _conversation_recency_map(
         self,

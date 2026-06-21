@@ -9,12 +9,17 @@ import { describe, it, expect, vi } from "vitest";
 // We test the constants and behavior rather than the hook directly
 // since hooks require a React rendering context.
 import { WS_RECONNECT_DELAY_MS } from "../config/constants";
-import { buildClarificationMessage, resolveClarificationSessionId } from "./useWebSocket";
+import { WS_RESPONSE_TIMEOUT_MS, buildClarificationMessage, resolveClarificationSessionId } from "./useWebSocket";
 
 describe("WS reconnection constants", () => {
   it("has a sensible initial reconnect delay", () => {
     expect(WS_RECONNECT_DELAY_MS).toBeGreaterThan(0);
     expect(WS_RECONNECT_DELAY_MS).toBeLessThanOrEqual(10_000);
+  });
+
+  it("allows normal backend agent turns to finish before resetting the socket", () => {
+    expect(WS_RESPONSE_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
+    expect(WS_RESPONSE_TIMEOUT_MS).toBeLessThanOrEqual(130_000);
   });
 });
 

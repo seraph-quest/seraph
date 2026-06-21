@@ -7,7 +7,9 @@ from config.settings import REPO_ROOT, settings
 from src.audit.repository import audit_repository
 from src.operators.local_codex import (
     LocalCodexConfigurationError,
+    _codex_env,
     _truncate_output,
+    local_codex_chat_timeout_seconds,
     local_codex_command,
     local_codex_status,
     run_local_codex,
@@ -20,11 +22,12 @@ def test_local_codex_command_uses_local_exec_contract():
         patch.object(settings, "codex_local_model", "gpt-5.5"),
         patch.object(settings, "codex_local_sandbox", "workspace-write"),
         patch.object(settings, "codex_local_approval_policy", "never"),
+        patch.object(settings, "codex_local_allow_workspace_write", True),
         patch.object(settings, "codex_local_timeout_seconds", 42),
     ):
         command = local_codex_command("fix the thing")
 
-    assert command.argv == [
+    assert command.argv[:15] == [
         "codex",
         "--ask-for-approval",
         "never",
@@ -33,12 +36,34 @@ def test_local_codex_command_uses_local_exec_contract():
         str(REPO_ROOT),
         "--sandbox",
         "workspace-write",
+        "--ephemeral",
+        "--ignore-rules",
+        "--ignore-user-config",
+        "--color",
+        "never",
         "--model",
         "gpt-5.5",
-        "fix the thing",
     ]
+    assert command.argv[15:18] == [
+        "-c",
+        'model_reasoning_effort="low"',
+        "--output-last-message",
+    ]
+    assert command.argv[-1] == "fix the thing"
+    assert command.output_path is not None
+    assert command.output_path.name.startswith("seraph-codex-last-")
+    assert command.output_path.suffix == ".txt"
+    command.output_path.unlink(missing_ok=True)
     assert command.cwd == REPO_ROOT
     assert command.timeout_seconds == 42
+
+
+def test_local_codex_chat_timeout_caps_interactive_turns():
+    with (
+        patch.object(settings, "agent_chat_timeout", 120),
+        patch.object(settings, "codex_local_timeout_seconds", 600),
+    ):
+        assert local_codex_chat_timeout_seconds() == 30
 
 
 @pytest.mark.parametrize("approval_policy", ["bogus", "always"])
@@ -89,6 +114,14 @@ def test_local_codex_status_fails_closed_when_sandbox_config_is_unsafe():
     assert status["unavailable_reason"] == "Local Codex sandbox mode must be read-only or workspace-write."
 
 
+def test_local_codex_command_rejects_workspace_write_without_explicit_opt_in():
+    with (
+        patch.object(settings, "codex_local_allow_workspace_write", False),
+        pytest.raises(LocalCodexConfigurationError, match="CODEX_LOCAL_ALLOW_WORKSPACE_WRITE=true"),
+    ):
+        local_codex_command("do it", sandbox="workspace-write")
+
+
 def test_local_codex_status_reports_version_without_api_key_requirement():
     completed = subprocess.CompletedProcess(["codex", "--version"], 0, stdout="codex 1.2.3\n", stderr="")
     with (
@@ -119,13 +152,7 @@ async def test_run_local_codex_audits_without_prompt_or_raw_output(async_db):
     with (
         patch.object(settings, "openai_api_key", secret_value),
         patch("src.operators.local_codex.shutil.which", return_value="/usr/local/bin/codex"),
-        patch(
-            "src.operators.local_codex.subprocess.run",
-            side_effect=[
-                subprocess.CompletedProcess(["codex", "--version"], 0, stdout="codex 1.2.3\n", stderr=""),
-                completed,
-            ],
-        ),
+        patch("src.operators.local_codex._run_codex_subprocess", AsyncMock(return_value=completed)),
     ):
         result = await run_local_codex("private task prompt")
 
@@ -156,23 +183,24 @@ async def test_run_local_codex_subprocess_env_strips_provider_api_keys(monkeypat
     completed = subprocess.CompletedProcess(["codex", "exec"], 0, stdout="ok", stderr="")
     with (
         patch("src.operators.local_codex.shutil.which", return_value="/usr/local/bin/codex"),
-        patch(
-            "src.operators.local_codex.subprocess.run",
-            side_effect=[
-                subprocess.CompletedProcess(["codex", "--version"], 0, stdout="codex 1.2.3\n", stderr=""),
-                completed,
-            ],
-        ) as mock_run,
+        patch("src.operators.local_codex._run_codex_subprocess", AsyncMock(return_value=completed)) as mock_exec,
     ):
         result = await run_local_codex("inspect local state")
 
     assert result["ok"] is True
-    exec_env = mock_run.call_args_list[1].kwargs["env"]
+    exec_command = mock_exec.await_args.args[0]
+    exec_env = _codex_env()
     assert "OPENAI_API_KEY" not in exec_env
     assert "OPENROUTER_API_KEY" not in exec_env
     assert "ANTHROPIC_API_KEY" not in exec_env
     assert "LLM_API_KEY" not in exec_env
     assert exec_env["SERAPH_LOCAL_OPERATOR"] == "codex-local"
+    assert exec_command.display == (
+        f"codex --ask-for-approval never exec -C {REPO_ROOT} "
+        "--sandbox read-only --ephemeral --ignore-rules --ignore-user-config "
+        '--color never --model gpt-5.5 -c model_reasoning_effort="low" '
+    ) + f"--output-last-message {exec_command.output_path} 'inspect local state'"
+    exec_command.output_path.unlink(missing_ok=True)
 
 
 def test_local_codex_output_redaction_covers_env_configured_and_pattern_secrets(monkeypatch):
@@ -200,6 +228,44 @@ async def test_runtime_status_exposes_local_operator_separately_from_provider_pr
     assert "local_operators" in payload
     assert any(item["id"] == "codex-local" for item in payload["local_operators"])
     assert all(item["id"] != "codex-local" for item in payload["provider_profiles"])
+
+
+@pytest.mark.asyncio
+async def test_rest_chat_uses_local_codex_when_selected(client):
+    with (
+        patch.object(settings, "default_model", "codex-local"),
+        patch(
+            "src.api.chat.run_local_codex",
+            AsyncMock(return_value={
+                "ok": True,
+                "stdout": "hello from local codex",
+                "stderr": "",
+            }),
+        ) as mock_run,
+    ):
+        response = await client.post("/api/chat", json={"message": "hello"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["response"] == "hello from local codex"
+    assert payload["session_id"]
+    mock_run.assert_awaited_once()
+    assert mock_run.await_args.kwargs["session_id"] == payload["session_id"]
+    assert mock_run.await_args.kwargs["timeout_seconds"] == 30
+    assert mock_run.await_args.kwargs["sandbox"] == "read-only"
+
+
+@pytest.mark.asyncio
+async def test_rest_chat_local_codex_times_out_instead_of_hanging(client):
+    with (
+        patch.object(settings, "default_model", "codex-local"),
+        patch("src.api.chat.local_codex_chat_timeout_seconds", return_value=1),
+        patch("src.api.chat.run_local_codex", AsyncMock(return_value={"ok": False, "timed_out": True})),
+    ):
+        response = await client.post("/api/chat", json={"message": "hello"})
+
+    assert response.status_code == 504
+    assert response.json()["detail"] == "Local Codex timed out after 1s."
 
 
 @pytest.mark.asyncio

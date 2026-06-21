@@ -2,15 +2,16 @@ import { useEffect, useRef, useCallback } from "react";
 import { API_URL, WS_URL, WS_RECONNECT_DELAY_MS, WS_PING_INTERVAL_MS } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
-import { useAgentAnimation } from "./useAgentAnimation";
+import { getIdleState, getThinkingState } from "../lib/animationStateMachine";
 import { appEventBus } from "../lib/appEventBus";
-import type { WSResponse, ChatMessage } from "../types";
+import type { AmbientState, ChatMessage, ConnectionStatus, SessionContinuityState, WSResponse } from "../types";
 
 function makeId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
 const WS_BACKOFF_MAX_MS = 30_000;
+export const WS_RESPONSE_TIMEOUT_MS = 130_000;
 
 type ClarificationPayload = {
   content?: string;
@@ -47,20 +48,55 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const responseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(WS_RECONNECT_DELAY_MS);
   const pendingResumeRef = useRef<{ sessionId: string | null; message: string } | null>(null);
 
-  const {
-    addMessage,
-    setSessionId,
-    setConnectionStatus,
-    setAgentBusy,
-    setAmbientState,
-    setChatPanelOpen,
-    markSessionContinuity,
-  } = useChatStore();
+  const addMessage = useCallback((message: ChatMessage) => {
+    useChatStore.getState().addMessage(message);
+  }, []);
+  const setSessionId = useCallback((sessionId: string) => {
+    useChatStore.getState().setSessionId(sessionId);
+  }, []);
+  const setConnectionStatus = useCallback((status: ConnectionStatus) => {
+    useChatStore.getState().setConnectionStatus(status);
+  }, []);
+  const setAgentBusy = useCallback((busy: boolean) => {
+    useChatStore.getState().setAgentBusy(busy);
+  }, []);
+  const setAmbientState = useCallback((state: AmbientState) => {
+    useChatStore.getState().setAmbientState(state);
+  }, []);
+  const setChatPanelOpen = useCallback((open: boolean) => {
+    useChatStore.getState().setChatPanelOpen(open);
+  }, []);
+  const markSessionContinuity = useCallback((sessionId: string, state: SessionContinuityState) => {
+    useChatStore.getState().markSessionContinuity(sessionId, state);
+  }, []);
 
-  const { onToolDetected, onFinalAnswer, onThinking } = useAgentAnimation();
+  const onThinking = useCallback(() => {
+    const thinking = getThinkingState();
+    useChatStore.getState().setAgentVisual({
+      animationState: "thinking",
+      positionX: thinking.positionX,
+      speechText: null,
+    });
+  }, []);
+  const onToolDetected = useCallback((_toolName: string, stepContent?: string) => {
+    useChatStore.getState().setAgentVisual({
+      animationState: "casting",
+      speechText: stepContent ?? null,
+    });
+  }, []);
+  const onFinalAnswer = useCallback((answer: string) => {
+    const idle = getIdleState();
+    useChatStore.getState().setAgentVisual({
+      animationState: "speaking",
+      positionX: idle.positionX,
+      speechText: answer.length > 80 ? answer.slice(0, 80) + "..." : answer,
+    });
+  }, []);
 
   const onToolDetectedRef = useRef(onToolDetected);
   const onFinalAnswerRef = useRef(onFinalAnswer);
@@ -82,6 +118,13 @@ export function useWebSocket() {
     timestamp: Date.now(),
     sessionId: useChatStore.getState().sessionId,
   }), []);
+
+  const clearResponseTimeout = useCallback(() => {
+    if (responseTimeoutRef.current) {
+      clearTimeout(responseTimeoutRef.current);
+      responseTimeoutRef.current = null;
+    }
+  }, []);
 
   const sendSocketMessage = useCallback(
     (
@@ -107,15 +150,32 @@ export function useWebSocket() {
             session_id: sessionId,
           })
         );
+        clearResponseTimeout();
+        responseTimeoutRef.current = setTimeout(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.close();
+          }
+          setAgentBusy(false);
+          setConnectionStatus("disconnected");
+          addMessage(buildErrorMessage(
+            "Seraph did not return a response in time. The live link was reset; send again to use the direct chat fallback."
+          ));
+        }, WS_RESPONSE_TIMEOUT_MS);
         return true;
       } catch {
+        clearResponseTimeout();
         setAgentBusy(false);
         addMessage(buildErrorMessage("Message delivery failed."));
         return false;
       }
     },
-    [addMessage, buildErrorMessage, buildUserMessage, setAgentBusy, onThinking]
+    [addMessage, buildErrorMessage, buildUserMessage, clearResponseTimeout, setAgentBusy, setConnectionStatus, onThinking]
   );
+  const sendSocketMessageRef = useRef(sendSocketMessage);
+
+  useEffect(() => {
+    sendSocketMessageRef.current = sendSocketMessage;
+  }, [sendSocketMessage]);
 
   const sendRestMessage = useCallback(async (message: string, sessionId: string | null) => {
     setAgentBusy(true);
@@ -210,10 +270,27 @@ export function useWebSocket() {
     setConnectionStatus("connecting");
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+    }
+    connectTimeoutRef.current = setTimeout(() => {
+      if (wsRef.current === ws) {
+        setConnectionStatus(ws.readyState === WebSocket.OPEN ? "connected" : "disconnected");
+      }
+    }, Math.max(WS_RECONNECT_DELAY_MS - 500, 1000));
 
     ws.onopen = () => {
+      wsRef.current = ws;
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
       setConnectionStatus("connected");
       backoffRef.current = WS_RECONNECT_DELAY_MS; // reset on successful connect
+      if (reconnectRef.current) {
+        clearTimeout(reconnectRef.current);
+        reconnectRef.current = null;
+      }
       useChatStore.getState().fetchProfile();
       useChatStore.getState().fetchToolRegistry();
 
@@ -222,7 +299,7 @@ export function useWebSocket() {
       if (pendingResumeRef.current) {
         const pending = pendingResumeRef.current;
         pendingResumeRef.current = null;
-        sendSocketMessage(pending.message, pending.sessionId, false, "resume_message");
+        sendSocketMessageRef.current(pending.message, pending.sessionId, false, "resume_message");
       }
 
       pingRef.current = setInterval(() => {
@@ -233,6 +310,8 @@ export function useWebSocket() {
     };
 
     ws.onmessage = (event) => {
+      if (wsRef.current !== ws) return;
+      setConnectionStatus("connected");
       try {
         const data: WSResponse = JSON.parse(event.data);
 
@@ -266,6 +345,7 @@ export function useWebSocket() {
           };
           addMessage(stepMsg);
         } else if (data.type === "final") {
+          clearResponseTimeout();
           setAgentBusy(false);
           onFinalAnswerRef.current(data.content);
 
@@ -291,6 +371,7 @@ export function useWebSocket() {
             }
           });
         } else if (data.type === "error") {
+          clearResponseTimeout();
           setAgentBusy(false);
 
           const errorMsg: ChatMessage = {
@@ -302,6 +383,7 @@ export function useWebSocket() {
           };
           addMessage(errorMsg);
         } else if (data.type === "approval_required") {
+          clearResponseTimeout();
           setAgentBusy(false);
 
           const approvalMsg: ChatMessage = {
@@ -317,6 +399,7 @@ export function useWebSocket() {
           };
           addMessage(approvalMsg);
         } else if (data.type === "clarification_required") {
+          clearResponseTimeout();
           setAgentBusy(false);
 
           addMessage(buildClarificationMessage(data, data.session_id));
@@ -353,19 +436,38 @@ export function useWebSocket() {
     };
 
     ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      clearResponseTimeout();
       setAgentBusy(false);
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
+      if (useChatStore.getState().connectionStatus === "connecting") {
+        setConnectionStatus("disconnected");
+      }
       setConnectionStatus("disconnected");
+      wsRef.current = null;
       if (pingRef.current) clearInterval(pingRef.current);
       reconnectRef.current = setTimeout(connect, backoffRef.current);
       backoffRef.current = Math.min(backoffRef.current * 2, WS_BACKOFF_MAX_MS);
     };
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return;
+      clearResponseTimeout();
       setAgentBusy(false);
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
+      if (useChatStore.getState().connectionStatus === "connecting") {
+        setConnectionStatus("error");
+      }
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, markSessionContinuity, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
+  }, [addMessage, clearResponseTimeout, markSessionContinuity, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
   const skipOnboarding = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -376,6 +478,9 @@ export function useWebSocket() {
   const sendMessage = useCallback(
     async (message: string) => {
       const sessionId = useChatStore.getState().sessionId;
+      if (useChatStore.getState().connectionStatus !== "connected") {
+        return sendRestMessage(message, sessionId);
+      }
       if (sendSocketMessage(message, sessionId, true)) {
         return true;
       }
@@ -389,7 +494,7 @@ export function useWebSocket() {
     const handleApprovalResume = (payload: { sessionId?: string | null; message?: string }) => {
       if (!payload?.message) return;
       const fallbackSessionId = useChatStore.getState().sessionId;
-      const ok = sendSocketMessage(
+      const ok = sendSocketMessageRef.current(
         payload.message,
         payload.sessionId ?? fallbackSessionId,
         false,
@@ -409,9 +514,13 @@ export function useWebSocket() {
       appEventBus.off("approval-resume", handleApprovalResume);
       if (pingRef.current) clearInterval(pingRef.current);
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
-      wsRef.current?.close();
+      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+      clearResponseTimeout();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
     };
-  }, [connect, sendSocketMessage]);
+  }, [connect]);
 
   return { sendMessage, skipOnboarding };
 }

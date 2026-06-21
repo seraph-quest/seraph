@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     codex_local_command: str = "codex"
     codex_local_model: str = "gpt-5.5"
     codex_local_reasoning_effort: str = "low"
-    codex_local_sandbox: str = "workspace-write"
+    codex_local_sandbox: str = "read-only"
     codex_local_approval_policy: str = "never"
+    codex_local_allow_workspace_write: bool = False
     codex_local_timeout_seconds: int = 600
     model_temperature: float = 0.7
     model_max_tokens: int = 4096

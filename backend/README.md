@@ -89,8 +89,9 @@ Receive (streamed):
 | `CODEX_LOCAL_ENABLED` | `true` | Enables the local command-backed Codex operator adapter |
 | `CODEX_LOCAL_COMMAND` | `codex` | Local Codex executable name or path |
 | `CODEX_LOCAL_MODEL` | `gpt-5.5` | Model option passed to `codex exec` |
-| `CODEX_LOCAL_SANDBOX` | `workspace-write` | Sandbox option passed to local `codex exec` |
+| `CODEX_LOCAL_SANDBOX` | `read-only` | Sandbox option passed to local `codex exec` |
 | `CODEX_LOCAL_APPROVAL_POLICY` | `never` | Approval policy option passed to local `codex exec` |
+| `CODEX_LOCAL_ALLOW_WORKSPACE_WRITE` | `false` | Explicit opt-in required before local Codex may use `workspace-write` |
 | `CODEX_LOCAL_TIMEOUT_SECONDS` | `600` | Timeout for local Codex operator invocations |
 | `SCREEN_CAPTURE_ARCHIVE_DIR` | `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local archive root for preserved screen capture images, redacted provider output, and normalized JSON served by localhost-only observer artifact endpoints |
 | `SCREEN_ANALYSIS_MIN_SECONDS_BETWEEN_CAPTURES` | `0` | Minimum seconds between screen-analysis captures; `0` disables this throttle |
@@ -179,8 +180,9 @@ RUNTIME_PROFILE_PREFERENCES=chat_agent=codex-openai|openrouter
 CODEX_LOCAL_ENABLED=true
 CODEX_LOCAL_COMMAND=codex
 CODEX_LOCAL_MODEL=gpt-5.5
-CODEX_LOCAL_SANDBOX=workspace-write
+CODEX_LOCAL_SANDBOX=read-only
 CODEX_LOCAL_APPROVAL_POLICY=never
+CODEX_LOCAL_ALLOW_WORKSPACE_WRITE=false
 CODEX_LOCAL_TIMEOUT_SECONDS=600
 
 # Anthropic/Claude-oriented routes.

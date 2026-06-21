@@ -19,6 +19,13 @@ from src.audit.repository import audit_repository
 from src.api.profile import get_or_create_profile, mark_onboarding_complete
 from src.guardian.state import build_guardian_state
 from src.models.schemas import ChatRequest, ChatResponse
+from src.operators.local_codex import (
+    LocalCodexConfigurationError,
+    is_local_codex_model,
+    local_codex_chat_sandbox,
+    local_codex_chat_timeout_seconds,
+    run_local_codex,
+)
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
 from src.llm_runtime import (
@@ -42,6 +49,74 @@ async def chat(request: ChatRequest):
 
     # Check onboarding status
     profile = await get_or_create_profile()
+    if is_local_codex_model(settings.default_model):
+        started_at = perf_counter()
+        timeout_seconds = local_codex_chat_timeout_seconds()
+        try:
+            result = await run_local_codex(
+                request.message,
+                session_id=session.id,
+                timeout_seconds=timeout_seconds,
+                sandbox=local_codex_chat_sandbox(),
+            )
+            output = (result.get("stdout") or "").strip()
+            stderr = (result.get("stderr") or "").strip()
+            if result.get("timed_out"):
+                raise asyncio.TimeoutError
+            if not result.get("ok"):
+                raise LocalCodexConfigurationError(stderr or "Local Codex returned a non-zero exit code.")
+            response_text = await redact_secrets_in_text(
+                output or stderr or "Local Codex completed without output."
+            )
+        except asyncio.TimeoutError:
+            safe_detail = await redact_secrets_in_text(f"Local Codex timed out after {timeout_seconds}s.")
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=not profile.onboarding_completed,
+                outcome="timed_out",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "timeout_seconds": timeout_seconds,
+                    "runtime": "codex-local",
+                },
+            )
+            raise HTTPException(status_code=504, detail=safe_detail)
+        except LocalCodexConfigurationError as exc:
+            safe_detail = await redact_secrets_in_text(f"Local Codex unavailable: {exc}")
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=not profile.onboarding_completed,
+                outcome="failed",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "error": safe_detail,
+                    "runtime": "codex-local",
+                },
+            )
+            raise HTTPException(status_code=503, detail=safe_detail)
+
+        await session_manager.add_message(session.id, "assistant", response_text)
+        await log_agent_run_event(
+            session_id=session.id,
+            transport="rest",
+            is_onboarding=not profile.onboarding_completed,
+            outcome="succeeded",
+            policy_mode=get_current_tool_policy_mode(),
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "message_length": len(request.message),
+                "response_length": len(response_text),
+                "runtime": "codex-local",
+            },
+        )
+        return ChatResponse(response=response_text, session_id=session.id)
+
     if not profile.onboarding_completed:
         agent = create_onboarding_agent(request.message)
     else:

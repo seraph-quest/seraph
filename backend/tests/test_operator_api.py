@@ -10326,6 +10326,31 @@ async def test_operator_continuity_graph_links_sessions_workflows_artifacts_and_
 
 
 @pytest.mark.asyncio
+async def test_operator_continuity_graph_degrades_when_sources_or_snapshot_threads_fail(client):
+    with (
+        patch("src.api.operator.session_manager.list_sessions", AsyncMock(side_effect=RuntimeError("sessions missing"))),
+        patch("src.api.operator._list_workflow_runs", AsyncMock(return_value=[])),
+        patch("src.api.operator.approval_repository.list_pending", AsyncMock(return_value=[])),
+        patch("src.api.operator.native_notification_queue.list", AsyncMock(return_value=[])),
+        patch("src.api.operator.insight_queue.peek_all", AsyncMock(return_value=[])),
+        patch("src.api.operator.guardian_feedback_repository.list_recent", AsyncMock(return_value=[])),
+        patch(
+            "src.api.operator.build_observer_continuity_snapshot",
+            AsyncMock(return_value={"summary": {"continuity_health": "attention"}, "threads": None}),
+        ),
+    ):
+        resp = await client.get("/api/operator/continuity-graph", params={"limit_sessions": 4})
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["continuity_health"] == "attention"
+    assert payload["summary"]["tracked_sessions"] == 0
+    assert payload["sessions"] == []
+    assert payload["nodes"] == []
+    assert payload["edges"] == []
+
+
+@pytest.mark.asyncio
 async def test_operator_engineering_memory_applies_window_and_reports_total_bundle_counts(client):
     now = datetime.now(timezone.utc)
     fresh_pr_started_at = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")

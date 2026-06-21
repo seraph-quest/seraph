@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from src.audit.repository import audit_repository
 from src.db.models import Memory, MemoryEdgeType, MemoryKind, MemoryStatus
 from src.memory.decay import apply_memory_decay_policies, summarize_memory_reconciliation_state
@@ -709,20 +711,35 @@ async def get_memory_live_controls_snapshot(
     bounded_limit = min(max(int(limit or 8), 1), 50)
     provider_inventory = _apply_provider_quarantine_overlay(list_memory_provider_inventory())
     fetch_limit = bounded_limit if not owner_session_id else min(bounded_limit * 10, 200)
-    active = _scope_memories_to_owner(
-        await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
-        owner_session_id,
-    )[:bounded_limit]
-    superseded = _scope_memories_to_owner(
-        await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
-        owner_session_id,
-    )[:bounded_limit]
-    archived = _scope_memories_to_owner(
-        await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
-        owner_session_id,
-    )[:bounded_limit]
-    receipts = await list_memory_audit_receipts(limit=bounded_limit)
-    reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+    try:
+        active = _scope_memories_to_owner(
+            await memory_repository.list_memories(status=MemoryStatus.active, limit=fetch_limit),
+            owner_session_id,
+        )[:bounded_limit]
+        superseded = _scope_memories_to_owner(
+            await memory_repository.list_memories(status=MemoryStatus.superseded, limit=fetch_limit),
+            owner_session_id,
+        )[:bounded_limit]
+        archived = _scope_memories_to_owner(
+            await memory_repository.list_memories(status=MemoryStatus.archived, limit=fetch_limit),
+            owner_session_id,
+        )[:bounded_limit]
+        receipts = await list_memory_audit_receipts(limit=bounded_limit)
+        reconciliation = await summarize_memory_reconciliation_state(limit=min(bounded_limit, 10))
+        operator_status = "guardian_memory_live_controls_visible"
+    except SQLAlchemyError:
+        active = []
+        superseded = []
+        archived = []
+        receipts = {"events": []}
+        reconciliation = {
+            "summary": {
+                "status": "unavailable",
+                "reason": "memory database unavailable",
+            },
+            "items": [],
+        }
+        operator_status = "guardian_memory_live_controls_degraded"
 
     active_candidates = [_candidate_payload(memory, candidate_type="memory_candidate") for memory in active]
     review_candidates = [
@@ -750,7 +767,7 @@ async def get_memory_live_controls_snapshot(
     )
     snapshot = {
         "summary": {
-            "operator_status": "guardian_memory_live_controls_visible",
+            "operator_status": operator_status,
             "provider_count": provider_inventory.get("summary", {}).get("provider_count", 0),
             "quarantined_provider_count": provider_inventory.get("summary", {}).get("quarantined_count", 0),
             "active_memory_candidate_count": len(active),

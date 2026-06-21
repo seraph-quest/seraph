@@ -170,7 +170,7 @@ def _verified_manifest(digest: str, signature: str) -> str:
         "display_name: Verified Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.4.10\"\n"
+        "  seraph: \">=2026.4.11\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: verified\n"
@@ -199,7 +199,7 @@ def _verified_connector_manifest(digest: str, signature: str) -> str:
         "display_name: Verified Connectors\n"
         "kind: connector-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.4.10\"\n"
+        "  seraph: \">=2026.4.11\"\n"
         "publisher:\n"
         "  name: Seraph\n"
         "trust: verified\n"
@@ -339,7 +339,7 @@ def test_capability_pack_hardening_receipt_names_risk_delta_and_rollback(tmp_pat
     receipt = build_capability_pack_hardening_receipt(
         manifest,
         governance_status=status,
-        compatibility={"seraph": ">=2026.4.10", "current_version": "2026.4.10", "compatible": True},
+        compatibility={"seraph": ">=2026.4.11", "current_version": "2026.4.11", "compatible": True},
         lifecycle_plan={
             "current_version": "2026.3.20",
             "candidate_version": manifest.version,
@@ -372,7 +372,7 @@ def test_capability_pack_hardening_receipt_blocks_permission_creep_and_supply_ch
     receipt = build_capability_pack_hardening_receipt(
         manifest,
         governance_status=status,
-        compatibility={"seraph": "<2026.1.0", "current_version": "2026.4.10", "compatible": False},
+        compatibility={"seraph": "<2026.1.0", "current_version": "2026.4.11", "compatible": False},
         lifecycle_plan={
             "current_version": "2026.4.0",
             "candidate_version": manifest.version,
@@ -558,7 +558,7 @@ def test_local_unsigned_pack_remains_allowed(tmp_path: Path):
         "display_name: Local Pack\n"
         "kind: capability-pack\n"
         "compatibility:\n"
-        "  seraph: \">=2026.4.10\"\n"
+        "  seraph: \">=2026.4.11\"\n"
         "publisher:\n"
         "  name: Local Operator\n"
         "trust: local\n"

@@ -1245,8 +1245,8 @@ def _runtime_status_payload() -> dict[str, Any]:
     model = settings.default_model.strip()
     active_profile = "codex-local" if is_local_codex_model(model) else resolve_runtime_profile(runtime_path="chat_agent")
     return {
-        "version": "2026.4.10",
-        "build_id": "SERAPH_PRIME_v2026.4.10",
+        "version": "2026.4.11",
+        "build_id": "SERAPH_PRIME_v2026.4.11",
         "provider": _runtime_provider_label(),
         "model": model,
         "model_label": _runtime_model_label(model),

@@ -2222,8 +2222,8 @@ describe("CockpitView", () => {
           },
           runtime_posture: {
             runtime: {
-              version: "2026.4.10",
-              build_id: "SERAPH_PRIME_v2026.4.10",
+              version: "2026.4.11",
+              build_id: "SERAPH_PRIME_v2026.4.11",
               provider: "openrouter",
               model: "openrouter/openai/gpt-4.1-mini",
               model_label: "gpt-4.1-mini",
@@ -2687,8 +2687,8 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/runtime/status")) {
         return Promise.resolve(mockResponse({
-          version: "2026.4.10",
-          build_id: "SERAPH_PRIME_v2026.4.10",
+          version: "2026.4.11",
+          build_id: "SERAPH_PRIME_v2026.4.11",
           provider: "openrouter",
           model: "openrouter/openai/gpt-4.1-mini",
           model_label: "gpt-4.1-mini",
@@ -2769,8 +2769,8 @@ describe("CockpitView", () => {
           },
           runtime_posture: {
             runtime: {
-              version: "2026.4.10",
-              build_id: "SERAPH_PRIME_v2026.4.10",
+              version: "2026.4.11",
+              build_id: "SERAPH_PRIME_v2026.4.11",
               provider: "openrouter",
               model: "openrouter/openai/gpt-4.1-mini",
               model_label: "gpt-4.1-mini",
@@ -6041,7 +6041,7 @@ describe("CockpitView", () => {
           governance: { workspace_mode: "single_operator_guarded_workspace", review_posture: "", approval_mode: "high_risk", tool_policy_mode: "balanced", mcp_policy_mode: "approval", delegation_enabled: true, roles: [] },
           usage: { window_hours: 24, llm_call_count: 0, llm_cost_usd: 0, input_tokens: 0, output_tokens: 0, user_triggered_llm_calls: 0, autonomous_llm_calls: 0, failure_count: 0, pending_approvals: 0, active_workflows: 0, blocked_workflows: 0 },
           runtime_posture: {
-            runtime: { version: "2026.4.10", build_id: "SERAPH_TEST", provider: "openrouter", model: "openrouter/openai/gpt-4.1-mini", model_label: "gpt-4.1-mini" },
+            runtime: { version: "2026.4.11", build_id: "SERAPH_TEST", provider: "openrouter", model: "openrouter/openai/gpt-4.1-mini", model_label: "gpt-4.1-mini" },
             extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 },
             continuity: { continuity_health: "ready", primary_surface: "presence", recommended_focus: null, actionable_thread_count: 0, degraded_route_count: 0, degraded_source_adapter_count: 0, attention_presence_surface_count: 0 },
           },
@@ -10476,8 +10476,8 @@ describe("CockpitView", () => {
           version: "2026.4.01",
           version_line: "2026.4",
           compatibility: {
-            seraph: ">=2026.4.10",
-            current_version: "2026.4.10",
+            seraph: ">=2026.4.11",
+            current_version: "2026.4.11",
             compatible: true,
           },
           ok: true,
@@ -10580,7 +10580,7 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(within(studio).getByRole("button", { name: "Update package" })).toBeInTheDocument());
     expect(within(studio).getByText("update workspace · 2026.3.21 -> 2026.4.01 · upgrade")).toBeInTheDocument();
-    expect(within(studio).getByText("compatible · Seraph >=2026.4.10 · current 2026.4.10")).toBeInTheDocument();
+    expect(within(studio).getByText("compatible · Seraph >=2026.4.11 · current 2026.4.11")).toBeInTheDocument();
     expect(within(studio).getByText("ready · no doctor or load errors")).toBeInTheDocument();
     fireEvent.click(within(studio).getByRole("button", { name: "Update package" }));
 
@@ -12242,8 +12242,8 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/runtime/status")) {
         return Promise.resolve(mockResponse({
-          version: "2026.4.10",
-          build_id: "SERAPH_PRIME_v2026.4.10",
+          version: "2026.4.11",
+          build_id: "SERAPH_PRIME_v2026.4.11",
           provider: "openrouter",
           model: "openrouter/openai/gpt-4.1-mini",
           model_label: "gpt-4.1-mini",
@@ -12335,8 +12335,8 @@ describe("CockpitView", () => {
           },
           runtime_posture: {
             runtime: {
-              version: "2026.4.10",
-              build_id: "SERAPH_PRIME_v2026.4.10",
+              version: "2026.4.11",
+              build_id: "SERAPH_PRIME_v2026.4.11",
               provider: "openrouter",
               model: "openrouter/openai/gpt-4.1-mini",
               model_label: "gpt-4.1-mini",
@@ -12446,8 +12446,8 @@ describe("CockpitView", () => {
       }
       if (url.includes("/api/runtime/status")) {
         return Promise.resolve(mockResponse({
-          version: "2026.4.10",
-          build_id: "SERAPH_PRIME_v2026.4.10",
+          version: "2026.4.11",
+          build_id: "SERAPH_PRIME_v2026.4.11",
           provider: "openrouter",
           model: "openrouter/openai/gpt-4.1-mini",
           model_label: "gpt-4.1-mini",

@@ -42,7 +42,7 @@ version: 2026.5.4
 display_name: Contract Test
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -96,7 +96,7 @@ version: 2026.5.4
 display_name: Connector Contract Test
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -134,7 +134,7 @@ version: 2026.5.4
 display_name: MCP Contract Test
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -173,7 +173,7 @@ version: 2026.5.5
 display_name: Messaging Contract Test
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -206,7 +206,7 @@ version: 2026.5.5
 display_name: Node Contract Test
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local

@@ -13,7 +13,7 @@ version: 2026.3.21
 display_name: Research Briefing
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10,<2027"
+  seraph: ">=2026.4.11,<2027"
 publisher:
   name: Seraph
 trust: bundled
@@ -48,7 +48,7 @@ permissions:
     assert manifest.permissions.data_access == ["public_web"]
     assert manifest.permissions.mutation_rights == ["workspace.files.write"]
     assert manifest.permissions.audit_events == ["tool_call"]
-    assert manifest.is_compatible_with("2026.4.10") is True
+    assert manifest.is_compatible_with("2026.4.11") is True
     assert manifest.is_compatible_with("2027.1.0") is False
 
 
@@ -60,7 +60,7 @@ version: 2026.3.23
 display_name: Guardian Reach
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -89,7 +89,7 @@ version: 2026.3.23
 display_name: Reach Connectors
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -124,7 +124,7 @@ version: 2026.3.21
 display_name: Bad Paths
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -148,7 +148,7 @@ version: 2026.3.21
 display_name: Directory Paths
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -170,7 +170,7 @@ version: 2026.3.21
 display_name: Bad Layout
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -192,7 +192,7 @@ version: 2026.3.21
 display_name: Empty Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -212,7 +212,7 @@ version: 2026.3.21
 display_name: Bad Native Tools
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -234,7 +234,7 @@ version: 2026.3.21
 display_name: Trusted Without Code
 kind: trusted-plugin
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -256,7 +256,7 @@ version: 2026.3.21
 display_name: Connector Without Connector
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -300,7 +300,7 @@ version: not-a-version
 display_name: Bad Version
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -322,7 +322,7 @@ version: 2026.3.21
 display_name: Local Example
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -350,7 +350,7 @@ version: 2026.3.21
 display_name: Layout Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -394,7 +394,7 @@ version: 2026.3.21
 display_name: Duplicate Paths
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -417,7 +417,7 @@ version: 2026.3.21
 display_name: Verified Claim Only
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: verified
@@ -438,7 +438,7 @@ version: 2026.3.21
 display_name: Verified Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: verified

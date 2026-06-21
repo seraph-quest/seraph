@@ -21,6 +21,8 @@ services:
       - ./shared:/app/shared
     env_file:
       - .env.dev
+    environment:
+      SERAPH_DAEMON_STATUS_FILE: /app/data/daemon-status.json
     networks:
       - seraph-network-dev
     ports:

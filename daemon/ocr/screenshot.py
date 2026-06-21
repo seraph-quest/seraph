@@ -13,6 +13,7 @@ logger = logging.getLogger("seraph_daemon")
 
 # Track whether we've already warned about missing permission
 _warned_no_permission = False
+_warned_screencapture_failed = False
 
 
 def capture_screen_png() -> bytes | None:
@@ -50,7 +51,7 @@ def capture_screen_png() -> bytes | None:
 
 def _capture_via_screencapture() -> bytes | None:
     """Capture using macOS screencapture CLI — most reliable on newer macOS."""
-    global _warned_no_permission
+    global _warned_screencapture_failed
 
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -64,16 +65,36 @@ def _capture_via_screencapture() -> bytes | None:
         )
 
         if result.returncode != 0:
-            logger.debug("screencapture exited with code %d", result.returncode)
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            if stderr:
+                logger.debug("screencapture stderr: %s", stderr[:500])
+            if not _warned_screencapture_failed:
+                logger.warning(
+                    "macOS screencapture failed with code %d. "
+                    "No screenshot artifact was created. Grant Screen Recording / Screen & System Audio Recording "
+                    "permission to the terminal/app running Seraph, then restart the daemon.",
+                    result.returncode,
+                )
+                _warned_screencapture_failed = True
+            else:
+                logger.debug("screencapture exited with code %d", result.returncode)
             tmp_path.unlink(missing_ok=True)
             return None
 
         if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+            if not _warned_screencapture_failed:
+                logger.warning(
+                    "macOS screencapture produced no image. "
+                    "Grant Screen Recording / Screen & System Audio Recording permission to "
+                    "the terminal/app running Seraph, then restart the daemon."
+                )
+                _warned_screencapture_failed = True
             tmp_path.unlink(missing_ok=True)
             return None
 
         png_bytes = tmp_path.read_bytes()
         tmp_path.unlink(missing_ok=True)
+        _warned_screencapture_failed = False
         return png_bytes
 
     except FileNotFoundError:

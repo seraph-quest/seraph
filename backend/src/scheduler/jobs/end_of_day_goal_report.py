@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import smtplib
 from dataclasses import dataclass
@@ -125,7 +126,8 @@ def archive_end_of_day_goal_report(report: dict[str, Any]) -> dict[str, Any]:
     paths = _report_artifact_paths(report)
     text_path = Path(paths["report_text_path"])
     json_path = Path(paths["report_json_path"])
-    text_path.parent.mkdir(parents=True, exist_ok=True)
+    text_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    text_path.parent.chmod(0o700)
 
     text_payload = str(report.get("body") or "")
     json_payload = {
@@ -133,14 +135,28 @@ def archive_end_of_day_goal_report(report: dict[str, Any]) -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "report": report,
     }
-    text_path.write_text(text_payload, encoding="utf-8")
-    json_path.write_text(json.dumps(json_payload, indent=2, sort_keys=True), encoding="utf-8")
+    _write_private_text(text_path, text_payload)
+    _write_private_text(json_path, json.dumps(json_payload, indent=2, sort_keys=True))
 
     return {
         **paths,
         "report_text_sha256": hashlib.sha256(text_payload.encode("utf-8")).hexdigest(),
         "report_json_sha256": hashlib.sha256(json_path.read_bytes()).hexdigest(),
     }
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    fd = open(
+        path,
+        "w",
+        encoding="utf-8",
+        opener=lambda file_path, flags: os.open(file_path, flags, 0o600),
+    )
+    try:
+        fd.write(content)
+    finally:
+        fd.close()
+        path.chmod(0o600)
 
 
 def _safe_timezone() -> ZoneInfo:

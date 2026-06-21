@@ -130,21 +130,7 @@ def _write_daemon_status(**updates: object) -> None:
 # ─── macOS helpers ────────────────────────────────────────
 
 
-def get_frontmost_app_name() -> str | None:
-    """Return the localized name of the frontmost application via NSWorkspace.
-
-    Requires no special permissions.
-    """
-    try:
-        from AppKit import NSWorkspace
-
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        app_name = app.localizedName() if app else None
-        if app_name:
-            return app_name
-    except Exception:
-        logger.debug("NSWorkspace call failed", exc_info=True)
-
+def _get_frontmost_app_name_from_system_events() -> str | None:
     try:
         result = subprocess.run(
             [
@@ -166,6 +152,29 @@ def get_frontmost_app_name() -> str | None:
     except Exception:
         logger.debug("System Events frontmost app lookup failed", exc_info=True)
     return None
+
+
+def _get_frontmost_app_name_from_workspace() -> str | None:
+    try:
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        app_name = app.localizedName() if app else None
+        if app_name:
+            return app_name
+    except Exception:
+        logger.debug("NSWorkspace call failed", exc_info=True)
+    return None
+
+
+def get_frontmost_app_name() -> str | None:
+    """Return the visible foreground app name from the same source as window title.
+
+    System Events tracks the Accessibility-observed foreground process that Seraph
+    also uses for the active window title. NSWorkspace is kept as a fallback, but
+    should not mask app switches with a stale value.
+    """
+    return _get_frontmost_app_name_from_system_events() or _get_frontmost_app_name_from_workspace()
 
 
 def get_window_title() -> str | None:
@@ -575,11 +584,16 @@ async def poll_loop(
                                     "Screen & System Audio Recording permission to the terminal/app running Seraph, "
                                     "then restart the daemon."
                                 )
+                                observation["capture_error_kind"] = "screen_capture_permission"
                                 _write_daemon_status(
                                     state="running",
                                     screen_analysis="capture_error",
                                     provider=screen_runtime.provider.name,
                                     capture_ready=False,
+                                    active_window=active_window,
+                                    frontmost_app=app_name,
+                                    window_title=window_title,
+                                    last_poll_at=poll_at,
                                     last_error=observation["capture_error"],
                                     last_error_kind="screen_capture_permission",
                                 )
@@ -619,6 +633,7 @@ async def poll_loop(
                                 else:
                                     logger.debug("Screen analysis failed: %s", result.error)
                                     observation["capture_error"] = result.error or "Screen analysis failed."
+                                    observation["capture_error_kind"] = "analysis_error"
                                     _write_daemon_status(
                                         state="running",
                                         screen_analysis="analysis_error",
@@ -630,6 +645,7 @@ async def poll_loop(
                         except Exception:
                             logger.debug("Screenshot/analysis error", exc_info=True)
                             observation["capture_error"] = "Screenshot or screen analysis failed unexpectedly."
+                            observation["capture_error_kind"] = "analysis_exception"
                             _write_daemon_status(
                                 state="running",
                                 screen_analysis="analysis_error",
@@ -659,18 +675,41 @@ async def poll_loop(
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
                         logger.info("[%s] \u2192 %s", ts, active_window)
-                    _write_daemon_status(
-                        state="running",
-                        active_window=active_window,
-                        frontmost_app=app_name,
-                        window_title=window_title,
-                        capture_ready=bool(
+                    capture_error = (
+                        str(observation.get("capture_error"))
+                        if observation is not None and observation.get("capture_error")
+                        else None
+                    )
+                    capture_error_kind = (
+                        str(observation.get("capture_error_kind"))
+                        if observation is not None and observation.get("capture_error_kind")
+                        else "capture_error"
+                    )
+                    status_update = {
+                        "state": "running",
+                        "active_window": active_window,
+                        "frontmost_app": app_name,
+                        "window_title": window_title,
+                        "capture_ready": bool(
                             observation is not None
                             and not observation.get("blocked")
-                            and "capture_error" not in observation
+                            and capture_error is None
                         ),
-                        last_context_post_at=datetime.now(timezone.utc).isoformat(),
-                        last_poll_at=poll_at,
+                        "last_context_post_at": datetime.now(timezone.utc).isoformat(),
+                        "last_poll_at": poll_at,
+                    }
+                    if capture_error:
+                        status_update.update(
+                            {
+                                "screen_analysis": "analysis_error"
+                                if capture_error_kind.startswith("analysis")
+                                else "capture_error",
+                                "last_error": capture_error,
+                                "last_error_kind": capture_error_kind,
+                            }
+                        )
+                    _write_daemon_status(
+                        **status_update
                     )
                     last_posted = active_window
                 except httpx.ConnectError:

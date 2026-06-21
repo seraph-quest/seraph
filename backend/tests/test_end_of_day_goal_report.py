@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -152,6 +153,9 @@ async def test_store_report_writes_durable_artifacts(async_db, tmp_path):
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["artifact_schema"] == "seraph.end_of_day_goal_report.v1"
     assert payload["report"]["analysis_provider"] == "deterministic-local"
+    assert stat.S_IMODE(text_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(text_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(json_path.stat().st_mode) == 0o600
     assert artifacts["report_text_sha256"]
     assert artifacts["report_json_sha256"]
 

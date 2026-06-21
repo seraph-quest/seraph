@@ -132,7 +132,7 @@ Examples:
 ./daemon/run.sh --ocr --ocr-provider codex-local --preserve-captures --verbose
 
 # Cloud analysis — OpenRouter with Gemini (structured JSON, ~$1.30/mo at ~150 switches/day)
-OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
+OPENROUTER_API_KEY=<openrouter_api_key> ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
 
 # With custom blocklist
 ./daemon/run.sh --ocr --ocr-provider openrouter --blocklist-file ~/blocklist.json --verbose

@@ -89,10 +89,17 @@ class NotificationDismissAllResponse(BaseModel):
 
 class DaemonStatusResponse(BaseModel):
     connected: bool
+    daemon_alive: bool = False
     last_post: float | None
     active_window: str | None
     has_screen_context: bool
     capture_mode: str
+    daemon_state: str | None = None
+    daemon_status_updated_at: str | None = None
+    screen_analysis: str | None = None
+    capture_ready: bool = False
+    last_error: str | None = None
+    last_error_kind: str | None = None
     pending_notification_count: int
     last_native_notification_at: str | None = None
     last_native_notification_title: str | None = None
@@ -403,6 +410,16 @@ async def post_screen_context(body: ScreenContextRequest):
 
 
 def _screen_artifact_root() -> Path:
+    screen_analysis_path = Path(settings.workspace_dir).expanduser().resolve() / "screen-analysis-settings.json"
+    if screen_analysis_path.exists():
+        try:
+            payload = json.loads(screen_analysis_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            configured = str(payload.get("archive_dir") or "").strip()
+            if configured:
+                return Path(configured).expanduser().resolve()
     seraph_configured = os.environ.get("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", "").strip()
     if seraph_configured:
         return Path(seraph_configured).expanduser().resolve()
@@ -568,14 +585,22 @@ def _continuity_surface(
 
 async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]:
     ctx = context_manager.get_context()
+    daemon_status = _read_daemon_status_file()
     connected = context_manager.is_daemon_connected()
     pending_notification_count = await native_notification_queue.count()
     return {
         "connected": connected,
+        "daemon_alive": bool(daemon_status.get("alive")),
         "last_post": ctx.last_daemon_post,
         "active_window": ctx.active_window,
         "has_screen_context": bool(ctx.screen_context),
         "capture_mode": ctx.capture_mode,
+        "daemon_state": daemon_status.get("state"),
+        "daemon_status_updated_at": daemon_status.get("updated_at"),
+        "screen_analysis": daemon_status.get("screen_analysis"),
+        "capture_ready": daemon_status.get("capture_ready"),
+        "last_error": daemon_status.get("last_error"),
+        "last_error_kind": daemon_status.get("last_error_kind"),
         "pending_notification_count": pending_notification_count,
         "last_native_notification_at": (
             ctx.last_native_notification_at.isoformat()
@@ -585,6 +610,47 @@ async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]
         "last_native_notification_title": ctx.last_native_notification_title,
         "last_native_notification_outcome": ctx.last_native_notification_outcome,
     }
+
+
+def _daemon_status_file_path() -> Path:
+    configured = os.environ.get("SERAPH_DAEMON_STATUS_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(settings.workspace_dir).expanduser().resolve() / "daemon-status.json"
+
+
+def _read_daemon_status_file(max_age_seconds: float = 45) -> dict[str, object]:
+    path = _daemon_status_file_path()
+    status: dict[str, object] = {
+        "state": "unknown",
+        "screen_analysis": "unknown",
+        "capture_ready": False,
+        "alive": False,
+        "last_error": None,
+        "last_error_kind": None,
+        "updated_at": None,
+    }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return status
+    if not isinstance(payload, dict):
+        return status
+    for key in ("state", "screen_analysis", "last_error", "last_error_kind", "updated_at"):
+        value = payload.get(key)
+        if value is None or isinstance(value, str):
+            status[key] = value
+    status["capture_ready"] = bool(payload.get("capture_ready", False))
+    updated_at = status["updated_at"]
+    if isinstance(updated_at, str) and status["state"] == "running":
+        try:
+            parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            status["alive"] = (datetime.now(timezone.utc) - parsed).total_seconds() < max_age_seconds
+        except ValueError:
+            status["alive"] = False
+    return status
 
 
 def _thread_label(thread_id: str | None, session_titles: dict[str, str]) -> str | None:

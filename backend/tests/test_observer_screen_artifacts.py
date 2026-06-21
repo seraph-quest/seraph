@@ -127,3 +127,21 @@ async def test_screen_artifact_root_prefers_seraph_archive_env(tmp_path, monkeyp
     monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(fallback))
 
     assert _screen_artifact_root() == preferred.resolve()
+
+
+@pytest.mark.asyncio
+async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, monkeypatch):
+    from src.api.observer import _screen_artifact_root
+
+    workspace = tmp_path / "workspace"
+    preferred = tmp_path / "settings-screen"
+    env_fallback = tmp_path / "env-screen"
+    workspace.mkdir()
+    (workspace / "screen-analysis-settings.json").write_text(
+        json.dumps({"archive_dir": str(preferred)}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.api.observer.settings.workspace_dir", str(workspace))
+    monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(env_fallback))
+
+    assert _screen_artifact_root() == preferred.resolve()

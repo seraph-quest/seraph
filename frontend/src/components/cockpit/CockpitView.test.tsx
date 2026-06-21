@@ -319,6 +319,18 @@ describe("CockpitView", () => {
     );
   });
 
+  it("does not claim runtime linked when runtime status exists but websocket is disconnected", async () => {
+    useChatStore.setState({ connectionStatus: "disconnected" });
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("DIRECT FALLBACK · BALANCED TOOLS · HIGH_RISK APPROVAL")).toBeInTheDocument());
+    expect(screen.getAllByText("disconnected").length).toBeGreaterThan(0);
+    expect(screen.queryByText("LIVE LINK · BALANCED TOOLS · HIGH_RISK APPROVAL")).not.toBeInTheDocument();
+    expect(screen.queryByText("runtime linked")).not.toBeInTheDocument();
+  });
+
   it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);

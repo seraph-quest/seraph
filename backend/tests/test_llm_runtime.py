@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1159,6 +1159,94 @@ def test_completion_with_fallback_sync_uses_local_profile_for_runtime_path(async
     assert events[0]["details"]["runtime_path"] == "session_consolidation"
     assert events[0]["details"]["runtime_profile"] == "local"
     assert events[0]["details"]["primary_model"] == "ollama/llama3.2"
+
+
+def test_completion_with_fallback_sync_routes_codex_local_to_local_operator(async_db):
+    with (
+        patch.object(settings, "default_model", "codex-local"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("src.llm_runtime.run_local_codex", new=AsyncMock(return_value={"ok": True, "stdout": "Local title"})) as mock_codex,
+        patch("litellm.completion") as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "Name this session"}],
+            temperature=0.3,
+            max_tokens=64,
+            runtime_path="session_title_generation",
+        )
+
+    assert result.choices[0].message.content == "Local title"
+    mock_completion.assert_not_called()
+    mock_codex.assert_awaited_once()
+    assert "user: Name this session" in mock_codex.await_args.args[0]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "session_title_generation"
+    assert events[0]["details"]["primary_model"] == "codex-local"
+
+
+async def test_completion_with_fallback_sync_fails_fast_for_codex_local_inside_running_loop(async_db):
+    with (
+        patch.object(settings, "default_model", "codex-local"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("src.llm_runtime.run_local_codex", new=AsyncMock(return_value={"ok": True, "stdout": "Loop title"})) as mock_codex,
+        patch("litellm.completion") as mock_completion,
+    ):
+        with pytest.raises(RuntimeError, match="active event loop"):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "Name this session"}],
+                temperature=0.3,
+                max_tokens=64,
+                runtime_path="session_title_generation",
+            )
+
+    mock_completion.assert_not_called()
+    mock_codex.assert_not_awaited()
+
+
+def test_fallback_litellm_model_generate_routes_codex_local_to_local_operator(async_db):
+    with (
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch(
+            "src.llm_runtime.run_local_codex",
+            new=AsyncMock(return_value={"ok": True, "stdout": "Agent reply<stop>ignored"}),
+        ) as mock_codex,
+        patch("litellm.completion") as mock_completion,
+    ):
+        model = FallbackLiteLLMModel(model_id="codex-local")
+        result = model.generate(
+            [{"role": "user", "content": "Say hello"}],
+            stop_sequences=["<stop>"],
+        )
+
+    assert result.role == "assistant"
+    assert result.content == "Agent reply"
+    mock_completion.assert_not_called()
+    mock_codex.assert_awaited_once()
+    assert "user: Say hello" in mock_codex.await_args.args[0]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["primary_model"] == "codex-local"
 
 
 def test_completion_with_fallback_sync_uses_runtime_model_override(async_db):

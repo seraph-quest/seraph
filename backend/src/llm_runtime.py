@@ -13,14 +13,17 @@ import os
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from smolagents import LiteLLMModel as BaseLiteLLMModel
+from smolagents.models import ChatMessage, MessageRole
 
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
+from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
 
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
@@ -1038,6 +1041,77 @@ def build_completion_kwargs(
     if api_base:
         kwargs["api_base"] = api_base
     return kwargs
+
+
+def _message_value(message: Any, key: str, default: Any = None) -> Any:
+    if isinstance(message, dict):
+        return message.get(key, default)
+    return getattr(message, key, default)
+
+
+def _messages_to_local_operator_prompt(messages: list[Any]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = str(_message_value(message, "role", "user") or "user").strip() or "user"
+        content = str(_message_value(message, "content", "") or "").strip()
+        if content:
+            parts.append(f"{role}: {content}")
+    return "\n\n".join(parts).strip()
+
+
+def _local_operator_completion_response(content: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            )
+        ],
+    )
+
+
+def _trim_after_stop_sequences(content: str, stop_sequences: list[str] | None) -> str:
+    if not stop_sequences:
+        return content
+    earliest_stop = len(content)
+    for stop_sequence in stop_sequences:
+        if not stop_sequence:
+            continue
+        stop_index = content.find(stop_sequence)
+        if stop_index >= 0:
+            earliest_stop = min(earliest_stop, stop_index)
+    return content[:earliest_stop]
+
+
+def _local_operator_chat_message(
+    content: str,
+    *,
+    raw: Any | None = None,
+    stop_sequences: list[str] | None = None,
+) -> ChatMessage:
+    return ChatMessage(
+        role=MessageRole.ASSISTANT,
+        content=_trim_after_stop_sequences(content, stop_sequences),
+        raw=raw,
+    )
+
+
+def _run_local_codex_completion(prompt: str, *, session_id: str | None) -> dict[str, Any]:
+    async def _run() -> dict[str, Any]:
+        return await run_local_codex(
+            prompt,
+            timeout_seconds=local_codex_chat_timeout_seconds(),
+            session_id=session_id,
+        )
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_run())
+
+    return {
+        "ok": False,
+        "stderr": "Local Codex completion is unavailable from synchronous code inside an active event loop.",
+    }
 
 
 def has_fallback_model(*, runtime_path: str | None = None) -> bool:
@@ -2449,13 +2523,32 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             try:
                 if is_primary:
                     primary_attempted = True
-                    response = super().generate(
-                        messages,
-                        stop_sequences=stop_sequences,
-                        response_format=response_format,
-                        tools_to_call_from=tools_to_call_from,
-                        **kwargs,
-                    )
+                    if is_local_codex_model(primary_model):
+                        local_result = _run_local_codex_completion(
+                            _messages_to_local_operator_prompt(messages),
+                            session_id=get_current_session_id(),
+                        )
+                        if not local_result.get("ok", False):
+                            raise RuntimeError(
+                                str(
+                                    local_result.get("stderr")
+                                    or local_result.get("stdout")
+                                    or "Local Codex operator failed."
+                                ).strip()
+                            )
+                        response = _local_operator_chat_message(
+                            str(local_result.get("stdout") or "").strip(),
+                            raw=local_result,
+                            stop_sequences=stop_sequences,
+                        )
+                    else:
+                        response = super().generate(
+                            messages,
+                            stop_sequences=stop_sequences,
+                            response_format=response_format,
+                            tools_to_call_from=tools_to_call_from,
+                            **kwargs,
+                        )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=self.api_base,
@@ -2480,13 +2573,32 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
                 fallback_model = target["model"]
                 attempted_fallback_models.append(fallback_model.model_id)
-                response = fallback_model.generate(
-                    messages,
-                    stop_sequences=stop_sequences,
-                    response_format=response_format,
-                    tools_to_call_from=tools_to_call_from,
-                    **kwargs,
-                )
+                if is_local_codex_model(fallback_model.model_id):
+                    local_result = _run_local_codex_completion(
+                        _messages_to_local_operator_prompt(messages),
+                        session_id=get_current_session_id(),
+                    )
+                    if not local_result.get("ok", False):
+                        raise RuntimeError(
+                            str(
+                                local_result.get("stderr")
+                                or local_result.get("stdout")
+                                or "Local Codex operator failed."
+                            ).strip()
+                        )
+                    response = _local_operator_chat_message(
+                        str(local_result.get("stdout") or "").strip(),
+                        raw=local_result,
+                        stop_sequences=stop_sequences,
+                    )
+                else:
+                    response = fallback_model.generate(
+                        messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
                 _mark_target_succeeded(
                     model_id=fallback_model.model_id,
                     api_base=fallback_model.api_base,
@@ -2694,7 +2806,23 @@ def completion_with_fallback_sync(
             try:
                 if is_primary:
                     primary_attempted = True
-                    response = litellm.completion(**primary_kwargs)
+                    if is_local_codex_model(primary_model):
+                        local_prompt = _messages_to_local_operator_prompt(messages)
+                        if not local_prompt:
+                            raise ValueError("Local Codex completion requires at least one non-empty message")
+                        local_result = _run_local_codex_completion(
+                            local_prompt,
+                            session_id=get_current_session_id(),
+                        )
+                        if not local_result.get("ok"):
+                            if local_result.get("timed_out"):
+                                raise TimeoutError("Local Codex completion timed out")
+                            raise RuntimeError(
+                                (local_result.get("stderr") or local_result.get("stdout") or "Local Codex completion failed").strip()
+                            )
+                        response = _local_operator_completion_response(str(local_result.get("stdout") or "").strip())
+                    else:
+                        response = litellm.completion(**primary_kwargs)
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),

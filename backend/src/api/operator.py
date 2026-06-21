@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 import re
 from typing import Any
 
@@ -15,6 +16,7 @@ from src.agent.session import session_manager
 from src.app import _runtime_model_label, _runtime_provider_label
 from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
 from src.operators.local_codex import (
+    is_local_codex_model,
     LocalCodexConfigurationError,
     local_codex_status,
     local_operator_statuses,
@@ -153,6 +155,7 @@ from src.workflows.post_dx_live_durable_orchestration import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class MemoryOperatorControlRequest(BaseModel):
@@ -693,11 +696,13 @@ def _build_operator_continuity_graph(
         for item in sessions
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
+    raw_snapshot_threads = continuity_snapshot.get("threads") if isinstance(continuity_snapshot, dict) else []
+    snapshot_thread_items = raw_snapshot_threads if isinstance(raw_snapshot_threads, list) else []
     snapshot_threads = {
         _continuity_graph_session_key(
             item.get("thread_id") if isinstance(item, dict) else None
         ): item
-        for item in (continuity_snapshot.get("threads") if isinstance(continuity_snapshot, dict) else [])
+        for item in snapshot_thread_items
         if isinstance(item, dict)
     }
     nodes: dict[str, dict[str, Any]] = {}
@@ -1238,7 +1243,7 @@ def _continuity_operator_items(
 
 def _runtime_status_payload() -> dict[str, Any]:
     model = settings.default_model.strip()
-    active_profile = resolve_runtime_profile(runtime_path="chat_agent")
+    active_profile = "codex-local" if is_local_codex_model(model) else resolve_runtime_profile(runtime_path="chat_agent")
     return {
         "version": "2026.4.10",
         "build_id": "SERAPH_PRIME_v2026.4.10",
@@ -1248,7 +1253,7 @@ def _runtime_status_payload() -> dict[str, Any]:
         "api_base": settings.llm_api_base.strip(),
         "active_profile": active_profile,
         "provider_profiles": provider_profile_statuses(),
-        "local_operators": local_operator_statuses(),
+        "local_operators": local_operator_statuses(probe=False),
         "timezone": settings.user_timezone,
         "llm_logging_enabled": settings.llm_log_enabled,
     }
@@ -4856,7 +4861,7 @@ async def get_operator_continuity_graph(
     session_id: str | None = Query(default=None),
     limit_sessions: int = Query(default=6, ge=1, le=20),
 ):
-    sessions, workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, continuity_snapshot = await asyncio.gather(
+    results = await asyncio.gather(
         session_manager.list_sessions(),
         _list_workflow_runs(limit=max(limit_sessions * 8, 60), session_id=session_id),
         approval_repository.list_pending(session_id=session_id, limit=max(limit_sessions * 4, 40)),
@@ -4864,7 +4869,29 @@ async def get_operator_continuity_graph(
         insight_queue.peek_all(),
         guardian_feedback_repository.list_recent(limit=max(limit_sessions * 8, 60), session_id=session_id),
         build_observer_continuity_snapshot(),
+        return_exceptions=True,
     )
+    (
+        sessions,
+        workflow_runs,
+        pending_approvals,
+        notifications,
+        queued_insights,
+        recent_interventions,
+        continuity_snapshot,
+    ) = results
+    source_names = (
+        "sessions",
+        "workflow_runs",
+        "pending_approvals",
+        "notifications",
+        "queued_insights",
+        "recent_interventions",
+        "continuity_snapshot",
+    )
+    for name, result in zip(source_names, results, strict=True):
+        if isinstance(result, Exception):
+            logger.warning("Operator continuity graph degraded: %s source failed: %s", name, result)
     return _build_operator_continuity_graph(
         sessions if isinstance(sessions, list) else [],
         workflow_runs if isinstance(workflow_runs, list) else [],

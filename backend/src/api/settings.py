@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import stat
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -36,6 +36,16 @@ class ScreenAnalysisSettingsRequest(BaseModel):
     model: str | None = None
     preserve_captures: bool | None = None
     archive_dir: str | None = None
+    min_seconds_between_captures: int | None = None
+    max_daily_captures: int | None = None
+    archive_retention_days: int | None = None
+    archive_max_mb: int | None = None
+
+
+class ManualReportRequest(BaseModel):
+    send_email: bool = False
+    preview_acknowledged: bool = False
+    report_date: date | None = None
 
 
 class ToolPolicyModeRequest(BaseModel):
@@ -102,7 +112,7 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
         "state": "unknown",
         "screen_analysis": "unknown",
         "capture_ready": False,
-        "connected": False,
+        "alive": False,
         "last_error": None,
         "last_error_kind": None,
         "updated_at": None,
@@ -137,9 +147,9 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
             parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
-            status["connected"] = (datetime.now(timezone.utc) - parsed).total_seconds() < max_age_seconds
+            status["alive"] = (datetime.now(timezone.utc) - parsed).total_seconds() < max_age_seconds
         except ValueError:
-            status["connected"] = False
+            status["alive"] = False
     return status
 
 
@@ -155,6 +165,10 @@ def _default_screen_analysis_settings() -> dict[str, object]:
         or settings.codex_local_model,
         "preserve_captures": _env_enabled("SERAPH_PRESERVE_SCREEN_CAPTURES", True),
         "archive_dir": str(screen_archive_dir),
+        "min_seconds_between_captures": max(0, settings.screen_analysis_min_seconds_between_captures),
+        "max_daily_captures": max(0, settings.screen_analysis_max_daily_captures),
+        "archive_retention_days": max(1, settings.screen_capture_archive_retention_days),
+        "archive_max_mb": max(0, settings.screen_capture_archive_max_mb),
     }
 
 
@@ -167,7 +181,17 @@ def _read_screen_analysis_settings() -> dict[str, object]:
         except (OSError, json.JSONDecodeError):
             loaded = {}
         if isinstance(loaded, dict):
-            for key in ("enabled", "provider", "model", "preserve_captures", "archive_dir"):
+            for key in (
+                "enabled",
+                "provider",
+                "model",
+                "preserve_captures",
+                "archive_dir",
+                "min_seconds_between_captures",
+                "max_daily_captures",
+                "archive_retention_days",
+                "archive_max_mb",
+            ):
                 if key in loaded:
                     payload[key] = loaded[key]
     provider = str(payload.get("provider") or "codex-local")
@@ -178,6 +202,19 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
     payload["model"] = str(payload.get("model") or "")
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
+    for key in (
+        "min_seconds_between_captures",
+        "max_daily_captures",
+        "archive_max_mb",
+    ):
+        try:
+            payload[key] = max(0, int(payload.get(key) or 0))
+        except (TypeError, ValueError):
+            payload[key] = 0
+    try:
+        payload["archive_retention_days"] = max(1, int(payload.get("archive_retention_days") or 365))
+    except (TypeError, ValueError):
+        payload["archive_retention_days"] = 365
     return payload
 
 
@@ -209,6 +246,26 @@ def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
     return {
         "artifact_count": len(image_mtimes),
         "last_artifact_at": datetime.fromtimestamp(latest_mtime, timezone.utc).isoformat(),
+    }
+
+
+def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
+    receipts_dir = report_dir / "receipts"
+    if not receipts_dir.exists():
+        return {"receipt_count": 0, "last_receipt_at": None}
+    receipt_mtimes = []
+    try:
+        for path in receipts_dir.rglob("*.json"):
+            if path.is_file():
+                receipt_mtimes.append(path.stat().st_mtime)
+    except OSError as exc:
+        logger.warning("Report receipt filesystem summary failed: %s", exc)
+        return {"receipt_count": 0, "last_receipt_at": None}
+    if not receipt_mtimes:
+        return {"receipt_count": 0, "last_receipt_at": None}
+    return {
+        "receipt_count": len(receipt_mtimes),
+        "last_receipt_at": datetime.fromtimestamp(max(receipt_mtimes), timezone.utc).isoformat(),
     }
 
 
@@ -320,7 +377,8 @@ async def get_screen_analysis_settings():
         {
             "capture_mode": ctx.capture_mode,
             "cadence_seconds": 60 if ctx.capture_mode == "detailed" else 300 if ctx.capture_mode == "balanced" else None,
-            "daemon_connected": bool(daemon_status["connected"]) or context_manager.is_daemon_connected(),
+            "daemon_connected": context_manager.is_daemon_connected(),
+            "daemon_alive": bool(daemon_status["alive"]),
             "artifact_count": 0,
             "last_artifact_at": None,
         }
@@ -359,6 +417,20 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         ):
             raise HTTPException(status_code=422, detail="Screen archive directory must be private and writable")
         payload["archive_dir"] = str(archive_dir)
+    for field_name in (
+        "min_seconds_between_captures",
+        "max_daily_captures",
+        "archive_max_mb",
+    ):
+        value = getattr(body, field_name)
+        if value is not None:
+            if value < 0:
+                raise HTTPException(status_code=422, detail=f"{field_name} must be >= 0")
+            payload[field_name] = value
+    if body.archive_retention_days is not None:
+        if body.archive_retention_days < 1:
+            raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
+        payload["archive_retention_days"] = body.archive_retention_days
     _write_screen_analysis_settings(payload)
     return await get_screen_analysis_settings()
 
@@ -368,6 +440,7 @@ async def get_artifact_storage_settings():
     """Return operator-visible evidence/report archive configuration."""
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
+    report_receipts = _report_receipt_summary(report_archive_dir)
     screen_analysis = await get_screen_analysis_settings()
     screen_archive_dir = Path(str(screen_analysis["archive_dir"]))
     screen_dir_status = _archive_dir_status(screen_archive_dir)
@@ -380,8 +453,15 @@ async def get_artifact_storage_settings():
             "capture_mode": screen_analysis["capture_mode"],
             "cadence_seconds": screen_analysis["cadence_seconds"],
             "daemon_connected": screen_analysis["daemon_connected"],
+            "daemon_alive": screen_analysis["daemon_alive"],
             "artifact_count": screen_summary["artifact_count"],
             "last_artifact_at": screen_summary["last_artifact_at"],
+            "budget": {
+                "min_seconds_between_captures": screen_analysis["min_seconds_between_captures"],
+                "max_daily_captures": screen_analysis["max_daily_captures"],
+                "archive_retention_days": screen_analysis["archive_retention_days"],
+                "archive_max_mb": screen_analysis["archive_max_mb"],
+            },
             "preservation_enabled": screen_analysis["preserve_captures"],
             "archive_dir": str(screen_analysis["archive_dir"]),
             "archive_dir_source": "screen-analysis-settings",
@@ -403,6 +483,8 @@ async def get_artifact_storage_settings():
             "archive_dir_source": report_archive_source,
             **report_dir_status,
             "stored_artifacts": ["report_text", "report_json"],
+            "receipt_count": report_receipts["receipt_count"],
+            "last_receipt_at": report_receipts["last_receipt_at"],
             "control_env": {
                 "archive_dir": "REPORT_ARCHIVE_DIR",
                 "enabled": "END_OF_DAY_REPORT_ENABLED",
@@ -415,6 +497,7 @@ async def get_artifact_storage_settings():
             "smtp_configured": bool(settings.smtp_host.strip()),
             "recipient_configured": bool(settings.email_reports_to.strip()),
             "allowlist_configured": bool(settings.email_reports_to_allowlist.strip()),
+            "sender_configured": bool(settings.email_reports_from.strip()),
             "control_env": {
                 "enabled": "EMAIL_REPORTS_ENABLED",
                 "preview_required": "EMAIL_REPORTS_PREVIEW_REQUIRED",
@@ -424,6 +507,26 @@ async def get_artifact_storage_settings():
             },
         },
     }
+
+
+@router.post("/settings/end-of-day-report/manual")
+async def run_manual_end_of_day_report(body: ManualReportRequest):
+    """Build/store a manual end-of-day report preview or operator-acknowledged send."""
+    from src.scheduler.jobs.end_of_day_goal_report import run_manual_end_of_day_goal_report
+
+    return await run_manual_end_of_day_goal_report(
+        send_email=body.send_email,
+        preview_acknowledged=body.preview_acknowledged,
+        report_day=body.report_date,
+    )
+
+
+@router.post("/settings/end-of-day-report/test-email")
+async def send_end_of_day_report_test_email():
+    """Send a guarded test email using the configured report email transport."""
+    from src.scheduler.jobs.end_of_day_goal_report import send_end_of_day_report_test_email
+
+    return await send_end_of_day_report_test_email()
 
 
 @router.get("/settings/tool-policy-mode")

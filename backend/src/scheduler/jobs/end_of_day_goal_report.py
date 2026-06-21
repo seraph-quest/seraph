@@ -108,6 +108,10 @@ def _report_archive_root() -> Path:
     return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "reports"
 
 
+def _report_receipt_dir(report_date: str) -> Path:
+    return _report_archive_root() / "receipts" / report_date
+
+
 def _report_artifact_paths(report: dict[str, Any]) -> dict[str, str]:
     report_date = str(report.get("date") or "unknown")
     digest = hashlib.sha256(
@@ -142,6 +146,84 @@ def archive_end_of_day_goal_report(report: dict[str, Any]) -> dict[str, Any]:
         **paths,
         "report_text_sha256": hashlib.sha256(text_payload.encode("utf-8")).hexdigest(),
         "report_json_sha256": hashlib.sha256(json_path.read_bytes()).hexdigest(),
+    }
+
+
+def archive_end_of_day_report_receipt(
+    *,
+    action: str,
+    report: dict[str, Any] | None = None,
+    episode_id: str | None = None,
+    email_result: EmailDeliveryResult | None = None,
+    status: str = "succeeded",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Persist a private operator receipt for manual/scheduled report actions."""
+    report_date = str((report or {}).get("date") or datetime.now(timezone.utc).date().isoformat())
+    created_at = datetime.now(timezone.utc).isoformat()
+    digest_input = json.dumps(
+        {
+            "action": action,
+            "created_at": created_at,
+            "report_date": report_date,
+            "episode_id": episode_id,
+            "email_status": email_result.status if email_result else None,
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:16]
+    receipt_dir = _report_receipt_dir(report_date)
+    receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt_dir.chmod(0o700)
+    receipt_path = receipt_dir / f"{action}-{report_date}-{digest}.json"
+    payload = {
+        "artifact_schema": "seraph.end_of_day_report_receipt.v1",
+        "created_at": created_at,
+        "action": action,
+        "status": status,
+        "reason": reason,
+        "report_date": report_date,
+        "episode_id": episode_id,
+        "report_artifacts": (report or {}).get("artifacts"),
+        "analysis_provider": (report or {}).get("analysis_provider"),
+        "email": {
+            "status": email_result.status if email_result else None,
+            "reason": email_result.reason if email_result else None,
+            "recipient_hash": email_result.recipient_hash if email_result else None,
+            "provider_receipt": email_result.provider_receipt if email_result else None,
+        },
+    }
+    _write_private_text(receipt_path, json.dumps(payload, indent=2, sort_keys=True))
+    return {
+        "receipt_id": receipt_path.stem,
+        "receipt_path": str(receipt_path),
+        "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        "status": status,
+        "reason": reason,
+    }
+
+
+def public_report_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
+    """Return report artifact metadata without exposing private filesystem paths."""
+    if not isinstance(artifacts, dict):
+        return {}
+    return {
+        "report_text_sha256": artifacts.get("report_text_sha256"),
+        "report_json_sha256": artifacts.get("report_json_sha256"),
+        "raw_artifact_path_exposed": False,
+    }
+
+
+def public_report_receipt(receipt: dict[str, Any] | None) -> dict[str, Any]:
+    """Return receipt metadata that is safe for API/audit surfaces."""
+    if not isinstance(receipt, dict):
+        return {}
+    return {
+        "receipt_id": receipt.get("receipt_id"),
+        "receipt_sha256": receipt.get("receipt_sha256"),
+        "status": receipt.get("status"),
+        "reason": receipt.get("reason"),
+        "raw_receipt_path_exposed": False,
     }
 
 
@@ -426,13 +508,17 @@ async def store_end_of_day_goal_report(report: dict[str, Any]) -> str:
     return episode.id
 
 
-async def deliver_report_email(report: dict[str, Any]) -> EmailDeliveryResult:
+async def deliver_report_email(
+    report: dict[str, Any],
+    *,
+    preview_acknowledged: bool = False,
+) -> EmailDeliveryResult:
     recipient = settings.email_reports_to.strip()
     sender = settings.email_reports_from.strip()
 
     if not settings.email_reports_enabled:
         return EmailDeliveryResult(status="skipped", reason="email_reports_disabled")
-    if settings.email_reports_preview_required:
+    if settings.email_reports_preview_required and not preview_acknowledged:
         return EmailDeliveryResult(status="preview_required", reason="operator_preview_required")
     if not recipient or not sender:
         return EmailDeliveryResult(status="skipped", reason="missing_recipient_or_sender")
@@ -484,6 +570,71 @@ async def deliver_report_email(report: dict[str, Any]) -> EmailDeliveryResult:
     return EmailDeliveryResult(status="sent", recipient_hash=recipient_digest)
 
 
+async def run_manual_end_of_day_goal_report(
+    *,
+    send_email: bool = False,
+    preview_acknowledged: bool = False,
+    report_day: date | None = None,
+) -> dict[str, Any]:
+    report = await build_end_of_day_goal_report(report_day)
+    episode_id = await store_end_of_day_goal_report(report)
+    email_result = (
+        await deliver_report_email(report, preview_acknowledged=preview_acknowledged)
+        if send_email
+        else EmailDeliveryResult(status="preview_only", reason="manual_preview")
+    )
+    receipt = archive_end_of_day_report_receipt(
+        action="manual-send" if send_email else "manual-preview",
+        report=report,
+        episode_id=episode_id,
+        email_result=email_result,
+    )
+    return {
+        "status": "ok",
+        "action": "manual-send" if send_email else "manual-preview",
+        "report": {
+            "date": report["date"],
+            "timezone": report["timezone"],
+            "body": report["body"],
+            "summary": report["summary"],
+            "goal_alignment": report["goal_alignment"],
+            "analysis_provider": report.get("analysis_provider"),
+            "artifacts": public_report_artifacts(report.get("artifacts")),
+        },
+        "episode_id": episode_id,
+        "email": {
+            "status": email_result.status,
+            "reason": email_result.reason,
+            "recipient_hash": email_result.recipient_hash,
+        },
+        "receipt": public_report_receipt(receipt),
+    }
+
+
+async def send_end_of_day_report_test_email() -> dict[str, Any]:
+    test_report = {
+        "date": datetime.now(_safe_timezone()).date().isoformat(),
+        "timezone": str(_safe_timezone()),
+        "body": "Seraph test email: end-of-day report delivery is configured.",
+        "analysis_provider": "deterministic-local",
+        "artifact_schema": "seraph.end_of_day_report_test_email.v1",
+    }
+    email_result = await deliver_report_email(test_report, preview_acknowledged=True)
+    receipt = archive_end_of_day_report_receipt(
+        action="test-email",
+        report=test_report,
+        email_result=email_result,
+        status=email_result.status,
+        reason=email_result.reason,
+    )
+    return {
+        "status": email_result.status,
+        "reason": email_result.reason,
+        "recipient_hash": email_result.recipient_hash,
+        "receipt": public_report_receipt(receipt),
+    }
+
+
 async def run_end_of_day_goal_report() -> None:
     if not settings.end_of_day_report_enabled:
         await log_scheduler_job_event(
@@ -498,6 +649,12 @@ async def run_end_of_day_goal_report() -> None:
         report = await build_end_of_day_goal_report()
         episode_id = await store_end_of_day_goal_report(report)
         email_result = await deliver_report_email(report)
+        receipt = archive_end_of_day_report_receipt(
+            action="scheduled",
+            report=report,
+            episode_id=episode_id,
+            email_result=email_result,
+        )
         await log_scheduler_job_event(
             job_name="end_of_day_goal_report",
             outcome="succeeded",
@@ -511,7 +668,8 @@ async def run_end_of_day_goal_report() -> None:
                 "email_status": email_result.status,
                 "email_reason": email_result.reason,
                 "email_recipient_hash": email_result.recipient_hash,
-                "report_artifacts": report.get("artifacts"),
+                "report_artifacts": public_report_artifacts(report.get("artifacts")),
+                "report_receipt": public_report_receipt(receipt),
             },
         )
     except Exception as exc:

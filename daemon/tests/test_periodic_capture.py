@@ -117,6 +117,10 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
             "model": "gpt-5.5",
             "preserve_captures": True,
             "archive_dir": str(first_archive),
+            "min_seconds_between_captures": 30,
+            "max_daily_captures": 5,
+            "archive_retention_days": 180,
+            "archive_max_mb": 512,
         }
     )
 
@@ -129,6 +133,10 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
         assert runtime.provider.name == "codex-local"
         assert runtime.preserve_captures is True
         assert runtime.archive_dir == str(first_archive)
+        assert runtime.min_seconds_between_captures == 30
+        assert runtime.max_daily_captures == 5
+        assert runtime.archive_retention_days == 180
+        assert runtime.archive_max_mb == 512
         assert runtime.blocklist == {"SecretApp"}
 
         second_archive = tmp_path / "second"
@@ -137,10 +145,14 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
                 "enabled": True,
                 "provider": "apple-vision",
                 "model": "",
-                "preserve_captures": False,
-                "archive_dir": str(second_archive),
-            }
-        )
+            "preserve_captures": False,
+            "archive_dir": str(second_archive),
+            "min_seconds_between_captures": 0,
+            "max_daily_captures": 0,
+            "archive_retention_days": 365,
+            "archive_max_mb": 0,
+        }
+    )
         old_provider = runtime.provider
         await runtime.refresh(second_client, "http://localhost:8004", force=True)
 
@@ -149,6 +161,27 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
     assert runtime.provider.name == "apple-vision"
     assert runtime.preserve_captures is False
     assert runtime.archive_dir == str(second_archive)
+
+
+def test_screen_analysis_runtime_budget_records_and_skips(tmp_path):
+    runtime = ScreenAnalysisRuntime(
+        enabled=True,
+        provider="codex-local",
+        model=None,
+        preserve_captures=True,
+        archive_dir=str(tmp_path),
+        openrouter_api_key=None,
+        blocklist_file=None,
+    )
+    runtime._update_budget_settings(60, 1, 365, 0)
+
+    assert runtime.budget_skip_reason(now=100.0) is None
+    runtime.record_capture(now=100.0)
+    assert runtime.budget_skip_reason(now=120.0) == "min_seconds_between_captures"
+    assert runtime.budget_skip_reason(now=161.0) == "max_daily_captures"
+    status = runtime.budget_status()
+    assert status["daily_capture_count"] == 1
+    assert status["max_daily_captures"] == 1
 
 
 @pytest.mark.asyncio
@@ -312,6 +345,9 @@ class TestPeriodicCaptureLoop:
             archive_dir=str(tmp_path),
             blocklist=set(),
             refresh=AsyncMock(),
+            budget_skip_reason=MagicMock(return_value=None),
+            record_capture=MagicMock(),
+            budget_status=MagicMock(return_value={}),
         )
 
         async def mock_get(url, **kwargs):
@@ -347,10 +383,69 @@ class TestPeriodicCaptureLoop:
         assert len(posts) == 1
         observation = posts[0]["observation"]
         assert observation["summary"] == "Editing Seraph settings."
+        assert observation["analysis_usage"]["provider"] == "codex-local"
+        assert observation["analysis_usage"]["cost_posture"] == "local_no_api_price"
+        assert observation["analysis_usage"]["duration_ms"] == 12
         assert observation["capture_artifacts"]["provider"] == "codex-local"
         assert Path(observation["capture_artifacts"]["image_path"]).read_bytes() == b"png bytes"
+        analysis_payload = json.loads(Path(observation["capture_artifacts"]["analysis_path"]).read_text(encoding="utf-8"))
+        assert analysis_payload["analysis_usage"]["cost_posture"] == "local_no_api_price"
         assert provider.analyze_screen.await_count == 1
+        screen_runtime.record_capture.assert_called_once()
         assert screen_runtime.refresh.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_detailed_mode_posts_budget_skip_reason(self, tmp_path):
+        posts = []
+        provider = SimpleNamespace(name="codex-local")
+        runtime = ScreenAnalysisRuntime(
+            enabled=True,
+            provider="codex-local",
+            model=None,
+            preserve_captures=True,
+            archive_dir=str(tmp_path),
+            openrouter_api_key=None,
+            blocklist_file=None,
+        )
+        runtime.provider = provider
+        runtime.blocklist = set()
+        runtime._update_budget_settings(0, 0, 365, 0)
+        runtime.budget_skip_reason = MagicMock(return_value="max_daily_captures")
+        runtime.refresh = AsyncMock()
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"mode": "detailed"}
+            return resp
+
+        async def mock_post(url, **kwargs):
+            posts.append(kwargs.get("json", {}))
+            raise asyncio.CancelledError()
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.post = mock_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("seraph_daemon.get_frontmost_app_name", return_value="VS Code"), \
+             patch("seraph_daemon.get_window_title", return_value="settings.py"), \
+             patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+             patch("ocr.screenshot.capture_screen_png", return_value=b"png bytes"), \
+             patch("httpx.AsyncClient", return_value=mock_client):
+
+            with pytest.raises(asyncio.CancelledError):
+                await periodic_capture_loop(
+                    "http://localhost:8004",
+                    idle_timeout=300,
+                    verbose=False,
+                    screen_runtime=runtime,
+                )
+
+        assert posts[0]["observation"]["capture_skipped"] is True
+        assert posts[0]["observation"]["capture_skip_reason"] == "max_daily_captures"
+        assert not hasattr(provider, "analyze_screen")
 
     @pytest.mark.asyncio
     async def test_skips_when_idle(self):

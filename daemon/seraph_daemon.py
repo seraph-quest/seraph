@@ -83,6 +83,15 @@ def _archive_provider_capture(
     }
 
 
+def _analysis_usage(provider_name: str, *, duration_ms: int | None, success: bool) -> dict[str, object]:
+    return {
+        "provider": provider_name,
+        "duration_ms": duration_ms,
+        "success": success,
+        "cost_posture": "local_no_api_price" if provider_name == "codex-local" else "provider_api_usage",
+    }
+
+
 def _write_private_bytes(path: Path, content: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -335,6 +344,13 @@ class ScreenAnalysisRuntime:
         self.enabled = False
         self.preserve_captures = False
         self.archive_dir = archive_dir
+        self.min_seconds_between_captures = 0
+        self.max_daily_captures = 0
+        self.archive_retention_days = 365
+        self.archive_max_mb = 0
+        self._last_capture_monotonic = 0.0
+        self._daily_capture_date = datetime.now(timezone.utc).date().isoformat()
+        self._daily_capture_count = 0
 
     async def refresh(self, client: httpx.AsyncClient, url: str, *, force: bool = False) -> None:
         now = time.time()
@@ -349,7 +365,21 @@ class ScreenAnalysisRuntime:
         model = str(payload.get("model") or self._fallback["model"] or "")
         preserve = bool(payload.get("preserve_captures", self._fallback["preserve_captures"]))
         archive_dir = str(payload.get("archive_dir") or self._fallback["archive_dir"])
-        signature = (enabled, provider_name, model, preserve, archive_dir)
+        min_seconds = max(0, int(payload.get("min_seconds_between_captures") or 0))
+        max_daily = max(0, int(payload.get("max_daily_captures") or 0))
+        retention_days = max(1, int(payload.get("archive_retention_days") or 365))
+        archive_max_mb = max(0, int(payload.get("archive_max_mb") or 0))
+        signature = (
+            enabled,
+            provider_name,
+            model,
+            preserve,
+            archive_dir,
+            min_seconds,
+            max_daily,
+            retention_days,
+            archive_max_mb,
+        )
         if signature == self._signature:
             return
 
@@ -359,6 +389,7 @@ class ScreenAnalysisRuntime:
             self.enabled = False
             self.preserve_captures = preserve
             self.archive_dir = archive_dir
+            self._update_budget_settings(min_seconds, max_daily, retention_days, archive_max_mb)
             self._signature = signature
             if old_provider is not None and hasattr(old_provider, "close"):
                 await old_provider.close()
@@ -394,6 +425,7 @@ class ScreenAnalysisRuntime:
             self.enabled = False
             self.preserve_captures = preserve
             self.archive_dir = archive_dir
+            self._update_budget_settings(min_seconds, max_daily, retention_days, archive_max_mb)
             if old_provider is not None and hasattr(old_provider, "close"):
                 await old_provider.close()
             _write_daemon_status(
@@ -414,6 +446,7 @@ class ScreenAnalysisRuntime:
             self.enabled = False
             self.preserve_captures = preserve
             self.archive_dir = archive_dir
+            self._update_budget_settings(min_seconds, max_daily, retention_days, archive_max_mb)
             if old_provider is not None and hasattr(old_provider, "close"):
                 await old_provider.close()
             _write_daemon_status(
@@ -433,6 +466,7 @@ class ScreenAnalysisRuntime:
         self.enabled = True
         self.preserve_captures = preserve
         self.archive_dir = archive_dir
+        self._update_budget_settings(min_seconds, max_daily, retention_days, archive_max_mb)
         self._signature = signature
         self.blocklist = load_blocklist(self._blocklist_file)
         logger.info(
@@ -452,6 +486,52 @@ class ScreenAnalysisRuntime:
             last_error=None,
             last_error_kind=None,
         )
+
+    def _update_budget_settings(
+        self,
+        min_seconds: int,
+        max_daily: int,
+        retention_days: int,
+        archive_max_mb: int,
+    ) -> None:
+        self.min_seconds_between_captures = min_seconds
+        self.max_daily_captures = max_daily
+        self.archive_retention_days = retention_days
+        self.archive_max_mb = archive_max_mb
+
+    def _refresh_daily_counter(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if today != self._daily_capture_date:
+            self._daily_capture_date = today
+            self._daily_capture_count = 0
+
+    def budget_skip_reason(self, *, now: float) -> str | None:
+        self._refresh_daily_counter()
+        if (
+            self.min_seconds_between_captures > 0
+            and self._last_capture_monotonic > 0
+            and now - self._last_capture_monotonic < self.min_seconds_between_captures
+        ):
+            return "min_seconds_between_captures"
+        if self.max_daily_captures > 0 and self._daily_capture_count >= self.max_daily_captures:
+            return "max_daily_captures"
+        return None
+
+    def record_capture(self, *, now: float) -> None:
+        self._refresh_daily_counter()
+        self._last_capture_monotonic = now
+        self._daily_capture_count += 1
+
+    def budget_status(self) -> dict[str, object]:
+        self._refresh_daily_counter()
+        return {
+            "min_seconds_between_captures": self.min_seconds_between_captures,
+            "max_daily_captures": self.max_daily_captures,
+            "daily_capture_count": self._daily_capture_count,
+            "daily_capture_date": self._daily_capture_date,
+            "archive_retention_days": self.archive_retention_days,
+            "archive_max_mb": self.archive_max_mb,
+        }
 
     async def close(self) -> None:
         if self.provider is not None and hasattr(self.provider, "close"):
@@ -574,20 +654,111 @@ async def poll_loop(
                         if verbose:
                             logger.info("Blocked app: %s — skipping screenshot", app_name)
                     else:
-                        try:
-                            from ocr.screenshot import capture_screen_png
+                        budget_skip_reason = screen_runtime.budget_skip_reason(now=time.time())
+                        if budget_skip_reason:
+                            observation["capture_skipped"] = True
+                            observation["capture_skip_reason"] = budget_skip_reason
+                            _write_daemon_status(
+                                state="running",
+                                screen_analysis="capture_budget_skipped",
+                                provider=screen_runtime.provider.name,
+                                capture_ready=False,
+                                active_window=active_window,
+                                frontmost_app=app_name,
+                                window_title=window_title,
+                                last_poll_at=poll_at,
+                                last_error=f"Screen capture skipped by budget: {budget_skip_reason}",
+                                last_error_kind=budget_skip_reason,
+                                capture_budget=screen_runtime.budget_status(),
+                            )
+                            if verbose:
+                                logger.info("Screen capture skipped by budget: %s", budget_skip_reason)
+                        else:
+                            try:
+                                from ocr.screenshot import capture_screen_png
 
-                            png_bytes = await asyncio.to_thread(capture_screen_png)
-                            if not png_bytes:
-                                observation["capture_error"] = (
-                                    "macOS screen capture returned no image. Grant Screen Recording / "
-                                    "Screen & System Audio Recording permission to the terminal/app running Seraph, "
-                                    "then restart the daemon."
-                                )
-                                observation["capture_error_kind"] = "screen_capture_permission"
+                                png_bytes = await asyncio.to_thread(capture_screen_png)
+                                if not png_bytes:
+                                    observation["capture_error"] = (
+                                        "macOS screen capture returned no image. Grant Screen Recording / "
+                                        "Screen & System Audio Recording permission to the terminal/app running Seraph, "
+                                        "then restart the daemon."
+                                    )
+                                    observation["capture_error_kind"] = "screen_capture_permission"
+                                    _write_daemon_status(
+                                        state="running",
+                                        screen_analysis="capture_error",
+                                        provider=screen_runtime.provider.name,
+                                        capture_ready=False,
+                                        active_window=active_window,
+                                        frontmost_app=app_name,
+                                        window_title=window_title,
+                                        last_poll_at=poll_at,
+                                        last_error=observation["capture_error"],
+                                        last_error_kind="screen_capture_permission",
+                                    )
+                                if png_bytes:
+                                    result = await screen_runtime.provider.analyze_screen(png_bytes, app_name)
+                                    if result.success:
+                                        screen_runtime.record_capture(now=time.time())
+                                        analysis = {
+                                            **result.data,
+                                            "analysis_usage": _analysis_usage(
+                                                screen_runtime.provider.name,
+                                                duration_ms=result.duration_ms,
+                                                success=True,
+                                            ),
+                                        }
+                                        observation.update(analysis)
+                                        if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
+                                            observation["capture_artifacts"] = _archive_provider_capture(
+                                                archive_dir=screen_runtime.archive_dir,
+                                                png_bytes=png_bytes,
+                                                app_name=app_name,
+                                                provider_name=screen_runtime.provider.name,
+                                                analysis=analysis,
+                                            )
+                                        if verbose:
+                                            ts = time.strftime("%H:%M:%S")
+                                            logger.info(
+                                                "[%s] analyzed (%dms): %s",
+                                                ts,
+                                                result.duration_ms,
+                                                result.data.get("summary", "")[:80],
+                                            )
+                                        _write_daemon_status(
+                                            state="running",
+                                            screen_analysis="active",
+                                            provider=screen_runtime.provider.name,
+                                            capture_ready=True,
+                                            active_window=active_window,
+                                            frontmost_app=app_name,
+                                            window_title=window_title,
+                                            last_capture_at=datetime.now(timezone.utc).isoformat(),
+                                            last_poll_at=poll_at,
+                                            last_error=None,
+                                            last_error_kind=None,
+                                            capture_budget=screen_runtime.budget_status(),
+                                        )
+                                    else:
+                                        logger.debug("Screen analysis failed: %s", result.error)
+                                        observation["capture_error"] = result.error or "Screen analysis failed."
+                                        observation["capture_error_kind"] = "analysis_error"
+                                        _write_daemon_status(
+                                            state="running",
+                                            screen_analysis="analysis_error",
+                                            provider=screen_runtime.provider.name,
+                                            capture_ready=False,
+                                            last_error=observation["capture_error"],
+                                            last_error_kind="analysis_error",
+                                        )
+                            except Exception:
+                                logger.debug("Screenshot/analysis error", exc_info=True)
+                                observation["capture_error"] = "Screenshot or screen analysis failed unexpectedly."
+                                observation["capture_error_kind"] = "analysis_exception"
                                 _write_daemon_status(
                                     state="running",
-                                    screen_analysis="capture_error",
+                                    screen_analysis="analysis_error",
                                     provider=screen_runtime.provider.name,
                                     capture_ready=False,
                                     active_window=active_window,
@@ -595,69 +766,8 @@ async def poll_loop(
                                     window_title=window_title,
                                     last_poll_at=poll_at,
                                     last_error=observation["capture_error"],
-                                    last_error_kind="screen_capture_permission",
+                                    last_error_kind="analysis_exception",
                                 )
-                            if png_bytes:
-                                result = await screen_runtime.provider.analyze_screen(png_bytes, app_name)
-                                if result.success:
-                                    observation.update(result.data)
-                                    if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
-                                        observation["capture_artifacts"] = _archive_provider_capture(
-                                            archive_dir=screen_runtime.archive_dir,
-                                            png_bytes=png_bytes,
-                                            app_name=app_name,
-                                            provider_name=screen_runtime.provider.name,
-                                            analysis=result.data,
-                                        )
-                                    if verbose:
-                                        ts = time.strftime("%H:%M:%S")
-                                        logger.info(
-                                            "[%s] analyzed (%dms): %s",
-                                            ts,
-                                            result.duration_ms,
-                                            result.data.get("summary", "")[:80],
-                                        )
-                                    _write_daemon_status(
-                                        state="running",
-                                        screen_analysis="active",
-                                        provider=screen_runtime.provider.name,
-                                        capture_ready=True,
-                                        active_window=active_window,
-                                        frontmost_app=app_name,
-                                        window_title=window_title,
-                                        last_capture_at=datetime.now(timezone.utc).isoformat(),
-                                        last_poll_at=poll_at,
-                                        last_error=None,
-                                        last_error_kind=None,
-                                    )
-                                else:
-                                    logger.debug("Screen analysis failed: %s", result.error)
-                                    observation["capture_error"] = result.error or "Screen analysis failed."
-                                    observation["capture_error_kind"] = "analysis_error"
-                                    _write_daemon_status(
-                                        state="running",
-                                        screen_analysis="analysis_error",
-                                        provider=screen_runtime.provider.name,
-                                        capture_ready=False,
-                                        last_error=observation["capture_error"],
-                                        last_error_kind="analysis_error",
-                                    )
-                        except Exception:
-                            logger.debug("Screenshot/analysis error", exc_info=True)
-                            observation["capture_error"] = "Screenshot or screen analysis failed unexpectedly."
-                            observation["capture_error_kind"] = "analysis_exception"
-                            _write_daemon_status(
-                                state="running",
-                                screen_analysis="analysis_error",
-                                provider=screen_runtime.provider.name,
-                                capture_ready=False,
-                                active_window=active_window,
-                                frontmost_app=app_name,
-                                window_title=window_title,
-                                last_poll_at=poll_at,
-                                last_error=observation["capture_error"],
-                                last_error_kind="analysis_exception",
-                            )
 
                 # Post to backend
                 try:
@@ -806,6 +916,34 @@ async def periodic_capture_loop(
                     "app": app_name,
                     "window_title": window_title,
                 }
+                budget_skip_reason = screen_runtime.budget_skip_reason(now=now)
+                if budget_skip_reason:
+                    observation["capture_skipped"] = True
+                    observation["capture_skip_reason"] = budget_skip_reason
+                    _write_daemon_status(
+                        state="running",
+                        screen_analysis="capture_budget_skipped",
+                        provider=screen_runtime.provider.name,
+                        capture_ready=False,
+                        active_window=active_window,
+                        frontmost_app=app_name,
+                        window_title=window_title,
+                        last_poll_at=poll_at,
+                        last_error=f"Screen capture skipped by budget: {budget_skip_reason}",
+                        last_error_kind=budget_skip_reason,
+                        capture_budget=screen_runtime.budget_status(),
+                    )
+                    await client.post(
+                        f"{url}/api/observer/context",
+                        json={
+                            "active_window": active_window,
+                            "observation": observation,
+                            "switch_timestamp": now,
+                        },
+                    )
+                    last_periodic = now
+                    await asyncio.sleep(check_interval)
+                    continue
 
                 try:
                     from ocr.screenshot import capture_screen_png
@@ -828,14 +966,23 @@ async def periodic_capture_loop(
                     if png_bytes:
                         result = await screen_runtime.provider.analyze_screen(png_bytes, app_name)
                         if result.success:
-                            observation.update(result.data)
+                            screen_runtime.record_capture(now=now)
+                            analysis = {
+                                **result.data,
+                                "analysis_usage": _analysis_usage(
+                                    screen_runtime.provider.name,
+                                    duration_ms=result.duration_ms,
+                                    success=True,
+                                ),
+                            }
+                            observation.update(analysis)
                             if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
                                 observation["capture_artifacts"] = _archive_provider_capture(
                                     archive_dir=screen_runtime.archive_dir,
                                     png_bytes=png_bytes,
                                     app_name=app_name,
                                     provider_name=screen_runtime.provider.name,
-                                    analysis=result.data,
+                                    analysis=analysis,
                                 )
                             if verbose:
                                 ts = time.strftime("%H:%M:%S")
@@ -858,6 +1005,7 @@ async def periodic_capture_loop(
                                 last_poll_at=poll_at,
                                 last_error=None,
                                 last_error_kind=None,
+                                capture_budget=screen_runtime.budget_status(),
                             )
                         else:
                             logger.debug("Periodic analysis failed: %s", result.error)

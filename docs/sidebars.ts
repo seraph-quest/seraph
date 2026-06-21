@@ -3,15 +3,22 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   legacySidebar: [
     'intro',
-    'setup',
     {
       type: 'category',
-      label: 'Overview',
+      label: 'Historical Setup',
+      collapsed: true,
+      items: ['setup'],
+    },
+    {
+      type: 'category',
+      label: 'Archived Overview',
+      collapsed: true,
       items: ['overview/status-report', 'overview/roadmap'],
     },
     {
       type: 'category',
-      label: 'Plan',
+      label: 'Archived Plan',
+      collapsed: true,
       items: [
         'plan/trust-boundaries',
         'plan/execution-plane',
@@ -24,6 +31,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Archived Phases',
+      collapsed: true,
       items: [
         'development/phase-1-persistent-identity',
         'development/phase-2-capable-executor',
@@ -35,14 +43,16 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Integrations',
+      label: 'Historical Integrations',
+      collapsed: true,
       items: [
         'integrations/things3-mcp',
       ],
     },
     {
       type: 'category',
-      label: 'Extensions',
+      label: 'Historical Extensions',
+      collapsed: true,
       items: [
         'extensions/overview',
         'extensions/create-a-capability-pack',
@@ -54,7 +64,8 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Contributing',
+      label: 'Historical Contributing',
+      collapsed: true,
       items: [
         'contributing/git-workflow',
         'development/testing',
@@ -62,7 +73,8 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Architecture',
+      label: 'Historical Architecture',
+      collapsed: true,
       items: [
         'architecture/tauri-analysis',
         'architecture/recursive-delegation-research',

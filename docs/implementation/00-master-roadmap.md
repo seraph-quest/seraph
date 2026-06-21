@@ -43,6 +43,8 @@ When these docs are updated on an open feature branch, they describe the intende
 ## Current Status
 
 Read this roadmap together with [Development Status](./STATUS.md).
+For a shorter reader-facing overview of the current app, start with
+[Current App Guide](./12-current-app-guide.md).
 For the implementation-side mirrors of the evidence, benchmark, superiority, world-class strategy, and agent parity goal layers, also read [08. Docs Contract](./08-docs-contract.md), [09. Benchmark Status](./09-benchmark-status.md), [10. Superiority Delivery](./10-superiority-delivery.md), [11. World-Class Strategy Delivery](./11-world-class-strategy-delivery.md), and [16. Agent Parity Execution Roadmap](./16-agent-parity-execution-roadmap.md).
 
 ## M1 Capability Contract

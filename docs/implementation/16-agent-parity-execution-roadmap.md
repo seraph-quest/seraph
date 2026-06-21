@@ -77,7 +77,7 @@ June 18, 2026 correction: the next parity train is feature-first. The BV-EF proo
 ## Paired Research
 
 - full goal document: [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals)
-- execution prompt: [17. Full Production Parity Goal Prompt](/implementation/full-production-parity-goal-prompt)
+- execution prompt: [17. Full Production Parity Goal Prompt](./17-full-production-parity-goal-prompt.md)
 - competitor truth and source discipline: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
 - claim gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
 - world-class strategy: [17. Seraph World-Class Strategy](/research/seraph-world-class-strategy)

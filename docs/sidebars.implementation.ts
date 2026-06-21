@@ -8,6 +8,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'master-roadmap',
         'STATUS',
+        'current-app-guide',
       ],
     },
     {

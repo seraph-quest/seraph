@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ArtifactStoragePanel } from "./ArtifactStoragePanel";
@@ -7,6 +7,84 @@ function mockResponse(data: unknown, ok = true) {
   return {
     ok,
     json: async () => data,
+  };
+}
+
+function settingsFromScreenAnalysisFixture(screen: {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  preserve_captures: boolean;
+  archive_dir: string;
+  capture_mode: string;
+  cadence_seconds: number | null;
+  daemon_connected: boolean;
+  artifact_count: number;
+  last_artifact_at: string | null;
+}) {
+  return {
+    screen: {
+      analysis_enabled: screen.enabled,
+      provider: screen.provider,
+      model: screen.model,
+      capture_mode: screen.capture_mode,
+      cadence_seconds: screen.cadence_seconds,
+      daemon_connected: screen.daemon_connected,
+      artifact_count: screen.artifact_count,
+      last_artifact_at: screen.last_artifact_at,
+      preservation_enabled: screen.preserve_captures,
+      archive_dir: screen.archive_dir,
+      archive_dir_source: "screen-analysis-settings",
+      exists: true,
+      writable: true,
+      creation_error: null,
+      stored_artifacts: ["image", "provider_output", "analysis_json"],
+      inspection_endpoint: "/api/observer/screen-artifacts",
+      inspection_visibility: "localhost_only",
+      daemon_status: {
+        state: "running",
+        screen_analysis: "active",
+        capture_ready: true,
+        last_error: null,
+        last_error_kind: null,
+        updated_at: "2026-06-20T18:34:25Z",
+        status_source: "daemon-status-file",
+      },
+      control_env: {
+        enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
+        archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+      },
+    },
+    reports: {
+      enabled: false,
+      hour: 21,
+      analysis_provider: "deterministic-local",
+      archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
+      archive_dir_source: "default",
+      exists: true,
+      writable: true,
+      creation_error: null,
+      stored_artifacts: ["report_text", "report_json"],
+      control_env: {
+        archive_dir: "REPORT_ARCHIVE_DIR",
+        enabled: "END_OF_DAY_REPORT_ENABLED",
+        llm: "END_OF_DAY_REPORT_LLM_ENABLED",
+      },
+    },
+    email: {
+      enabled: false,
+      preview_required: true,
+      smtp_configured: false,
+      recipient_configured: false,
+      allowlist_configured: false,
+      control_env: {
+        enabled: "EMAIL_REPORTS_ENABLED",
+        preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
+        smtp_host: "SMTP_HOST",
+        recipient: "EMAIL_REPORTS_TO",
+        allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
+      },
+    },
   };
 }
 
@@ -26,15 +104,32 @@ describe("ArtifactStoragePanel", () => {
     fetchMock.mockResolvedValueOnce(
       mockResponse({
         screen: {
+          analysis_enabled: true,
+          provider: "codex-local",
+          model: "gpt-5.5",
+          capture_mode: "detailed",
+          cadence_seconds: 60,
+          daemon_connected: false,
+          artifact_count: 1,
+          last_artifact_at: "2026-06-20T18:34:25.918618",
           preservation_enabled: true,
           archive_dir: "/Users/test/Library/Application Support/Seraph/artifacts/screen-captures",
-          archive_dir_source: "default",
+          archive_dir_source: "screen-analysis-settings",
           exists: true,
           writable: true,
           creation_error: null,
           stored_artifacts: ["image", "provider_output", "analysis_json"],
           inspection_endpoint: "/api/observer/screen-artifacts",
           inspection_visibility: "localhost_only",
+          daemon_status: {
+            state: "running",
+            screen_analysis: "capture_error",
+            capture_ready: false,
+            last_error: "Grant Screen Recording permission to the terminal/app running Seraph.",
+            last_error_kind: "screen_capture_permission",
+            updated_at: "2026-06-20T18:34:25Z",
+            status_source: "daemon-status-file",
+          },
           control_env: {
             enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
             archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
@@ -75,9 +170,14 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    await waitFor(() => expect(screen.getByText("Screen capture preservation")).toBeInTheDocument());
-    expect(screen.getByText("Evidence Archive")).toBeInTheDocument();
-    expect(screen.getByText("images, provider output, analysis JSON")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Screen analysis")).toBeInTheDocument());
+    expect(screen.getByText("Screen Capture")).toBeInTheDocument();
+    expect(screen.getByText("screenshots, provider output, analysis JSON")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
+    expect(screen.getByText("offline - no new captures")).toBeInTheDocument();
+    expect(screen.getByText("Grant Screen Recording permission to the terminal/app running Seraph.")).toBeInTheDocument();
+    expect(screen.getByText(/1 captures/)).toBeInTheDocument();
     expect(screen.getByText("/api/observer/screen-artifacts (localhost only)")).toBeInTheDocument();
     expect(screen.getByText("SERAPH_PRESERVE_SCREEN_CAPTURES")).toBeInTheDocument();
     expect(screen.getAllByText("ready")).toHaveLength(2);
@@ -87,4 +187,403 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("SMTP")).toBeInTheDocument();
     expect(screen.getAllByText("Missing")).toHaveLength(2);
   });
+
+  it("updates capture mode from settings", async () => {
+    const artifactStorage = {
+      screen: {
+        analysis_enabled: true,
+        provider: "codex-local",
+        model: "gpt-5.5",
+        capture_mode: "on_switch",
+        cadence_seconds: null,
+        daemon_connected: true,
+        artifact_count: 0,
+        last_artifact_at: null,
+        preservation_enabled: true,
+        archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+        archive_dir_source: "screen-analysis-settings",
+        exists: true,
+        writable: true,
+        creation_error: null,
+        stored_artifacts: ["image", "provider_output", "analysis_json"],
+        inspection_endpoint: "/api/observer/screen-artifacts",
+        inspection_visibility: "localhost_only",
+        daemon_status: {
+          state: "running",
+          screen_analysis: "active",
+          capture_ready: true,
+          last_error: null,
+          last_error_kind: null,
+          updated_at: "2026-06-20T18:34:25Z",
+          status_source: "daemon-status-file",
+        },
+        control_env: {
+          enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
+          archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+        },
+      },
+      reports: {
+        enabled: false,
+        hour: 21,
+        analysis_provider: "deterministic-local",
+        archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
+        archive_dir_source: "default",
+        exists: true,
+        writable: true,
+        creation_error: null,
+        stored_artifacts: ["report_text", "report_json"],
+        control_env: {
+          archive_dir: "REPORT_ARCHIVE_DIR",
+          enabled: "END_OF_DAY_REPORT_ENABLED",
+          llm: "END_OF_DAY_REPORT_LLM_ENABLED",
+        },
+      },
+      email: {
+        enabled: false,
+        preview_required: true,
+        smtp_configured: false,
+        recipient_configured: false,
+        allowlist_configured: false,
+        control_env: {
+          enabled: "EMAIL_REPORTS_ENABLED",
+          preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
+          smtp_host: "SMTP_HOST",
+          recipient: "EMAIL_REPORTS_TO",
+          allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
+        },
+      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(mockResponse({ mode: "detailed" }))
+      .mockResolvedValueOnce(
+        mockResponse({
+          ...artifactStorage,
+          screen: { ...artifactStorage.screen, capture_mode: "detailed", cadence_seconds: 60 },
+        }),
+      );
+
+    render(<ArtifactStoragePanel />);
+
+    const modeSelect = await screen.findByDisplayValue("on_switch");
+    fireEvent.change(modeSelect, { target: { value: "detailed" } });
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/capture-mode"),
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ mode: "detailed" }),
+        }),
+      ),
+    );
+    await waitFor(() => expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument());
+  });
+
+  it("does not refresh settings after a save resolves on an unmounted panel", async () => {
+    const artifactStorage = {
+      screen: {
+        analysis_enabled: true,
+        provider: "codex-local",
+        model: "gpt-5.5",
+        capture_mode: "on_switch",
+        cadence_seconds: null,
+        daemon_connected: true,
+        artifact_count: 0,
+        last_artifact_at: null,
+        preservation_enabled: true,
+        archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+        archive_dir_source: "screen-analysis-settings",
+        exists: true,
+        writable: true,
+        creation_error: null,
+        stored_artifacts: ["image", "provider_output", "analysis_json"],
+        inspection_endpoint: "/api/observer/screen-artifacts",
+        inspection_visibility: "localhost_only",
+        daemon_status: {
+          state: "running",
+          screen_analysis: "active",
+          capture_ready: true,
+          last_error: null,
+          last_error_kind: null,
+          updated_at: "2026-06-20T18:34:25Z",
+          status_source: "daemon-status-file",
+        },
+        control_env: {
+          enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
+          archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+        },
+      },
+      reports: {
+        enabled: false,
+        hour: 21,
+        analysis_provider: "deterministic-local",
+        archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
+        archive_dir_source: "default",
+        exists: true,
+        writable: true,
+        creation_error: null,
+        stored_artifacts: ["report_text", "report_json"],
+        control_env: {
+          archive_dir: "REPORT_ARCHIVE_DIR",
+          enabled: "END_OF_DAY_REPORT_ENABLED",
+          llm: "END_OF_DAY_REPORT_LLM_ENABLED",
+        },
+      },
+      email: {
+        enabled: false,
+        preview_required: true,
+        smtp_configured: false,
+        recipient_configured: false,
+        allowlist_configured: false,
+        control_env: {
+          enabled: "EMAIL_REPORTS_ENABLED",
+          preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
+          smtp_host: "SMTP_HOST",
+          recipient: "EMAIL_REPORTS_TO",
+          allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
+        },
+      },
+    };
+    let resolveSave: (value: ReturnType<typeof mockResponse>) => void = () => {};
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSave = resolve;
+          }),
+      );
+
+    const { unmount } = render(<ArtifactStoragePanel />);
+
+    const modeSelect = await screen.findByDisplayValue("on_switch");
+    fetchMock.mockClear();
+    fireEvent.change(modeSelect, { target: { value: "detailed" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    unmount();
+    resolveSave(mockResponse({ mode: "detailed" }));
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains on_switch mode even when the daemon is capture-ready", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        screen: {
+          analysis_enabled: true,
+          provider: "codex-local",
+          model: "gpt-5.5",
+          capture_mode: "on_switch",
+          cadence_seconds: null,
+          daemon_connected: true,
+          artifact_count: 2,
+          last_artifact_at: "2026-06-21T05:43:55",
+          preservation_enabled: true,
+          archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+          archive_dir_source: "screen-analysis-settings",
+          exists: true,
+          writable: true,
+          creation_error: null,
+          stored_artifacts: ["image", "provider_output", "analysis_json"],
+          inspection_endpoint: "/api/observer/screen-artifacts",
+          inspection_visibility: "localhost_only",
+          daemon_status: {
+            state: "running",
+            screen_analysis: "active",
+            capture_ready: true,
+            last_error: null,
+            last_error_kind: null,
+            updated_at: "2026-06-21T06:02:58Z",
+            status_source: "daemon-status-file",
+          },
+          control_env: {
+            enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
+            archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+          },
+        },
+        reports: {
+          enabled: false,
+          hour: 21,
+          analysis_provider: "deterministic-local",
+          archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
+          archive_dir_source: "default",
+          exists: true,
+          writable: true,
+          creation_error: null,
+          stored_artifacts: ["report_text", "report_json"],
+          control_env: {
+            archive_dir: "REPORT_ARCHIVE_DIR",
+            enabled: "END_OF_DAY_REPORT_ENABLED",
+            llm: "END_OF_DAY_REPORT_LLM_ENABLED",
+          },
+        },
+        email: {
+          enabled: false,
+          preview_required: true,
+          smtp_configured: false,
+          recipient_configured: false,
+          allowlist_configured: false,
+          control_env: {
+            enabled: "EMAIL_REPORTS_ENABLED",
+            preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
+            smtp_host: "SMTP_HOST",
+            recipient: "EMAIL_REPORTS_TO",
+            allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
+          },
+        },
+      }),
+    );
+
+    render(<ArtifactStoragePanel />);
+
+    const captureState = await screen.findByText("waiting for app/window switch");
+    expect(captureState).toBeInTheDocument();
+    expect(captureState).toHaveAttribute("title", "waiting for app/window switch");
+  });
+
+  it("keeps screen capture controls visible when artifact metadata is unavailable", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mockResponse({
+          enabled: true,
+          provider: "codex-local",
+          model: "gpt-5.5",
+          preserve_captures: true,
+          archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+          capture_mode: "on_switch",
+          cadence_seconds: null,
+          daemon_connected: true,
+          artifact_count: 7,
+          last_artifact_at: "2026-06-21T08:42:52Z",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("artifact endpoint timed out"));
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText("Screen analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("on_switch")).toBeInTheDocument();
+    expect(screen.getByText("Archive metadata degraded; screen capture controls are still live.")).toBeInTheDocument();
+    expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+  });
+
+  it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        mockResponse({
+          enabled: true,
+          provider: "codex-local",
+          model: "gpt-5.5",
+          preserve_captures: true,
+          archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+          capture_mode: "on_switch",
+          cadence_seconds: null,
+          daemon_connected: true,
+          artifact_count: 0,
+          last_artifact_at: null,
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse({ screen: { archive_dir: "/tmp/broken" } }));
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText("Screen analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(
+      await screen.findByText("Archive metadata degraded; screen capture controls are still live."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Archive metadata loading; screen capture controls are live.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+  });
+
+  it("ignores stale artifact metadata after a newer save refresh", async () => {
+    let resolveInitialArtifact: (value: ReturnType<typeof mockResponse>) => void = () => {};
+    const screenInitial = {
+      enabled: true,
+      provider: "codex-local",
+      model: "gpt-5.5",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+    };
+    const screenDetailed = {
+      ...screenInitial,
+      capture_mode: "detailed",
+      cadence_seconds: 60,
+    };
+    const staleArtifactStorage = settingsFromScreenAnalysisFixture(screenInitial);
+    const detailedArtifactStorage = settingsFromScreenAnalysisFixture(screenDetailed);
+
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(screenInitial))
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitialArtifact = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(mockResponse({ mode: "detailed" }))
+      .mockResolvedValueOnce(mockResponse(screenDetailed))
+      .mockResolvedValueOnce(mockResponse(detailedArtifactStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    const modeSelect = await screen.findByDisplayValue("on_switch");
+    fireEvent.change(modeSelect, { target: { value: "detailed" } });
+
+    await waitFor(() => expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument());
+    resolveInitialArtifact(mockResponse(staleArtifactStorage));
+    await Promise.resolve();
+
+    expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
+  });
+
+  it("aborts hung artifact metadata and keeps screen capture controls visible", async () => {
+    let artifactSignal: AbortSignal | undefined;
+    fetchMock
+      .mockResolvedValueOnce(
+        mockResponse({
+          enabled: true,
+          provider: "codex-local",
+          model: "gpt-5.5",
+          preserve_captures: true,
+          archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+          capture_mode: "on_switch",
+          cadence_seconds: null,
+          daemon_connected: true,
+          artifact_count: 0,
+          last_artifact_at: null,
+        }),
+      )
+      .mockImplementationOnce((_url: string, init?: RequestInit) => {
+        artifactSignal = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        });
+      });
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText("Screen analysis", undefined, { timeout: 5_000 })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Archive metadata degraded; screen capture controls are still live.",
+        undefined,
+        { timeout: 5_000 },
+      ),
+    ).toBeInTheDocument();
+    expect(artifactSignal?.aborted).toBe(true);
+    expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+  }, 7_000);
 });

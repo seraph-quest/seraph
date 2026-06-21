@@ -1,12 +1,15 @@
 """Tests for settings API — GET/PUT interruption mode."""
 
+import json
 import stat
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 
 from config.settings import settings
+from src.api.settings import _screen_artifact_summary
 from src.db.models import UserProfile
 from src.observer.context import CurrentContext
 
@@ -115,11 +118,32 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "smtp_password", "secret-password"),
         patch.object(settings, "email_reports_to", "user@example.test"),
         patch.object(settings, "email_reports_to_allowlist", "hash-value"),
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch("src.api.settings.context_manager.is_daemon_connected", return_value=False),
     ):
+        status_file = tmp_path / "workspace" / "daemon-status.json"
+        status_file.parent.mkdir(parents=True)
+        status_file.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "screen_analysis": "capture_error",
+                    "capture_ready": False,
+                    "last_error": "Grant Screen Recording permission.",
+                    "last_error_kind": "screen_capture_permission",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
         resp = await client.get("/api/settings/artifact-storage")
 
     assert resp.status_code == 200
     data = resp.json()
+    assert data["screen"]["analysis_enabled"] is True
+    assert data["screen"]["provider"] == "codex-local"
+    assert data["screen"]["daemon_connected"] is True
+    assert data["screen"]["artifact_count"] == 0
     assert data["screen"]["preservation_enabled"] is True
     assert data["screen"]["archive_dir"].endswith("/screen")
     assert data["screen"]["exists"] is True
@@ -128,6 +152,10 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     assert stat.S_IMODE((tmp_path / "screen").stat().st_mode) == 0o700
     assert data["screen"]["stored_artifacts"] == ["image", "provider_output", "analysis_json"]
     assert data["screen"]["inspection_visibility"] == "localhost_only"
+    assert data["screen"]["daemon_status"]["screen_analysis"] == "capture_error"
+    assert data["screen"]["daemon_status"]["last_error"] == "Grant Screen Recording permission."
+    assert data["screen"]["daemon_status"]["status_source"] == "daemon-status-file"
+    assert "status_file" not in data["screen"]["daemon_status"]
     assert data["reports"]["archive_dir"].endswith("/reports")
     assert data["reports"]["exists"] is True
     assert data["reports"]["writable"] is True
@@ -150,5 +178,62 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
     assert resp.status_code == 200
     data = resp.json()
     assert data["screen"]["archive_dir"] == str(preferred)
-    assert data["screen"]["archive_dir_source"] == "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR"
+    assert data["screen"]["archive_dir_source"] == "screen-analysis-settings"
     assert data["screen"]["exists"] is True
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        archive = tmp_path / "captures"
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={
+                "enabled": True,
+                "provider": "codex-local",
+                "model": "gpt-5.5",
+                "preserve_captures": True,
+                "archive_dir": str(archive),
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is True
+        assert data["provider"] == "codex-local"
+        assert data["model"] == "gpt-5.5"
+        assert data["preserve_captures"] is True
+        assert data["archive_dir"] == str(archive)
+
+        storage = (await client.get("/api/settings/artifact-storage")).json()
+        assert storage["screen"]["analysis_enabled"] is True
+        assert storage["screen"]["provider"] == "codex-local"
+        assert storage["screen"]["archive_dir"] == str(archive)
+        assert storage["screen"]["preservation_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_invalid_provider(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={"provider": "not-real"},
+        )
+
+    assert resp.status_code == 422
+
+
+def test_screen_artifact_summary_skips_files_deleted_during_stat(tmp_path, monkeypatch):
+    image = tmp_path / "capture.png"
+    image.write_bytes(b"not-really-a-png")
+    original_stat = type(image).stat
+
+    def flaky_stat(path, *args, **kwargs):
+        if path == image:
+            raise FileNotFoundError(str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(image), "is_file", lambda path: path == image)
+    monkeypatch.setattr(type(image), "stat", flaky_stat)
+
+    assert _screen_artifact_summary(tmp_path) == {"artifact_count": 0, "last_artifact_at": None}

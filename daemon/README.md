@@ -111,8 +111,10 @@ Screen analysis is opt-in and runs **on context switch** (not a timer). When you
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--ocr` | off | Enable screenshot analysis on context switch |
-| `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local) or `openrouter` (cloud, structured JSON) |
-| `--ocr-model` | `google/gemini-2.5-flash-lite` | Model for OpenRouter provider |
+| `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local), `codex-local` (local Codex CLI), or `openrouter` (cloud, structured JSON) |
+| `--ocr-model` | provider default | Model for OpenRouter or local Codex provider |
+| `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts for future re-analysis |
+| `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local directory for preserved artifacts |
 | `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
 | `--blocklist-file` | (none) | Path to JSON blocklist config (extends built-in defaults) |
 | `--ocr-interval` | (deprecated) | Ignored — OCR now runs on context switch |
@@ -123,8 +125,14 @@ Examples:
 # Local analysis — Apple Vision framework (free, offline, ~200ms per capture)
 ./daemon/run.sh --ocr --verbose
 
+# Local structured analysis — Codex CLI on this machine
+./daemon/run.sh --ocr --ocr-provider codex-local --verbose
+
+# Local Codex analysis with inspectable artifacts
+./daemon/run.sh --ocr --ocr-provider codex-local --preserve-captures --verbose
+
 # Cloud analysis — OpenRouter with Gemini (structured JSON, ~$1.30/mo at ~150 switches/day)
-OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
+OPENROUTER_API_KEY=<openrouter_api_key> ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
 
 # With custom blocklist
 ./daemon/run.sh --ocr --ocr-provider openrouter --blocklist-file ~/blocklist.json --verbose
@@ -183,7 +191,15 @@ OCR mode captures screenshots to extract visible text. This requires the Screen 
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** keystrokes, clipboard, file contents. Screenshots are only captured in memory when `--ocr` is enabled and are never written to disk.
+**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots are captured only to produce a structured activity observation. `apple-vision` keeps analysis local. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure unless capture preservation is enabled. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir` for future re-analysis by better models. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured. `openrouter` sends the image to the configured OpenRouter model and should only be used when that external provider is acceptable.
+
+Preserved local Codex artifacts can be inspected through the backend from localhost only:
+
+```bash
+curl http://localhost:8004/api/observer/screen-artifacts
+curl http://localhost:8004/api/observer/screen-artifacts/{observation_id}/codex-output
+open http://localhost:8004/api/observer/screen-artifacts/{observation_id}/image
+```
 
 The daemon posts to `POST /api/observer/context`:
 ```json
@@ -195,7 +211,13 @@ The daemon posts to `POST /api/observer/context`:
     "activity": "coding",
     "project": "seraph",
     "summary": "Editing Python file in VS Code",
-    "details": ["file: main.py", "language: Python"]
+    "details": ["file: main.py", "language: Python"],
+    "capture_artifacts": {
+      "id": "artifact-digest",
+      "image_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.png",
+      "codex_output_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.codex.txt",
+      "analysis_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.analysis.json"
+    }
   },
   "switch_timestamp": 1700000000.0
 }

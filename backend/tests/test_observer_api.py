@@ -1,3 +1,4 @@
+import json
 import time
 import types
 from datetime import datetime, timezone
@@ -80,8 +81,9 @@ class TestObserverAPI:
         assert mgr.get_context().screen_context == "Editing"
 
     @pytest.mark.asyncio
-    async def test_daemon_status_disconnected(self, client):
+    async def test_daemon_status_disconnected(self, client, tmp_path, monkeypatch):
         """Daemon status returns disconnected when no POST received."""
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "missing-daemon-status.json"))
         mgr = ContextManager()
         mgr.update_capture_mode("balanced")
         await native_notification_queue.clear()
@@ -101,8 +103,9 @@ class TestObserverAPI:
         assert data["last_native_notification_outcome"] is None
 
     @pytest.mark.asyncio
-    async def test_daemon_status_connected(self, client):
+    async def test_daemon_status_connected(self, client, tmp_path, monkeypatch):
         """Daemon status returns connected after a recent POST."""
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "missing-daemon-status.json"))
         mgr = ContextManager()
         mgr.update_screen_context("VS Code — main.py", None)
         mgr.record_native_notification(title="Seraph desktop shell", outcome="queued_test")
@@ -130,8 +133,9 @@ class TestObserverAPI:
         await native_notification_queue.clear()
 
     @pytest.mark.asyncio
-    async def test_daemon_status_stale(self, client):
+    async def test_daemon_status_stale(self, client, tmp_path, monkeypatch):
         """Daemon status returns disconnected when last POST is too old."""
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "missing-daemon-status.json"))
         mgr = ContextManager()
         mgr.update_screen_context("Terminal", None)
         # Simulate stale timestamp (60 seconds ago)
@@ -142,6 +146,35 @@ class TestObserverAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["connected"] is False
+
+    @pytest.mark.asyncio
+    async def test_daemon_status_alive_from_fresh_status_file(self, client, tmp_path, monkeypatch):
+        """Daemon heartbeat proves the process is alive without implying transport connected."""
+        status_file = tmp_path / "daemon-status.json"
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(status_file))
+        status_file.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "screen_analysis": "active",
+                    "capture_ready": True,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        mgr = ContextManager()
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/daemon-status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["connected"] is False
+        assert data["daemon_alive"] is True
+        assert data["last_post"] is None
+        assert data["daemon_state"] == "running"
+        assert data["screen_analysis"] == "active"
+        assert data["capture_ready"] is True
 
     @pytest.mark.asyncio
     async def test_post_refresh(self, client):

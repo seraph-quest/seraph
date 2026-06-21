@@ -5,19 +5,25 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from dataclasses import dataclass
+import hashlib
+import json
 import logging
 import math
+import os
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from smolagents import LiteLLMModel as BaseLiteLLMModel
+from smolagents.models import ChatMessage, MessageRole
 
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
+from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
 
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
@@ -25,7 +31,7 @@ _runtime_requests: dict[str, bool] = {}
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
 _target_feedback_lock = Lock()
-_KNOWN_RUNTIME_PROFILES = {"default", "local"}
+_BUILT_IN_RUNTIME_PROFILES = {"default", "local"}
 _GUARDRAIL_TIERS = {"low": 0, "medium": 1, "high": 2}
 _RECENT_FEEDBACK_WINDOW_SECONDS = 900.0
 _FAILURE_KIND_SCORES = {
@@ -59,8 +65,383 @@ class _TargetFeedback:
 _target_feedback: dict[tuple[str, str | None, str | None], _TargetFeedback] = {}
 
 
+class ProviderProfileConfigurationError(RuntimeError):
+    """Raised when a selected provider profile is not usable."""
+
+
+@dataclass(frozen=True)
+class ProviderProfile:
+    id: str
+    provider_kind: str
+    model: str
+    api_base: str = ""
+    secret_env: str = ""
+    options: dict[str, Any] | None = None
+    capabilities: tuple[str, ...] = ()
+    cost_tier: str | None = None
+    latency_tier: str | None = None
+    task_class: str | None = None
+    budget_class: str | None = None
+    fallback_models: tuple[str, ...] = ()
+    enabled: bool = True
+    keyless: bool = False
+    safety_notes: str = ""
+
+    @property
+    def api_key(self) -> str:
+        return _secret_value(self.secret_env)
+
+
+def _redact_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    redacted = value
+    for secret in (
+        settings.llm_api_key,
+        settings.openrouter_api_key,
+        settings.openai_api_key,
+        settings.anthropic_api_key,
+        settings.local_llm_api_key,
+        settings.fallback_llm_api_key,
+    ):
+        if secret:
+            redacted = redacted.replace(secret, "[redacted]")
+    for env_name in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        env_value = os.getenv(env_name, "")
+        if env_value:
+            redacted = redacted.replace(env_value, "[redacted]")
+    for profile in _configured_provider_profiles().values():
+        profile_secret = profile.api_key
+        if profile_secret:
+            redacted = redacted.replace(profile_secret, "[redacted]")
+    return redacted
+
+
+def _redact_for_status(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, nested_value in value.items():
+            normalized_key = _normalize_policy_tag(str(key))
+            if any(marker in normalized_key for marker in ("api_key", "authorization", "token", "secret", "password")):
+                redacted[str(key)] = "[redacted]"
+            else:
+                redacted[str(key)] = _redact_for_status(nested_value)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_for_status(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_for_status(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value) or ""
+    return value
+
+
+def _secret_value(env_name: str) -> str:
+    if not env_name:
+        return ""
+    if env_name == "OPENAI_API_KEY":
+        return settings.openai_api_key or os.getenv(env_name, "")
+    if env_name == "OPENROUTER_API_KEY":
+        return settings.openrouter_api_key or os.getenv(env_name, "")
+    if env_name == "ANTHROPIC_API_KEY":
+        return settings.anthropic_api_key or os.getenv(env_name, "")
+    if env_name == "LLM_API_KEY":
+        return settings.llm_api_key or os.getenv(env_name, "")
+    return os.getenv(env_name, "")
+
+
+def _safe_error(error: Exception | str | None) -> str:
+    if error is None:
+        return ""
+    return _redact_text(str(error)) or ""
+
+
+def _api_key_fingerprint(api_key: str | None) -> str | None:
+    if not api_key:
+        return None
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+
+
 def _primary_api_key() -> str:
     return settings.llm_api_key or settings.openrouter_api_key
+
+
+def _provider_secret_env(provider_kind: str) -> str:
+    if provider_kind in {"openai", "codex"}:
+        return "OPENAI_API_KEY"
+    if provider_kind == "anthropic":
+        return "ANTHROPIC_API_KEY"
+    if provider_kind == "openrouter":
+        return "OPENROUTER_API_KEY"
+    return ""
+
+
+def _provider_default_api_base(provider_kind: str) -> str:
+    if provider_kind in {"openai", "codex", "openai_compatible"}:
+        return "https://api.openai.com/v1"
+    if provider_kind == "openrouter":
+        return "https://openrouter.ai/api/v1"
+    if provider_kind in {"local", "ollama"}:
+        return "http://localhost:11434/v1"
+    return ""
+
+
+def _normal_profile_id(value: str) -> str:
+    return _normalize_policy_tag(value).replace("_", "-")
+
+
+def _profile_tuple(raw_value: Any) -> tuple[str, ...]:
+    if isinstance(raw_value, list | tuple):
+        return tuple(
+            _normalize_policy_tag(str(item))
+            for item in raw_value
+            if str(item).strip()
+        )
+    if isinstance(raw_value, str):
+        return tuple(_parse_policy_tags(raw_value))
+    return ()
+
+
+def _profile_models(raw_value: Any) -> tuple[str, ...]:
+    if isinstance(raw_value, list | tuple):
+        return tuple(str(item).strip() for item in raw_value if str(item).strip())
+    if isinstance(raw_value, str):
+        return tuple(item.strip() for item in raw_value.split("|") if item.strip())
+    return ()
+
+
+def _profile_bool(raw_value: Any, *, default: bool) -> bool:
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(raw_value)
+
+
+def _profile_from_payload(profile_id: str, payload: Any) -> ProviderProfile | None:
+    if not isinstance(payload, dict):
+        return None
+    provider_kind = _normalize_policy_tag(str(payload.get("provider_kind") or payload.get("provider") or ""))
+    model = str(payload.get("model") or payload.get("default_model") or "").strip()
+    if not provider_kind or not model:
+        return None
+    options = payload.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    secret_env = str(
+        payload.get("env_secret")
+        or payload.get("secret_env")
+        or payload.get("env_var")
+        or ""
+    ).strip()
+    return ProviderProfile(
+        id=_normal_profile_id(profile_id),
+        provider_kind=provider_kind,
+        model=model,
+        api_base=str(payload.get("api_base") or _provider_default_api_base(provider_kind)).strip(),
+        secret_env=secret_env or _provider_secret_env(provider_kind),
+        options=dict(options),
+        capabilities=_profile_tuple(payload.get("capabilities")),
+        cost_tier=_normalize_guardrail_tier(str(payload.get("cost") or payload.get("cost_tier") or "")),
+        latency_tier=_normalize_guardrail_tier(str(payload.get("latency") or payload.get("latency_tier") or "")),
+        task_class=_normalize_policy_tag(str(payload.get("task") or payload.get("task_class") or "")) or None,
+        budget_class=_normalize_guardrail_tier(str(payload.get("budget") or payload.get("budget_class") or "")),
+        fallback_models=_profile_models(payload.get("fallback", payload.get("fallback_models"))),
+        enabled=_profile_bool(payload.get("enabled"), default=True),
+        keyless=_profile_bool(payload.get("keyless"), default=provider_kind in {"local", "ollama"}),
+        safety_notes=str(payload.get("safety_notes") or "").strip(),
+    )
+
+
+def _configured_provider_profiles() -> dict[str, ProviderProfile]:
+    raw_profiles = settings.llm_provider_profiles.strip()
+    profiles: dict[str, ProviderProfile] = {}
+    if raw_profiles:
+        try:
+            payload = json.loads(raw_profiles)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            raw_items = payload.get("profiles", payload)
+            if isinstance(raw_items, dict):
+                for profile_id, raw_profile in raw_items.items():
+                    profile = _profile_from_payload(str(profile_id), raw_profile)
+                    if profile is not None:
+                        profiles[profile.id] = profile
+            elif isinstance(raw_items, list):
+                for raw_profile in raw_items:
+                    if not isinstance(raw_profile, dict):
+                        continue
+                    profile_id = str(raw_profile.get("id") or raw_profile.get("name") or "").strip()
+                    if not profile_id:
+                        continue
+                    profile = _profile_from_payload(profile_id, raw_profile)
+                    if profile is not None:
+                        profiles[profile.id] = profile
+        elif isinstance(payload, list):
+            for raw_profile in payload:
+                if not isinstance(raw_profile, dict):
+                    continue
+                profile_id = str(raw_profile.get("id") or raw_profile.get("name") or "").strip()
+                if not profile_id:
+                    continue
+                profile = _profile_from_payload(profile_id, raw_profile)
+                if profile is not None:
+                    profiles[profile.id] = profile
+    return profiles
+
+
+def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
+    profiles = {
+        "openrouter": ProviderProfile(
+            id="openrouter",
+            provider_kind="openrouter",
+            model=settings.default_model.strip() or "openrouter/anthropic/claude-sonnet-4",
+            api_base="https://openrouter.ai/api/v1",
+            secret_env="OPENROUTER_API_KEY",
+            capabilities=("reasoning", "tool_use"),
+            cost_tier="medium",
+            latency_tier="medium",
+            task_class="general",
+            budget_class="medium",
+            safety_notes="OpenRouter-compatible cloud profile; credentials stay provider-scoped.",
+        ),
+        "openai-compatible": ProviderProfile(
+            id="openai-compatible",
+            provider_kind="openai_compatible",
+            model=settings.default_model.strip() or "openai/gpt-4.1-mini",
+            api_base=settings.llm_api_base.strip() or "https://api.openai.com/v1",
+            secret_env="LLM_API_KEY",
+            capabilities=("reasoning", "tool_use"),
+            cost_tier="medium",
+            latency_tier="medium",
+            task_class="general",
+            budget_class="medium",
+            safety_notes="Generic OpenAI-compatible profile backed by LLM_API_BASE and LLM_API_KEY.",
+        ),
+        "codex-openai": ProviderProfile(
+            id="codex-openai",
+            provider_kind="openai",
+            model="openai/gpt-5.5",
+            api_base="https://api.openai.com/v1",
+            secret_env="OPENAI_API_KEY",
+            options={"reasoning_effort": "low"},
+            capabilities=("reasoning", "tool_use", "coding"),
+            cost_tier="high",
+            latency_tier="medium",
+            task_class="coding",
+            budget_class="high",
+            safety_notes="OpenAI GPT-5.5 profile with low reasoning effort configured as a request option; model id uses the LiteLLM provider prefix.",
+        ),
+        "gpt-5.5-low": ProviderProfile(
+            id="gpt-5.5-low",
+            provider_kind="openai",
+            model="openai/gpt-5.5",
+            api_base="https://api.openai.com/v1",
+            secret_env="OPENAI_API_KEY",
+            options={"reasoning_effort": "low"},
+            capabilities=("reasoning", "tool_use", "coding"),
+            cost_tier="high",
+            latency_tier="medium",
+            task_class="coding",
+            budget_class="high",
+            safety_notes="Compatibility alias for codex-openai; model uses LiteLLM id openai/gpt-5.5 and reasoning_effort stays a request option.",
+        ),
+        "claude-anthropic": ProviderProfile(
+            id="claude-anthropic",
+            provider_kind="anthropic",
+            model="anthropic/claude-sonnet-4-20250514",
+            api_base="",
+            secret_env="ANTHROPIC_API_KEY",
+            capabilities=("reasoning", "tool_use", "writing"),
+            cost_tier="high",
+            latency_tier="medium",
+            task_class="general",
+            budget_class="high",
+            safety_notes="Anthropic-keyed Claude profile; operators may pin the exact provider model id in LLM_PROVIDER_PROFILES.",
+        ),
+    }
+    if has_local_model_profile():
+        profiles["local-ollama"] = ProviderProfile(
+            id="local-ollama",
+            provider_kind="ollama",
+            model=settings.local_model.strip(),
+            api_base=settings.local_llm_api_base.strip() or "http://localhost:11434/v1",
+            capabilities=("local", "private"),
+            cost_tier="low",
+            latency_tier="low",
+            task_class="general",
+            budget_class="low",
+            keyless=True,
+            safety_notes="Local Ollama-compatible profile.",
+        )
+    return profiles
+
+
+def provider_profiles() -> dict[str, ProviderProfile]:
+    profiles = _builtin_provider_profiles()
+    profiles.update(_configured_provider_profiles())
+    return profiles
+
+
+def _provider_profile(profile: str | None) -> ProviderProfile | None:
+    if not profile:
+        return None
+    return provider_profiles().get(_normal_profile_id(profile))
+
+
+def _is_local_profile(profile: str | None) -> bool:
+    if profile == "local":
+        return True
+    provider_profile = _provider_profile(profile)
+    return bool(
+        provider_profile is not None
+        and provider_profile.provider_kind in {"local", "ollama"}
+    )
+
+
+def provider_profile_statuses() -> list[dict[str, Any]]:
+    statuses: list[dict[str, Any]] = []
+    for profile in sorted(provider_profiles().values(), key=lambda item: item.id):
+        missing_secret = bool(
+            profile.enabled
+            and not profile.keyless
+            and profile.secret_env
+            and not profile.api_key
+        )
+        statuses.append({
+            "id": profile.id,
+            "provider_kind": profile.provider_kind,
+            "model": profile.model,
+            "api_base": profile.api_base,
+            "enabled": profile.enabled,
+            "keyless": profile.keyless,
+            "env_secret": profile.secret_env,
+            "secret_env": profile.secret_env,
+            "secret_ref": profile.secret_env,
+            "secret_configured": profile.keyless or bool(profile.api_key),
+            "missing_secret": missing_secret,
+            "options": _redact_for_status(profile.options or {}),
+            "capabilities": list(profile.capabilities),
+            "cost": profile.cost_tier,
+            "cost_tier": profile.cost_tier,
+            "latency": profile.latency_tier,
+            "latency_tier": profile.latency_tier,
+            "task": profile.task_class,
+            "task_class": profile.task_class,
+            "budget": profile.budget_class,
+            "budget_class": profile.budget_class,
+            "fallback": list(profile.fallback_models),
+            "fallback_models": list(profile.fallback_models),
+            "safety_notes": profile.safety_notes,
+        })
+    return statuses
 
 
 def has_local_model_profile() -> bool:
@@ -145,18 +526,21 @@ def _runtime_model_override(runtime_path: str | None) -> tuple[str | None, str] 
         return None
     if ":" in value:
         maybe_profile, model_id = value.split(":", 1)
-        normalized_profile = maybe_profile.strip()
+        normalized_profile = _normal_profile_id(maybe_profile)
         normalized_model_id = model_id.strip()
-        if normalized_profile in {"default", "local"} and normalized_model_id:
+        if _normalize_runtime_profile(normalized_profile) and normalized_model_id:
             return normalized_profile, normalized_model_id
     return None, value
 
 
 def _normalize_runtime_profile(profile: str) -> str | None:
-    normalized = profile.strip()
-    if normalized not in _KNOWN_RUNTIME_PROFILES:
-        return None
-    if normalized == "local" and not has_local_model_profile():
+    normalized = _normal_profile_id(profile)
+    if normalized in _BUILT_IN_RUNTIME_PROFILES:
+        if normalized == "local" and not has_local_model_profile():
+            return None
+        return normalized
+    provider_profile = _provider_profile(normalized)
+    if provider_profile is None or not provider_profile.enabled:
         return None
     return normalized
 
@@ -282,6 +666,12 @@ def provider_capabilities(
     profile: str | None = None,
 ) -> list[str]:
     """Return the declared capability tags for a provider target."""
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None:
+        capabilities = list(provider_profile.capabilities)
+        if provider_profile.provider_kind == "ollama" and "local" not in capabilities:
+            capabilities.append("local")
+        return capabilities
     capabilities = _parse_policy_tags(
         _select_runtime_entry(
             settings.provider_capability_overrides,
@@ -299,6 +689,9 @@ def provider_cost_tier(
     *,
     profile: str | None = None,
 ) -> str | None:
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None and provider_profile.cost_tier:
+        return provider_profile.cost_tier
     return _normalize_guardrail_tier(
         _select_runtime_entry(
             settings.provider_cost_tiers,
@@ -313,6 +706,9 @@ def provider_latency_tier(
     *,
     profile: str | None = None,
 ) -> str | None:
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None and provider_profile.latency_tier:
+        return provider_profile.latency_tier
     return _normalize_guardrail_tier(
         _select_runtime_entry(
             settings.provider_latency_tiers,
@@ -327,6 +723,9 @@ def provider_task_class(
     *,
     profile: str | None = None,
 ) -> str | None:
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None and provider_profile.task_class:
+        return provider_profile.task_class
     value = _select_runtime_entry(
         settings.provider_task_classes,
         runtime_path=model_id,
@@ -341,6 +740,9 @@ def provider_budget_class(
     *,
     profile: str | None = None,
 ) -> str | None:
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None and provider_profile.budget_class:
+        return provider_profile.budget_class
     return _normalize_guardrail_tier(
         _select_runtime_entry(
             settings.provider_budget_classes,
@@ -357,7 +759,8 @@ def runtime_profile_candidates(
 ) -> list[str]:
     """Return the ordered runtime profiles to try for an implicit runtime path."""
     if profile:
-        return [profile]
+        normalized_profile = _normalize_runtime_profile(profile)
+        return [normalized_profile] if normalized_profile else ["default"]
 
     candidates: list[str] = []
     override = _runtime_model_override(runtime_path)
@@ -423,19 +826,48 @@ def _resolved_primary_model_id(
 def _profile_model_id(profile: str) -> str:
     if profile == "local" and has_local_model_profile():
         return settings.local_model
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None:
+        return provider_profile.model
     return settings.default_model
 
 
 def _profile_api_key(profile: str) -> str:
     if profile == "local" and has_local_model_profile():
         return settings.local_llm_api_key or _primary_api_key()
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None:
+        if not provider_profile.enabled:
+            raise ProviderProfileConfigurationError(f"Provider profile '{provider_profile.id}' is disabled")
+        if provider_profile.keyless:
+            return ""
+        api_key = provider_profile.api_key
+        if not api_key:
+            if not provider_profile.secret_env:
+                raise ProviderProfileConfigurationError(
+                    f"Provider profile '{provider_profile.id}' is missing required env_secret configuration"
+                )
+            raise ProviderProfileConfigurationError(
+                f"Provider profile '{provider_profile.id}' is missing required credential env {provider_profile.secret_env}"
+            )
+        return api_key
     return _primary_api_key()
 
 
 def _profile_api_base(profile: str) -> str:
     if profile == "local" and has_local_model_profile():
         return settings.local_llm_api_base or settings.llm_api_base
+    provider_profile = _provider_profile(profile)
+    if provider_profile is not None:
+        return provider_profile.api_base
     return settings.llm_api_base
+
+
+def _profile_options(profile: str) -> dict[str, Any]:
+    provider_profile = _provider_profile(profile)
+    if provider_profile is None:
+        return {}
+    return dict(provider_profile.options or {})
 
 
 def fallback_model_ids(*, runtime_path: str | None = None) -> list[str]:
@@ -463,6 +895,56 @@ def fallback_model_ids(*, runtime_path: str | None = None) -> list[str]:
     return fallback_ids
 
 
+def _profile_fallback_targets(profile: str | None) -> list[dict[str, Any]]:
+    provider_profile = _provider_profile(profile)
+    if provider_profile is None:
+        return []
+    targets: list[dict[str, Any]] = []
+    for fallback_entry in provider_profile.fallback_models:
+        fallback_profile = _provider_profile(fallback_entry)
+        if fallback_profile is not None:
+            try:
+                fallback_api_key = _profile_api_key(fallback_profile.id)
+            except ProviderProfileConfigurationError:
+                logger.warning(
+                    "Skipping unusable provider profile fallback '%s' for profile '%s'",
+                    fallback_profile.id,
+                    provider_profile.id,
+                )
+                continue
+            targets.append(
+                {
+                    "model_id": fallback_profile.model,
+                    "api_base": _profile_api_base(fallback_profile.id),
+                    "api_key": fallback_api_key,
+                    "profile": fallback_profile.id,
+                    "source": "profile_fallback_chain",
+                    "options": _profile_options(fallback_profile.id),
+                }
+            )
+            continue
+        try:
+            fallback_api_key = _profile_api_key(provider_profile.id)
+        except ProviderProfileConfigurationError:
+            logger.warning(
+                "Skipping unusable model fallback '%s' for profile '%s'",
+                fallback_entry,
+                provider_profile.id,
+            )
+            continue
+        targets.append(
+            {
+                "model_id": fallback_entry,
+                "api_base": _profile_api_base(provider_profile.id),
+                "api_key": fallback_api_key,
+                "profile": provider_profile.id,
+                "source": "profile_fallback_chain",
+                "options": _profile_options(provider_profile.id),
+            }
+        )
+    return targets
+
+
 def build_model_kwargs(
     *,
     temperature: float,
@@ -488,6 +970,7 @@ def build_model_kwargs(
         "runtime_profile": resolved_profile,
         "runtime_path": runtime_path,
     }
+    kwargs.update(_profile_options(resolved_profile))
     api_key = _profile_api_key(resolved_profile)
     if api_key:
         kwargs["api_key"] = api_key
@@ -507,6 +990,7 @@ def build_completion_kwargs(
     fallback_model_id: str | None = None,
     fallback_api_key: str | None = None,
     fallback_api_base: str | None = None,
+    fallback_options: dict[str, Any] | None = None,
     runtime_path: str | None = None,
     profile: str | None = None,
 ) -> dict[str, Any]:
@@ -521,8 +1005,17 @@ def build_completion_kwargs(
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        api_key = fallback_api_key or settings.fallback_llm_api_key or _primary_api_key()
-        api_base = fallback_api_base or settings.fallback_llm_api_base or settings.llm_api_base
+        kwargs.update(fallback_options or {})
+        api_key = (
+            fallback_api_key
+            if fallback_api_key is not None
+            else settings.fallback_llm_api_key or _primary_api_key()
+        )
+        api_base = (
+            fallback_api_base
+            if fallback_api_base is not None
+            else settings.fallback_llm_api_base or settings.llm_api_base
+        )
     else:
         resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
         resolved_model_id = (
@@ -539,6 +1032,7 @@ def build_completion_kwargs(
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        kwargs.update(_profile_options(resolved_profile))
         api_key = _profile_api_key(resolved_profile)
         api_base = _profile_api_base(resolved_profile)
 
@@ -547,6 +1041,77 @@ def build_completion_kwargs(
     if api_base:
         kwargs["api_base"] = api_base
     return kwargs
+
+
+def _message_value(message: Any, key: str, default: Any = None) -> Any:
+    if isinstance(message, dict):
+        return message.get(key, default)
+    return getattr(message, key, default)
+
+
+def _messages_to_local_operator_prompt(messages: list[Any]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = str(_message_value(message, "role", "user") or "user").strip() or "user"
+        content = str(_message_value(message, "content", "") or "").strip()
+        if content:
+            parts.append(f"{role}: {content}")
+    return "\n\n".join(parts).strip()
+
+
+def _local_operator_completion_response(content: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            )
+        ],
+    )
+
+
+def _trim_after_stop_sequences(content: str, stop_sequences: list[str] | None) -> str:
+    if not stop_sequences:
+        return content
+    earliest_stop = len(content)
+    for stop_sequence in stop_sequences:
+        if not stop_sequence:
+            continue
+        stop_index = content.find(stop_sequence)
+        if stop_index >= 0:
+            earliest_stop = min(earliest_stop, stop_index)
+    return content[:earliest_stop]
+
+
+def _local_operator_chat_message(
+    content: str,
+    *,
+    raw: Any | None = None,
+    stop_sequences: list[str] | None = None,
+) -> ChatMessage:
+    return ChatMessage(
+        role=MessageRole.ASSISTANT,
+        content=_trim_after_stop_sequences(content, stop_sequences),
+        raw=raw,
+    )
+
+
+def _run_local_codex_completion(prompt: str, *, session_id: str | None) -> dict[str, Any]:
+    async def _run() -> dict[str, Any]:
+        return await run_local_codex(
+            prompt,
+            timeout_seconds=local_codex_chat_timeout_seconds(),
+            session_id=session_id,
+        )
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_run())
+
+    return {
+        "ok": False,
+        "stderr": "Local Codex completion is unavailable from synchronous code inside an active event loop.",
+    }
 
 
 def has_fallback_model(*, runtime_path: str | None = None) -> bool:
@@ -575,7 +1140,13 @@ def _safe_model_name(kwargs: dict[str, Any]) -> str:
 
 
 def _target_key(*, model_id: str, api_base: str | None, api_key: str | None) -> tuple[str, str | None, str | None]:
-    return (model_id, api_base or None, api_key or None)
+    return (model_id, api_base or None, _api_key_fingerprint(api_key))
+
+
+def _safe_route_key(*, model_id: str, api_base: str | None, api_key: str | None) -> str:
+    target_key = _target_key(model_id=model_id, api_base=api_base, api_key=api_key)
+    digest = hashlib.sha256(repr(target_key).encode("utf-8")).hexdigest()[:16]
+    return f"llm-target:{digest}"
 
 
 def _fallback_targets(
@@ -586,7 +1157,7 @@ def _fallback_targets(
     primary_profile: str = "default",
     runtime_path: str | None = None,
     profile: str | None = None,
-) -> list[dict[str, str | None]]:
+) -> list[dict[str, Any]]:
     seen_targets = {
         _target_key(
             model_id=primary_model_id,
@@ -594,13 +1165,20 @@ def _fallback_targets(
             api_key=primary_api_key,
         ),
     }
-    targets: list[dict[str, str | None]] = []
+    targets: list[dict[str, Any]] = []
 
     for candidate_profile in runtime_profile_candidates(
         runtime_path=runtime_path,
         profile=profile,
     )[1:]:
-        candidate_api_key = _profile_api_key(candidate_profile)
+        try:
+            candidate_api_key = _profile_api_key(candidate_profile)
+        except ProviderProfileConfigurationError:
+            logger.warning(
+                "Skipping unusable alternate provider profile '%s'",
+                candidate_profile,
+            )
+            continue
         candidate_api_base = _profile_api_base(candidate_profile)
         candidate_model_id = _resolved_primary_model_id(
             runtime_path=runtime_path,
@@ -621,8 +1199,20 @@ def _fallback_targets(
                 "api_key": candidate_api_key,
                 "profile": candidate_profile,
                 "source": "alternate_profile",
+                "options": _profile_options(candidate_profile),
             }
         )
+
+    for target in _profile_fallback_targets(primary_profile):
+        target_key = _target_key(
+            model_id=str(target["model_id"]),
+            api_base=target.get("api_base"),
+            api_key=target.get("api_key"),
+        )
+        if target_key in seen_targets:
+            continue
+        seen_targets.add(target_key)
+        targets.append(target)
 
     fallback_api_key = _fallback_api_key(primary_api_key, primary_profile=primary_profile)
     fallback_api_base = _fallback_api_base(primary_api_base, primary_profile=primary_profile)
@@ -642,6 +1232,7 @@ def _fallback_targets(
                 "api_key": fallback_api_key,
                 "profile": None,
                 "source": "fallback_chain",
+                "options": {},
             }
         )
     return _order_targets_by_policy(targets, runtime_path=runtime_path)
@@ -795,7 +1386,7 @@ def _mark_target_failed(
         entry.last_failure_at = now
         if error is not None:
             entry.last_failure_kind = _classify_runtime_failure(error)
-            entry.last_error = str(error)
+            entry.last_error = _safe_error(error)
 
 
 def _mark_target_succeeded(
@@ -1068,7 +1659,7 @@ def _matched_policy_intents(
 ) -> list[str]:
     capabilities = provider_capabilities(model_id, profile=profile)
     matched: list[str] = []
-    if "local_first" in policy_intents and profile == "local":
+    if "local_first" in policy_intents and _is_local_profile(profile):
         matched.append("local_first")
     matched.extend(
         intent
@@ -1131,7 +1722,7 @@ def _candidate_priority_components(
     assessment = target["policy_assessment"]
     local_preference_score = (
         score_weights.get("local_first", 1.0)
-        if prefer_local and target.get("profile") == "local"
+        if prefer_local and _is_local_profile(target.get("profile"))
         else 0.0
     )
     capability_priority = _capability_priority(
@@ -1231,6 +1822,8 @@ def _candidate_reason_codes(
         reasons.append("primary_target")
     elif source == "alternate_profile":
         reasons.append("alternate_profile_candidate")
+    elif source == "profile_fallback_chain":
+        reasons.append("configured_profile_fallback_chain")
     elif source == "fallback_chain":
         reasons.append("configured_fallback_chain")
 
@@ -1345,7 +1938,7 @@ def _build_routing_decision_details(
         api_key=primary_api_key,
     )
     selected_target = ordered_targets[0]
-    selected_target_key = _target_key(
+    selected_target_key = _safe_route_key(
         model_id=str(selected_target["model_id"]),
         api_base=selected_target.get("api_base"),
         api_key=selected_target.get("api_key"),
@@ -1368,7 +1961,7 @@ def _build_routing_decision_details(
             api_base=target.get("api_base"),
             api_key=target.get("api_key"),
         )
-        target_key = _target_key(
+        target_key = _safe_route_key(
             model_id=str(target["model_id"]),
             api_base=target.get("api_base"),
             api_key=target.get("api_key"),
@@ -1408,7 +2001,7 @@ def _build_routing_decision_details(
                 "model_id": str(target["model_id"]),
                 "profile": target.get("profile"),
                 "source": target["source"],
-                "route_key": target_key,
+                "route_id": target_key,
                 "healthy": healthy,
                 "decision": decision,
                 "matched_policy_intents": _matched_policy_intents(
@@ -1520,7 +2113,7 @@ def _build_routing_decision_details(
     alternate_candidates = [
         target
         for target in planning_candidates
-        if target["route_key"] != selected_candidate["route_key"]
+        if target["route_id"] != selected_candidate["route_id"]
     ]
     best_alternate = max(alternate_candidates, key=_candidate_planning_sort_key) if alternate_candidates else None
     selection_policy_mode = "highest_ranked_attemptable"
@@ -1531,7 +2124,7 @@ def _build_routing_decision_details(
         and not rerouted_due_to_policy
     ):
         selection_policy_mode = "retain_primary_until_reroute"
-    elif planning_winner["route_key"] != selected_candidate["route_key"]:
+    elif planning_winner["route_id"] != selected_candidate["route_id"]:
         selection_policy_mode = "legacy_ordered_attemptable"
     selected_vs_best_alternate_margin = None
     selected_label = _candidate_route_label(
@@ -1554,7 +2147,7 @@ def _build_routing_decision_details(
         )
         if (
             selection_policy_mode == "retain_primary_until_reroute"
-            and planning_winner["route_key"] != selected_candidate["route_key"]
+            and planning_winner["route_id"] != selected_candidate["route_id"]
         ):
             route_comparison_summary = (
                 f"retained primary {selected_label} even though "
@@ -1562,7 +2155,7 @@ def _build_routing_decision_details(
                 f"({planning_winner['planning_score']} vs {selected_candidate['planning_score']}) "
                 "because no reroute trigger was active"
             )
-        elif planning_winner["route_key"] != selected_candidate["route_key"]:
+        elif planning_winner["route_id"] != selected_candidate["route_id"]:
             route_comparison_summary = (
                 f"selected {selected_label} by legacy ordering even though "
                 f"{planning_winner_label} had higher planning_score "
@@ -1638,7 +2231,7 @@ def _build_routing_decision_details(
         "planning_winner_model": planning_winner["model_id"],
         "planning_winner_profile": planning_winner.get("profile"),
         "planning_winner_source": planning_winner["source"],
-        "planning_winner_selected": planning_winner["route_key"] == selected_candidate["route_key"],
+        "planning_winner_selected": planning_winner["route_id"] == selected_candidate["route_id"],
         "best_alternate_model": best_alternate["model_id"] if best_alternate else None,
         "best_alternate_profile": best_alternate.get("profile") if best_alternate else None,
         "best_alternate_source": best_alternate["source"] if best_alternate else None,
@@ -1816,12 +2409,16 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             primary_profile=self._runtime_profile,
             runtime_path=self._runtime_path,
         ):
+            target_kwargs = {
+                **fallback_kwargs,
+                **dict(target.get("options") or {}),
+            }
             fallback_model = BaseLiteLLMModel(
                     model_id=str(target["model_id"]),
                     api_base=target["api_base"] or None,
                     api_key=target["api_key"] or None,
                     custom_role_conversions=custom_role_conversions,
-                    **fallback_kwargs,
+                    **target_kwargs,
                 )
             setattr(fallback_model, "runtime_profile", target.get("profile"))
             setattr(fallback_model, "runtime_source", target.get("source"))
@@ -1926,13 +2523,32 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             try:
                 if is_primary:
                     primary_attempted = True
-                    response = super().generate(
-                        messages,
-                        stop_sequences=stop_sequences,
-                        response_format=response_format,
-                        tools_to_call_from=tools_to_call_from,
-                        **kwargs,
-                    )
+                    if is_local_codex_model(primary_model):
+                        local_result = _run_local_codex_completion(
+                            _messages_to_local_operator_prompt(messages),
+                            session_id=get_current_session_id(),
+                        )
+                        if not local_result.get("ok", False):
+                            raise RuntimeError(
+                                str(
+                                    local_result.get("stderr")
+                                    or local_result.get("stdout")
+                                    or "Local Codex operator failed."
+                                ).strip()
+                            )
+                        response = _local_operator_chat_message(
+                            str(local_result.get("stdout") or "").strip(),
+                            raw=local_result,
+                            stop_sequences=stop_sequences,
+                        )
+                    else:
+                        response = super().generate(
+                            messages,
+                            stop_sequences=stop_sequences,
+                            response_format=response_format,
+                            tools_to_call_from=tools_to_call_from,
+                            **kwargs,
+                        )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=self.api_base,
@@ -1957,13 +2573,32 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
                 fallback_model = target["model"]
                 attempted_fallback_models.append(fallback_model.model_id)
-                response = fallback_model.generate(
-                    messages,
-                    stop_sequences=stop_sequences,
-                    response_format=response_format,
-                    tools_to_call_from=tools_to_call_from,
-                    **kwargs,
-                )
+                if is_local_codex_model(fallback_model.model_id):
+                    local_result = _run_local_codex_completion(
+                        _messages_to_local_operator_prompt(messages),
+                        session_id=get_current_session_id(),
+                    )
+                    if not local_result.get("ok", False):
+                        raise RuntimeError(
+                            str(
+                                local_result.get("stderr")
+                                or local_result.get("stdout")
+                                or "Local Codex operator failed."
+                            ).strip()
+                        )
+                    response = _local_operator_chat_message(
+                        str(local_result.get("stdout") or "").strip(),
+                        raw=local_result,
+                        stop_sequences=stop_sequences,
+                    )
+                else:
+                    response = fallback_model.generate(
+                        messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
                 _mark_target_succeeded(
                     model_id=fallback_model.model_id,
                     api_base=fallback_model.api_base,
@@ -1980,7 +2615,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         "primary_attempted": primary_attempted,
                     }
                     if primary_error is not None:
-                        details["primary_error"] = str(primary_error)
+                        details["primary_error"] = _safe_error(primary_error)
                     if rerouted and primary_unhealthy:
                         details["rerouted_from_unhealthy_primary"] = True
                     if rerouted_due_to_policy:
@@ -2013,7 +2648,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     fallback_errors.append(
                         {
                             "model": fallback_model.model_id,
-                            "error": str(error),
+                            "error": _safe_error(error),
                         }
                     )
                 if index + 1 < len(attempt_targets):
@@ -2032,12 +2667,12 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 "attempted_fallback_models": attempted_fallback_models,
                 "fallback_attempts": len(attempted_fallback_models),
                 "used_fallback": True,
-                "fallback_error": str(last_error),
+                "fallback_error": _safe_error(last_error),
                 "fallback_errors": fallback_errors,
                 "primary_attempted": primary_attempted,
             }
             if primary_error is not None:
-                details["primary_error"] = str(primary_error)
+                details["primary_error"] = _safe_error(primary_error)
             if rerouted and primary_unhealthy:
                 details["rerouted_from_unhealthy_primary"] = True
             if rerouted_due_to_policy:
@@ -2056,7 +2691,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     "runtime_path": "agent_generate",
                     "primary_model": primary_model,
                     "used_fallback": False,
-                    "error": str(primary_error),
+                    "error": _safe_error(primary_error),
                 },
                 request_id=request_id,
             )
@@ -2171,7 +2806,23 @@ def completion_with_fallback_sync(
             try:
                 if is_primary:
                     primary_attempted = True
-                    response = litellm.completion(**primary_kwargs)
+                    if is_local_codex_model(primary_model):
+                        local_prompt = _messages_to_local_operator_prompt(messages)
+                        if not local_prompt:
+                            raise ValueError("Local Codex completion requires at least one non-empty message")
+                        local_result = _run_local_codex_completion(
+                            local_prompt,
+                            session_id=get_current_session_id(),
+                        )
+                        if not local_result.get("ok"):
+                            if local_result.get("timed_out"):
+                                raise TimeoutError("Local Codex completion timed out")
+                            raise RuntimeError(
+                                (local_result.get("stderr") or local_result.get("stdout") or "Local Codex completion failed").strip()
+                            )
+                        response = _local_operator_completion_response(str(local_result.get("stdout") or "").strip())
+                    else:
+                        response = litellm.completion(**primary_kwargs)
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),
@@ -2203,6 +2854,7 @@ def completion_with_fallback_sync(
                     fallback_model_id=str(target["model_id"]),
                     fallback_api_key=target["api_key"],
                     fallback_api_base=target["api_base"],
+                    fallback_options=dict(target.get("options") or {}),
                     runtime_path=runtime_path,
                 )
                 fallback_model = _safe_model_name(fallback_kwargs)
@@ -2225,7 +2877,7 @@ def completion_with_fallback_sync(
                         "primary_attempted": primary_attempted,
                     }
                     if primary_error is not None:
-                        details["primary_error"] = str(primary_error)
+                        details["primary_error"] = _safe_error(primary_error)
                     if rerouted and primary_unhealthy:
                         details["rerouted_from_unhealthy_primary"] = True
                     if rerouted_due_to_policy:
@@ -2258,7 +2910,7 @@ def completion_with_fallback_sync(
                     fallback_errors.append(
                         {
                             "model": fallback_model,
-                            "error": str(error),
+                            "error": _safe_error(error),
                         }
                     )
                 if index + 1 < len(attempt_targets):
@@ -2278,12 +2930,12 @@ def completion_with_fallback_sync(
                 "attempted_fallback_models": attempted_fallback_models,
                 "fallback_attempts": len(attempted_fallback_models),
                 "used_fallback": True,
-                "fallback_error": str(last_error),
+                "fallback_error": _safe_error(last_error),
                 "fallback_errors": fallback_errors,
                 "primary_attempted": primary_attempted,
             }
             if primary_error is not None:
-                details["primary_error"] = str(primary_error)
+                details["primary_error"] = _safe_error(primary_error)
             if rerouted and primary_unhealthy:
                 details["rerouted_from_unhealthy_primary"] = True
             if rerouted_due_to_policy:
@@ -2303,7 +2955,7 @@ def completion_with_fallback_sync(
                     "runtime_profile": resolved_profile,
                     "primary_model": primary_model,
                     "used_fallback": False,
-                    "error": str(primary_error),
+                    "error": _safe_error(primary_error),
                 },
                 request_id=request_id,
             )

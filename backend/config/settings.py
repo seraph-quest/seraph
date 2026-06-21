@@ -9,9 +9,12 @@ DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
 
 class Settings(BaseSettings):
     openrouter_api_key: str = ""
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
     default_model: str = "openrouter/anthropic/claude-sonnet-4"
     llm_api_key: str = ""
     llm_api_base: str = "https://openrouter.ai/api/v1"
+    llm_provider_profiles: str = ""  # JSON object of named provider/operator profiles
     fallback_model: str = ""
     fallback_models: str = ""  # comma-separated ordered fallback chain
     fallback_llm_api_key: str = ""
@@ -36,6 +39,14 @@ class Settings(BaseSettings):
     provider_task_classes: str = ""  # semicolon-separated model_or_glob=task_class entries
     provider_budget_classes: str = ""  # semicolon-separated model_or_glob=low|medium|high entries
     llm_target_cooldown_seconds: int = 300  # temporarily deprioritize failed LLM targets across requests
+    codex_local_enabled: bool = True
+    codex_local_command: str = "codex"
+    codex_local_model: str = "gpt-5.5"
+    codex_local_reasoning_effort: str = "low"
+    codex_local_sandbox: str = "read-only"
+    codex_local_approval_policy: str = "never"
+    codex_local_allow_workspace_write: bool = False
+    codex_local_timeout_seconds: int = 600
     model_temperature: float = 0.7
     model_max_tokens: int = 4096
     agent_max_steps: int = 10
@@ -91,6 +102,26 @@ class Settings(BaseSettings):
     activity_digest_hour: int = 20                    # 8 PM daily digest
     weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
     screen_observation_retention_days: int = 90        # keep 90 days of observations
+    screen_capture_archive_dir: str = ""
+    screen_analysis_min_seconds_between_captures: int = 0
+    screen_analysis_max_daily_captures: int = 0
+    screen_capture_archive_retention_days: int = 365
+    screen_capture_archive_max_mb: int = 0
+    report_archive_dir: str = ""
+    end_of_day_report_enabled: bool = True
+    end_of_day_report_hour: int = 21
+    end_of_day_report_llm_enabled: bool = False
+    email_reports_enabled: bool = False
+    email_reports_preview_required: bool = True
+    email_reports_to: str = ""
+    email_reports_to_allowlist: str = ""
+    email_reports_from: str = ""
+    email_reports_reply_to: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
 
     # Vault
     vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty

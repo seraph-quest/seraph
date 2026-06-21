@@ -16,6 +16,9 @@
 - [x] hierarchical goals and progress tracking
 - [x] strategist agent with restricted guardian tool set
 - [x] daily briefing, evening review, activity digest, and weekly activity review foundations
+- [x] end-of-day goal report generation now compares local screen-derived activity summaries with active/completed goals, stores the redacted report as an observer memory episode, defaults to deterministic local drafting unless `END_OF_DAY_REPORT_LLM_ENABLED=true`, and can deliver by SMTP only when email is explicitly configured, preview is deliberately acknowledged/disabled, and the recipient is allowlisted
+- [x] Settings exposes report delivery readiness, manual preview/send/test-email actions, private report receipts, and screen-analysis budget posture so operators can verify the loop without editing env files blindly
+- [x] preserved screen artifacts and end-of-day report artifacts give the learning loop a durable local evidence trail: allowed images, redacted provider output, normalized analysis JSON, report text, and report JSON stay under configured archive roots for future re-analysis
 - [x] observer-driven user-state and attention-budget modeling
 - [x] observer salience, confidence, and interruption-cost scoring that feeds guardian state and proactive policy
 - [x] explicit guardian-state synthesis that unifies observer context, memory, current session, recent sessions, confidence, and observer salience signals for downstream agent paths

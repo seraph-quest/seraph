@@ -2,7 +2,7 @@
 """VLM Screenshot Benchmark — benchmark Gemini 2.5 Flash Lite on real screenshots.
 
 Usage:
-    OPENROUTER_API_KEY=sk-or-... python scripts/vlm_benchmark.py
+    OPENROUTER_API_KEY=<openrouter_api_key> python scripts/vlm_benchmark.py
     python scripts/vlm_benchmark.py --screenshots-dir ~/Desktop/screen
 """
 

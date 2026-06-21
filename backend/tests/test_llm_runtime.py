@@ -1,8 +1,9 @@
 """Tests for shared LLM runtime configuration and fallback behavior."""
 
 import asyncio
+import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -11,10 +12,13 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
     FallbackLiteLLMModel,
+    ProviderProfileConfigurationError,
     _build_routing_decision_details,
     _feedback_snapshot,
     _fallback_targets,
     _mark_target_failed,
+    _ordered_candidate_targets,
+    _order_targets_by_policy,
     _reset_target_health,
     build_completion_kwargs,
     build_model_kwargs,
@@ -24,7 +28,9 @@ from src.llm_runtime import (
     _register_request,
     _finish_request,
     reset_current_llm_request_id,
+    provider_profile_statuses,
     runtime_policy_scores,
+    _safe_error,
     set_current_llm_request_id,
 )
 
@@ -42,6 +48,437 @@ def test_build_model_kwargs_uses_provider_agnostic_settings():
     assert kwargs["api_base"] == "http://localhost:11434/v1"
     assert kwargs["temperature"] == 0.4
     assert kwargs["max_tokens"] == 512
+
+
+def test_default_profile_does_not_attach_provider_scoped_cloud_keys(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with (
+        patch.object(settings, "llm_api_key", ""),
+        patch.object(settings, "openrouter_api_key", ""),
+        patch.object(settings, "openai_api_key", ""),
+        patch.object(settings, "anthropic_api_key", ""),
+        patch.object(settings, "runtime_profile_preferences", ""),
+    ):
+        kwargs = build_model_kwargs(temperature=0.4, max_tokens=512)
+
+    assert "api_key" not in kwargs
+
+
+def test_build_model_kwargs_uses_named_codex_openai_profile_with_reasoning_effort(monkeypatch):
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret-key")
+    with (
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=codex-openai|openrouter"),
+        patch.object(settings, "openai_api_key", ""),
+        patch.object(settings, "openrouter_api_key", ""),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "openai/gpt-5.5"
+    assert kwargs["runtime_profile"] == "codex-openai"
+    assert kwargs["api_key"] == "openai-secret-key"
+    assert kwargs["api_base"] == "https://api.openai.com/v1"
+    assert kwargs["reasoning_effort"] == "low"
+    _, provider, _, _ = get_llm_provider(
+        model=kwargs["model_id"],
+        api_base=kwargs["api_base"],
+    )
+    assert provider == "openai"
+
+
+def test_build_model_kwargs_supports_gpt55_low_alias_without_encoding_reasoning_in_model(monkeypatch):
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret-key")
+    with (
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=gpt-5.5-low"),
+        patch.object(settings, "openai_api_key", ""),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "openai/gpt-5.5"
+    assert kwargs["runtime_profile"] == "gpt-5.5-low"
+    assert kwargs["reasoning_effort"] == "low"
+    _, provider, _, _ = get_llm_provider(
+        model=kwargs["model_id"],
+        api_base=kwargs["api_base"],
+    )
+    assert provider == "openai"
+
+
+def test_build_model_kwargs_named_profile_missing_secret_fails_closed(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with (
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=gpt-5.5-low"),
+        patch.object(settings, "openai_api_key", ""),
+    ):
+        with pytest.raises(ProviderProfileConfigurationError, match="missing required credential"):
+            build_model_kwargs(
+                temperature=0.2,
+                max_tokens=256,
+                runtime_path="chat_agent",
+            )
+
+
+def test_build_model_kwargs_uses_custom_openai_compatible_profile(monkeypatch):
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "custom-secret-key")
+    profile_config = {
+        "profiles": {
+            "team-router": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/team-model",
+                "api_base": "https://llm.example.test/v1",
+                "env_secret": "CUSTOM_LLM_API_KEY",
+                "options": {"reasoning_effort": "low"},
+                "capabilities": ["reasoning", "tool_use"],
+                "cost": "medium",
+                "latency": "low",
+                "task": "coding",
+                "budget": "medium",
+                "fallback": ["openai-compatible/team-small"],
+                "enabled": True,
+                "safety_notes": "team scoped profile",
+            }
+        }
+    }
+    with (
+        patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=team-router"),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+        statuses = provider_profile_statuses()
+
+    assert kwargs["model"] == "openai-compatible/team-model"
+    assert kwargs["api_key"] == "custom-secret-key"
+    assert kwargs["api_base"] == "https://llm.example.test/v1"
+    assert kwargs["reasoning_effort"] == "low"
+    team_profile = next(item for item in statuses if item["id"] == "team-router")
+    assert team_profile["secret_configured"] is True
+    assert team_profile["env_secret"] == "CUSTOM_LLM_API_KEY"
+    assert team_profile["capabilities"] == ["reasoning", "tool_use"]
+    assert team_profile["cost"] == "medium"
+    assert team_profile["latency"] == "low"
+    assert team_profile["task"] == "coding"
+    assert team_profile["budget"] == "medium"
+    assert team_profile["fallback"] == ["openai-compatible/team-small"]
+    assert team_profile["fallback_models"] == ["openai-compatible/team-small"]
+    assert team_profile["enabled"] is True
+    assert team_profile["safety_notes"] == "team scoped profile"
+
+
+def test_provider_profile_status_redacts_nested_option_secrets(monkeypatch):
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "custom-secret-key")
+    profile_config = {
+        "profiles": {
+            "team-router": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/team-model",
+                "api_base": "https://llm.example.test/v1",
+                "env_secret": "CUSTOM_LLM_API_KEY",
+                "options": {
+                    "api_key": "inline-secret",
+                    "extra_headers": {"Authorization": "Bearer header-secret"},
+                    "trace": "custom-secret-key",
+                },
+            }
+        }
+    }
+    with patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)):
+        statuses = provider_profile_statuses()
+
+    team_profile = next(item for item in statuses if item["id"] == "team-router")
+    serialized = json.dumps(team_profile)
+    assert "inline-secret" not in serialized
+    assert "header-secret" not in serialized
+    assert "custom-secret-key" not in serialized
+    assert team_profile["options"]["api_key"] == "[redacted]"
+    assert team_profile["options"]["extra_headers"]["Authorization"] == "[redacted]"
+    assert team_profile["options"]["trace"] == "[redacted]"
+
+
+def test_built_in_profile_statuses_include_expected_operator_profiles(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with (
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "openai_api_key", ""),
+        patch.object(settings, "anthropic_api_key", ""),
+        patch.object(settings, "llm_api_key", ""),
+    ):
+        profiles = {item["id"]: item for item in provider_profile_statuses()}
+
+    assert {"openrouter", "openai-compatible", "codex-openai", "claude-anthropic", "gpt-5.5-low"} <= profiles.keys()
+    assert profiles["codex-openai"]["model"] == "openai/gpt-5.5"
+    assert profiles["codex-openai"]["options"] == {"reasoning_effort": "low"}
+    assert profiles["codex-openai"]["missing_secret"] is True
+    assert profiles["openai-compatible"]["secret_ref"] == "LLM_API_KEY"
+    assert all("api_key" not in profile for profile in profiles.values())
+
+
+def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret-key")
+    with (
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=claude-anthropic"),
+        patch.object(settings, "anthropic_api_key", ""),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+
+    assert kwargs["model_id"] == "anthropic/claude-sonnet-4-20250514"
+    assert kwargs["runtime_profile"] == "claude-anthropic"
+    assert kwargs["api_key"] == "anthropic-secret-key"
+    resolved_model, provider, _, _ = get_llm_provider(model=kwargs["model_id"])
+    assert resolved_model == "claude-sonnet-4-20250514"
+    assert provider == "anthropic"
+
+
+def test_safe_error_redacts_local_and_fallback_keys():
+    with (
+        patch.object(settings, "local_llm_api_key", "local-secret-key"),
+        patch.object(settings, "fallback_llm_api_key", "fallback-secret-key"),
+    ):
+        error = _safe_error(
+            "failed with local-secret-key then fallback-secret-key"
+        )
+
+    assert "local-secret-key" not in error
+    assert "fallback-secret-key" not in error
+    assert error.count("[redacted]") == 2
+
+
+def test_named_profile_fallback_chain_uses_profile_credentials(monkeypatch):
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "profile-fallback-secret")
+    profile_config = {
+        "profiles": {
+            "team-router": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/team-model",
+                "api_base": "https://llm.example.test/v1",
+                "secret_env": "CUSTOM_LLM_API_KEY",
+                "fallback_models": ["openai-compatible/team-small"],
+            }
+        }
+    }
+    with (
+        patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=team-router"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+        targets = _fallback_targets(
+            primary_model_id=kwargs["model"],
+            primary_api_base=kwargs["api_base"],
+            primary_api_key=kwargs["api_key"],
+            primary_profile="team-router",
+            runtime_path="chat_agent",
+        )
+
+    assert [target["model_id"] for target in targets] == ["openai-compatible/team-small"]
+    assert targets[0]["api_key"] == "profile-fallback-secret"
+    assert targets[0]["api_base"] == "https://llm.example.test/v1"
+    assert targets[0]["source"] == "profile_fallback_chain"
+
+
+def test_misconfigured_profile_fallback_does_not_block_primary(monkeypatch):
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "profile-primary-secret")
+    monkeypatch.delenv("MISSING_FALLBACK_KEY", raising=False)
+    profile_config = {
+        "profiles": {
+            "team-router": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/team-model",
+                "api_base": "https://llm.example.test/v1",
+                "secret_env": "CUSTOM_LLM_API_KEY",
+                "fallback_models": ["broken-fallback"],
+            },
+            "broken-fallback": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/team-small",
+                "api_base": "https://llm.example.test/v1",
+                "secret_env": "MISSING_FALLBACK_KEY",
+            },
+        }
+    }
+    with (
+        patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+    ):
+        targets = _fallback_targets(
+            primary_model_id="openai-compatible/team-model",
+            primary_api_base="https://llm.example.test/v1",
+            primary_api_key="profile-primary-secret",
+            primary_profile="team-router",
+            runtime_path="chat_agent",
+        )
+
+    assert targets == []
+
+
+def test_local_first_prefers_named_local_ollama_profile():
+    with (
+        patch.object(settings, "local_model", "ollama/qwen2.5-coder:7b"),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_policy_intents", "chat_agent=local_first"),
+        patch.object(settings, "runtime_policy_scores", ""),
+        patch.object(settings, "runtime_policy_requirements", ""),
+        patch.object(settings, "runtime_max_cost_tier", ""),
+        patch.object(settings, "runtime_max_latency_tier", ""),
+        patch.object(settings, "runtime_task_class", ""),
+        patch.object(settings, "runtime_max_budget_class", ""),
+    ):
+        ordered = _order_targets_by_policy(
+            [
+                {
+                    "model_id": "openrouter/anthropic/claude-sonnet-4",
+                    "api_base": "https://openrouter.ai/api/v1",
+                    "api_key": "openrouter-key",
+                    "profile": "openrouter",
+                    "source": "primary",
+                },
+                {
+                    "model_id": "ollama/qwen2.5-coder:7b",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key": "",
+                    "profile": "local-ollama",
+                    "source": "alternate_profile",
+                },
+            ],
+            runtime_path="chat_agent",
+        )
+
+    assert ordered[0]["profile"] == "local-ollama"
+    assert ordered[0]["priority_components"]["local_preference_score"] == 1.0
+
+
+def test_healthy_primary_is_retained_over_named_local_ollama_preference():
+    with (
+        patch.object(settings, "local_model", "ollama/qwen2.5-coder:7b"),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_policy_intents", "chat_agent=local_first"),
+        patch.object(settings, "runtime_policy_scores", ""),
+        patch.object(settings, "runtime_policy_requirements", ""),
+        patch.object(settings, "runtime_max_cost_tier", ""),
+        patch.object(settings, "runtime_max_latency_tier", ""),
+        patch.object(settings, "runtime_task_class", ""),
+        patch.object(settings, "runtime_max_budget_class", ""),
+    ):
+        ordered = _ordered_candidate_targets(
+            primary_target={
+                "model_id": "openrouter/anthropic/claude-sonnet-4",
+                "api_base": "https://openrouter.ai/api/v1",
+                "api_key": "openrouter-key",
+                "profile": "openrouter",
+                "source": "primary",
+            },
+            fallback_targets=[
+                {
+                    "model_id": "ollama/qwen2.5-coder:7b",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key": "",
+                    "profile": "local-ollama",
+                    "source": "alternate_profile",
+                }
+            ],
+            runtime_path="chat_agent",
+        )
+
+    assert ordered[0]["profile"] == "openrouter"
+    assert ordered[1]["profile"] == "local-ollama"
+    assert ordered[1]["priority_components"]["local_preference_score"] == 1.0
+
+
+def test_routing_decision_details_redacts_api_keys(monkeypatch):
+    monkeypatch.setenv("CUSTOM_LLM_API_KEY", "sk-test-secret-redaction")
+    profile_config = {
+        "profiles": {
+            "team-router": {
+                "provider_kind": "openai_compatible",
+                "model": "openai-compatible/team-model",
+                "api_base": "https://llm.example.test/v1",
+                "secret_env": "CUSTOM_LLM_API_KEY",
+                "fallback_models": ["openai-compatible/team-small"],
+            }
+        }
+    }
+    with (
+        patch.object(settings, "llm_provider_profiles", json.dumps(profile_config)),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=team-router"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+    ):
+        primary_kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+        primary_target = {
+            "model_id": primary_kwargs["model"],
+            "api_base": primary_kwargs["api_base"],
+            "api_key": primary_kwargs["api_key"],
+            "profile": "team-router",
+            "source": "primary",
+        }
+        fallback_targets = _fallback_targets(
+            primary_model_id=primary_kwargs["model"],
+            primary_api_base=primary_kwargs["api_base"],
+            primary_api_key=primary_kwargs["api_key"],
+            primary_profile="team-router",
+            runtime_path="chat_agent",
+        )
+        ordered_targets = _ordered_candidate_targets(
+            primary_target=primary_target,
+            fallback_targets=fallback_targets,
+            runtime_path="chat_agent",
+        )
+        details = _build_routing_decision_details(
+            runtime_path="chat_agent",
+            runtime_profile="team-router",
+            primary_model=primary_kwargs["model"],
+            primary_api_base=primary_kwargs["api_base"],
+            primary_api_key=primary_kwargs["api_key"],
+            primary_profile="team-router",
+            ordered_targets=ordered_targets,
+            rerouted=False,
+            rerouted_due_to_policy=False,
+        )
+
+    serialized = json.dumps(details)
+    assert "sk-test-secret-redaction" not in serialized
+    assert "route_key" not in serialized
+    assert "route_id" in serialized
 
 
 def test_build_model_kwargs_uses_local_profile_settings():
@@ -722,6 +1159,94 @@ def test_completion_with_fallback_sync_uses_local_profile_for_runtime_path(async
     assert events[0]["details"]["runtime_path"] == "session_consolidation"
     assert events[0]["details"]["runtime_profile"] == "local"
     assert events[0]["details"]["primary_model"] == "ollama/llama3.2"
+
+
+def test_completion_with_fallback_sync_routes_codex_local_to_local_operator(async_db):
+    with (
+        patch.object(settings, "default_model", "codex-local"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("src.llm_runtime.run_local_codex", new=AsyncMock(return_value={"ok": True, "stdout": "Local title"})) as mock_codex,
+        patch("litellm.completion") as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=[{"role": "user", "content": "Name this session"}],
+            temperature=0.3,
+            max_tokens=64,
+            runtime_path="session_title_generation",
+        )
+
+    assert result.choices[0].message.content == "Local title"
+    mock_completion.assert_not_called()
+    mock_codex.assert_awaited_once()
+    assert "user: Name this session" in mock_codex.await_args.args[0]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "session_title_generation"
+    assert events[0]["details"]["primary_model"] == "codex-local"
+
+
+async def test_completion_with_fallback_sync_fails_fast_for_codex_local_inside_running_loop(async_db):
+    with (
+        patch.object(settings, "default_model", "codex-local"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch("src.llm_runtime.run_local_codex", new=AsyncMock(return_value={"ok": True, "stdout": "Loop title"})) as mock_codex,
+        patch("litellm.completion") as mock_completion,
+    ):
+        with pytest.raises(RuntimeError, match="active event loop"):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "Name this session"}],
+                temperature=0.3,
+                max_tokens=64,
+                runtime_path="session_title_generation",
+            )
+
+    mock_completion.assert_not_called()
+    mock_codex.assert_not_awaited()
+
+
+def test_fallback_litellm_model_generate_routes_codex_local_to_local_operator(async_db):
+    with (
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "runtime_model_overrides", ""),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", ""),
+        patch(
+            "src.llm_runtime.run_local_codex",
+            new=AsyncMock(return_value={"ok": True, "stdout": "Agent reply<stop>ignored"}),
+        ) as mock_codex,
+        patch("litellm.completion") as mock_completion,
+    ):
+        model = FallbackLiteLLMModel(model_id="codex-local")
+        result = model.generate(
+            [{"role": "user", "content": "Say hello"}],
+            stop_sequences=["<stop>"],
+        )
+
+    assert result.role == "assistant"
+    assert result.content == "Agent reply"
+    mock_completion.assert_not_called()
+    mock_codex.assert_awaited_once()
+    assert "user: Say hello" in mock_codex.await_args.args[0]
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "llm_primary_success"]
+
+    events = asyncio.run(_fetch())
+    assert events
+    assert events[0]["details"]["runtime_path"] == "agent_generate"
+    assert events[0]["details"]["primary_model"] == "codex-local"
 
 
 def test_completion_with_fallback_sync_uses_runtime_model_override(async_db):

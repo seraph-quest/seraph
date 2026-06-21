@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 import re
 from typing import Any
 
@@ -13,6 +14,14 @@ from pydantic import BaseModel, Field
 from config.settings import settings
 from src.agent.session import session_manager
 from src.app import _runtime_model_label, _runtime_provider_label
+from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
+from src.operators.local_codex import (
+    is_local_codex_model,
+    LocalCodexConfigurationError,
+    local_codex_status,
+    local_operator_statuses,
+    run_local_codex,
+)
 from src.extensions.lifecycle import list_extensions
 from src.llm_logger import list_recent_llm_calls
 from src.observer.manager import context_manager
@@ -146,6 +155,7 @@ from src.workflows.post_dx_live_durable_orchestration import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class MemoryOperatorControlRequest(BaseModel):
@@ -170,10 +180,44 @@ class MemoryLiveControlActionRequest(BaseModel):
     privacy_boundary: str | None = None
 
 
+class LocalCodexExecRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=40_000)
+    cwd: str | None = None
+    model: str | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    session_id: str | None = None
+
+
 def _memory_live_control_acknowledgement(request: MemoryLiveControlActionRequest) -> bool:
     if str(request.action or "").strip().lower() == "rollback_memory":
         return request.acknowledge_rollback_boundary
     return request.acknowledged or request.acknowledge_rollback_boundary
+
+
+@router.get("/operator/local-codex/status")
+async def operator_local_codex_status():
+    return local_codex_status()
+
+
+@router.post("/operator/local-codex/exec")
+async def operator_local_codex_exec(request: LocalCodexExecRequest):
+    try:
+        return await run_local_codex(
+            request.prompt,
+            cwd=request.cwd,
+            model=request.model,
+            timeout_seconds=request.timeout_seconds,
+            session_id=request.session_id,
+        )
+    except LocalCodexConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "adapter": "codex-local",
+                "status": "blocked",
+                "failure_reason": str(exc),
+            },
+        ) from exc
 
 
 _ENGINEERING_PULL_REQUEST_RE = re.compile(
@@ -652,11 +696,13 @@ def _build_operator_continuity_graph(
         for item in sessions
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
+    raw_snapshot_threads = continuity_snapshot.get("threads") if isinstance(continuity_snapshot, dict) else []
+    snapshot_thread_items = raw_snapshot_threads if isinstance(raw_snapshot_threads, list) else []
     snapshot_threads = {
         _continuity_graph_session_key(
             item.get("thread_id") if isinstance(item, dict) else None
         ): item
-        for item in (continuity_snapshot.get("threads") if isinstance(continuity_snapshot, dict) else [])
+        for item in snapshot_thread_items
         if isinstance(item, dict)
     }
     nodes: dict[str, dict[str, Any]] = {}
@@ -1197,13 +1243,17 @@ def _continuity_operator_items(
 
 def _runtime_status_payload() -> dict[str, Any]:
     model = settings.default_model.strip()
+    active_profile = "codex-local" if is_local_codex_model(model) else resolve_runtime_profile(runtime_path="chat_agent")
     return {
-        "version": "2026.4.10",
-        "build_id": "SERAPH_PRIME_v2026.4.10",
+        "version": "2026.4.11",
+        "build_id": "SERAPH_PRIME_v2026.4.11",
         "provider": _runtime_provider_label(),
         "model": model,
         "model_label": _runtime_model_label(model),
         "api_base": settings.llm_api_base.strip(),
+        "active_profile": active_profile,
+        "provider_profiles": provider_profile_statuses(),
+        "local_operators": local_operator_statuses(probe=False),
         "timezone": settings.user_timezone,
         "llm_logging_enabled": settings.llm_log_enabled,
     }
@@ -4811,7 +4861,7 @@ async def get_operator_continuity_graph(
     session_id: str | None = Query(default=None),
     limit_sessions: int = Query(default=6, ge=1, le=20),
 ):
-    sessions, workflow_runs, pending_approvals, notifications, queued_insights, recent_interventions, continuity_snapshot = await asyncio.gather(
+    results = await asyncio.gather(
         session_manager.list_sessions(),
         _list_workflow_runs(limit=max(limit_sessions * 8, 60), session_id=session_id),
         approval_repository.list_pending(session_id=session_id, limit=max(limit_sessions * 4, 40)),
@@ -4819,7 +4869,29 @@ async def get_operator_continuity_graph(
         insight_queue.peek_all(),
         guardian_feedback_repository.list_recent(limit=max(limit_sessions * 8, 60), session_id=session_id),
         build_observer_continuity_snapshot(),
+        return_exceptions=True,
     )
+    (
+        sessions,
+        workflow_runs,
+        pending_approvals,
+        notifications,
+        queued_insights,
+        recent_interventions,
+        continuity_snapshot,
+    ) = results
+    source_names = (
+        "sessions",
+        "workflow_runs",
+        "pending_approvals",
+        "notifications",
+        "queued_insights",
+        "recent_interventions",
+        "continuity_snapshot",
+    )
+    for name, result in zip(source_names, results, strict=True):
+        if isinstance(result, Exception):
+            logger.warning("Operator continuity graph degraded: %s source failed: %s", name, result)
     return _build_operator_continuity_graph(
         sessions if isinstance(sessions, list) else [],
         workflow_runs if isinstance(workflow_runs, list) else [],

@@ -39,6 +39,21 @@ def _validate_timezone(tz_name: str) -> str:
         return "UTC"
 
 
+def _settings_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = getattr(settings, name, default)
+    if not isinstance(raw, (int, str)) or isinstance(raw, bool):
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    if maximum is not None and value > maximum:
+        return default
+    return value
+
+
 def init_scheduler() -> AsyncIOScheduler | None:
     """Create and start the background scheduler with all configured jobs.
 
@@ -63,6 +78,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
+    from src.scheduler.jobs.end_of_day_goal_report import run_end_of_day_goal_report
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
 
@@ -117,6 +133,15 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "activity_digest",
             "name": "Activity digest",
+        },
+        {
+            "func": _async_job_wrapper(run_end_of_day_goal_report, loop),
+            "trigger": CronTrigger(
+                hour=_settings_int("end_of_day_report_hour", 21, minimum=0, maximum=23),
+                timezone=validated_tz,
+            ),
+            "id": "end_of_day_goal_report",
+            "name": "End-of-day goal report",
         },
         {
             "func": _async_job_wrapper(run_weekly_activity_review, loop),

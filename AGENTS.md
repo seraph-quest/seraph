@@ -89,6 +89,10 @@ The lead should incorporate the critique, explicitly reject it with rationale, o
 
 ## Review Rule
 
-- Run a subagent review for non-trivial PR-sized slices.
+- Every PR-sized slice must be reviewed before merge. Non-trivial PR-sized slices require an independent subagent review.
+- Every pushed update to an open PR that changes behavior, security/privacy posture, runtime wiring, settings, docs truth, tests, or workflow contract must receive a fresh independent Critic/Contrarian pass before the lead claims the PR is reviewed, updates the PR as review-passed, or asks to merge.
+- Small follow-up commits are not exempt when they affect the same PR's acceptance criteria or operator-visible behavior. Treat them as part of the PR-sized slice and re-run the critic on the cumulative diff or the changed follow-up scope.
+- A lead's own named "critic pass" is not a substitute when subagent tooling is available. Use an independent subagent critic; only fall back to a separate self-run critic pass when subagent tooling is unavailable, and state that limitation in the PR/final response.
 - Verify subagent claims before acting on them.
 - Record material review findings, or an explicit no-findings result, in the PR body and in affected implementation docs when the slice changes shipped truth or workflow contract.
+- Do not merge a PR until material review findings are either fixed, explicitly rejected with rationale, or turned into tracked follow-up work.

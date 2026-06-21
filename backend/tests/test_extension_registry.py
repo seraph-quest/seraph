@@ -16,7 +16,7 @@ version: 2026.3.21
 display_name: Research Briefing
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: bundled
@@ -43,7 +43,7 @@ contributes:
     assert extension is not None
     assert extension.source == "manifest"
     assert {item.contribution_type for item in extension.contributions} == {"skills", "workflows"}
-    assert extension.metadata["compatibility"] == ">=2026.4.10"
+    assert extension.metadata["compatibility"] == ">=2026.4.11"
 
 
 def test_contribution_payload_surfaces_rejected_capability_contract(tmp_path: Path):
@@ -56,7 +56,7 @@ version: 2026.5.4
 display_name: Contract Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -121,7 +121,7 @@ version: 2026.3.23
 display_name: Guardian Reach
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -214,7 +214,7 @@ version: 2026.3.21
 display_name: Bad
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -286,7 +286,7 @@ contributes:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -294,7 +294,7 @@ contributes:
     assert snapshot.extensions == []
     assert len(snapshot.load_errors) == 1
     assert snapshot.load_errors[0].phase == "compatibility"
-    assert "current runtime is 2026.4.10" in snapshot.load_errors[0].message
+    assert "current runtime is 2026.4.11" in snapshot.load_errors[0].message
 
 
 def test_registry_synthesizes_legacy_skill_and_workflow_sources(tmp_path: Path):
@@ -446,7 +446,7 @@ version: 2026.3.21
 display_name: Research Briefing
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -462,7 +462,7 @@ contributes:
         skill_dirs=[str(skills_dir)],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -481,7 +481,7 @@ version: 2026.3.23
 display_name: Research Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -498,7 +498,7 @@ version: 2026.3.23
 display_name: Nested Example
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -531,7 +531,7 @@ version: 2026.3.21
 display_name: Connector Pack
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -569,7 +569,7 @@ permissions:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=StubMCPRuntime(),
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -594,7 +594,7 @@ version: 2026.3.23
 display_name: {label} Duplicate
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -634,7 +634,7 @@ version: 2026.3.24
 display_name: A Canvas Winner
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -666,7 +666,7 @@ version: 2026.3.24
 display_name: Z Canvas Loser
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -697,7 +697,7 @@ version: 2026.3.24
 display_name: A Runtime Winner
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -729,7 +729,7 @@ version: 2026.3.24
 display_name: Z Runtime Loser
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -761,7 +761,7 @@ version: 2026.3.24
 display_name: Workflow Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -818,7 +818,7 @@ version: 2026.3.21
 display_name: Managed GitHub
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -856,7 +856,7 @@ config_fields:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -884,7 +884,7 @@ version: 2026.3.21
 display_name: Core Observer Sources
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -911,7 +911,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -941,7 +941,7 @@ version: 2026.3.21
 display_name: Workspace Calendar
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -970,7 +970,7 @@ version: 2026.3.21
 display_name: Core Observer Sources
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: bundled
@@ -997,7 +997,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -1019,7 +1019,7 @@ version: 2026.3.21
 display_name: Core Channel Adapters
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -1044,7 +1044,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -1074,7 +1074,7 @@ version: 2026.3.21
 display_name: Workspace Channel
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -1101,7 +1101,7 @@ version: 2026.3.21
 display_name: Core Channel Adapters
 kind: connector-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: bundled
@@ -1126,7 +1126,7 @@ enabled: true
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()
@@ -1151,7 +1151,7 @@ version: 2026.3.21
 display_name: Escape Pack
 kind: capability-pack
 compatibility:
-  seraph: ">=2026.4.10"
+  seraph: ">=2026.4.11"
 publisher:
   name: Seraph
 trust: local
@@ -1170,7 +1170,7 @@ contributes:
         skill_dirs=[],
         workflow_dirs=[],
         mcp_runtime=None,
-        seraph_version="2026.4.10",
+        seraph_version="2026.4.11",
     )
 
     snapshot = registry.snapshot()

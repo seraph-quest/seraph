@@ -21,7 +21,7 @@ Complete instructions for getting Seraph fully running with all features.
 All settings live in `.env.dev` at the project root. The only **required** value is your API key:
 
 ```bash
-OPENROUTER_API_KEY=sk-or-v1-your-key-here
+OPENROUTER_API_KEY=<openrouter_api_key>
 ```
 
 ### Optional model settings
@@ -309,7 +309,7 @@ Sensitive apps (password managers, banking, crypto wallets) are automatically bl
 ./daemon/run.sh --ocr --verbose
 
 # OpenRouter cloud analysis (Gemini 2.5 Flash Lite, structured JSON, ~$1.30/mo)
-OPENROUTER_API_KEY=sk-or-... ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
+OPENROUTER_API_KEY=<openrouter_api_key> ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
 
 # With custom app blocklist
 ./daemon/run.sh --ocr --ocr-provider openrouter --blocklist-file ~/blocklist.json --verbose

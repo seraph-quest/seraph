@@ -93,7 +93,9 @@ export function SeraphPresencePane({ snapshot, isSelected = false }: SeraphPrese
       {
         label: "Context",
         value: contextLabel(snapshot),
-        hint: (snapshot.dataQuality ?? "runtime linked").replace(/_/g, " "),
+        hint: (snapshot.dataQuality ?? (
+          snapshot.connectionStatus === "connected" ? "live link" : "direct fallback"
+        )).replace(/_/g, " "),
       },
       {
         label: "Queue",

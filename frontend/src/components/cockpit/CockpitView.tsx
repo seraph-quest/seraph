@@ -7,7 +7,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useQuestStore } from "../../stores/questStore";
 import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
 import { PANEL_MIN_SIZES, usePanelLayoutStore } from "../../stores/panelLayoutStore";
-import type { ChatMessage, GoalInfo } from "../../types";
+import type { ChatMessage, ConnectionStatus, GoalInfo } from "../../types";
 import {
   buildWorkflowDraft,
   workflowAcceptsArtifact,
@@ -6778,9 +6778,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
-    const fetchJson = async (url: string) => {
+    const fetchJson = async (url: string, timeoutMs = 5000) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: controller.signal });
         if (isCancelled() || !response.ok) {
           return { ok: false, payload: null };
         }
@@ -6791,6 +6793,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         return { ok: true, payload };
       } catch {
         return { ok: false, payload: null };
+      } finally {
+        window.clearTimeout(timeout);
       }
     };
 
@@ -6855,7 +6859,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ]);
 
     if (isCancelled()) return;
-
     if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
       setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
     }
@@ -8006,7 +8009,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => starterPacks.filter((pack) => pack.availability === "ready"),
     [starterPacks],
   );
-  const connectionLabel = connectionStatus === "connected" ? "live" : connectionStatus;
+  const runtimeAvailable = runtimeStatus !== null;
+  const effectiveConnectionStatus: ConnectionStatus = connectionStatus === "connected"
+    ? "connected"
+    : connectionStatus === "connecting" || connectionStatus === "error"
+      ? "disconnected"
+      : connectionStatus;
+  const connectionLabel = effectiveConnectionStatus === "connected"
+    ? "live"
+    : effectiveConnectionStatus;
   const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
   const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
     .replace(/^openrouter\//, "")
@@ -8084,7 +8095,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : null;
   const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
   const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
-  const workspaceTelemetryRight = `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
+  const workspaceTelemetryRight = effectiveConnectionStatus === "connected"
+    ? `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`
+    : `DIRECT FALLBACK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
+  const desktopPresenceLabel = daemonPresence?.connected
+    ? "desktop live"
+    : runtimeAvailable
+      ? "desktop optional"
+      : "desktop offline";
   const submitDisabled = isAgentBusy || !composer.trim();
   const operatorRunbooks = useMemo(
     () => runbooks,
@@ -8106,7 +8124,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   );
   const seraphPresenceSnapshot = useMemo(
     () => ({
-      connectionStatus,
+      connectionStatus: effectiveConnectionStatus,
       animationState: agentVisual.animationState,
       isAgentBusy,
       pendingApprovalCount: pendingApprovals.length,
@@ -8130,7 +8148,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     [
       agentVisual.animationState,
       ambientState,
-      connectionStatus,
+      effectiveConnectionStatus,
       continuitySummary?.actionable_thread_count,
       continuitySummary?.attention_family_count,
       continuitySummary?.attention_presence_surface_count,
@@ -12958,11 +12976,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
         <div className="cockpit-topbar-right">
           <div className="cockpit-pill-row">
-            <span className={`cockpit-pill cockpit-pill--${connectionStatus}`}>{connectionLabel}</span>
+            <span className={`cockpit-pill cockpit-pill--${effectiveConnectionStatus}`}>{connectionLabel}</span>
             <span className="cockpit-pill">{ambientState.replace("_", " ")}</span>
-            <span className="cockpit-pill">
-              desktop {daemonPresence?.connected ? "live" : "offline"}
-            </span>
+            <span className="cockpit-pill">{desktopPresenceLabel}</span>
             {daemonPresence && (
               <button
                 type="button"
@@ -14300,7 +14316,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <CockpitWorkspaceWindow
                 panelId="presence_pane"
                 title="Seraph presence"
-                meta={connectionStatus === "connected" ? "runtime linked" : connectionLabel}
+                meta={effectiveConnectionStatus === "connected" ? "live link" : "direct fallback"}
                 hint={COCKPIT_WINDOW_HINTS.presence}
                 showHint={false}
                 minWidth={368}
@@ -18669,7 +18685,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             value={composer}
             onChange={(event) => setComposer(event.target.value)}
             placeholder={
-              connectionStatus === "connected"
+              effectiveConnectionStatus === "connected"
                 ? "Ask Seraph, redirect a workflow, or steer the guardian."
                 : "WebSocket offline. Message will fall back to direct chat."
             }

@@ -5,9 +5,11 @@ They are automatically skipped on non-macOS platforms (e.g., GitHub CI on Linux)
 """
 
 import asyncio
+import json
 import platform
 import sys
 import os
+from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -26,6 +28,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from seraph_daemon import poll_loop, format_active_window
 
 
+class _NoopScreenRuntime:
+    provider = type("Provider", (), {"name": "test-provider"})()
+    blocklist: set[str] = set()
+
+    async def refresh(self, *args, **kwargs):
+        return None
+
+
 class TestFormatActiveWindow:
     def test_with_both(self):
         assert format_active_window("VS Code", "main.py") == "VS Code \u2014 main.py"
@@ -41,6 +51,127 @@ class TestFormatActiveWindow:
 
 
 class TestPollLoopOfflineBackend:
+    @pytest.mark.asyncio
+    async def test_frontmost_app_unavailable_updates_status_without_posting_context(self, tmp_path, monkeypatch):
+        """On-switch mode should expose frontmost-app failures instead of silently appearing ready."""
+        status_file = tmp_path / "daemon-status.json"
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(status_file))
+        status_file.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "screen_analysis": "active",
+                    "capture_ready": True,
+                    "active_window": "OldApp",
+                    "last_capture_at": "2026-06-21T08:00:00+00:00",
+                    "last_error": None,
+                    "last_error_kind": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async def mock_get(*args, **kwargs):
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"notification": None}
+            return response
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.post = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("seraph_daemon.get_frontmost_app_name", return_value=None), \
+             patch("seraph_daemon.get_window_title", return_value=None), \
+             patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+             patch("httpx.AsyncClient", return_value=mock_client):
+
+            task = asyncio.create_task(
+                poll_loop(
+                    "http://localhost:9999",
+                    interval=0.05,
+                    idle_timeout=300,
+                    verbose=False,
+                    screen_runtime=_NoopScreenRuntime(),
+                )
+            )
+            await asyncio.sleep(0.12)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        mock_client.post.assert_not_called()
+        status = json.loads(Path(status_file).read_text(encoding="utf-8"))
+        assert status["capture_ready"] is False
+        assert status["active_window"] is None
+        assert status["screen_analysis"] == "frontmost_unavailable"
+        assert status["last_error_kind"] == "frontmost_app_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_capture_exception_clears_stale_ready_status(self, tmp_path, monkeypatch):
+        """Screenshot exceptions should not leave Settings showing an old ready capture state."""
+        status_file = tmp_path / "daemon-status.json"
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(status_file))
+        status_file.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "screen_analysis": "active",
+                    "capture_ready": True,
+                    "active_window": "OldApp",
+                    "last_capture_at": "2026-06-21T08:00:00+00:00",
+                    "last_error": None,
+                    "last_error_kind": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async def mock_get(*args, **kwargs):
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"notification": None}
+            return response
+
+        mock_client = AsyncMock()
+        mock_client.get = mock_get
+        mock_client.post = AsyncMock(return_value=MagicMock(status_code=200))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("seraph_daemon.get_frontmost_app_name", return_value="TestApp"), \
+             patch("seraph_daemon.get_window_title", return_value="TestWindow"), \
+             patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+             patch("blocklist.is_blocked", return_value=False), \
+             patch("ocr.screenshot.capture_screen_png", side_effect=RuntimeError("boom")), \
+             patch("httpx.AsyncClient", return_value=mock_client):
+
+            task = asyncio.create_task(
+                poll_loop(
+                    "http://localhost:9999",
+                    interval=0.05,
+                    idle_timeout=300,
+                    verbose=False,
+                    screen_runtime=_NoopScreenRuntime(),
+                )
+            )
+            await asyncio.sleep(0.12)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        status = json.loads(Path(status_file).read_text(encoding="utf-8"))
+        assert status["capture_ready"] is False
+        assert status["active_window"] == "TestApp — TestWindow"
+        assert status["screen_analysis"] == "analysis_error"
+        assert status["last_error_kind"] == "analysis_exception"
+
     @pytest.mark.asyncio
     async def test_continues_after_connect_error(self):
         """Poll loop should log a warning and continue when backend is unreachable."""

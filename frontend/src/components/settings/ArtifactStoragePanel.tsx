@@ -27,6 +27,12 @@ interface ArtifactStorageSettings {
       last_error: string | null;
       last_error_kind: string | null;
       updated_at: string | null;
+      active_window?: string | null;
+      frontmost_app?: string | null;
+      window_title?: string | null;
+      last_poll_at?: string | null;
+      last_capture_at?: string | null;
+      last_context_post_at?: string | null;
       status_source: string;
     };
     control_env: Record<string, string>;
@@ -428,6 +434,16 @@ export function ArtifactStoragePanel() {
               label="Capture"
               value={captureStateLabel(settings.screen)}
               tone={captureStateTone(settings.screen)}
+            />
+            <ArtifactRow
+              label="Active"
+              value={settings.screen.daemon_status.active_window ?? "not observed"}
+              tone={settings.screen.daemon_status.active_window ? "normal" : "warn"}
+            />
+            <ArtifactRow
+              label="Last capture"
+              value={settings.screen.daemon_status.last_capture_at ?? "none"}
+              tone={settings.screen.daemon_status.last_capture_at ? "good" : "warn"}
             />
             <ArtifactRow
               label="Stored"

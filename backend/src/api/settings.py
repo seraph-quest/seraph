@@ -114,7 +114,19 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
         return status
     if not isinstance(payload, dict):
         return status
-    for key in ("state", "screen_analysis", "last_error", "last_error_kind", "updated_at"):
+    for key in (
+        "state",
+        "screen_analysis",
+        "last_error",
+        "last_error_kind",
+        "updated_at",
+        "active_window",
+        "frontmost_app",
+        "window_title",
+        "last_poll_at",
+        "last_capture_at",
+        "last_context_post_at",
+    ):
         value = payload.get(key)
         if value is None or isinstance(value, str):
             status[key] = value

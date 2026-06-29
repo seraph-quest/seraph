@@ -152,21 +152,9 @@ async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_manifest_ingest_persists_observation_and_serves_image(
-    async_db,
-    client,
-    tmp_path,
-    monkeypatch,
-):
+async def test_framekeeper_image_ingest_persists_observation_and_serves_image(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
-    seraph_archive = tmp_path / "seraph-screen"
-    monkeypatch.setattr("src.api.settings.settings.workspace_dir", str(tmp_path / "workspace"))
-    monkeypatch.setattr("src.api.observer.settings.workspace_dir", str(tmp_path / "workspace"))
-    image = _write_framekeeper_capture(root, capture_id="capture-valid")
-    await client.put(
-        "/api/settings/screen-analysis",
-        json={"archive_dir": str(seraph_archive)},
-    )
+    image = _write_framekeeper_screenshot(root, name="capture-valid.png")
 
     resp = await client.post(
         "/api/observer/framekeeper/ingest",
@@ -183,19 +171,21 @@ async def test_framekeeper_manifest_ingest_persists_observation_and_serves_image
         result = await db.execute(select(ScreenObservation))
         observation = result.scalar_one()
 
-    assert observation.app_name == "VS Code"
-    assert observation.summary == "Framekeeper captured VS Code: framekeeper_source.py."
+    assert observation.app_name == "Framekeeper"
+    assert observation.summary == "Framekeeper screenshot ingested from capture-valid.png."
     stored_details = json.loads(observation.details_json or "[]")
-    assert "framekeeper_capture_id:capture-valid" in stored_details
+    image_sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
+    assert f"framekeeper_image_sha256:{image_sha256}" in stored_details
     artifact_details = [
         json.loads(item.removeprefix("capture_artifacts:"))
         for item in stored_details
         if isinstance(item, str) and item.startswith("capture_artifacts:")
     ][0]
-    assert artifact_details["analysis_path"].startswith(str(seraph_archive))
-    assert artifact_details["provider_output_path"].startswith(str(seraph_archive))
-    assert Path(artifact_details["analysis_path"]).exists()
-    assert Path(artifact_details["provider_output_path"]).exists()
+    assert artifact_details["provider"] == "framekeeper"
+    assert artifact_details["image_path"] == str(image.resolve())
+    assert artifact_details["image_sha256"] == image_sha256
+    assert "analysis_path" not in artifact_details
+    assert "provider_output_path" not in artifact_details
 
     list_resp = await client.get("/api/observer/screen-artifacts")
     assert list_resp.status_code == 200
@@ -210,18 +200,19 @@ async def test_framekeeper_manifest_ingest_persists_observation_and_serves_image
     assert analysis_resp.status_code == 200
     analysis = analysis_resp.json()
     assert analysis["provider"] == "framekeeper"
-    assert analysis["analysis_provider"] == "deterministic-local"
-    assert analysis["image"]["sha256"] == artifact_details["image_sha256"]
+    assert analysis["analysis"] is None
+    assert analysis["image_sha256"] == image_sha256
 
     output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
     assert output_resp.status_code == 200
-    assert "Raw screenshot remains in Framekeeper" in output_resp.text
+    assert "Framekeeper only produced the screenshot image" in output_resp.text
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_manifest_ingest_rejects_path_traversal(async_db, client, tmp_path):
+async def test_framekeeper_image_ingest_ignores_non_images(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
-    _write_framekeeper_capture(root, capture_id="capture-traversal", image_path="../outside.png")
+    root.mkdir()
+    (root / "notes.txt").write_text("not a screenshot", encoding="utf-8")
 
     resp = await client.post(
         "/api/observer/framekeeper/ingest",
@@ -230,38 +221,18 @@ async def test_framekeeper_manifest_ingest_rejects_path_traversal(async_db, clie
 
     assert resp.status_code == 200
     payload = resp.json()
+    assert payload["scanned"] == 0
     assert payload["ingested"] == 0
-    assert payload["rejected"][0]["reason"] == "artifact path must be relative and stay inside capture directory"
-
+    assert payload["rejected"] == []
     async with async_db() as db:
         result = await db.execute(select(ScreenObservation))
         assert result.scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_manifest_ingest_rejects_hash_mismatch(async_db, client, tmp_path):
+async def test_framekeeper_image_ingest_skips_duplicate_hash(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
-    _write_framekeeper_capture(root, capture_id="capture-hash", image_sha256="0" * 64)
-
-    resp = await client.post(
-        "/api/observer/framekeeper/ingest",
-        json={"artifact_root": str(root), "limit": 10},
-    )
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["ingested"] == 0
-    assert payload["rejected"][0]["reason"] == "image sha256 mismatch"
-
-    async with async_db() as db:
-        result = await db.execute(select(ScreenObservation))
-        assert result.scalar_one_or_none() is None
-
-
-@pytest.mark.asyncio
-async def test_framekeeper_manifest_ingest_skips_duplicate_capture_id(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
-    _write_framekeeper_capture(root, capture_id="capture-dupe")
+    _write_framekeeper_screenshot(root, name="capture-dupe.png")
 
     first = await client.post(
         "/api/observer/framekeeper/ingest",
@@ -279,41 +250,8 @@ async def test_framekeeper_manifest_ingest_skips_duplicate_capture_id(async_db, 
     assert second.json()["skipped_duplicates"] == 1
 
 
-def _write_framekeeper_capture(
-    root,
-    *,
-    capture_id: str,
-    image_path: str = "screenshot.png",
-    image_sha256: str | None = None,
-):
-    capture_dir = root / "captures" / "2026-06-29" / capture_id
-    capture_dir.mkdir(parents=True)
-    image = capture_dir / "screenshot.png"
+def _write_framekeeper_screenshot(root: Path, *, name: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    image = root / name
     image.write_bytes(b"framekeeper png bytes")
-    digest = hashlib.sha256(image.read_bytes()).hexdigest()
-    manifest = {
-        "schema_version": 1,
-        "capture_id": capture_id,
-        "captured_at": "2026-06-29T10:34:56Z",
-        "platform": "macos",
-        "producer": {"name": "framekeeper", "version": "0.1.0"},
-        "reason": "manual",
-        "mode": "manual",
-        "subject": {
-            "app_name": "VS Code",
-            "window_title": "framekeeper_source.py",
-            "display_id": None,
-        },
-        "artifacts": {
-            "image_path": image_path,
-            "image_sha256": image_sha256 or digest,
-            "image_media_type": "image/png",
-        },
-        "policy": {
-            "blocked": False,
-            "blocklist_version": "builtin-v1",
-            "retention_days": 7,
-        },
-    }
-    (capture_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return image

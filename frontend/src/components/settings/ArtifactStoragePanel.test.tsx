@@ -150,12 +150,12 @@ describe("ArtifactStoragePanel", () => {
           provider: "framekeeper",
           artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
           artifact_root_source: "default",
-          manifest_count: 2,
-          last_manifest_at: "2026-06-20T18:40:00Z",
+          image_count: 2,
+          last_image_at: "2026-06-20T18:40:00Z",
           status: "ready",
           exists: true,
           readable: true,
-          stored_artifacts: ["manifest_json", "image"],
+          stored_artifacts: ["image"],
           ingest_endpoint: "/api/observer/framekeeper/ingest",
           inspection_endpoint: "/api/observer/screen-artifacts",
           inspection_visibility: "localhost_only",
@@ -200,9 +200,9 @@ describe("ArtifactStoragePanel", () => {
 
     await waitFor(() => expect(screen.getByText("Seraph analysis")).toBeInTheDocument());
     expect(screen.getByText("Framekeeper Source")).toBeInTheDocument();
-    expect(screen.getByText("consumes Framekeeper manifests and keeps reports local-first")).toBeInTheDocument();
-    expect(screen.getByText("Framekeeper artifacts")).toBeInTheDocument();
-    expect(screen.getByText(/2 manifests/)).toBeInTheDocument();
+    expect(screen.getByText("consumes Framekeeper screenshots and keeps reports local-first")).toBeInTheDocument();
+    expect(screen.getByText("Framekeeper screenshots")).toBeInTheDocument();
+    expect(screen.getByText(/2 images/)).toBeInTheDocument();
     expect(screen.getByText("/api/observer/framekeeper/ingest")).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();

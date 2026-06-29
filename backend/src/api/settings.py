@@ -272,38 +272,38 @@ def _framekeeper_source_summary(root: Path) -> dict[str, object]:
     if not root.exists():
         return {
             "status": "not_found",
-            "manifest_count": 0,
-            "last_manifest_at": None,
+            "image_count": 0,
+            "last_image_at": None,
             "exists": False,
             "readable": False,
         }
     if not root.is_dir():
         return {
             "status": "invalid_root",
-            "manifest_count": 0,
-            "last_manifest_at": None,
+            "image_count": 0,
+            "last_image_at": None,
             "exists": True,
             "readable": False,
         }
-    manifest_mtimes: list[float] = []
+    image_mtimes: list[float] = []
     try:
-        for path in (root / "captures").rglob("manifest.json"):
-            if path.is_file():
-                manifest_mtimes.append(path.stat().st_mtime)
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                image_mtimes.append(path.stat().st_mtime)
     except OSError as exc:
         logger.warning("Framekeeper artifact source summary failed: %s", exc)
         return {
             "status": "read_error",
-            "manifest_count": 0,
-            "last_manifest_at": None,
+            "image_count": 0,
+            "last_image_at": None,
             "exists": True,
             "readable": False,
         }
     return {
-        "status": "ready" if manifest_mtimes else "empty",
-        "manifest_count": len(manifest_mtimes),
-        "last_manifest_at": datetime.fromtimestamp(max(manifest_mtimes), timezone.utc).isoformat()
-        if manifest_mtimes
+        "status": "ready" if image_mtimes else "empty",
+        "image_count": len(image_mtimes),
+        "last_image_at": datetime.fromtimestamp(max(image_mtimes), timezone.utc).isoformat()
+        if image_mtimes
         else None,
         "exists": True,
         "readable": True,
@@ -543,12 +543,12 @@ async def get_artifact_storage_settings():
             "provider": "framekeeper",
             "artifact_root": str(framekeeper_root),
             "artifact_root_source": framekeeper_root_source,
-            "manifest_count": framekeeper_source["manifest_count"],
-            "last_manifest_at": framekeeper_source["last_manifest_at"],
+            "image_count": framekeeper_source["image_count"],
+            "last_image_at": framekeeper_source["last_image_at"],
             "status": framekeeper_source["status"],
             "exists": framekeeper_source["exists"],
             "readable": framekeeper_source["readable"],
-            "stored_artifacts": ["manifest_json", "image", "seraph_analysis_json", "seraph_provider_output"],
+            "stored_artifacts": ["image"],
             "ingest_endpoint": "/api/observer/framekeeper/ingest",
             "inspection_endpoint": "/api/observer/screen-artifacts",
             "inspection_visibility": "localhost_only",

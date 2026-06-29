@@ -560,6 +560,12 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") == "framekeeper" and not (
+        artifacts.get("codex_output_path") or artifacts.get("provider_output_path")
+    ):
+        return PlainTextResponse(
+            "Framekeeper only produced the screenshot image. Seraph has no provider output for this capture."
+        )
     path = _artifact_path(
         str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""),
         allowed_roots=_artifact_allowed_roots(artifacts),
@@ -578,7 +584,7 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
             "provider": "framekeeper",
             "summary": observation.summary,
             "image_sha256": artifacts.get("image_sha256"),
-            "manifest_path": artifacts.get("manifest_path"),
+            "analysis": None,
         }
     path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     try:
@@ -590,22 +596,17 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
 
 @router.post("/observer/framekeeper/ingest")
 async def ingest_framekeeper_artifacts(body: FramekeeperIngestRequest, request: Request) -> dict[str, Any]:
-    """Ingest Framekeeper manifests as Seraph screen observations."""
+    """Ingest Framekeeper screenshot images as Seraph screen observations."""
     from src.observer.framekeeper_source import ingest_framekeeper_root
 
     _require_local_artifact_request(request)
     root = _framekeeper_artifact_root(body.artifact_root)
-    result = await ingest_framekeeper_root(
-        root,
-        limit=body.limit,
-        analysis_root=_screen_artifact_root() / "framekeeper-analysis",
-    )
+    result = await ingest_framekeeper_root(root, limit=body.limit)
     return {
         "artifact_root": str(root),
         "scanned": result.scanned,
         "ingested": result.ingested,
         "skipped_duplicates": result.skipped_duplicates,
-        "blocked_events": result.blocked_events,
         "rejected": result.rejected,
     }
 

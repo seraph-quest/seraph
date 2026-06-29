@@ -189,9 +189,8 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
 @pytest.mark.asyncio
 async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_path, monkeypatch):
     framekeeper_root = tmp_path / "framekeeper"
-    capture_dir = framekeeper_root / "captures" / "capture-1"
-    capture_dir.mkdir(parents=True)
-    (capture_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    framekeeper_root.mkdir()
+    (framekeeper_root / "capture-1.png").write_bytes(b"png bytes")
     monkeypatch.setenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", str(framekeeper_root))
 
     resp = await client.get("/api/settings/artifact-storage")
@@ -202,7 +201,8 @@ async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_pa
     assert data["framekeeper"]["artifact_root"] == str(framekeeper_root)
     assert data["framekeeper"]["artifact_root_source"] == "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
     assert data["framekeeper"]["status"] == "ready"
-    assert data["framekeeper"]["manifest_count"] == 1
+    assert data["framekeeper"]["image_count"] == 1
+    assert data["framekeeper"]["stored_artifacts"] == ["image"]
     assert data["framekeeper"]["exists"] is True
     assert data["framekeeper"]["readable"] is True
     assert data["framekeeper"]["ingest_endpoint"] == "/api/observer/framekeeper/ingest"

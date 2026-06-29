@@ -49,8 +49,8 @@ interface ArtifactStorageSettings {
     provider: string;
     artifact_root: string;
     artifact_root_source: string;
-    manifest_count: number;
-    last_manifest_at: string | null;
+    image_count: number;
+    last_image_at: string | null;
     status: string;
     exists: boolean;
     readable: boolean;
@@ -163,7 +163,7 @@ function framekeeperStateTone(settings: NonNullable<ArtifactStorageSettings["fra
   if (!settings.exists || !settings.readable || settings.status === "invalid_root" || settings.status === "read_error") {
     return "warn";
   }
-  return settings.manifest_count > 0 ? "good" : "normal";
+  return settings.image_count > 0 ? "good" : "normal";
 }
 
 function isArtifactStorageSettings(value: unknown): value is ArtifactStorageSettings {
@@ -252,12 +252,12 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       provider: "framekeeper",
       artifact_root: "~/Library/Application Support/Framekeeper/artifacts",
       artifact_root_source: "default",
-      manifest_count: 0,
-      last_manifest_at: null,
+      image_count: 0,
+      last_image_at: null,
       status: "metadata unavailable",
       exists: false,
       readable: false,
-      stored_artifacts: ["manifest_json", "image"],
+      stored_artifacts: ["image"],
       ingest_endpoint: "/api/observer/framekeeper/ingest",
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
@@ -519,7 +519,7 @@ export function ArtifactStoragePanel() {
               <div className="min-w-0">
                 <div className="text-[10px] text-retro-text">Seraph analysis</div>
                 <div className="text-[9px] text-retro-text/40 truncate">
-                  consumes Framekeeper manifests and keeps reports local-first
+                  consumes Framekeeper screenshots and keeps reports local-first
                 </div>
               </div>
               <button
@@ -539,7 +539,7 @@ export function ArtifactStoragePanel() {
             {framekeeperSource && (
               <div className="border border-retro-text/10 px-2 py-2 flex flex-col gap-1">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-[10px] text-retro-text">Framekeeper artifacts</div>
+                  <div className="text-[10px] text-retro-text">Framekeeper screenshots</div>
                   <div className={`text-[9px] uppercase tracking-wider ${
                     framekeeperStateTone(framekeeperSource) === "good"
                       ? "text-green-400"
@@ -553,8 +553,8 @@ export function ArtifactStoragePanel() {
                 <ArtifactRow label="Root" value={framekeeperSource.artifact_root} />
                 <ArtifactRow label="Source" value={sourceLabel(framekeeperSource.artifact_root_source)} />
                 <ArtifactRow
-                  label="Manifests"
-                  value={`${framekeeperSource.manifest_count} manifests${framekeeperSource.last_manifest_at ? ` · latest ${framekeeperSource.last_manifest_at}` : ""}`}
+                  label="Images"
+                  value={`${framekeeperSource.image_count} images${framekeeperSource.last_image_at ? ` · latest ${framekeeperSource.last_image_at}` : ""}`}
                   tone={framekeeperStateTone(framekeeperSource)}
                 />
                 <ArtifactRow label="Ingest" value={framekeeperSource.ingest_endpoint} tone="good" />

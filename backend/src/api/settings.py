@@ -584,7 +584,7 @@ async def get_artifact_storage_settings():
             "auto_ingest_enabled": settings.framekeeper_ingest_enabled,
             "auto_ingest_interval_min": settings.framekeeper_ingest_interval_min,
             "auto_ingest_limit": settings.framekeeper_ingest_limit,
-            "ingest_endpoint": "/api/observer/framekeeper/ingest",
+            "scan_endpoint": "/api/observer/framekeeper/scan",
             "inspection_endpoint": "/api/observer/screen-artifacts",
             "inspection_visibility": "localhost_only",
             "control_env": {

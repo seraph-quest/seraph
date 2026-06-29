@@ -7,7 +7,7 @@ from time import perf_counter
 
 from config.settings import settings
 from src.audit.runtime import log_scheduler_job_event
-from src.observer.framekeeper_source import ingest_framekeeper_root, resolve_framekeeper_root
+from src.observer.framekeeper_source import resolve_framekeeper_root, scan_framekeeper_root
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ async def run_framekeeper_image_ingest() -> None:
         return
 
     try:
-        result = await ingest_framekeeper_root(root, limit=_clamped_limit())
+        result = await scan_framekeeper_root(root, limit=_clamped_limit())
         outcome = "succeeded"
         if result.rejected:
             outcome = "degraded"

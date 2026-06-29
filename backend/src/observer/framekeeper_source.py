@@ -23,7 +23,7 @@ class FramekeeperImageError(ValueError):
 
 
 @dataclass(frozen=True)
-class FramekeeperIngestResult:
+class FramekeeperScanResult:
     scanned: int
     ingested: int
     skipped_duplicates: int
@@ -60,7 +60,7 @@ def resolve_framekeeper_root(configured: str | None = None) -> Path:
     return Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve()
 
 
-async def ingest_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperIngestResult:
+async def scan_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperScanResult:
     """Scan a Framekeeper screenshot directory and persist new images as observations."""
     screenshot_root = root.expanduser().resolve()
     image_paths = _image_paths(screenshot_root, limit=max(limit, 1))
@@ -81,7 +81,7 @@ async def ingest_framekeeper_root(root: Path, *, limit: int = 100) -> Framekeepe
 
     await log_integration_event(
         integration_type="framekeeper",
-        name="screenshot_ingest",
+        name="screenshot_scan",
         outcome="succeeded" if not rejected else "degraded",
         details={
             "root": str(screenshot_root),
@@ -91,12 +91,15 @@ async def ingest_framekeeper_root(root: Path, *, limit: int = 100) -> Framekeepe
             "rejected_count": len(rejected),
         },
     )
-    return FramekeeperIngestResult(
+    return FramekeeperScanResult(
         scanned=len(image_paths),
         ingested=ingested,
         skipped_duplicates=skipped,
         rejected=rejected,
     )
+
+
+ingest_framekeeper_root = scan_framekeeper_root
 
 
 def _image_paths(root: Path, *, limit: int) -> list[Path]:

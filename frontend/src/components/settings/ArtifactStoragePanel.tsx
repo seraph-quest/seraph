@@ -60,7 +60,8 @@ interface ArtifactStorageSettings {
     auto_ingest_enabled: boolean;
     auto_ingest_interval_min: number;
     auto_ingest_limit: number;
-    ingest_endpoint: string;
+    scan_endpoint?: string;
+    ingest_endpoint?: string;
     inspection_endpoint: string;
     inspection_visibility: string;
     control_env: Record<string, string>;
@@ -132,7 +133,7 @@ interface ReportActionResult {
   };
 }
 
-interface FramekeeperIngestResult {
+interface FramekeeperScanResult {
   artifact_root?: string;
   scanned?: number;
   ingested?: number;
@@ -278,7 +279,7 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
-      ingest_endpoint: "/api/observer/framekeeper/ingest",
+      scan_endpoint: "/api/observer/framekeeper/scan",
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
@@ -357,9 +358,9 @@ export function ArtifactStoragePanel() {
   const [reportAction, setReportAction] = useState<"idle" | "previewing" | "sending" | "testing">("idle");
   const [reportActionResult, setReportActionResult] = useState<ReportActionResult | null>(null);
   const [reportActionError, setReportActionError] = useState<string | null>(null);
-  const [framekeeperIngesting, setFramekeeperIngesting] = useState(false);
-  const [framekeeperIngestResult, setFramekeeperIngestResult] = useState<FramekeeperIngestResult | null>(null);
-  const [framekeeperIngestError, setFramekeeperIngestError] = useState<string | null>(null);
+  const [framekeeperScanning, setFramekeeperScanning] = useState(false);
+  const [framekeeperScanResult, setFramekeeperScanResult] = useState<FramekeeperScanResult | null>(null);
+  const [framekeeperScanError, setFramekeeperScanError] = useState<string | null>(null);
   const [framekeeperRootDraft, setFramekeeperRootDraft] = useState("");
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
@@ -520,25 +521,27 @@ export function ArtifactStoragePanel() {
     }
   };
 
-  const runFramekeeperIngest = async () => {
-    if (framekeeperIngesting || framekeeperSource === null) return;
-    setFramekeeperIngesting(true);
-    setFramekeeperIngestError(null);
+  const runFramekeeperScan = async () => {
+    if (framekeeperScanning || framekeeperSource === null) return;
+    setFramekeeperScanning(true);
+    setFramekeeperScanError(null);
     try {
-      const response = await fetch(`${API_URL}${framekeeperSource.ingest_endpoint}`, {
+      const scanEndpoint = framekeeperSource.scan_endpoint ?? framekeeperSource.ingest_endpoint;
+      if (!scanEndpoint) throw new Error("Framekeeper screenshot scan endpoint unavailable.");
+      const response = await fetch(`${API_URL}${scanEndpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ screenshot_folder: framekeeperFolder, limit: 100 }),
       });
       if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-      const payload = (await response.json()) as FramekeeperIngestResult;
+      const payload = (await response.json()) as FramekeeperScanResult;
       if (!mountedRef.current) return;
-      setFramekeeperIngestResult(payload);
+      setFramekeeperScanResult(payload);
       await fetchSettings(() => !mountedRef.current);
     } catch {
-      if (mountedRef.current) setFramekeeperIngestError("Screenshot folder scan failed.");
+      if (mountedRef.current) setFramekeeperScanError("Screenshot folder scan failed.");
     } finally {
-      if (mountedRef.current) setFramekeeperIngesting(false);
+      if (mountedRef.current) setFramekeeperScanning(false);
     }
   };
 
@@ -548,8 +551,8 @@ export function ArtifactStoragePanel() {
 
   const saveFramekeeperRoot = async () => {
     if (framekeeperSource === null || framekeeperRootLockedByEnv) return;
-    setFramekeeperIngestResult(null);
-    setFramekeeperIngestError(null);
+    setFramekeeperScanResult(null);
+    setFramekeeperScanError(null);
     await updateScreenAnalysis({ framekeeper_screenshot_folder: framekeeperRootDraft.trim() });
   };
 
@@ -657,25 +660,25 @@ export function ArtifactStoragePanel() {
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button
                     type="button"
-                    disabled={framekeeperIngesting || !framekeeperSource.exists || !framekeeperSource.readable}
-                    onClick={() => void runFramekeeperIngest()}
+                    disabled={framekeeperScanning || !framekeeperSource.exists || !framekeeperSource.readable}
+                    onClick={() => void runFramekeeperScan()}
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
-                    {framekeeperIngesting ? "Scanning" : "Scan folder"}
+                    {framekeeperScanning ? "Scanning" : "Scan folder"}
                   </button>
                   <div className="text-[9px] text-retro-text/40">
                     local scan only
                   </div>
                 </div>
-                {framekeeperIngestError && (
-                  <div className="text-[9px] text-red-400">{framekeeperIngestError}</div>
+                {framekeeperScanError && (
+                  <div className="text-[9px] text-red-400">{framekeeperScanError}</div>
                 )}
-                {framekeeperIngestResult && (
+                {framekeeperScanResult && (
                   <div className="border border-retro-text/10 px-2 py-1 text-[9px] text-retro-text/60">
-                    scanned {framekeeperIngestResult.scanned ?? 0} · added {framekeeperIngestResult.ingested ?? 0}
-                    {" · "}duplicates {framekeeperIngestResult.skipped_duplicates ?? 0}
-                    {(framekeeperIngestResult.rejected?.length ?? 0) > 0
-                      ? ` · rejected ${framekeeperIngestResult.rejected?.length ?? 0}`
+                    scanned {framekeeperScanResult.scanned ?? 0} · added {framekeeperScanResult.ingested ?? 0}
+                    {" · "}duplicates {framekeeperScanResult.skipped_duplicates ?? 0}
+                    {(framekeeperScanResult.rejected?.length ?? 0) > 0
+                      ? ` · rejected ${framekeeperScanResult.rejected?.length ?? 0}`
                       : ""}
                   </div>
                 )}

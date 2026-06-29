@@ -51,7 +51,7 @@ class ScreenContextRequest(BaseModel):
     switch_timestamp: float | None = None
 
 
-class FramekeeperIngestRequest(BaseModel):
+class FramekeeperScanRequest(BaseModel):
     screenshot_folder: str | None = None
     artifact_root: str | None = None
     limit: int = 100
@@ -601,14 +601,15 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     return payload if isinstance(payload, dict) else {"value": payload}
 
 
+@router.post("/observer/framekeeper/scan")
 @router.post("/observer/framekeeper/ingest")
-async def ingest_framekeeper_artifacts(body: FramekeeperIngestRequest, request: Request) -> dict[str, Any]:
-    """Ingest Framekeeper screenshot images as Seraph screen observations."""
-    from src.observer.framekeeper_source import ingest_framekeeper_root
+async def scan_framekeeper_screenshot_folder(body: FramekeeperScanRequest, request: Request) -> dict[str, Any]:
+    """Scan a local Framekeeper screenshot folder as a Seraph image source."""
+    from src.observer.framekeeper_source import scan_framekeeper_root
 
     _require_local_artifact_request(request)
     root = _framekeeper_artifact_root(body.screenshot_folder or body.artifact_root)
-    result = await ingest_framekeeper_root(root, limit=body.limit)
+    result = await scan_framekeeper_root(root, limit=body.limit)
     return {
         "screenshot_folder": str(root),
         "artifact_root": str(root),

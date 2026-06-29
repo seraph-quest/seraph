@@ -80,7 +80,7 @@ function settingsFromScreenAnalysisFixture(screen: {
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
-      ingest_endpoint: "/api/observer/framekeeper/ingest",
+      scan_endpoint: "/api/observer/framekeeper/scan",
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
@@ -188,7 +188,7 @@ describe("ArtifactStoragePanel", () => {
           auto_ingest_enabled: true,
           auto_ingest_interval_min: 5,
           auto_ingest_limit: 100,
-          ingest_endpoint: "/api/observer/framekeeper/ingest",
+          scan_endpoint: "/api/observer/framekeeper/scan",
           inspection_endpoint: "/api/observer/screen-artifacts",
           inspection_visibility: "localhost_only",
           control_env: {
@@ -240,6 +240,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/2 images/)).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
+    expect(screen.queryByText("/api/observer/framekeeper/scan")).not.toBeInTheDocument();
     expect(screen.queryByText("/api/observer/framekeeper/ingest")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
@@ -441,7 +442,7 @@ describe("ArtifactStoragePanel", () => {
         auto_ingest_enabled: true,
         auto_ingest_interval_min: 5,
         auto_ingest_limit: 100,
-        ingest_endpoint: "/api/observer/framekeeper/ingest",
+        scan_endpoint: "/api/observer/framekeeper/scan",
         inspection_endpoint: "/api/observer/screen-artifacts",
         inspection_visibility: "localhost_only",
         control_env: {
@@ -479,7 +480,7 @@ describe("ArtifactStoragePanel", () => {
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/observer/framekeeper/ingest"),
+        expect.stringContaining("/api/observer/framekeeper/scan"),
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({

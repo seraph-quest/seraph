@@ -212,7 +212,8 @@ async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_pa
     assert data["framekeeper"]["control_env"]["auto_ingest_enabled"] == "FRAMEKEEPER_INGEST_ENABLED"
     assert data["framekeeper"]["exists"] is True
     assert data["framekeeper"]["readable"] is True
-    assert data["framekeeper"]["ingest_endpoint"] == "/api/observer/framekeeper/ingest"
+    assert data["framekeeper"]["scan_endpoint"] == "/api/observer/framekeeper/scan"
+    assert "ingest_endpoint" not in data["framekeeper"]
 
 
 @pytest.mark.asyncio

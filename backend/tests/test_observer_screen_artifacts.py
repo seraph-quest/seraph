@@ -152,12 +152,12 @@ async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_image_ingest_persists_observation_and_serves_image(async_db, client, tmp_path):
+async def test_framekeeper_folder_scan_persists_observation_and_serves_image(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
     image = _write_framekeeper_screenshot(root, name="capture-valid.png")
 
     resp = await client.post(
-        "/api/observer/framekeeper/ingest",
+        "/api/observer/framekeeper/scan",
         json={"artifact_root": str(root), "limit": 10},
     )
 
@@ -213,13 +213,13 @@ async def test_framekeeper_image_ingest_persists_observation_and_serves_image(as
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_image_ingest_ignores_non_images(async_db, client, tmp_path):
+async def test_framekeeper_folder_scan_ignores_non_images(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
     root.mkdir()
     (root / "notes.txt").write_text("not a screenshot", encoding="utf-8")
 
     resp = await client.post(
-        "/api/observer/framekeeper/ingest",
+        "/api/observer/framekeeper/scan",
         json={"artifact_root": str(root), "limit": 10},
     )
 
@@ -234,12 +234,34 @@ async def test_framekeeper_image_ingest_ignores_non_images(async_db, client, tmp
 
 
 @pytest.mark.asyncio
+async def test_framekeeper_legacy_ingest_endpoint_scans_same_image_folder(async_db, client, tmp_path):
+    root = tmp_path / "framekeeper"
+    _write_framekeeper_screenshot(root, name="capture-legacy.png")
+
+    resp = await client.post(
+        "/api/observer/framekeeper/ingest",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["screenshot_folder"] == str(root.resolve())
+    assert payload["scanned"] == 1
+    assert payload["ingested"] == 1
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+    assert observation.window_title == "capture-legacy.png"
+
+
+@pytest.mark.asyncio
 async def test_framekeeper_image_analysis_extracts_png_dimensions(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
     image = _write_framekeeper_screenshot(root, name="capture-real.png", data=_sample_png())
 
     resp = await client.post(
-        "/api/observer/framekeeper/ingest",
+        "/api/observer/framekeeper/scan",
         json={"artifact_root": str(root), "limit": 10},
     )
 
@@ -263,7 +285,7 @@ async def test_framekeeper_jpeg_artifact_uses_jpeg_media_type(async_db, client, 
     _write_framekeeper_screenshot(root, name="capture.jpg")
 
     resp = await client.post(
-        "/api/observer/framekeeper/ingest",
+        "/api/observer/framekeeper/scan",
         json={"artifact_root": str(root), "limit": 10},
     )
 
@@ -278,16 +300,16 @@ async def test_framekeeper_jpeg_artifact_uses_jpeg_media_type(async_db, client, 
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_image_ingest_skips_duplicate_hash(async_db, client, tmp_path):
+async def test_framekeeper_folder_scan_skips_duplicate_hash(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
     _write_framekeeper_screenshot(root, name="capture-dupe.png")
 
     first = await client.post(
-        "/api/observer/framekeeper/ingest",
+        "/api/observer/framekeeper/scan",
         json={"artifact_root": str(root), "limit": 10},
     )
     second = await client.post(
-        "/api/observer/framekeeper/ingest",
+        "/api/observer/framekeeper/scan",
         json={"artifact_root": str(root), "limit": 10},
     )
 

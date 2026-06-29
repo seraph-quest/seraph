@@ -47,7 +47,7 @@ Framekeeper screenshots are expected to be ordinary `.png`, `.jpg`, or `.jpeg` f
 Seraph exposes an on-demand local folder-scan endpoint for its own UI and scheduler:
 
 ```http
-POST /api/observer/framekeeper/ingest
+POST /api/observer/framekeeper/scan
 ```
 
 Optional JSON body:
@@ -59,7 +59,7 @@ Optional JSON body:
 }
 ```
 
-If `screenshot_folder` is omitted, Seraph uses the configured folder. The legacy `artifact_root` request key is still accepted for older clients. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph. The endpoint name still contains `ingest` for compatibility with older Seraph clients, but the behavior is only a local directory scan.
+If `screenshot_folder` is omitted, Seraph uses the configured folder. The legacy `artifact_root` request key is still accepted for older clients. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph. The older `/api/observer/framekeeper/ingest` route remains as a hidden compatibility alias, but the preferred contract is the local directory scan route above.
 
 The artifact analysis endpoint returns Seraph-owned local image analysis for Framekeeper screenshots, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph; Framekeeper still writes only screenshots.
 
@@ -81,7 +81,7 @@ The Seraph settings UI describes this as a Framekeeper screenshot folder, not as
 - inspection endpoint
 - stored artifact type: `image`
 
-The settings panel saves `framekeeper_screenshot_folder` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default folder unless `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or its legacy env fallback is set. The manual scan action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
+The settings panel saves `framekeeper_screenshot_folder` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default folder unless `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or its legacy env fallback is set. The manual scan action calls Seraph's local `/api/observer/framekeeper/scan` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
 
 ## Verification
 

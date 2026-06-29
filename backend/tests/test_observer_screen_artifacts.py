@@ -200,7 +200,11 @@ async def test_framekeeper_image_ingest_persists_observation_and_serves_image(as
     assert analysis_resp.status_code == 200
     analysis = analysis_resp.json()
     assert analysis["provider"] == "framekeeper"
-    assert analysis["analysis"] is None
+    assert analysis["analysis"]["analysis_owner"] == "seraph"
+    assert analysis["analysis"]["source"] == "framekeeper_image_directory"
+    assert analysis["analysis"]["image_sha256"] == image_sha256
+    assert analysis["analysis"]["image_bytes"] == len(image.read_bytes())
+    assert analysis["analysis"]["report_ready"] is True
     assert analysis["image_sha256"] == image_sha256
 
     output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
@@ -230,6 +234,50 @@ async def test_framekeeper_image_ingest_ignores_non_images(async_db, client, tmp
 
 
 @pytest.mark.asyncio
+async def test_framekeeper_image_analysis_extracts_png_dimensions(async_db, client, tmp_path):
+    root = tmp_path / "framekeeper"
+    image = _write_framekeeper_screenshot(root, name="capture-real.png", data=_sample_png())
+
+    resp = await client.post(
+        "/api/observer/framekeeper/ingest",
+        json={"artifact_root": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()["analysis"]
+    assert analysis["file_format"] == "png"
+    assert analysis["width"] == 1
+    assert analysis["height"] == 1
+    assert analysis["image_path"] == str(image.resolve())
+
+
+@pytest.mark.asyncio
+async def test_framekeeper_jpeg_artifact_uses_jpeg_media_type(async_db, client, tmp_path):
+    root = tmp_path / "framekeeper"
+    _write_framekeeper_screenshot(root, name="capture.jpg")
+
+    resp = await client.post(
+        "/api/observer/framekeeper/ingest",
+        json={"artifact_root": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
+    assert image_resp.status_code == 200
+    assert image_resp.headers["content-type"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
 async def test_framekeeper_image_ingest_skips_duplicate_hash(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
     _write_framekeeper_screenshot(root, name="capture-dupe.png")
@@ -250,8 +298,82 @@ async def test_framekeeper_image_ingest_skips_duplicate_hash(async_db, client, t
     assert second.json()["skipped_duplicates"] == 1
 
 
-def _write_framekeeper_screenshot(root: Path, *, name: str) -> Path:
+def _write_framekeeper_screenshot(root: Path, *, name: str, data: bytes = b"framekeeper png bytes") -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image = root / name
-    image.write_bytes(b"framekeeper png bytes")
+    image.write_bytes(data)
     return image
+
+
+def _sample_png() -> bytes:
+    return bytes(
+        [
+            0x89,
+            0x50,
+            0x4E,
+            0x47,
+            0x0D,
+            0x0A,
+            0x1A,
+            0x0A,
+            0x00,
+            0x00,
+            0x00,
+            0x0D,
+            0x49,
+            0x48,
+            0x44,
+            0x52,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x08,
+            0x06,
+            0x00,
+            0x00,
+            0x00,
+            0x1F,
+            0x15,
+            0xC4,
+            0x89,
+            0x00,
+            0x00,
+            0x00,
+            0x0A,
+            0x49,
+            0x44,
+            0x41,
+            0x54,
+            0x78,
+            0x9C,
+            0x63,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            0x05,
+            0x00,
+            0x01,
+            0x0D,
+            0x0A,
+            0x2D,
+            0xB4,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x49,
+            0x45,
+            0x4E,
+            0x44,
+            0xAE,
+            0x42,
+            0x60,
+            0x82,
+        ]
+    )

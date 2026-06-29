@@ -24,7 +24,7 @@ Seraph owns:
 - scanning the configured directory for images
 - computing Seraph-side image hashes
 - duplicate detection
-- image analysis through Seraph provider settings
+- local image artifact analysis and future provider-backed image analysis through Seraph settings
 - `ScreenObservation` persistence
 - report generation
 
@@ -58,6 +58,8 @@ Optional JSON body:
 ```
 
 If `artifact_root` is omitted, Seraph uses the configured root. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
+
+The artifact analysis endpoint returns Seraph-owned local image analysis for Framekeeper screenshots, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph; Framekeeper still writes only screenshots.
 
 Configure a narrow, trusted screenshot directory. Do not point ingestion at a broad home, downloads, desktop, or project folder. A local caller that can invoke this endpoint can cause Seraph to read image files under the supplied path, hash them, and persist observations.
 

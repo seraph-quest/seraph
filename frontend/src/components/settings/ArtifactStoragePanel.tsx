@@ -385,7 +385,7 @@ export function ArtifactStoragePanel() {
         data = artifactData;
         hasArtifactMetadata = true;
       }
-      if (data === null) throw new Error("Framekeeper folder settings response is unavailable.");
+      if (data === null) throw new Error("Screenshot folder settings response is unavailable.");
       if (canPublish()) {
         setSettings(data);
         setMetadataWarning(hasArtifactMetadata ? null : "Archive metadata loading; analysis controls are live.");
@@ -536,7 +536,7 @@ export function ArtifactStoragePanel() {
       setFramekeeperIngestResult(payload);
       await fetchSettings(() => !mountedRef.current);
     } catch {
-      if (mountedRef.current) setFramekeeperIngestError("Framekeeper folder scan failed.");
+      if (mountedRef.current) setFramekeeperIngestError("Screenshot folder scan failed.");
     } finally {
       if (mountedRef.current) setFramekeeperIngesting(false);
     }
@@ -556,12 +556,12 @@ export function ArtifactStoragePanel() {
   return (
     <div className="px-1">
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
-        Framekeeper Folder
+        Screenshot Folder
       </div>
       <div className="border border-retro-text/10 rounded px-2 py-2 flex flex-col gap-2">
         {failed ? (
           <div className="flex flex-col gap-2">
-            <div className="text-[9px] text-red-400">Framekeeper folder settings unavailable.</div>
+            <div className="text-[9px] text-red-400">Screenshot folder settings unavailable.</div>
             <button
               type="button"
               onClick={() => void fetchSettings()}
@@ -571,7 +571,7 @@ export function ArtifactStoragePanel() {
             </button>
           </div>
         ) : settings === null ? (
-          <div className="text-[9px] text-retro-text/40">Loading Framekeeper folder settings...</div>
+          <div className="text-[9px] text-retro-text/40">Loading screenshot folder settings...</div>
         ) : (
           <>
             {metadataWarning && (
@@ -603,7 +603,7 @@ export function ArtifactStoragePanel() {
             {framekeeperSource && (
               <div className="border border-retro-text/10 px-2 py-2 flex flex-col gap-1">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-[10px] text-retro-text">Framekeeper screenshots</div>
+                  <div className="text-[10px] text-retro-text">Local screenshot images</div>
                   <div className={`text-[9px] uppercase tracking-wider ${
                     framekeeperStateTone(framekeeperSource) === "good"
                       ? "text-green-400"
@@ -652,7 +652,7 @@ export function ArtifactStoragePanel() {
                   }
                   tone={framekeeperSource.auto_ingest_enabled ? "good" : "normal"}
                 />
-                <ArtifactRow label="Scan API" value={framekeeperSource.ingest_endpoint} tone="good" />
+                <ArtifactRow label="Reads" value="local image files only" tone="good" />
                 <ArtifactRow label="Inspect" value={`${framekeeperSource.inspection_endpoint} (${framekeeperSource.inspection_visibility.replace(/_/g, " ")})`} />
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button

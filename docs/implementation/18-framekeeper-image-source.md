@@ -44,7 +44,7 @@ Framekeeper screenshots are expected to be ordinary `.png`, `.jpg`, or `.jpeg` f
 
 ## Folder Scan
 
-Seraph exposes an on-demand local folder-scan endpoint:
+Seraph exposes an on-demand local folder-scan endpoint for its own UI and scheduler:
 
 ```http
 POST /api/observer/framekeeper/ingest
@@ -65,7 +65,7 @@ The artifact analysis endpoint returns Seraph-owned local image analysis for Fra
 
 End-of-day reports consume Framekeeper-derived `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `framekeeper` from its own stored capture-artifact details, so reports can show Framekeeper image activity without requiring any Framekeeper manifest or service connection. Source mix includes both observation counts and tracked minutes, because Framekeeper screenshots are point-in-time images and may not carry a duration.
 
-Configure a narrow, trusted screenshot directory. Do not point ingestion at a broad home, downloads, desktop, or project folder. A local caller that can invoke this endpoint can cause Seraph to read image files under the supplied path, hash them, and persist observations.
+Configure a narrow, trusted screenshot directory. Do not point folder scanning at a broad home, downloads, desktop, or project folder. A local caller that can invoke this endpoint can cause Seraph to read image files under the supplied path, hash them, and persist observations.
 
 ## Settings Surface
 
@@ -75,7 +75,7 @@ The Seraph settings UI describes this as a Framekeeper screenshot folder, not as
 - configuration source
 - image count
 - latest image timestamp
-- local scan endpoint
+- local image-file scan status
 - manual local folder scan action
 - editable saved folder when no env override is present
 - inspection endpoint

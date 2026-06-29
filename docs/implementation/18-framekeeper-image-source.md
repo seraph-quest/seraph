@@ -1,11 +1,11 @@
 ---
 slug: /framekeeper-image-source
-title: Framekeeper Image Source
+title: Framekeeper Screenshot Folder
 ---
 
-# Framekeeper Image Source
+# Framekeeper Screenshot Folder
 
-Framekeeper is not a connected Seraph service. It is a separate screenshot recorder that writes image files to a local directory. Seraph can use that directory as an optional image source.
+Framekeeper is not a connected Seraph service. It is a separate screenshot recorder that writes image files to a local directory. Seraph can scan that directory as an optional screenshot folder.
 
 ## Boundary
 
@@ -69,19 +69,19 @@ Configure a narrow, trusted screenshot directory. Do not point ingestion at a br
 
 ## Settings Surface
 
-The Seraph settings UI describes this as a Framekeeper source, not as Seraph-owned capture. The source status includes:
+The Seraph settings UI describes this as a Framekeeper screenshot folder, not as Seraph-owned capture or a connected service. The folder status includes:
 
 - configured screenshot folder
 - configuration source
 - image count
 - latest image timestamp
-- ingest endpoint
-- manual local ingest action
+- local scan endpoint
+- manual local folder scan action
 - editable saved folder when no env override is present
 - inspection endpoint
 - stored artifact type: `image`
 
-The settings panel saves `framekeeper_screenshot_folder` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default folder unless `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or its legacy env fallback is set. The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
+The settings panel saves `framekeeper_screenshot_folder` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default folder unless `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or its legacy env fallback is set. The manual scan action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
 
 ## Verification
 

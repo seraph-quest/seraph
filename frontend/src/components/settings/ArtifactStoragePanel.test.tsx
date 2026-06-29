@@ -234,13 +234,13 @@ describe("ArtifactStoragePanel", () => {
     render(<ArtifactStoragePanel />);
 
     await waitFor(() => expect(screen.getByText("Seraph analysis")).toBeInTheDocument());
-    expect(screen.getByText("Framekeeper Source")).toBeInTheDocument();
-    expect(screen.getByText("consumes Framekeeper screenshots and keeps reports local-first")).toBeInTheDocument();
+    expect(screen.getByText("Framekeeper Folder")).toBeInTheDocument();
+    expect(screen.getByText("scans a local screenshot folder; reports stay in Seraph")).toBeInTheDocument();
     expect(screen.getByText("Framekeeper screenshots")).toBeInTheDocument();
     expect(screen.getByText(/2 images/)).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("/api/observer/framekeeper/ingest")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Ingest now" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
     expect(screen.getByText("offline - no new captures")).toBeInTheDocument();
@@ -410,7 +410,7 @@ describe("ArtifactStoragePanel", () => {
     await waitFor(() => expect(sendButton).not.toBeDisabled());
   });
 
-  it("runs a local Framekeeper ingest from the source panel", async () => {
+  it("runs a local Framekeeper folder scan from the settings panel", async () => {
     const artifactStorage = {
       ...settingsFromScreenAnalysisFixture({
         enabled: true,
@@ -474,7 +474,7 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Ingest now" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Scan folder" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -488,7 +488,7 @@ describe("ArtifactStoragePanel", () => {
         }),
       ),
     );
-    expect(await screen.findByText(/scanned 3 · ingested 1/)).toBeInTheDocument();
+    expect(await screen.findByText(/scanned 3 · added 1/)).toBeInTheDocument();
     expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
   });
 
@@ -729,7 +729,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByDisplayValue("on_switch")).toBeInTheDocument();
     expect(screen.getByText("Archive metadata degraded; analysis controls are still live.")).toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Framekeeper source settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Framekeeper folder settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {
@@ -757,7 +757,7 @@ describe("ArtifactStoragePanel", () => {
       await screen.findByText("Archive metadata degraded; analysis controls are still live."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Archive metadata loading; analysis controls are live.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Framekeeper source settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Framekeeper folder settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("ignores stale artifact metadata after a newer save refresh", async () => {
@@ -844,6 +844,6 @@ describe("ArtifactStoragePanel", () => {
     ).toBeInTheDocument();
     expect(artifactSignal?.aborted).toBe(true);
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Framekeeper source settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Framekeeper folder settings unavailable.")).not.toBeInTheDocument();
   }, 7_000);
 });

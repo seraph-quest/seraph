@@ -273,6 +273,7 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
     by_project: dict[str, int] = {}
     by_app: dict[str, int] = {}
     by_source: dict[str, int] = {}
+    source_observations: dict[str, int] = {}
     details: list[str] = []
     total_seconds = 0
     for obs in observations:
@@ -282,6 +283,7 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
         by_activity[obs.activity_type] = by_activity.get(obs.activity_type, 0) + duration
         by_app[obs.app_name] = by_app.get(obs.app_name, 0) + duration
         by_source[source] = by_source.get(source, 0) + duration
+        source_observations[source] = source_observations.get(source, 0) + 1
         if obs.project:
             by_project[obs.project] = by_project.get(obs.project, 0) + duration
         if obs.summary:
@@ -299,6 +301,9 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
         "by_project": dict(sorted(by_project.items(), key=lambda item: -item[1])),
         "by_app": dict(sorted(by_app.items(), key=lambda item: -item[1])),
         "by_source": dict(sorted(by_source.items(), key=lambda item: -item[1])),
+        "source_observations": dict(
+            sorted(source_observations.items(), key=lambda item: (-item[1], item[0]))
+        ),
         "redacted_samples": details[:8],
     }
 
@@ -384,6 +389,29 @@ def _format_seconds_map(values: dict[str, int], *, empty: str) -> str:
     return "\n".join(lines)
 
 
+def _format_source_mix(
+    seconds_by_source: dict[str, int],
+    counts_by_source: dict[str, int],
+    *,
+    empty: str,
+) -> str:
+    if not seconds_by_source and not counts_by_source:
+        return empty
+    names = sorted(
+        set(seconds_by_source) | set(counts_by_source),
+        key=lambda name: (-counts_by_source.get(name, 0), -seconds_by_source.get(name, 0), name),
+    )
+    lines = []
+    for name in names[:8]:
+        count = counts_by_source.get(name, 0)
+        noun = "observation" if count == 1 else "observations"
+        lines.append(
+            f"- {_redact_text(name, limit=80)}: {count} {noun}, "
+            f"{seconds_by_source.get(name, 0) // 60}m"
+        )
+    return "\n".join(lines)
+
+
 def _format_goals(goals: list[Any]) -> str:
     if not goals:
         return "- None"
@@ -412,7 +440,11 @@ def _deterministic_report_body(
 ) -> str:
     activity = _format_seconds_map(summary.get("by_activity", {}), empty="- No tracked activity")
     projects = _format_seconds_map(summary.get("by_project", {}), empty="- No project labels detected")
-    sources = _format_seconds_map(summary.get("by_source", {}), empty="- No observation sources detected")
+    sources = _format_source_mix(
+        summary.get("by_source", {}),
+        summary.get("source_observations", {}),
+        empty="- No observation sources detected",
+    )
     aligned = [item for item in alignment if item["status"] == "aligned"]
     unclear = [item for item in alignment if item["status"] != "aligned"]
     completed = _format_goals(completed_goals)
@@ -472,7 +504,11 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
             switch_count=summary.get("switch_count", 0),
             activity_breakdown=_format_seconds_map(summary.get("by_activity", {}), empty="- No tracked activity"),
             project_breakdown=_format_seconds_map(summary.get("by_project", {}), empty="- No project labels detected"),
-            source_breakdown=_format_seconds_map(summary.get("by_source", {}), empty="- No observation sources detected"),
+            source_breakdown=_format_source_mix(
+                summary.get("by_source", {}),
+                summary.get("source_observations", {}),
+                empty="- No observation sources detected",
+            ),
             active_goals=_format_goals(active_goals),
             completed_goals=_format_goals(completed_goals),
             alignment_hints=_format_alignment(alignment),

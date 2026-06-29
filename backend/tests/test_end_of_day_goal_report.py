@@ -106,7 +106,7 @@ async def test_build_report_counts_framekeeper_observation_source(async_db):
                 activity_type="screen",
                 project="seraph",
                 summary="Framekeeper screenshot ingested from capture.png.",
-                duration_s=300,
+                duration_s=None,
                 details_json=json.dumps(details),
             )
         )
@@ -117,9 +117,10 @@ async def test_build_report_counts_framekeeper_observation_source(async_db):
         report = await build_end_of_day_goal_report(date(2026, 6, 20))
 
     assert report["summary"]["total_observations"] == 1
-    assert report["summary"]["by_source"] == {"framekeeper": 300}
+    assert report["summary"]["by_source"] == {"framekeeper": 0}
+    assert report["summary"]["source_observations"] == {"framekeeper": 1}
     assert "Source mix:" in report["body"]
-    assert "- framekeeper: 5m" in report["body"]
+    assert "- framekeeper: 1 observation, 0m" in report["body"]
 
 
 @pytest.mark.asyncio

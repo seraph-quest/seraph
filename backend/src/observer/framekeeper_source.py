@@ -31,13 +31,18 @@ class FramekeeperIngestResult:
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+FRAMEKEEPER_SCREENSHOT_FOLDER_ENV = "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
+FRAMEKEEPER_ARTIFACT_ROOT_ENV = "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
 
 
 def resolve_framekeeper_root(configured: str | None = None) -> Path:
     """Resolve Seraph's local Framekeeper screenshot folder."""
     if configured and configured.strip():
         return Path(configured).expanduser().resolve()
-    env_root = os.environ.get("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", "").strip()
+    env_root = os.environ.get(FRAMEKEEPER_SCREENSHOT_FOLDER_ENV, "").strip()
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    env_root = os.environ.get(FRAMEKEEPER_ARTIFACT_ROOT_ENV, "").strip()
     if env_root:
         return Path(env_root).expanduser().resolve()
     screen_analysis_path = Path(settings.workspace_dir).expanduser().resolve() / "screen-analysis-settings.json"
@@ -47,7 +52,9 @@ def resolve_framekeeper_root(configured: str | None = None) -> Path:
         except (OSError, json.JSONDecodeError):
             payload = {}
         if isinstance(payload, dict):
-            settings_root = str(payload.get("framekeeper_artifact_root") or "").strip()
+            settings_root = str(
+                payload.get("framekeeper_screenshot_folder") or payload.get("framekeeper_artifact_root") or ""
+            ).strip()
             if settings_root:
                 return Path(settings_root).expanduser().resolve()
     return Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve()

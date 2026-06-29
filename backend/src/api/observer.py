@@ -52,6 +52,7 @@ class ScreenContextRequest(BaseModel):
 
 
 class FramekeeperIngestRequest(BaseModel):
+    screenshot_folder: str | None = None
     artifact_root: str | None = None
     limit: int = 100
 
@@ -606,9 +607,10 @@ async def ingest_framekeeper_artifacts(body: FramekeeperIngestRequest, request: 
     from src.observer.framekeeper_source import ingest_framekeeper_root
 
     _require_local_artifact_request(request)
-    root = _framekeeper_artifact_root(body.artifact_root)
+    root = _framekeeper_artifact_root(body.screenshot_folder or body.artifact_root)
     result = await ingest_framekeeper_root(root, limit=body.limit)
     return {
+        "screenshot_folder": str(root),
         "artifact_root": str(root),
         "scanned": result.scanned,
         "ingested": result.ingested,

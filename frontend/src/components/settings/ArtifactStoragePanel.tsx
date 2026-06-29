@@ -47,6 +47,8 @@ interface ArtifactStorageSettings {
   framekeeper?: {
     enabled: boolean;
     provider: string;
+    screenshot_folder?: string;
+    screenshot_folder_source?: string;
     artifact_root: string;
     artifact_root_source: string;
     image_count: number;
@@ -94,6 +96,7 @@ interface ScreenAnalysisSettings {
   model: string;
   preserve_captures: boolean;
   archive_dir: string;
+  framekeeper_screenshot_folder?: string;
   framekeeper_artifact_root?: string;
   capture_mode: string;
   cadence_seconds: number | null;
@@ -262,8 +265,10 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
     framekeeper: {
       enabled: true,
       provider: "framekeeper",
-      artifact_root: screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-      artifact_root_source: screen.framekeeper_artifact_root ? "screen-analysis-settings" : "default",
+      screenshot_folder: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
+      screenshot_folder_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
+      artifact_root: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
+      artifact_root_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
       image_count: 0,
       last_image_at: null,
       status: "metadata unavailable",
@@ -277,6 +282,7 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
+        screenshot_folder: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
         artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
         auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
         auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
@@ -472,7 +478,9 @@ export function ArtifactStoragePanel() {
     archive_max_mb: 0,
   };
   const framekeeperSource = settings?.framekeeper ?? null;
-  const framekeeperRootLockedByEnv = framekeeperSource?.artifact_root_source === "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT";
+  const framekeeperFolder = framekeeperSource?.screenshot_folder ?? framekeeperSource?.artifact_root ?? "";
+  const framekeeperFolderSource = framekeeperSource?.screenshot_folder_source ?? framekeeperSource?.artifact_root_source ?? "";
+  const framekeeperRootLockedByEnv = framekeeperFolderSource === "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER" || framekeeperFolderSource === "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT";
   const previewReadyForSend =
     reportActionResult?.action === "manual-preview" &&
     reportActionResult?.status === "ok" &&
@@ -520,7 +528,7 @@ export function ArtifactStoragePanel() {
       const response = await fetch(`${API_URL}${framekeeperSource.ingest_endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ artifact_root: framekeeperSource.artifact_root, limit: 100 }),
+        body: JSON.stringify({ screenshot_folder: framekeeperFolder, limit: 100 }),
       });
       if (!response.ok) throw new Error(`Request failed: ${response.status}`);
       const payload = (await response.json()) as FramekeeperIngestResult;
@@ -535,14 +543,14 @@ export function ArtifactStoragePanel() {
   };
 
   useEffect(() => {
-    if (framekeeperSource !== null) setFramekeeperRootDraft(framekeeperSource.artifact_root);
-  }, [framekeeperSource?.artifact_root]);
+    if (framekeeperSource !== null) setFramekeeperRootDraft(framekeeperFolder);
+  }, [framekeeperFolder, framekeeperSource]);
 
   const saveFramekeeperRoot = async () => {
     if (framekeeperSource === null || framekeeperRootLockedByEnv) return;
     setFramekeeperIngestResult(null);
     setFramekeeperIngestError(null);
-    await updateScreenAnalysis({ framekeeper_artifact_root: framekeeperRootDraft.trim() });
+    await updateScreenAnalysis({ framekeeper_screenshot_folder: framekeeperRootDraft.trim() });
   };
 
   return (
@@ -620,7 +628,7 @@ export function ArtifactStoragePanel() {
                     disabled={
                       saving ||
                       framekeeperRootLockedByEnv ||
-                      framekeeperRootDraft.trim() === framekeeperSource.artifact_root
+                      framekeeperRootDraft.trim() === framekeeperFolder
                     }
                     onClick={() => void saveFramekeeperRoot()}
                     className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
@@ -628,8 +636,8 @@ export function ArtifactStoragePanel() {
                     Save
                   </button>
                 </div>
-                <ArtifactRow label="Root" value={framekeeperSource.artifact_root} />
-                <ArtifactRow label="Source" value={sourceLabel(framekeeperSource.artifact_root_source)} />
+                <ArtifactRow label="Folder" value={framekeeperFolder} />
+                <ArtifactRow label="Source" value={sourceLabel(framekeeperFolderSource)} />
                 <ArtifactRow
                   label="Images"
                   value={`${framekeeperSource.image_count} images${framekeeperSource.last_image_at ? ` · latest ${framekeeperSource.last_image_at}` : ""}`}

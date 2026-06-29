@@ -32,11 +32,13 @@ Framekeeper does not write manifests, sidecars, analysis output, observations, r
 
 ## Configuration
 
-Seraph resolves the Framekeeper screenshot root in this order:
+Seraph resolves the Framekeeper screenshot folder in this order:
 
-1. `SERAPH_FRAMEKEEPER_ARTIFACT_ROOT`
-2. Seraph settings key `framekeeper_artifact_root`
-3. macOS default `~/Library/Application Support/Framekeeper/artifacts`
+1. `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER`
+2. Legacy env fallback `SERAPH_FRAMEKEEPER_ARTIFACT_ROOT`
+3. Seraph settings key `framekeeper_screenshot_folder`
+4. Legacy settings key `framekeeper_artifact_root`
+5. macOS default `~/Library/Application Support/Framekeeper/artifacts`
 
 Framekeeper screenshots are expected to be ordinary `.png`, `.jpg`, or `.jpeg` files. Seraph scans recursively and ignores non-image files.
 
@@ -52,12 +54,12 @@ Optional JSON body:
 
 ```json
 {
-  "artifact_root": "/path/to/framekeeper/artifacts",
+  "screenshot_folder": "/path/to/framekeeper/artifacts",
   "limit": 100
 }
 ```
 
-If `artifact_root` is omitted, Seraph uses the configured root. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
+If `screenshot_folder` is omitted, Seraph uses the configured folder. The legacy `artifact_root` request key is still accepted for older clients. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
 
 The artifact analysis endpoint returns Seraph-owned local image analysis for Framekeeper screenshots, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph; Framekeeper still writes only screenshots.
 
@@ -69,7 +71,7 @@ Configure a narrow, trusted screenshot directory. Do not point ingestion at a br
 
 The Seraph settings UI describes this as a Framekeeper source, not as Seraph-owned capture. The source status includes:
 
-- configured root
+- configured screenshot folder
 - configuration source
 - image count
 - latest image timestamp
@@ -79,7 +81,7 @@ The Seraph settings UI describes this as a Framekeeper source, not as Seraph-own
 - inspection endpoint
 - stored artifact type: `image`
 
-The settings panel can save `framekeeper_artifact_root` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default root unless `SERAPH_FRAMEKEEPER_ARTIFACT_ROOT` is set. The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
+The settings panel saves `framekeeper_screenshot_folder` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default folder unless `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or its legacy env fallback is set. The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
 
 ## Verification
 

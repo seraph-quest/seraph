@@ -36,6 +36,7 @@ class ScreenAnalysisSettingsRequest(BaseModel):
     model: str | None = None
     preserve_captures: bool | None = None
     archive_dir: str | None = None
+    framekeeper_screenshot_folder: str | None = None
     framekeeper_artifact_root: str | None = None
     min_seconds_between_captures: int | None = None
     max_daily_captures: int | None = None
@@ -67,6 +68,8 @@ _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV = "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
+_FRAMEKEEPER_ARTIFACT_ROOT_ENV = "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -89,12 +92,17 @@ def _screen_archive_dir() -> tuple[Path, str]:
     )
 
 
-def _framekeeper_artifact_root() -> tuple[Path, str]:
-    configured = os.environ.get("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", "").strip()
+def _framekeeper_screenshot_folder() -> tuple[Path, str]:
+    configured = os.environ.get(_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV, "").strip()
     if configured:
-        return Path(configured).expanduser().resolve(), "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
+        return Path(configured).expanduser().resolve(), _FRAMEKEEPER_SCREENSHOT_FOLDER_ENV
+    configured = os.environ.get(_FRAMEKEEPER_ARTIFACT_ROOT_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(), _FRAMEKEEPER_ARTIFACT_ROOT_ENV
     payload = _read_screen_analysis_settings()
-    settings_configured = str(payload.get("framekeeper_artifact_root") or "").strip()
+    settings_configured = str(
+        payload.get("framekeeper_screenshot_folder") or payload.get("framekeeper_artifact_root") or ""
+    ).strip()
     if settings_configured:
         return Path(settings_configured).expanduser().resolve(), "screen-analysis-settings"
     return (
@@ -206,6 +214,7 @@ def _read_screen_analysis_settings() -> dict[str, object]:
                 "max_daily_captures",
                 "archive_retention_days",
                 "archive_max_mb",
+                "framekeeper_screenshot_folder",
                 "framekeeper_artifact_root",
             ):
                 if key in loaded:
@@ -218,10 +227,16 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
     payload["model"] = str(payload.get("model") or "")
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
-    if payload.get("framekeeper_artifact_root"):
-        payload["framekeeper_artifact_root"] = str(
-            Path(str(payload["framekeeper_artifact_root"])).expanduser().resolve()
-        )
+    framekeeper_folder = str(
+        payload.get("framekeeper_screenshot_folder") or payload.get("framekeeper_artifact_root") or ""
+    ).strip()
+    if framekeeper_folder:
+        normalized_folder = str(Path(framekeeper_folder).expanduser().resolve())
+        payload["framekeeper_screenshot_folder"] = normalized_folder
+        payload["framekeeper_artifact_root"] = normalized_folder
+    else:
+        payload.pop("framekeeper_screenshot_folder", None)
+        payload.pop("framekeeper_artifact_root", None)
     for key in (
         "min_seconds_between_captures",
         "max_daily_captures",
@@ -479,11 +494,19 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         ):
             raise HTTPException(status_code=422, detail="Screen archive directory must be private and writable")
         payload["archive_dir"] = str(archive_dir)
-    if body.framekeeper_artifact_root is not None:
-        configured_root = body.framekeeper_artifact_root.strip()
+    configured_framekeeper_folder = (
+        body.framekeeper_screenshot_folder
+        if body.framekeeper_screenshot_folder is not None
+        else body.framekeeper_artifact_root
+    )
+    if configured_framekeeper_folder is not None:
+        configured_root = configured_framekeeper_folder.strip()
         if configured_root:
-            payload["framekeeper_artifact_root"] = str(Path(configured_root).expanduser().resolve())
+            normalized_root = str(Path(configured_root).expanduser().resolve())
+            payload["framekeeper_screenshot_folder"] = normalized_root
+            payload["framekeeper_artifact_root"] = normalized_root
         else:
+            payload.pop("framekeeper_screenshot_folder", None)
             payload.pop("framekeeper_artifact_root", None)
     for field_name in (
         "min_seconds_between_captures",
@@ -509,7 +532,7 @@ async def get_artifact_storage_settings():
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
     report_receipts = _report_receipt_summary(report_archive_dir)
-    framekeeper_root, framekeeper_root_source = _framekeeper_artifact_root()
+    framekeeper_root, framekeeper_root_source = _framekeeper_screenshot_folder()
     framekeeper_source = _framekeeper_source_summary(framekeeper_root)
     screen_analysis = await get_screen_analysis_settings()
     screen_archive_dir = Path(str(screen_analysis["archive_dir"]))
@@ -548,6 +571,8 @@ async def get_artifact_storage_settings():
         "framekeeper": {
             "enabled": True,
             "provider": "framekeeper",
+            "screenshot_folder": str(framekeeper_root),
+            "screenshot_folder_source": framekeeper_root_source,
             "artifact_root": str(framekeeper_root),
             "artifact_root_source": framekeeper_root_source,
             "image_count": framekeeper_source["image_count"],
@@ -563,7 +588,8 @@ async def get_artifact_storage_settings():
             "inspection_endpoint": "/api/observer/screen-artifacts",
             "inspection_visibility": "localhost_only",
             "control_env": {
-                "artifact_root": "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+                "screenshot_folder": _FRAMEKEEPER_SCREENSHOT_FOLDER_ENV,
+                "artifact_root": _FRAMEKEEPER_ARTIFACT_ROOT_ENV,
                 "auto_ingest_enabled": "FRAMEKEEPER_INGEST_ENABLED",
                 "auto_ingest_interval": "FRAMEKEEPER_INGEST_INTERVAL_MIN",
                 "auto_ingest_limit": "FRAMEKEEPER_INGEST_LIMIT",

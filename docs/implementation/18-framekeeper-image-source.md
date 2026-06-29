@@ -75,10 +75,11 @@ The Seraph settings UI describes this as a Framekeeper source, not as Seraph-own
 - latest image timestamp
 - ingest endpoint
 - manual local ingest action
+- editable saved folder when no env override is present
 - inspection endpoint
 - stored artifact type: `image`
 
-The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
+The settings panel can save `framekeeper_artifact_root` through `/api/settings/screen-analysis`; an empty value resets Seraph to the default root unless `SERAPH_FRAMEKEEPER_ARTIFACT_ROOT` is set. The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
 
 ## Verification
 

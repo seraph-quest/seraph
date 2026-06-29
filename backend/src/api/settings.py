@@ -36,6 +36,7 @@ class ScreenAnalysisSettingsRequest(BaseModel):
     model: str | None = None
     preserve_captures: bool | None = None
     archive_dir: str | None = None
+    framekeeper_artifact_root: str | None = None
     min_seconds_between_captures: int | None = None
     max_daily_captures: int | None = None
     archive_retention_days: int | None = None
@@ -478,6 +479,12 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         ):
             raise HTTPException(status_code=422, detail="Screen archive directory must be private and writable")
         payload["archive_dir"] = str(archive_dir)
+    if body.framekeeper_artifact_root is not None:
+        configured_root = body.framekeeper_artifact_root.strip()
+        if configured_root:
+            payload["framekeeper_artifact_root"] = str(Path(configured_root).expanduser().resolve())
+        else:
+            payload.pop("framekeeper_artifact_root", None)
     for field_name in (
         "min_seconds_between_captures",
         "max_daily_captures",

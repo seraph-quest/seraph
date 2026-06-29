@@ -216,6 +216,7 @@ async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_pa
 async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"
+        framekeeper_root = tmp_path / "framekeeper"
         resp = await client.put(
             "/api/settings/screen-analysis",
             json={
@@ -224,6 +225,7 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
                 "model": "gpt-5.5",
                 "preserve_captures": True,
                 "archive_dir": str(archive),
+                "framekeeper_artifact_root": str(framekeeper_root),
             },
         )
 
@@ -234,6 +236,7 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert data["model"] == "gpt-5.5"
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
+        assert data["framekeeper_artifact_root"] == str(framekeeper_root)
         assert data["max_daily_captures"] == 0
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
@@ -241,6 +244,15 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert storage["screen"]["provider"] == "codex-local"
         assert storage["screen"]["archive_dir"] == str(archive)
         assert storage["screen"]["preservation_enabled"] is True
+        assert storage["framekeeper"]["artifact_root"] == str(framekeeper_root)
+        assert storage["framekeeper"]["artifact_root_source"] == "screen-analysis-settings"
+
+        cleared = await client.put(
+            "/api/settings/screen-analysis",
+            json={"framekeeper_artifact_root": ""},
+        )
+        assert cleared.status_code == 200
+        assert "framekeeper_artifact_root" not in cleared.json()
 
 
 @pytest.mark.asyncio

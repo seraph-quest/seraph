@@ -16,6 +16,7 @@ function settingsFromScreenAnalysisFixture(screen: {
   model: string;
   preserve_captures: boolean;
   archive_dir: string;
+  framekeeper_artifact_root?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -60,6 +61,30 @@ function settingsFromScreenAnalysisFixture(screen: {
       control_env: {
         enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+      },
+    },
+    framekeeper: {
+      enabled: true,
+      provider: "framekeeper",
+      artifact_root: screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
+      artifact_root_source: screen.framekeeper_artifact_root ? "screen-analysis-settings" : "default",
+      image_count: 0,
+      last_image_at: null,
+      status: "empty",
+      exists: false,
+      readable: false,
+      stored_artifacts: ["image"],
+      auto_ingest_enabled: true,
+      auto_ingest_interval_min: 5,
+      auto_ingest_limit: 100,
+      ingest_endpoint: "/api/observer/framekeeper/ingest",
+      inspection_endpoint: "/api/observer/screen-artifacts",
+      inspection_visibility: "localhost_only",
+      control_env: {
+        artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+        auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
+        auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
+        auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
       },
     },
     reports: {
@@ -458,6 +483,52 @@ describe("ArtifactStoragePanel", () => {
     );
     expect(await screen.findByText(/scanned 3 · ingested 1/)).toBeInTheDocument();
     expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
+  });
+
+  it("saves a configured Framekeeper screenshot folder", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "codex-local",
+      model: "gpt-5.5",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+    });
+    const nextRoot = "/Users/test/Framekeeper Screens";
+    const refreshedStorage = {
+      ...artifactStorage,
+      framekeeper: {
+        ...artifactStorage.framekeeper,
+        artifact_root: nextRoot,
+        artifact_root_source: "screen-analysis-settings",
+      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(mockResponse({ ok: true }))
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    const folderInput = await screen.findByLabelText("Framekeeper screenshot folder");
+    fireEvent.change(folderInput, { target: { value: nextRoot } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/screen-analysis"),
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ framekeeper_artifact_root: nextRoot }),
+        }),
+      ),
+    );
+    expect(await screen.findByDisplayValue(nextRoot)).toBeInTheDocument();
+    expect(screen.getAllByText("screen-analysis-settings").length).toBeGreaterThanOrEqual(1);
   });
 
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {

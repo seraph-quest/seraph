@@ -94,6 +94,7 @@ interface ScreenAnalysisSettings {
   model: string;
   preserve_captures: boolean;
   archive_dir: string;
+  framekeeper_artifact_root?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -261,8 +262,8 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
     framekeeper: {
       enabled: true,
       provider: "framekeeper",
-      artifact_root: "~/Library/Application Support/Framekeeper/artifacts",
-      artifact_root_source: "default",
+      artifact_root: screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
+      artifact_root_source: screen.framekeeper_artifact_root ? "screen-analysis-settings" : "default",
       image_count: 0,
       last_image_at: null,
       status: "metadata unavailable",
@@ -353,6 +354,7 @@ export function ArtifactStoragePanel() {
   const [framekeeperIngesting, setFramekeeperIngesting] = useState(false);
   const [framekeeperIngestResult, setFramekeeperIngestResult] = useState<FramekeeperIngestResult | null>(null);
   const [framekeeperIngestError, setFramekeeperIngestError] = useState<string | null>(null);
+  const [framekeeperRootDraft, setFramekeeperRootDraft] = useState("");
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -470,6 +472,7 @@ export function ArtifactStoragePanel() {
     archive_max_mb: 0,
   };
   const framekeeperSource = settings?.framekeeper ?? null;
+  const framekeeperRootLockedByEnv = framekeeperSource?.artifact_root_source === "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT";
   const previewReadyForSend =
     reportActionResult?.action === "manual-preview" &&
     reportActionResult?.status === "ok" &&
@@ -529,6 +532,17 @@ export function ArtifactStoragePanel() {
     } finally {
       if (mountedRef.current) setFramekeeperIngesting(false);
     }
+  };
+
+  useEffect(() => {
+    if (framekeeperSource !== null) setFramekeeperRootDraft(framekeeperSource.artifact_root);
+  }, [framekeeperSource?.artifact_root]);
+
+  const saveFramekeeperRoot = async () => {
+    if (framekeeperSource === null || framekeeperRootLockedByEnv) return;
+    setFramekeeperIngestResult(null);
+    setFramekeeperIngestError(null);
+    await updateScreenAnalysis({ framekeeper_artifact_root: framekeeperRootDraft.trim() });
   };
 
   return (
@@ -591,6 +605,28 @@ export function ArtifactStoragePanel() {
                   }`}>
                     {framekeeperSource.status.replace(/_/g, " ")}
                   </div>
+                </div>
+                <div className="grid grid-cols-[92px_minmax(0,1fr)_auto] gap-2 text-[9px] items-center">
+                  <div className="text-retro-text/30 uppercase tracking-wider">Folder</div>
+                  <input
+                    aria-label="Framekeeper screenshot folder"
+                    value={framekeeperRootDraft}
+                    disabled={saving || framekeeperRootLockedByEnv}
+                    onChange={(event) => setFramekeeperRootDraft(event.target.value)}
+                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      saving ||
+                      framekeeperRootLockedByEnv ||
+                      framekeeperRootDraft.trim() === framekeeperSource.artifact_root
+                    }
+                    onClick={() => void saveFramekeeperRoot()}
+                    className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    Save
+                  </button>
                 </div>
                 <ArtifactRow label="Root" value={framekeeperSource.artifact_root} />
                 <ArtifactRow label="Source" value={sourceLabel(framekeeperSource.artifact_root_source)} />

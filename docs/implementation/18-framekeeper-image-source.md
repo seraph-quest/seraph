@@ -42,9 +42,9 @@ Seraph resolves the Framekeeper screenshot folder in this order:
 
 Framekeeper screenshots are expected to be ordinary `.png`, `.jpg`, or `.jpeg` files. Seraph scans recursively and ignores non-image files.
 
-## Ingestion
+## Folder Scan
 
-Seraph exposes an on-demand ingestion endpoint:
+Seraph exposes an on-demand local folder-scan endpoint:
 
 ```http
 POST /api/observer/framekeeper/ingest
@@ -59,7 +59,7 @@ Optional JSON body:
 }
 ```
 
-If `screenshot_folder` is omitted, Seraph uses the configured folder. The legacy `artifact_root` request key is still accepted for older clients. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
+If `screenshot_folder` is omitted, Seraph uses the configured folder. The legacy `artifact_root` request key is still accepted for older clients. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph. The endpoint name still contains `ingest` for compatibility with older Seraph clients, but the behavior is only a local directory scan.
 
 The artifact analysis endpoint returns Seraph-owned local image analysis for Framekeeper screenshots, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph; Framekeeper still writes only screenshots.
 

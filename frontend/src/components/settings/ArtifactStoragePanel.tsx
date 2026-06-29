@@ -652,7 +652,7 @@ export function ArtifactStoragePanel() {
                   }
                   tone={framekeeperSource.auto_ingest_enabled ? "good" : "normal"}
                 />
-                <ArtifactRow label="Ingest" value={framekeeperSource.ingest_endpoint} tone="good" />
+                <ArtifactRow label="Scan API" value={framekeeperSource.ingest_endpoint} tone="good" />
                 <ArtifactRow label="Inspect" value={`${framekeeperSource.inspection_endpoint} (${framekeeperSource.inspection_visibility.replace(/_/g, " ")})`} />
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button

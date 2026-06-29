@@ -1,4 +1,4 @@
-"""Framekeeper screenshot-directory ingestion for screen observations."""
+"""Framekeeper screenshot-folder scanning for screen observations."""
 
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         "window_title": resolved.name,
         "activity_type": "screen",
         "project": None,
-        "summary": f"Framekeeper screenshot ingested from {resolved.name}.",
+        "summary": f"Framekeeper screenshot added from folder: {resolved.name}.",
         "details": details,
         "blocked": False,
         "timestamp": captured_at,

@@ -172,7 +172,7 @@ async def test_framekeeper_image_ingest_persists_observation_and_serves_image(as
         observation = result.scalar_one()
 
     assert observation.app_name == "Framekeeper"
-    assert observation.summary == "Framekeeper screenshot ingested from capture-valid.png."
+    assert observation.summary == "Framekeeper screenshot added from folder: capture-valid.png."
     stored_details = json.loads(observation.details_json or "[]")
     image_sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
     assert f"framekeeper_image_sha256:{image_sha256}" in stored_details

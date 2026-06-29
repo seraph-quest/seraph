@@ -9,6 +9,7 @@ const sidebars: SidebarsConfig = {
         'master-roadmap',
         'STATUS',
         'current-app-guide',
+        'framekeeper-image-source',
       ],
     },
     {

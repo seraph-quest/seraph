@@ -204,6 +204,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("Framekeeper screenshots")).toBeInTheDocument();
     expect(screen.getByText(/2 images/)).toBeInTheDocument();
     expect(screen.getByText("/api/observer/framekeeper/ingest")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ingest now" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
     expect(screen.getByText("offline - no new captures")).toBeInTheDocument();
@@ -371,6 +372,79 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/receipt abcdef123456/)).toBeInTheDocument();
     expect(screen.queryByText(/user@example/)).not.toBeInTheDocument();
     await waitFor(() => expect(sendButton).not.toBeDisabled());
+  });
+
+  it("runs a local Framekeeper ingest from the source panel", async () => {
+    const artifactStorage = {
+      ...settingsFromScreenAnalysisFixture({
+        enabled: true,
+        provider: "codex-local",
+        model: "gpt-5.5",
+        preserve_captures: true,
+        archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+        capture_mode: "on_switch",
+        cadence_seconds: null,
+        daemon_connected: true,
+        artifact_count: 0,
+        last_artifact_at: null,
+      }),
+      framekeeper: {
+        enabled: true,
+        provider: "framekeeper",
+        artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
+        artifact_root_source: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+        image_count: 3,
+        last_image_at: "2026-06-20T18:40:00Z",
+        status: "ready",
+        exists: true,
+        readable: true,
+        stored_artifacts: ["image"],
+        ingest_endpoint: "/api/observer/framekeeper/ingest",
+        inspection_endpoint: "/api/observer/screen-artifacts",
+        inspection_visibility: "localhost_only",
+        control_env: {
+          artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+        },
+      },
+    };
+    const refreshedStorage = {
+      ...artifactStorage,
+      framekeeper: {
+        ...artifactStorage.framekeeper,
+        image_count: 4,
+      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(
+        mockResponse({
+          artifact_root: artifactStorage.framekeeper.artifact_root,
+          scanned: 3,
+          ingested: 1,
+          skipped_duplicates: 2,
+          rejected: [],
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Ingest now" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/observer/framekeeper/ingest"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            artifact_root: artifactStorage.framekeeper.artifact_root,
+            limit: 100,
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/scanned 3 · ingested 1/)).toBeInTheDocument();
+    expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
   });
 
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {

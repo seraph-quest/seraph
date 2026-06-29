@@ -74,10 +74,11 @@ The Seraph settings UI describes this as a Framekeeper source, not as Seraph-own
 - image count
 - latest image timestamp
 - ingest endpoint
+- manual local ingest action
 - inspection endpoint
 - stored artifact type: `image`
 
-This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
+The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. It does not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
 
 ## Verification
 

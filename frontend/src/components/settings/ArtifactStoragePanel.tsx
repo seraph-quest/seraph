@@ -125,6 +125,14 @@ interface ReportActionResult {
   };
 }
 
+interface FramekeeperIngestResult {
+  artifact_root?: string;
+  scanned?: number;
+  ingested?: number;
+  skipped_duplicates?: number;
+  rejected?: Array<{ image_path?: string; reason?: string }>;
+}
+
 function boolLabel(value: boolean): string {
   return value ? "On" : "Off";
 }
@@ -333,6 +341,9 @@ export function ArtifactStoragePanel() {
   const [reportAction, setReportAction] = useState<"idle" | "previewing" | "sending" | "testing">("idle");
   const [reportActionResult, setReportActionResult] = useState<ReportActionResult | null>(null);
   const [reportActionError, setReportActionError] = useState<string | null>(null);
+  const [framekeeperIngesting, setFramekeeperIngesting] = useState(false);
+  const [framekeeperIngestResult, setFramekeeperIngestResult] = useState<FramekeeperIngestResult | null>(null);
+  const [framekeeperIngestError, setFramekeeperIngestError] = useState<string | null>(null);
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -489,6 +500,28 @@ export function ArtifactStoragePanel() {
     }
   };
 
+  const runFramekeeperIngest = async () => {
+    if (framekeeperIngesting || framekeeperSource === null) return;
+    setFramekeeperIngesting(true);
+    setFramekeeperIngestError(null);
+    try {
+      const response = await fetch(`${API_URL}${framekeeperSource.ingest_endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ artifact_root: framekeeperSource.artifact_root, limit: 100 }),
+      });
+      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      const payload = (await response.json()) as FramekeeperIngestResult;
+      if (!mountedRef.current) return;
+      setFramekeeperIngestResult(payload);
+      await fetchSettings(() => !mountedRef.current);
+    } catch {
+      if (mountedRef.current) setFramekeeperIngestError("Framekeeper ingest failed.");
+    } finally {
+      if (mountedRef.current) setFramekeeperIngesting(false);
+    }
+  };
+
   return (
     <div className="px-1">
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
@@ -559,6 +592,31 @@ export function ArtifactStoragePanel() {
                 />
                 <ArtifactRow label="Ingest" value={framekeeperSource.ingest_endpoint} tone="good" />
                 <ArtifactRow label="Inspect" value={`${framekeeperSource.inspection_endpoint} (${framekeeperSource.inspection_visibility.replace(/_/g, " ")})`} />
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={framekeeperIngesting || !framekeeperSource.exists || !framekeeperSource.readable}
+                    onClick={() => void runFramekeeperIngest()}
+                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    {framekeeperIngesting ? "Ingesting" : "Ingest now"}
+                  </button>
+                  <div className="text-[9px] text-retro-text/40">
+                    local scan only
+                  </div>
+                </div>
+                {framekeeperIngestError && (
+                  <div className="text-[9px] text-red-400">{framekeeperIngestError}</div>
+                )}
+                {framekeeperIngestResult && (
+                  <div className="border border-retro-text/10 px-2 py-1 text-[9px] text-retro-text/60">
+                    scanned {framekeeperIngestResult.scanned ?? 0} · ingested {framekeeperIngestResult.ingested ?? 0}
+                    {" · "}duplicates {framekeeperIngestResult.skipped_duplicates ?? 0}
+                    {(framekeeperIngestResult.rejected?.length ?? 0) > 0
+                      ? ` · rejected ${framekeeperIngestResult.rejected?.length ?? 0}`
+                      : ""}
+                  </div>
+                )}
               </div>
             )}
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlmodel import col, select
 
+from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
@@ -29,6 +31,26 @@ class FramekeeperIngestResult:
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+
+def resolve_framekeeper_root(configured: str | None = None) -> Path:
+    """Resolve Seraph's local Framekeeper screenshot folder."""
+    if configured and configured.strip():
+        return Path(configured).expanduser().resolve()
+    env_root = os.environ.get("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    screen_analysis_path = Path(settings.workspace_dir).expanduser().resolve() / "screen-analysis-settings.json"
+    if screen_analysis_path.exists():
+        try:
+            payload = json.loads(screen_analysis_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            settings_root = str(payload.get("framekeeper_artifact_root") or "").strip()
+            if settings_root:
+                return Path(settings_root).expanduser().resolve()
+    return Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve()
 
 
 async def ingest_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperIngestResult:

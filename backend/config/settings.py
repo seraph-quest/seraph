@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     screen_analysis_max_daily_captures: int = 0
     screen_capture_archive_retention_days: int = 365
     screen_capture_archive_max_mb: int = 0
+    framekeeper_ingest_enabled: bool = True
+    framekeeper_ingest_interval_min: int = 5
+    framekeeper_ingest_limit: int = 100
     report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21

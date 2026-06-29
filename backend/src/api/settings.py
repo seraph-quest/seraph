@@ -549,11 +549,17 @@ async def get_artifact_storage_settings():
             "exists": framekeeper_source["exists"],
             "readable": framekeeper_source["readable"],
             "stored_artifacts": ["image"],
+            "auto_ingest_enabled": settings.framekeeper_ingest_enabled,
+            "auto_ingest_interval_min": settings.framekeeper_ingest_interval_min,
+            "auto_ingest_limit": settings.framekeeper_ingest_limit,
             "ingest_endpoint": "/api/observer/framekeeper/ingest",
             "inspection_endpoint": "/api/observer/screen-artifacts",
             "inspection_visibility": "localhost_only",
             "control_env": {
                 "artifact_root": "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+                "auto_ingest_enabled": "FRAMEKEEPER_INGEST_ENABLED",
+                "auto_ingest_interval": "FRAMEKEEPER_INGEST_INTERVAL_MIN",
+                "auto_ingest_limit": "FRAMEKEEPER_INGEST_LIMIT",
             },
         },
         "reports": {

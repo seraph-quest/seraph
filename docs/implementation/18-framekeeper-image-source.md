@@ -78,7 +78,7 @@ The Seraph settings UI describes this as a Framekeeper source, not as Seraph-own
 - inspection endpoint
 - stored artifact type: `image`
 
-The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. It does not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
+The manual ingest action calls Seraph's local `/api/observer/framekeeper/ingest` endpoint to scan the configured screenshot folder. Seraph can also run its own `framekeeper_image_ingest` scheduler job, controlled by `FRAMEKEEPER_INGEST_ENABLED`, `FRAMEKEEPER_INGEST_INTERVAL_MIN`, and `FRAMEKEEPER_INGEST_LIMIT`. Both paths only read local image files from the configured folder. They do not start Framekeeper, connect to a Framekeeper service, or ask Framekeeper for metadata. This keeps Seraph controls focused on analysis and reporting while Framekeeper stays responsible for screenshot production.
 
 ## Verification
 
@@ -87,12 +87,13 @@ This branch verifies the image-source path with:
 ```bash
 cd /Users/bigcube/Desktop/repos/seraph/backend
 UV_CACHE_DIR=/tmp/seraph-uv-cache uv run pytest tests/test_observer_screen_artifacts.py tests/test_settings_api.py::test_artifact_storage_exposes_framekeeper_source_status
+UV_CACHE_DIR=/tmp/seraph-uv-cache uv run pytest tests/test_framekeeper_ingest_job.py
 
 cd /Users/bigcube/Desktop/repos/seraph/frontend
 npm run test -- ArtifactStoragePanel.test.tsx
 npm run build
 
 cd /Users/bigcube/Desktop/repos/seraph
-PYTHONPYCACHEPREFIX=/tmp/seraph-pycache python3 -m py_compile backend/src/observer/framekeeper_source.py backend/src/api/observer.py backend/src/api/settings.py
+PYTHONPYCACHEPREFIX=/tmp/seraph-pycache python3 -m py_compile backend/src/observer/framekeeper_source.py backend/src/scheduler/jobs/framekeeper_ingest.py backend/src/scheduler/engine.py backend/src/api/observer.py backend/src/api/settings.py
 git diff --check
 ```

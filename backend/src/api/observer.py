@@ -618,22 +618,9 @@ async def ingest_framekeeper_artifacts(body: FramekeeperIngestRequest, request: 
 
 
 def _framekeeper_artifact_root(configured: str | None = None) -> Path:
-    if configured and configured.strip():
-        return Path(configured).expanduser().resolve()
-    env_root = os.environ.get("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", "").strip()
-    if env_root:
-        return Path(env_root).expanduser().resolve()
-    screen_analysis_path = Path(settings.workspace_dir).expanduser().resolve() / "screen-analysis-settings.json"
-    if screen_analysis_path.exists():
-        try:
-            payload = json.loads(screen_analysis_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        if isinstance(payload, dict):
-            settings_root = str(payload.get("framekeeper_artifact_root") or "").strip()
-            if settings_root:
-                return Path(settings_root).expanduser().resolve()
-    return Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve()
+    from src.observer.framekeeper_source import resolve_framekeeper_root
+
+    return resolve_framekeeper_root(configured)
 
 
 def _image_media_type(path: Path) -> str:

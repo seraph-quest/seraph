@@ -55,6 +55,9 @@ interface ArtifactStorageSettings {
     exists: boolean;
     readable: boolean;
     stored_artifacts: string[];
+    auto_ingest_enabled: boolean;
+    auto_ingest_interval_min: number;
+    auto_ingest_limit: number;
     ingest_endpoint: string;
     inspection_endpoint: string;
     inspection_visibility: string;
@@ -266,11 +269,17 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       exists: false,
       readable: false,
       stored_artifacts: ["image"],
+      auto_ingest_enabled: true,
+      auto_ingest_interval_min: 5,
+      auto_ingest_limit: 100,
       ingest_endpoint: "/api/observer/framekeeper/ingest",
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
         artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+        auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
+        auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
+        auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
       },
     },
     reports: {
@@ -589,6 +598,15 @@ export function ArtifactStoragePanel() {
                   label="Images"
                   value={`${framekeeperSource.image_count} images${framekeeperSource.last_image_at ? ` · latest ${framekeeperSource.last_image_at}` : ""}`}
                   tone={framekeeperStateTone(framekeeperSource)}
+                />
+                <ArtifactRow
+                  label="Auto scan"
+                  value={
+                    framekeeperSource.auto_ingest_enabled
+                      ? `every ${framekeeperSource.auto_ingest_interval_min}m · up to ${framekeeperSource.auto_ingest_limit} images`
+                      : "off"
+                  }
+                  tone={framekeeperSource.auto_ingest_enabled ? "good" : "normal"}
                 />
                 <ArtifactRow label="Ingest" value={framekeeperSource.ingest_endpoint} tone="good" />
                 <ArtifactRow label="Inspect" value={`${framekeeperSource.inspection_endpoint} (${framekeeperSource.inspection_visibility.replace(/_/g, " ")})`} />

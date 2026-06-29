@@ -203,6 +203,10 @@ async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_pa
     assert data["framekeeper"]["status"] == "ready"
     assert data["framekeeper"]["image_count"] == 1
     assert data["framekeeper"]["stored_artifacts"] == ["image"]
+    assert data["framekeeper"]["auto_ingest_enabled"] is True
+    assert data["framekeeper"]["auto_ingest_interval_min"] == settings.framekeeper_ingest_interval_min
+    assert data["framekeeper"]["auto_ingest_limit"] == settings.framekeeper_ingest_limit
+    assert data["framekeeper"]["control_env"]["auto_ingest_enabled"] == "FRAMEKEEPER_INGEST_ENABLED"
     assert data["framekeeper"]["exists"] is True
     assert data["framekeeper"]["readable"] is True
     assert data["framekeeper"]["ingest_endpoint"] == "/api/observer/framekeeper/ingest"

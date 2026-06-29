@@ -156,11 +156,17 @@ describe("ArtifactStoragePanel", () => {
           exists: true,
           readable: true,
           stored_artifacts: ["image"],
+          auto_ingest_enabled: true,
+          auto_ingest_interval_min: 5,
+          auto_ingest_limit: 100,
           ingest_endpoint: "/api/observer/framekeeper/ingest",
           inspection_endpoint: "/api/observer/screen-artifacts",
           inspection_visibility: "localhost_only",
           control_env: {
             artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+            auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
+            auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
+            auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
           },
         },
         reports: {
@@ -203,6 +209,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("consumes Framekeeper screenshots and keeps reports local-first")).toBeInTheDocument();
     expect(screen.getByText("Framekeeper screenshots")).toBeInTheDocument();
     expect(screen.getByText(/2 images/)).toBeInTheDocument();
+    expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("/api/observer/framekeeper/ingest")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Ingest now" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
@@ -399,11 +406,17 @@ describe("ArtifactStoragePanel", () => {
         exists: true,
         readable: true,
         stored_artifacts: ["image"],
+        auto_ingest_enabled: true,
+        auto_ingest_interval_min: 5,
+        auto_ingest_limit: 100,
         ingest_endpoint: "/api/observer/framekeeper/ingest",
         inspection_endpoint: "/api/observer/screen-artifacts",
         inspection_visibility: "localhost_only",
         control_env: {
           artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+          auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
+          auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
+          auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
         },
       },
     };

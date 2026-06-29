@@ -187,6 +187,28 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_path, monkeypatch):
+    framekeeper_root = tmp_path / "framekeeper"
+    capture_dir = framekeeper_root / "captures" / "capture-1"
+    capture_dir.mkdir(parents=True)
+    (capture_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", str(framekeeper_root))
+
+    resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["framekeeper"]["provider"] == "framekeeper"
+    assert data["framekeeper"]["artifact_root"] == str(framekeeper_root)
+    assert data["framekeeper"]["artifact_root_source"] == "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
+    assert data["framekeeper"]["status"] == "ready"
+    assert data["framekeeper"]["manifest_count"] == 1
+    assert data["framekeeper"]["exists"] is True
+    assert data["framekeeper"]["readable"] is True
+    assert data["framekeeper"]["ingest_endpoint"] == "/api/observer/framekeeper/ingest"
+
+
+@pytest.mark.asyncio
 async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"

@@ -88,6 +88,20 @@ def _screen_archive_dir() -> tuple[Path, str]:
     )
 
 
+def _framekeeper_artifact_root() -> tuple[Path, str]:
+    configured = os.environ.get("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(), "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
+    payload = _read_screen_analysis_settings()
+    settings_configured = str(payload.get("framekeeper_artifact_root") or "").strip()
+    if settings_configured:
+        return Path(settings_configured).expanduser().resolve(), "screen-analysis-settings"
+    return (
+        Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve(),
+        "default",
+    )
+
+
 def _report_archive_dir() -> tuple[Path, str]:
     configured = settings.report_archive_dir.strip()
     if configured:
@@ -191,6 +205,7 @@ def _read_screen_analysis_settings() -> dict[str, object]:
                 "max_daily_captures",
                 "archive_retention_days",
                 "archive_max_mb",
+                "framekeeper_artifact_root",
             ):
                 if key in loaded:
                     payload[key] = loaded[key]
@@ -202,6 +217,10 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
     payload["model"] = str(payload.get("model") or "")
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
+    if payload.get("framekeeper_artifact_root"):
+        payload["framekeeper_artifact_root"] = str(
+            Path(str(payload["framekeeper_artifact_root"])).expanduser().resolve()
+        )
     for key in (
         "min_seconds_between_captures",
         "max_daily_captures",
@@ -246,6 +265,48 @@ def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
     return {
         "artifact_count": len(image_mtimes),
         "last_artifact_at": datetime.fromtimestamp(latest_mtime, timezone.utc).isoformat(),
+    }
+
+
+def _framekeeper_source_summary(root: Path) -> dict[str, object]:
+    if not root.exists():
+        return {
+            "status": "not_found",
+            "manifest_count": 0,
+            "last_manifest_at": None,
+            "exists": False,
+            "readable": False,
+        }
+    if not root.is_dir():
+        return {
+            "status": "invalid_root",
+            "manifest_count": 0,
+            "last_manifest_at": None,
+            "exists": True,
+            "readable": False,
+        }
+    manifest_mtimes: list[float] = []
+    try:
+        for path in (root / "captures").rglob("manifest.json"):
+            if path.is_file():
+                manifest_mtimes.append(path.stat().st_mtime)
+    except OSError as exc:
+        logger.warning("Framekeeper artifact source summary failed: %s", exc)
+        return {
+            "status": "read_error",
+            "manifest_count": 0,
+            "last_manifest_at": None,
+            "exists": True,
+            "readable": False,
+        }
+    return {
+        "status": "ready" if manifest_mtimes else "empty",
+        "manifest_count": len(manifest_mtimes),
+        "last_manifest_at": datetime.fromtimestamp(max(manifest_mtimes), timezone.utc).isoformat()
+        if manifest_mtimes
+        else None,
+        "exists": True,
+        "readable": True,
     }
 
 
@@ -441,6 +502,8 @@ async def get_artifact_storage_settings():
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
     report_receipts = _report_receipt_summary(report_archive_dir)
+    framekeeper_root, framekeeper_root_source = _framekeeper_artifact_root()
+    framekeeper_source = _framekeeper_source_summary(framekeeper_root)
     screen_analysis = await get_screen_analysis_settings()
     screen_archive_dir = Path(str(screen_analysis["archive_dir"]))
     screen_dir_status = _archive_dir_status(screen_archive_dir)
@@ -473,6 +536,24 @@ async def get_artifact_storage_settings():
             "control_env": {
                 "enabled": "SERAPH_PRESERVE_SCREEN_CAPTURES",
                 "archive_dir": "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+            },
+        },
+        "framekeeper": {
+            "enabled": True,
+            "provider": "framekeeper",
+            "artifact_root": str(framekeeper_root),
+            "artifact_root_source": framekeeper_root_source,
+            "manifest_count": framekeeper_source["manifest_count"],
+            "last_manifest_at": framekeeper_source["last_manifest_at"],
+            "status": framekeeper_source["status"],
+            "exists": framekeeper_source["exists"],
+            "readable": framekeeper_source["readable"],
+            "stored_artifacts": ["manifest_json", "image", "seraph_analysis_json", "seraph_provider_output"],
+            "ingest_endpoint": "/api/observer/framekeeper/ingest",
+            "inspection_endpoint": "/api/observer/screen-artifacts",
+            "inspection_visibility": "localhost_only",
+            "control_env": {
+                "artifact_root": "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
             },
         },
         "reports": {

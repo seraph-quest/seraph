@@ -44,6 +44,22 @@ interface ArtifactStorageSettings {
     };
     control_env: Record<string, string>;
   };
+  framekeeper?: {
+    enabled: boolean;
+    provider: string;
+    artifact_root: string;
+    artifact_root_source: string;
+    manifest_count: number;
+    last_manifest_at: string | null;
+    status: string;
+    exists: boolean;
+    readable: boolean;
+    stored_artifacts: string[];
+    ingest_endpoint: string;
+    inspection_endpoint: string;
+    inspection_visibility: string;
+    control_env: Record<string, string>;
+  };
   reports: {
     enabled: boolean;
     hour: number;
@@ -143,6 +159,13 @@ function captureStateTone(settings: ArtifactStorageSettings["screen"]): "normal"
   return settings.daemon_status.capture_ready ? "good" : "warn";
 }
 
+function framekeeperStateTone(settings: NonNullable<ArtifactStorageSettings["framekeeper"]>): "normal" | "good" | "warn" {
+  if (!settings.exists || !settings.readable || settings.status === "invalid_root" || settings.status === "read_error") {
+    return "warn";
+  }
+  return settings.manifest_count > 0 ? "good" : "normal";
+}
+
 function isArtifactStorageSettings(value: unknown): value is ArtifactStorageSettings {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<ArtifactStorageSettings>;
@@ -222,6 +245,24 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       control_env: {
         enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+      },
+    },
+    framekeeper: {
+      enabled: true,
+      provider: "framekeeper",
+      artifact_root: "~/Library/Application Support/Framekeeper/artifacts",
+      artifact_root_source: "default",
+      manifest_count: 0,
+      last_manifest_at: null,
+      status: "metadata unavailable",
+      exists: false,
+      readable: false,
+      stored_artifacts: ["manifest_json", "image"],
+      ingest_endpoint: "/api/observer/framekeeper/ingest",
+      inspection_endpoint: "/api/observer/screen-artifacts",
+      inspection_visibility: "localhost_only",
+      control_env: {
+        artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
       },
     },
     reports: {
@@ -316,10 +357,10 @@ export function ArtifactStoragePanel() {
         data = artifactData;
         hasArtifactMetadata = true;
       }
-      if (data === null) throw new Error("Screen capture settings response is unavailable.");
+      if (data === null) throw new Error("Framekeeper source settings response is unavailable.");
       if (canPublish()) {
         setSettings(data);
-        setMetadataWarning(hasArtifactMetadata ? null : "Archive metadata loading; screen capture controls are live.");
+        setMetadataWarning(hasArtifactMetadata ? null : "Archive metadata loading; analysis controls are live.");
         setFailed(false);
       }
       if (!hasArtifactMetadata) {
@@ -330,12 +371,12 @@ export function ArtifactStoragePanel() {
               setSettings(artifactData);
               setMetadataWarning(null);
             } else {
-              setMetadataWarning("Archive metadata degraded; screen capture controls are still live.");
+              setMetadataWarning("Archive metadata degraded; analysis controls are still live.");
             }
           })
           .catch(() => {
             if (canPublish()) {
-              setMetadataWarning("Archive metadata degraded; screen capture controls are still live.");
+              setMetadataWarning("Archive metadata degraded; analysis controls are still live.");
             }
           });
       }
@@ -408,6 +449,7 @@ export function ArtifactStoragePanel() {
     archive_retention_days: 365,
     archive_max_mb: 0,
   };
+  const framekeeperSource = settings?.framekeeper ?? null;
   const previewReadyForSend =
     reportActionResult?.action === "manual-preview" &&
     reportActionResult?.status === "ok" &&
@@ -450,12 +492,12 @@ export function ArtifactStoragePanel() {
   return (
     <div className="px-1">
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
-        Screen Capture
+        Framekeeper Source
       </div>
       <div className="border border-retro-text/10 rounded px-2 py-2 flex flex-col gap-2">
         {failed ? (
           <div className="flex flex-col gap-2">
-            <div className="text-[9px] text-red-400">Screen capture settings unavailable.</div>
+            <div className="text-[9px] text-red-400">Framekeeper source settings unavailable.</div>
             <button
               type="button"
               onClick={() => void fetchSettings()}
@@ -465,7 +507,7 @@ export function ArtifactStoragePanel() {
             </button>
           </div>
         ) : settings === null ? (
-          <div className="text-[9px] text-retro-text/40">Loading screen capture settings...</div>
+          <div className="text-[9px] text-retro-text/40">Loading Framekeeper source settings...</div>
         ) : (
           <>
             {metadataWarning && (
@@ -475,9 +517,9 @@ export function ArtifactStoragePanel() {
             )}
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
-                <div className="text-[10px] text-retro-text">Screen analysis</div>
+                <div className="text-[10px] text-retro-text">Seraph analysis</div>
                 <div className="text-[9px] text-retro-text/40 truncate">
-                  screenshots, provider output, analysis JSON
+                  consumes Framekeeper manifests and keeps reports local-first
                 </div>
               </div>
               <button
@@ -493,6 +535,32 @@ export function ArtifactStoragePanel() {
                 {boolLabel(settings.screen.analysis_enabled)}
               </button>
             </div>
+
+            {framekeeperSource && (
+              <div className="border border-retro-text/10 px-2 py-2 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] text-retro-text">Framekeeper artifacts</div>
+                  <div className={`text-[9px] uppercase tracking-wider ${
+                    framekeeperStateTone(framekeeperSource) === "good"
+                      ? "text-green-400"
+                      : framekeeperStateTone(framekeeperSource) === "warn"
+                        ? "text-yellow-400"
+                        : "text-retro-text/50"
+                  }`}>
+                    {framekeeperSource.status.replace(/_/g, " ")}
+                  </div>
+                </div>
+                <ArtifactRow label="Root" value={framekeeperSource.artifact_root} />
+                <ArtifactRow label="Source" value={sourceLabel(framekeeperSource.artifact_root_source)} />
+                <ArtifactRow
+                  label="Manifests"
+                  value={`${framekeeperSource.manifest_count} manifests${framekeeperSource.last_manifest_at ? ` · latest ${framekeeperSource.last_manifest_at}` : ""}`}
+                  tone={framekeeperStateTone(framekeeperSource)}
+                />
+                <ArtifactRow label="Ingest" value={framekeeperSource.ingest_endpoint} tone="good" />
+                <ArtifactRow label="Inspect" value={`${framekeeperSource.inspection_endpoint} (${framekeeperSource.inspection_visibility.replace(/_/g, " ")})`} />
+              </div>
+            )}
 
             <div className="grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-[9px]">
               <div className="text-retro-text/30 uppercase tracking-wider">Provider</div>

@@ -49,6 +49,11 @@ class ScreenContextRequest(BaseModel):
     switch_timestamp: float | None = None
 
 
+class FramekeeperIngestRequest(BaseModel):
+    artifact_root: str | None = None
+    limit: int = 100
+
+
 class NativeNotificationResponse(BaseModel):
     id: str
     intervention_id: str | None = None
@@ -436,15 +441,28 @@ def _require_local_artifact_request(request: Request) -> None:
 
 
 def _screen_artifact_path(raw_path: str | None) -> Path:
+    return _artifact_path(raw_path, allowed_roots=[_screen_artifact_root()])
+
+
+def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
     if not raw_path:
         raise HTTPException(status_code=404, detail="Screen artifact is missing")
-    root = _screen_artifact_root()
     path = Path(raw_path).expanduser().resolve()
-    if not path.is_relative_to(root):
+    roots = [root.expanduser().resolve() for root in allowed_roots]
+    if not any(path.is_relative_to(root) for root in roots):
         raise HTTPException(status_code=403, detail="Screen artifact is outside the configured archive")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Screen artifact file not found")
     return path
+
+
+def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
+    roots = [_screen_artifact_root()]
+    if artifacts.get("provider") == "framekeeper":
+        configured_root = str(artifacts.get("artifact_root") or "").strip()
+        if configured_root:
+            roots.append(Path(configured_root).expanduser().resolve())
+    return roots
 
 
 def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] | None:
@@ -532,7 +550,7 @@ async def get_screen_artifact_image(observation_id: str, request: Request) -> Fi
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("image_path") or ""))
+    path = _artifact_path(str(artifacts.get("image_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     return FileResponse(path, media_type="image/png")
 
 
@@ -542,7 +560,10 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""))
+    path = _artifact_path(
+        str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""),
+        allowed_roots=_artifact_allowed_roots(artifacts),
+    )
     return PlainTextResponse(path.read_text(encoding="utf-8"))
 
 
@@ -552,12 +573,60 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("analysis_path") or ""))
+    if artifacts.get("provider") == "framekeeper" and not artifacts.get("analysis_path"):
+        return {
+            "provider": "framekeeper",
+            "summary": observation.summary,
+            "image_sha256": artifacts.get("image_sha256"),
+            "manifest_path": artifacts.get("manifest_path"),
+        }
+    path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Saved analysis artifact is invalid") from exc
     return payload if isinstance(payload, dict) else {"value": payload}
+
+
+@router.post("/observer/framekeeper/ingest")
+async def ingest_framekeeper_artifacts(body: FramekeeperIngestRequest, request: Request) -> dict[str, Any]:
+    """Ingest Framekeeper manifests as Seraph screen observations."""
+    from src.observer.framekeeper_source import ingest_framekeeper_root
+
+    _require_local_artifact_request(request)
+    root = _framekeeper_artifact_root(body.artifact_root)
+    result = await ingest_framekeeper_root(
+        root,
+        limit=body.limit,
+        analysis_root=_screen_artifact_root() / "framekeeper-analysis",
+    )
+    return {
+        "artifact_root": str(root),
+        "scanned": result.scanned,
+        "ingested": result.ingested,
+        "skipped_duplicates": result.skipped_duplicates,
+        "blocked_events": result.blocked_events,
+        "rejected": result.rejected,
+    }
+
+
+def _framekeeper_artifact_root(configured: str | None = None) -> Path:
+    if configured and configured.strip():
+        return Path(configured).expanduser().resolve()
+    env_root = os.environ.get("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    screen_analysis_path = Path(settings.workspace_dir).expanduser().resolve() / "screen-analysis-settings.json"
+    if screen_analysis_path.exists():
+        try:
+            payload = json.loads(screen_analysis_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, dict):
+            settings_root = str(payload.get("framekeeper_artifact_root") or "").strip()
+            if settings_root:
+                return Path(settings_root).expanduser().resolve()
+    return Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve()
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)

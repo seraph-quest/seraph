@@ -35,6 +35,7 @@ _PATCH_TARGETS = [
     "src.scheduler.jobs.memory_consolidation.get_session",
     "src.scheduler.scheduled_jobs.get_session",
     "src.observer.insight_queue.get_session",
+    "src.observer.framekeeper_source.get_session",
     "src.guardian.feedback.get_session",
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",

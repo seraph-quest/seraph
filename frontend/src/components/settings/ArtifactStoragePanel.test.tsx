@@ -145,6 +145,24 @@ describe("ArtifactStoragePanel", () => {
             archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
           },
         },
+        framekeeper: {
+          enabled: true,
+          provider: "framekeeper",
+          artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
+          artifact_root_source: "default",
+          manifest_count: 2,
+          last_manifest_at: "2026-06-20T18:40:00Z",
+          status: "ready",
+          exists: true,
+          readable: true,
+          stored_artifacts: ["manifest_json", "image"],
+          ingest_endpoint: "/api/observer/framekeeper/ingest",
+          inspection_endpoint: "/api/observer/screen-artifacts",
+          inspection_visibility: "localhost_only",
+          control_env: {
+            artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
+          },
+        },
         reports: {
           enabled: true,
           hour: 21,
@@ -180,17 +198,20 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    await waitFor(() => expect(screen.getByText("Screen analysis")).toBeInTheDocument());
-    expect(screen.getByText("Screen Capture")).toBeInTheDocument();
-    expect(screen.getByText("screenshots, provider output, analysis JSON")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Seraph analysis")).toBeInTheDocument());
+    expect(screen.getByText("Framekeeper Source")).toBeInTheDocument();
+    expect(screen.getByText("consumes Framekeeper manifests and keeps reports local-first")).toBeInTheDocument();
+    expect(screen.getByText("Framekeeper artifacts")).toBeInTheDocument();
+    expect(screen.getByText(/2 manifests/)).toBeInTheDocument();
+    expect(screen.getByText("/api/observer/framekeeper/ingest")).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
     expect(screen.getByText("offline - no new captures")).toBeInTheDocument();
     expect(screen.getByText("Grant Screen Recording permission to the terminal/app running Seraph.")).toBeInTheDocument();
     expect(screen.getByText(/1 captures/)).toBeInTheDocument();
-    expect(screen.getByText("/api/observer/screen-artifacts (localhost only)")).toBeInTheDocument();
+    expect(screen.getAllByText("/api/observer/screen-artifacts (localhost only)")).toHaveLength(2);
     expect(screen.getByText("SERAPH_PRESERVE_SCREEN_CAPTURES")).toBeInTheDocument();
-    expect(screen.getAllByText("ready")).toHaveLength(2);
+    expect(screen.getAllByText("ready")).toHaveLength(3);
     expect(screen.getByText("End-of-day reports")).toBeInTheDocument();
     expect(screen.getByText("deterministic-local")).toBeInTheDocument();
     expect(screen.getByText("Email delivery")).toBeInTheDocument();
@@ -516,7 +537,7 @@ describe("ArtifactStoragePanel", () => {
     expect(captureState).toHaveAttribute("title", "waiting for app/window switch");
   });
 
-  it("keeps screen capture controls visible when artifact metadata is unavailable", async () => {
+  it("keeps analysis controls visible when artifact metadata is unavailable", async () => {
     fetchMock
       .mockResolvedValueOnce(
         mockResponse({
@@ -536,12 +557,12 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Screen analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("on_switch")).toBeInTheDocument();
-    expect(screen.getByText("Archive metadata degraded; screen capture controls are still live.")).toBeInTheDocument();
+    expect(screen.getByText("Archive metadata degraded; analysis controls are still live.")).toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Framekeeper source settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {
@@ -564,12 +585,12 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Screen analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(
-      await screen.findByText("Archive metadata degraded; screen capture controls are still live."),
+      await screen.findByText("Archive metadata degraded; analysis controls are still live."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Archive metadata loading; screen capture controls are live.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Archive metadata loading; analysis controls are live.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Framekeeper source settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("ignores stale artifact metadata after a newer save refresh", async () => {
@@ -619,7 +640,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
   });
 
-  it("aborts hung artifact metadata and keeps screen capture controls visible", async () => {
+  it("aborts hung artifact metadata and keeps analysis controls visible", async () => {
     let artifactSignal: AbortSignal | undefined;
     fetchMock
       .mockResolvedValueOnce(
@@ -645,17 +666,17 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Screen analysis", undefined, { timeout: 5_000 })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(
       await screen.findByText(
-        "Archive metadata degraded; screen capture controls are still live.",
+        "Archive metadata degraded; analysis controls are still live.",
         undefined,
         { timeout: 5_000 },
       ),
     ).toBeInTheDocument();
     expect(artifactSignal?.aborted).toBe(true);
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Framekeeper source settings unavailable.")).not.toBeInTheDocument();
   }, 7_000);
 });

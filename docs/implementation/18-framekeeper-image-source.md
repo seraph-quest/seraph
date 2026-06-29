@@ -61,6 +61,8 @@ If `artifact_root` is omitted, Seraph uses the configured root. For each new ima
 
 The artifact analysis endpoint returns Seraph-owned local image analysis for Framekeeper screenshots, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph; Framekeeper still writes only screenshots.
 
+End-of-day reports consume Framekeeper-derived `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `framekeeper` from its own stored capture-artifact details, so reports can show Framekeeper image activity without requiring any Framekeeper manifest or service connection.
+
 Configure a narrow, trusted screenshot directory. Do not point ingestion at a broad home, downloads, desktop, or project folder. A local caller that can invoke this endpoint can cause Seraph to read image files under the supplied path, hash them, and persist observations.
 
 ## Settings Surface

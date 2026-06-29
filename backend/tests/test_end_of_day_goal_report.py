@@ -81,6 +81,48 @@ async def test_build_report_is_deterministic_by_default(async_db):
 
 
 @pytest.mark.asyncio
+async def test_build_report_counts_framekeeper_observation_source(async_db):
+    from src.db.models import ScreenObservation
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "framekeeper",
+                "source": "framekeeper",
+                "image_path": "/tmp/framekeeper/capture.png",
+                "image_sha256": "abc123",
+            },
+            sort_keys=True,
+        )
+    ]
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                timestamp=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+                app_name="Framekeeper",
+                window_title="capture.png",
+                activity_type="screen",
+                project="seraph",
+                summary="Framekeeper screenshot ingested from capture.png.",
+                duration_s=300,
+                details_json=json.dumps(details),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch.object(
+        settings, "end_of_day_report_llm_enabled", False
+    ):
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["summary"]["total_observations"] == 1
+    assert report["summary"]["by_source"] == {"framekeeper": 300}
+    assert "Source mix:" in report["body"]
+    assert "- framekeeper: 5m" in report["body"]
+
+
+@pytest.mark.asyncio
 async def test_run_report_stores_episode_and_keeps_email_preview_only(async_db):
     from src.db.models import MemoryEpisode
     from sqlmodel import select

@@ -222,8 +222,6 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, tmp_pat
 async def test_artifact_storage_defaults_to_seraph_owned_screenshot_folder(client, tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     monkeypatch.delenv("SERAPH_SCREENSHOT_FOLDER", raising=False)
-    monkeypatch.delenv("SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER", raising=False)
-    monkeypatch.delenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", raising=False)
     with patch.object(settings, "workspace_dir", str(workspace)):
         resp = await client.get("/api/settings/artifact-storage")
 
@@ -306,7 +304,7 @@ async def test_screen_analysis_settings_reject_public_legacy_framekeeper_screens
 
 
 @pytest.mark.asyncio
-async def test_screen_analysis_settings_migrates_legacy_local_file_without_exposing_keys(client, tmp_path):
+async def test_screen_analysis_settings_ignores_legacy_framekeeper_local_file_keys(client, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     screenshot_root = tmp_path / "legacy-screenshots"
@@ -320,9 +318,26 @@ async def test_screen_analysis_settings_migrates_legacy_local_file_without_expos
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["screenshot_folder"] == str(screenshot_root)
+    assert "screenshot_folder" not in data
     assert "framekeeper_screenshot_folder" not in data
     assert "framekeeper_artifact_root" not in data
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_ignores_legacy_framekeeper_env_keys(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    legacy_root = tmp_path / "legacy-screenshots"
+    monkeypatch.delenv("SERAPH_SCREENSHOT_FOLDER", raising=False)
+    monkeypatch.setenv("SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER", str(legacy_root))
+    monkeypatch.setenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", str(legacy_root))
+
+    with patch.object(settings, "workspace_dir", str(workspace)):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screenshot_folder"]["path"] == str(workspace / "artifacts" / "screenshot-folder")
+    assert data["screenshot_folder"]["path_source"] == "default"
 
 
 @pytest.mark.asyncio

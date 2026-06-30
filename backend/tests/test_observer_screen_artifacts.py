@@ -121,6 +121,36 @@ async def test_screen_artifact_endpoints_are_localhost_only(app, async_db, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_screen_artifacts_ignore_legacy_framekeeper_provider(async_db, client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
+    image_path = tmp_path / "capture.png"
+    image_path.write_bytes(b"png bytes")
+    artifacts = {
+        "id": "legacy-framekeeper-artifact",
+        "provider": "framekeeper",
+        "screenshot_folder": str(tmp_path),
+        "image_path": str(image_path),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with async_db() as db:
+        observation = ScreenObservation(
+            app_name="Framekeeper",
+            window_title="capture.png",
+            activity_type="screen",
+            summary="Legacy producer-specific artifact",
+            details_json=json.dumps(["capture_artifacts:" + json.dumps(artifacts)]),
+        )
+        db.add(observation)
+
+    list_resp = await client.get("/api/observer/screen-artifacts")
+    assert list_resp.status_code == 200
+    assert list_resp.json()["items"] == []
+
+    image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
+    assert image_resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_screen_artifact_root_prefers_seraph_archive_env(tmp_path, monkeypatch):
     from src.api.observer import _screen_artifact_root
 

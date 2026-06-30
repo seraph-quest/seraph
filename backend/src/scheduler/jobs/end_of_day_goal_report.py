@@ -331,12 +331,10 @@ def _observation_source(observation: ScreenObservation) -> str:
                         continue
                     if isinstance(artifacts, dict):
                         provider = str(artifacts.get("provider") or artifacts.get("source") or "").strip()
-                        if provider:
+                        if provider and provider != "framekeeper":
                             return provider
     if observation.app_name == "Screenshot Folder":
         return "screenshot_folder"
-    if observation.app_name == "Framekeeper":
-        return "framekeeper"
     return "observer_daemon"
 
 
@@ -359,7 +357,7 @@ def _screenshot_image_sample(observation: ScreenObservation) -> str | None:
         if not isinstance(artifacts, dict):
             continue
         provider = str(artifacts.get("provider") or artifacts.get("source") or "").strip()
-        if provider not in {"screenshot_folder", "framekeeper"}:
+        if provider != "screenshot_folder":
             continue
         image_name = Path(str(artifacts.get("image_path") or observation.window_title or "screenshot")).name
         metadata_label = image_metadata_label(

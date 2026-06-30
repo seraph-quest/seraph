@@ -70,8 +70,6 @@ _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
-_LEGACY_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV = "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
-_LEGACY_FRAMEKEEPER_ARTIFACT_ROOT_ENV = "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -99,18 +97,9 @@ def _screenshot_folder() -> tuple[Path, str]:
     if configured:
         return Path(configured).expanduser().resolve(), _SCREENSHOT_FOLDER_ENV
     payload = _read_screen_analysis_settings()
-    settings_configured = str(
-        payload.get("screenshot_folder")
-        or payload.get("framekeeper_screenshot_folder")
-        or payload.get("framekeeper_artifact_root")
-        or ""
-    ).strip()
+    settings_configured = str(payload.get("screenshot_folder") or "").strip()
     if settings_configured:
         return Path(settings_configured).expanduser().resolve(), "screen-analysis-settings"
-    for env_name in (_LEGACY_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV, _LEGACY_FRAMEKEEPER_ARTIFACT_ROOT_ENV):
-        configured = os.environ.get(env_name, "").strip()
-        if configured:
-            return Path(configured).expanduser().resolve(), env_name
     return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "screenshot-folder", "default"
 
 
@@ -218,8 +207,6 @@ def _read_screen_analysis_settings() -> dict[str, object]:
                 "archive_retention_days",
                 "archive_max_mb",
                 "screenshot_folder",
-                "framekeeper_screenshot_folder",
-                "framekeeper_artifact_root",
             ):
                 if key in loaded:
                     payload[key] = loaded[key]
@@ -231,21 +218,12 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
     payload["model"] = str(payload.get("model") or "")
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
-    screenshot_folder = str(
-        payload.get("screenshot_folder")
-        or payload.get("framekeeper_screenshot_folder")
-        or payload.get("framekeeper_artifact_root")
-        or ""
-    ).strip()
+    screenshot_folder = str(payload.get("screenshot_folder") or "").strip()
     if screenshot_folder:
         normalized_folder = str(Path(screenshot_folder).expanduser().resolve())
         payload["screenshot_folder"] = normalized_folder
-        payload.pop("framekeeper_screenshot_folder", None)
-        payload.pop("framekeeper_artifact_root", None)
     else:
         payload.pop("screenshot_folder", None)
-        payload.pop("framekeeper_screenshot_folder", None)
-        payload.pop("framekeeper_artifact_root", None)
     for key in (
         "min_seconds_between_captures",
         "max_daily_captures",
@@ -523,12 +501,8 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         configured_root = body.screenshot_folder.strip()
         if configured_root:
             payload["screenshot_folder"] = _normalize_screenshot_folder_for_save(configured_root)
-            payload.pop("framekeeper_screenshot_folder", None)
-            payload.pop("framekeeper_artifact_root", None)
         else:
             payload.pop("screenshot_folder", None)
-            payload.pop("framekeeper_screenshot_folder", None)
-            payload.pop("framekeeper_artifact_root", None)
     for field_name in (
         "min_seconds_between_captures",
         "max_daily_captures",

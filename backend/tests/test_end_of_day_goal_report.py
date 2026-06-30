@@ -132,6 +132,46 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
 
 
 @pytest.mark.asyncio
+async def test_build_report_does_not_treat_framekeeper_as_source(async_db):
+    from src.db.models import ScreenObservation
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "framekeeper",
+                "image_path": "/tmp/screenshots/capture.png",
+                "image_bytes": 67,
+                "file_format": "png",
+            },
+            sort_keys=True,
+        )
+    ]
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                timestamp=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+                app_name="Framekeeper",
+                window_title="capture.png",
+                activity_type="screen",
+                summary="Legacy producer-specific observation.",
+                details_json=json.dumps(details),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch.object(
+        settings, "end_of_day_report_llm_enabled", False
+    ):
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["summary"]["source_observations"] == {"observer_daemon": 1}
+    assert "framekeeper" not in report["summary"]["source_observations"]
+    assert report["summary"]["screenshot_samples"] == []
+    assert "framekeeper" not in report["body"].lower()
+
+
+@pytest.mark.asyncio
 async def test_run_report_stores_episode_and_keeps_email_preview_only(async_db):
     from src.db.models import MemoryEpisode
     from sqlmodel import select

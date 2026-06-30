@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlmodel import select
 
 from config.settings import settings
@@ -31,14 +31,14 @@ class CaptureModeRequest(BaseModel):
 
 
 class ScreenAnalysisSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool | None = None
     provider: str | None = None
     model: str | None = None
     preserve_captures: bool | None = None
     archive_dir: str | None = None
     screenshot_folder: str | None = None
-    framekeeper_screenshot_folder: str | None = None
-    framekeeper_artifact_root: str | None = None
     min_seconds_between_captures: int | None = None
     max_daily_captures: int | None = None
     archive_retention_days: int | None = None
@@ -267,6 +267,22 @@ def _write_screen_analysis_settings(payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     path.chmod(0o600)
+
+
+def _normalize_screenshot_folder_for_save(configured_root: str) -> str:
+    candidate = Path(configured_root).expanduser()
+    if str(candidate) and not candidate.is_absolute():
+        raise HTTPException(status_code=422, detail="screenshot_folder must be an absolute path")
+    if ".." in candidate.parts:
+        raise HTTPException(status_code=422, detail="screenshot_folder must not contain '..' path traversal components")
+    normalized = candidate.resolve()
+    from src.observer.screenshot_folder_source import ScreenshotFolderImageError, validate_screenshot_folder_root
+
+    try:
+        validate_screenshot_folder_root(normalized)
+    except ScreenshotFolderImageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return str(normalized)
 
 
 def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
@@ -503,18 +519,10 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         ):
             raise HTTPException(status_code=422, detail="Screen archive directory must be private and writable")
         payload["archive_dir"] = str(archive_dir)
-    configured_screenshot_folder = body.screenshot_folder
-    if configured_screenshot_folder is None:
-        configured_screenshot_folder = (
-            body.framekeeper_screenshot_folder
-            if body.framekeeper_screenshot_folder is not None
-            else body.framekeeper_artifact_root
-        )
-    if configured_screenshot_folder is not None:
-        configured_root = configured_screenshot_folder.strip()
+    if body.screenshot_folder is not None:
+        configured_root = body.screenshot_folder.strip()
         if configured_root:
-            normalized_root = str(Path(configured_root).expanduser().resolve())
-            payload["screenshot_folder"] = normalized_root
+            payload["screenshot_folder"] = _normalize_screenshot_folder_for_save(configured_root)
             payload.pop("framekeeper_screenshot_folder", None)
             payload.pop("framekeeper_artifact_root", None)
         else:

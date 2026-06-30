@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from datetime import datetime, timezone
 
 import httpx
 
@@ -13,6 +14,8 @@ from config.settings import settings
 from src.observer.screenshot_analysis_contract import (
     ScreenshotAnalysis,
     ScreenshotAnalysisContractError,
+    SCREENSHOT_ANALYSIS_PROMPT_VERSION,
+    SCREENSHOT_ANALYSIS_SCHEMA_VERSION,
     parse_screenshot_analysis_output,
     screenshot_analysis_prompt,
 )
@@ -21,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 SCREENSHOT_ANALYSIS_DETAIL_PREFIX = "screenshot_analysis:"
 SCREENSHOT_ANALYSIS_ERROR_DETAIL_PREFIX = "screenshot_analysis_error:"
+SCREENSHOT_ANALYSIS_STATUS_DETAIL_PREFIX = "screenshot_analysis_status:"
+REANALYSIS_REASONS = {
+    "prompt_version_changed",
+    "model_version_changed",
+    "provider_failure_retry",
+    "manual_operator_request",
+}
 
 
 class ScreenshotSemanticAnalysisError(RuntimeError):
@@ -47,11 +57,32 @@ def screenshot_analysis_detail(analysis: ScreenshotAnalysis) -> str:
     return SCREENSHOT_ANALYSIS_DETAIL_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def screenshot_analysis_status_detail(
+    status: str,
+    *,
+    reason: str | None = None,
+    reanalysis_reason: str | None = None,
+) -> str:
+    """Serialize semantic analysis status for idempotency and reanalysis decisions."""
+    payload = {
+        "status": status,
+        "provider": settings.screen_analysis_provider or "not_configured",
+        "model": settings.local_vlm_model or None,
+        "schema_version": SCREENSHOT_ANALYSIS_SCHEMA_VERSION,
+        "prompt_version": SCREENSHOT_ANALYSIS_PROMPT_VERSION,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if reason:
+        payload["reason"] = _bounded_reason(reason)
+    if reanalysis_reason:
+        payload["reanalysis_reason"] = reanalysis_reason
+    return SCREENSHOT_ANALYSIS_STATUS_DETAIL_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def screenshot_analysis_error_detail(reason: str) -> str:
     """Serialize a bounded analyzer failure for ScreenObservation details."""
-    bounded_reason = " ".join(str(reason or "unknown").strip().split())[:240] or "unknown"
     return SCREENSHOT_ANALYSIS_ERROR_DETAIL_PREFIX + json.dumps(
-        {"provider": settings.screen_analysis_provider or "unknown", "reason": bounded_reason},
+        {"provider": settings.screen_analysis_provider or "unknown", "reason": _bounded_reason(reason)},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -83,6 +114,81 @@ def semantic_analysis_error_from_details(details: list[Any]) -> dict[str, Any] |
         if isinstance(payload, dict):
             return payload
     return None
+
+
+def semantic_analysis_status_from_details(details: list[Any]) -> dict[str, Any] | None:
+    """Extract the latest semantic analysis status payload from observation details."""
+    latest: dict[str, Any] | None = None
+    for item in details:
+        if not isinstance(item, str) or not item.startswith(SCREENSHOT_ANALYSIS_STATUS_DETAIL_PREFIX):
+            continue
+        try:
+            payload = json.loads(item.removeprefix(SCREENSHOT_ANALYSIS_STATUS_DETAIL_PREFIX))
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            latest = payload
+    return latest
+
+
+def semantic_analysis_needs_reanalysis(details: list[Any]) -> bool:
+    """Return true when stored analysis exists but belongs to an old prompt or model contract."""
+    analysis = semantic_analysis_from_details(details)
+    status = semantic_analysis_status_from_details(details)
+    if analysis is None or status is None:
+        return False
+    return (
+        analysis.get("prompt_version") != SCREENSHOT_ANALYSIS_PROMPT_VERSION
+        or analysis.get("schema_version") != SCREENSHOT_ANALYSIS_SCHEMA_VERSION
+        or status.get("model") != (settings.local_vlm_model or None)
+    )
+
+
+def validate_reanalysis_reason(reason: str) -> str:
+    """Validate the explicit operator reason required before reanalysis."""
+    normalized = str(reason or "").strip()
+    if normalized not in REANALYSIS_REASONS:
+        allowed = ", ".join(sorted(REANALYSIS_REASONS))
+        raise ValueError(f"reanalysis_reason must be one of: {allowed}")
+    return normalized
+
+
+def replace_semantic_analysis_details(
+    details: list[Any],
+    *,
+    analysis: ScreenshotAnalysis | None,
+    error_reason: str | None,
+    reanalysis_reason: str,
+) -> list[str]:
+    """Replace existing semantic analysis details while preserving capture metadata."""
+    next_details = [
+        item
+        for item in details
+        if not (
+            isinstance(item, str)
+            and (
+                item.startswith(SCREENSHOT_ANALYSIS_DETAIL_PREFIX)
+                or item.startswith(SCREENSHOT_ANALYSIS_ERROR_DETAIL_PREFIX)
+                or item.startswith(SCREENSHOT_ANALYSIS_STATUS_DETAIL_PREFIX)
+            )
+        )
+    ]
+    if analysis is not None:
+        next_details.append(screenshot_analysis_detail(analysis))
+        next_details.append(
+            screenshot_analysis_status_detail("succeeded", reanalysis_reason=reanalysis_reason)
+        )
+    else:
+        reason = error_reason or "unknown"
+        next_details.append(screenshot_analysis_error_detail(reason))
+        next_details.append(
+            screenshot_analysis_status_detail(
+                "failed",
+                reason=reason,
+                reanalysis_reason=reanalysis_reason,
+            )
+        )
+    return [str(item) for item in next_details if isinstance(item, str)]
 
 
 async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis:
@@ -140,3 +246,7 @@ def _image_media_type(path: Path) -> str:
     if suffix in {".jpg", ".jpeg"}:
         return "image/jpeg"
     return "application/octet-stream"
+
+
+def _bounded_reason(reason: str) -> str:
+    return " ".join(str(reason or "unknown").strip().split())[:240] or "unknown"

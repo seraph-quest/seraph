@@ -190,11 +190,58 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_artifact_storage_exposes_screenshot_folder_status(client, tmp_path, monkeypatch):
+async def test_artifact_storage_exposes_screenshot_folder_status(client, async_db, tmp_path, monkeypatch):
+    from src.db.models import MemoryEpisode, MemoryEpisodeType, ScreenObservation
+
     screenshot_root = tmp_path / "screenshots"
     screenshot_root.mkdir()
     (screenshot_root / "capture-1.png").write_bytes(b"png bytes")
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    observed_at = datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc)
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="capture-1.png",
+                activity_type="screen",
+                summary="Screenshot image ingested.",
+                details_json=json.dumps(
+                    [
+                        "capture_artifacts:"
+                        + json.dumps(
+                            {
+                                "provider": "screenshot_folder",
+                                "image_path": str(screenshot_root / "capture-1.png"),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "screenshot_analysis_status:"
+                        + json.dumps(
+                            {
+                                "status": "failed",
+                                "provider": "local-vlm",
+                                "model": "gemma",
+                                "reason": "provider unavailable",
+                                "recorded_at": observed_at.isoformat(),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ]
+                ),
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Screenshot digest",
+                content="Screenshot digest",
+                observed_at=datetime(2026, 6, 30, 9, 30, tzinfo=timezone.utc),
+            )
+        )
 
     resp = await client.get("/api/settings/artifact-storage")
 
@@ -207,6 +254,13 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, tmp_pat
     assert data["screenshot_folder"]["status"] == "ready"
     assert data["screenshot_folder"]["image_count"] == 1
     assert data["screenshot_folder"]["stored_artifacts"] == ["image"]
+    assert data["screenshot_folder"]["analysis"]["observation_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["analysis_failures"] == 1
+    assert data["screenshot_folder"]["analysis"]["analysis_backlog"] == 0
+    assert data["screenshot_folder"]["analysis"]["analysis_status"]["failed"] == 1
+    assert data["screenshot_folder"]["analysis"]["latest_failure"] == "provider unavailable"
+    assert data["screenshot_folder"]["analysis"]["digest_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["latest_digest_at"] == "2026-06-30T09:30:00+00:00"
     assert data["screenshot_folder"]["auto_ingest_enabled"] is True
     assert data["screenshot_folder"]["auto_ingest_interval_min"] == settings.screenshot_folder_ingest_interval_min
     assert data["screenshot_folder"]["auto_ingest_limit"] == settings.screenshot_folder_ingest_limit

@@ -98,7 +98,7 @@ The semantic analysis schema captures:
 
 The VLM prompt requires the model to treat screenshot content as untrusted and return only the JSON shape defined by the contract. The parser rejects non-JSON output, unknown fields, invalid enum values, and out-of-range confidence values. It also redacts sensitive-looking strings before the analysis can become a durable observation.
 
-This contract is the boundary for the next implementation slice. The current folder scan still persists metadata observations; the follow-up analyzer will call a configured VLM, validate the output with this contract, and persist the semantic analysis without requiring any direct connection to the screenshot producer.
+This contract is the boundary between local image ingestion and screenshot understanding. The folder scan calls the configured Seraph-side analyzer when one is available, validates the output with this contract, and persists the semantic analysis without requiring any direct connection to the screenshot producer.
 
 End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on recorder manifests, sidecars, or service metadata.
 
@@ -121,6 +121,8 @@ The Seraph settings UI describes this as a local screenshot folder, not as Serap
 The settings panel saves `screenshot_folder` through `/api/settings/screen-analysis`. The manual scan action calls Seraph's local `/api/observer/screenshot-folder/scan` endpoint. Seraph can also run its own `screenshot_folder_ingest` scheduler job, controlled by `SCREENSHOT_FOLDER_INGEST_ENABLED`, `SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN`, and `SCREENSHOT_FOLDER_INGEST_LIMIT`.
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
+
+The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, analyzer status mix, backlog, failures, latest observation/analyzed timestamps, digest count, and latest digest timestamp. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed and rolled into report-ready digest windows.
 
 ## Remote VLM Analysis Target
 
@@ -199,7 +201,40 @@ SERAPH_LOCAL_VLM_BASE_URL=http://GPU_SERVER_IP:8088
 SERAPH_LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
 ```
 
-When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`. If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`.
+If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+
+Each screenshot observation carries Seraph-owned analysis status details:
+
+- `pending` when the screenshot was ingested but no semantic provider was configured
+- `succeeded` when a validated semantic analysis payload was stored
+- `failed` when the provider call or schema validation failed
+- `needs_reanalysis` when a stored semantic payload was produced by an older prompt, schema, or configured model
+
+Duplicate screenshot files are still suppressed by image SHA-256, so the same image cannot accidentally create a second semantic observation.
+Reanalysis is explicit and local-only through `POST /api/observer/screen-artifacts/{observation_id}/reanalyze`; callers must provide one of `prompt_version_changed`, `model_version_changed`, `provider_failure_retry`, or `manual_operator_request`.
+Reanalysis replaces the semantic analysis/status details on the existing observation and preserves the original screenshot hash and file mtime-derived capture timestamp.
+
+## Rolling Observation Digests
+
+Seraph condenses analyzed screenshot-folder observations into rolling memory episodes before daily report generation. The scheduler job is `screenshot_observation_digest`.
+
+Default settings:
+
+- `SCREENSHOT_OBSERVATION_DIGEST_ENABLED=true`
+- `SCREENSHOT_OBSERVATION_DIGEST_INTERVAL_MIN=15`
+- `SCREENSHOT_OBSERVATION_DIGEST_WINDOW_MIN=30`
+- `SCREENSHOT_OBSERVATION_DIGEST_MAX_CHARS=6000`
+
+Each digest stores a `MemoryEpisode` with source tool `screenshot_observation_digest` and schema `seraph.screenshot_observation_digest.v1`. Digest metadata includes the digest key, window start/end, source screenshot observation ids, observation count, content character count, and payload SHA-256.
+
+The digest is intentionally text-only and privacy-bounded. It never embeds raw screenshots, image hashes, full visible text, or provider transcripts. It includes compact redacted progression notes, activity/project/app mixes, analysis status counts, confidence, blocker evidence, drift evidence, and the source observation ids needed for traceability.
+
+Digest writes are idempotent per window and schema. If a window has not changed, Seraph keeps the existing episode. If new observations appear in the same window, Seraph updates the same episode instead of creating duplicates.
+
+End-of-day reports consume these rolling digest episodes as the day-level screenshot evidence layer. The report builder passes redacted digest text into the optional LLM prompt and into the deterministic local fallback. Goal comparison uses the digest evidence to classify each active goal as aligned, blocked, drifted, or unclear, and records whether the day pushed the needle, got blocked, drifted, or remained unclear.
+
+The final report stores digest count and source screenshot observation ids in report metadata for traceability. It still does not copy raw screenshots, image hashes, long visible text, or provider transcripts into the report.
 
 Current model notes:
 
@@ -216,6 +251,24 @@ Sources checked June 30, 2026:
 - [seraph-quest/vlm-screenshot-server](https://github.com/seraph-quest/vlm-screenshot-server)
 
 ## Verification
+
+Full screenshot intelligence loop receipt:
+
+- local screenshot image file is scanned from the configured folder
+- Seraph computes its own hash and mtime-derived capture timestamp
+- Seraph runs semantic analysis through its own analyzer boundary
+- duplicate image ingestion remains hash-based
+- rolling digest stores redacted text and source observation ids
+- end-of-day report consumes digest text and compares against active goals
+- settings status shows observation, analyzer, backlog, failure, and digest counts
+- no screenshot producer service, manifest, or sidecar is required
+
+Focused receipt command:
+
+```bash
+cd /Users/bigcube/Desktop/repos/seraph/backend
+UV_CACHE_DIR=/tmp/seraph-uv-cache uv run pytest tests/test_screenshot_intelligence_loop.py
+```
 
 This branch verifies the image-source path with:
 

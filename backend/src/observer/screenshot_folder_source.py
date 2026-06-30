@@ -22,6 +22,7 @@ from src.observer.screenshot_semantic_analysis import (
     analyze_screenshot_image,
     screenshot_analysis_detail,
     screenshot_analysis_error_detail,
+    screenshot_analysis_status_detail,
 )
 
 
@@ -181,9 +182,13 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         analysis = await analyze_screenshot_image(resolved, artifacts)
     except ScreenshotSemanticAnalysisError as exc:
         details.append(screenshot_analysis_error_detail(str(exc)))
+        details.append(screenshot_analysis_status_detail("failed", reason=str(exc)))
     else:
         if analysis is not None:
             details.append(screenshot_analysis_detail(analysis))
+            details.append(screenshot_analysis_status_detail("succeeded"))
+        else:
+            details.append(screenshot_analysis_status_detail("pending", reason="provider not configured"))
     metadata_label = image_metadata_label(metadata)
     summary_suffix = f" ({metadata_label})" if metadata_label else ""
     return {

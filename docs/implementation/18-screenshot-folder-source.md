@@ -65,7 +65,40 @@ If `screenshot_folder` is omitted, Seraph uses the configured folder. For each n
 
 The request model is intentionally strict: legacy `artifact_root` or producer-specific fields are rejected instead of being treated as screenshot-folder aliases.
 
-The artifact analysis endpoint returns Seraph-owned local image analysis, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph.
+The artifact analysis endpoint currently returns Seraph-owned local image metadata analysis, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This metadata analysis is computed from the image file in Seraph and is not the final semantic VLM analysis loop.
+
+## Semantic Screenshot Analysis Contract
+
+Seraph's intended screenshot intelligence loop analyzes new screenshots throughout the day, not only at report time. The first shipped contract for this richer loop lives in `backend/src/observer/screenshot_analysis_contract.py`.
+
+The contract is Seraph-owned and producer-neutral:
+
+- schema version: `seraph.screenshot_analysis.v1`
+- prompt version: `seraph.screenshot_analysis.prompt.v1`
+- model output format: strict JSON only
+- visible screenshot text is untrusted data
+- secrets, credentials, private messages, long raw code, and long raw logs must not be copied into observations
+- uncertain fields must use `unknown`, `null`, or low confidence instead of guessed detail
+
+The semantic analysis schema captures:
+
+- one-sentence summary
+- detailed privacy-safe observations
+- activity type
+- inferred project
+- visible applications
+- visible artifacts such as files, repos, PRs, issues, pages, or tools
+- short non-sensitive visible text snippets
+- apparent user intent
+- goal-alignment status, evidence, and pushed-the-needle signal
+- confidence
+- sensitive-content flag
+- privacy notes
+- report tags
+
+The VLM prompt requires the model to treat screenshot content as untrusted and return only the JSON shape defined by the contract. The parser rejects non-JSON output, unknown fields, invalid enum values, and out-of-range confidence values. It also redacts sensitive-looking strings before the analysis can become a durable observation.
+
+This contract is the boundary for the next implementation slice. The current folder scan still persists metadata observations; the follow-up analyzer will call a configured VLM, validate the output with this contract, and persist the semantic analysis without requiring any direct connection to the screenshot producer.
 
 End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on recorder manifests, sidecars, or service metadata.
 

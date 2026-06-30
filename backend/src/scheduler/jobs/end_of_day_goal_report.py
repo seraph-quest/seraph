@@ -21,6 +21,7 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
 from src.db.models import GoalStatus, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback
+from src.observer.image_metadata import image_metadata_label
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ Use only the redacted structured inputs. Do not invent screen details.
 {project_breakdown}
 - Source mix:
 {source_breakdown}
+- Screenshot samples:
+{screenshot_samples}
 
 ## Goals
 Active goals:
@@ -275,6 +278,7 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
     by_source: dict[str, int] = {}
     source_observations: dict[str, int] = {}
     details: list[str] = []
+    screenshot_samples: list[str] = []
     total_seconds = 0
     for obs in observations:
         duration = obs.duration_s or 0
@@ -290,6 +294,9 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
             redacted = _redact_text(obs.summary, limit=160)
             if redacted and redacted not in details:
                 details.append(redacted)
+        screenshot_sample = _screenshot_image_sample(obs)
+        if screenshot_sample and screenshot_sample not in screenshot_samples:
+            screenshot_samples.append(screenshot_sample)
 
     return {
         "date": report_day.isoformat(),
@@ -305,6 +312,7 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
             sorted(source_observations.items(), key=lambda item: (-item[1], item[0]))
         ),
         "redacted_samples": details[:8],
+        "screenshot_samples": screenshot_samples[:8],
     }
 
 
@@ -330,6 +338,41 @@ def _observation_source(observation: ScreenObservation) -> str:
     if observation.app_name == "Framekeeper":
         return "framekeeper"
     return "observer_daemon"
+
+
+def _screenshot_image_sample(observation: ScreenObservation) -> str | None:
+    if not observation.details_json:
+        return None
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(details, list):
+        return None
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("capture_artifacts:")):
+            continue
+        try:
+            artifacts = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(artifacts, dict):
+            continue
+        provider = str(artifacts.get("provider") or artifacts.get("source") or "").strip()
+        if provider not in {"screenshot_folder", "framekeeper"}:
+            continue
+        image_name = Path(str(artifacts.get("image_path") or observation.window_title or "screenshot")).name
+        metadata_label = image_metadata_label(
+            {
+                "file_format": artifacts.get("file_format"),
+                "width": artifacts.get("width"),
+                "height": artifacts.get("height"),
+                "image_bytes": artifacts.get("image_bytes"),
+            }
+        )
+        label = f"{image_name} ({metadata_label})" if metadata_label else image_name
+        return _redact_text(label, limit=160)
+    return None
 
 
 async def _goals_for_report(report_day: date) -> tuple[list[Any], list[Any]]:
@@ -414,6 +457,12 @@ def _format_source_mix(
     return "\n".join(lines)
 
 
+def _format_samples(samples: list[str], *, empty: str) -> str:
+    if not samples:
+        return empty
+    return "\n".join(f"- {_redact_text(sample, limit=160)}" for sample in samples[:8])
+
+
 def _format_goals(goals: list[Any]) -> str:
     if not goals:
         return "- None"
@@ -447,6 +496,10 @@ def _deterministic_report_body(
         summary.get("source_observations", {}),
         empty="- No observation sources detected",
     )
+    screenshot_samples = _format_samples(
+        summary.get("screenshot_samples", []),
+        empty="- No screenshot-folder images analyzed",
+    )
     aligned = [item for item in alignment if item["status"] == "aligned"]
     unclear = [item for item in alignment if item["status"] != "aligned"]
     completed = _format_goals(completed_goals)
@@ -476,6 +529,9 @@ def _deterministic_report_body(
             "",
             "Source mix:",
             sources,
+            "",
+            "Screenshot samples:",
+            screenshot_samples,
             "",
             "Goals vs day:",
             f"- Aligned goals: {len(aligned)}",
@@ -510,6 +566,10 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
                 summary.get("by_source", {}),
                 summary.get("source_observations", {}),
                 empty="- No observation sources detected",
+            ),
+            screenshot_samples=_format_samples(
+                summary.get("screenshot_samples", []),
+                empty="- No screenshot-folder images analyzed",
             ),
             active_goals=_format_goals(active_goals),
             completed_goals=_format_goals(completed_goals),

@@ -15,6 +15,7 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
+from src.observer.image_metadata import image_metadata_label, local_image_metadata
 from src.observer.screen_repository import screen_observation_repo
 
 
@@ -161,6 +162,7 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         return None
 
     stat = resolved.stat()
+    metadata = local_image_metadata(resolved)
     captured_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
     capture_id = image_sha256[:16]
     details = [
@@ -176,17 +178,22 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
                 "image_path": str(resolved),
                 "image_sha256": image_sha256,
                 "image_bytes": stat.st_size,
+                "file_format": metadata.get("file_format"),
+                "width": metadata.get("width"),
+                "height": metadata.get("height"),
             },
             sort_keys=True,
             separators=(",", ":"),
         ),
     ]
+    metadata_label = image_metadata_label(metadata)
+    summary_suffix = f" ({metadata_label})" if metadata_label else ""
     return {
         "app_name": "Screenshot Folder",
         "window_title": resolved.name,
         "activity_type": "screen",
         "project": None,
-        "summary": f"Screenshot image added from folder: {resolved.name}.",
+        "summary": f"Screenshot image added from folder: {resolved.name}{summary_suffix}.",
         "details": details,
         "blocked": False,
         "timestamp": captured_at,

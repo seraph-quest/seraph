@@ -58,6 +58,12 @@ class ScreenshotFolderScanRequest(BaseModel):
     limit: int = 100
 
 
+class ScreenshotReanalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reanalysis_reason: str
+
+
 class NativeNotificationResponse(BaseModel):
     id: str
     intervention_id: str | None = None
@@ -493,6 +499,16 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
     return None
 
 
+def _screen_observation_details(observation: ScreenObservation) -> list[Any]:
+    if not observation.details_json:
+        return []
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return []
+    return details if isinstance(details, list) else []
+
+
 def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] | None:
     artifacts = _screen_capture_artifacts(observation)
     if artifacts is None:
@@ -609,6 +625,62 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     return payload if isinstance(payload, dict) else {"value": payload}
 
 
+@router.post("/observer/screen-artifacts/{observation_id}/reanalyze")
+async def reanalyze_screen_artifact(
+    observation_id: str,
+    body: ScreenshotReanalysisRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Explicitly re-run Seraph semantic analysis for one local screenshot artifact."""
+    from src.observer.screenshot_semantic_analysis import (
+        ScreenshotSemanticAnalysisError,
+        analyze_screenshot_image,
+        replace_semantic_analysis_details,
+        validate_reanalysis_reason,
+    )
+
+    _require_local_artifact_request(request)
+    try:
+        reanalysis_reason = validate_reanalysis_reason(body.reanalysis_reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    observation = await _screen_artifact_observation(observation_id)
+    artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") != "screenshot_folder":
+        raise HTTPException(status_code=400, detail="Only screenshot-folder artifacts can be reanalyzed here")
+    image_path = _artifact_path(
+        str(artifacts.get("image_path") or ""),
+        allowed_roots=_artifact_allowed_roots(artifacts),
+    )
+
+    analysis = None
+    error_reason = None
+    try:
+        analysis = await analyze_screenshot_image(image_path, artifacts)
+        if analysis is None:
+            error_reason = "provider not configured"
+    except ScreenshotSemanticAnalysisError as exc:
+        error_reason = str(exc)
+
+    details = replace_semantic_analysis_details(
+        _screen_observation_details(observation),
+        analysis=analysis,
+        error_reason=error_reason,
+        reanalysis_reason=reanalysis_reason,
+    )
+    observation.details_json = json.dumps(details)
+    async with get_session() as db:
+        db.add(observation)
+
+    return {
+        "observation_id": observation.id,
+        "image_sha256": artifacts.get("image_sha256"),
+        "reanalysis_reason": reanalysis_reason,
+        "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
+    }
+
+
 @router.post("/observer/screenshot-folder/scan")
 async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Request) -> dict[str, Any]:
     """Scan a local screenshot folder as a Seraph image source."""
@@ -647,10 +719,31 @@ def _screenshot_folder_image_analysis(
     artifacts: dict[str, Any],
     observation: ScreenObservation,
 ) -> dict[str, Any]:
+    from src.observer.screenshot_semantic_analysis import (
+        semantic_analysis_needs_reanalysis,
+        semantic_analysis_error_from_details,
+        semantic_analysis_from_details,
+        semantic_analysis_status_from_details,
+    )
+
     metadata = local_image_metadata(image_path)
+    details = _screen_observation_details(observation)
+    semantic_analysis = semantic_analysis_from_details(details)
+    semantic_error = semantic_analysis_error_from_details(details)
+    persisted_status = semantic_analysis_status_from_details(details) or {}
+    if semantic_analysis_needs_reanalysis(details):
+        semantic_status = "needs_reanalysis"
+    elif semantic_analysis:
+        semantic_status = "succeeded"
+    elif semantic_error:
+        semantic_status = "failed"
+    else:
+        semantic_status = str(persisted_status.get("status") or "pending")
     return {
         "source": "local_screenshot_folder",
         "analysis_owner": "seraph",
+        "semantic_status": semantic_status,
+        "semantic_status_detail": persisted_status or None,
         "image_path": str(image_path),
         "image_sha256": artifacts.get("image_sha256"),
         "image_bytes": metadata.get("image_bytes"),
@@ -659,6 +752,8 @@ def _screenshot_folder_image_analysis(
         "height": metadata.get("height"),
         "observation_id": observation.id,
         "observation_summary": observation.summary,
+        "semantic_analysis": semantic_analysis,
+        "semantic_error": semantic_error,
         "report_ready": True,
         "notes": [
             "The screenshot folder source produced only the image file.",

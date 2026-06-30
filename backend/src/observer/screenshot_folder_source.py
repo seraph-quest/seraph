@@ -17,6 +17,13 @@ from src.db.engine import get_session
 from src.db.models import ScreenObservation
 from src.observer.image_metadata import image_metadata_label, local_image_metadata
 from src.observer.screen_repository import screen_observation_repo
+from src.observer.screenshot_semantic_analysis import (
+    ScreenshotSemanticAnalysisError,
+    analyze_screenshot_image,
+    screenshot_analysis_detail,
+    screenshot_analysis_error_detail,
+    screenshot_analysis_status_detail,
+)
 
 
 class ScreenshotFolderImageError(ValueError):
@@ -102,7 +109,8 @@ def validate_screenshot_folder_root(root: Path) -> None:
     dangerous_roots = _dangerous_scan_roots()
     if root in dangerous_roots:
         raise ScreenshotFolderImageError(
-            "Screenshot folder must be a dedicated image directory, not a broad home, desktop, downloads, workspace, or filesystem root"
+            "Screenshot folder must be a dedicated image directory, not a broad home, "
+            "desktop, downloads, workspace, or filesystem root"
         )
 
 
@@ -153,27 +161,34 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
     metadata = local_image_metadata(resolved)
     captured_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
     capture_id = image_sha256[:16]
+    artifacts = {
+        "id": capture_id,
+        "provider": SCREENSHOT_FOLDER_PROVIDER,
+        "source": "local_image_directory",
+        "created_at": captured_at.isoformat(),
+        "screenshot_folder": str(root),
+        "image_path": str(resolved),
+        "image_sha256": image_sha256,
+        "image_bytes": stat.st_size,
+        "file_format": metadata.get("file_format"),
+        "width": metadata.get("width"),
+        "height": metadata.get("height"),
+    }
     details = [
         f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}",
-        "capture_artifacts:"
-        + json.dumps(
-            {
-                "id": capture_id,
-                "provider": SCREENSHOT_FOLDER_PROVIDER,
-                "source": "local_image_directory",
-                "created_at": captured_at.isoformat(),
-                "screenshot_folder": str(root),
-                "image_path": str(resolved),
-                "image_sha256": image_sha256,
-                "image_bytes": stat.st_size,
-                "file_format": metadata.get("file_format"),
-                "width": metadata.get("width"),
-                "height": metadata.get("height"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
+        "capture_artifacts:" + json.dumps(artifacts, sort_keys=True, separators=(",", ":")),
     ]
+    try:
+        analysis = await analyze_screenshot_image(resolved, artifacts)
+    except ScreenshotSemanticAnalysisError as exc:
+        details.append(screenshot_analysis_error_detail(str(exc)))
+        details.append(screenshot_analysis_status_detail("failed", reason=str(exc)))
+    else:
+        if analysis is not None:
+            details.append(screenshot_analysis_detail(analysis))
+            details.append(screenshot_analysis_status_detail("succeeded"))
+        else:
+            details.append(screenshot_analysis_status_detail("pending", reason="provider not configured"))
     metadata_label = image_metadata_label(metadata)
     summary_suffix = f" ({metadata_label})" if metadata_label else ""
     return {

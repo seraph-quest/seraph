@@ -74,6 +74,20 @@ function settingsFromScreenAnalysisFixture(screen: {
       exists: false,
       readable: false,
       stored_artifacts: ["image"],
+      analysis: {
+        provider: "metadata unavailable",
+        model: "",
+        base_url_configured: false,
+        observation_count: 0,
+        analysis_status: {},
+        analysis_backlog: 0,
+        analysis_failures: 0,
+        latest_observation_at: null,
+        latest_analyzed_at: null,
+        latest_failure: null,
+        digest_count: 0,
+        latest_digest_at: null,
+      },
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
@@ -181,6 +195,26 @@ describe("ArtifactStoragePanel", () => {
           exists: true,
           readable: true,
           stored_artifacts: ["image"],
+          analysis: {
+            provider: "local-vlm",
+            model: "gemma-4-26b",
+            base_url_configured: true,
+            observation_count: 12,
+            analysis_status: {
+              succeeded: 9,
+              failed: 1,
+              pending: 2,
+              needs_reanalysis: 0,
+              unknown: 0,
+            },
+            analysis_backlog: 2,
+            analysis_failures: 1,
+            latest_observation_at: "2026-06-20T18:41:00Z",
+            latest_analyzed_at: "2026-06-20T18:42:00Z",
+            latest_failure: "provider unavailable",
+            digest_count: 3,
+            latest_digest_at: "2026-06-20T18:30:00Z",
+          },
           auto_ingest_enabled: true,
           auto_ingest_interval_min: 5,
           auto_ingest_limit: 100,
@@ -236,6 +270,10 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/2 images/)).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
+    expect(screen.getByText("local-vlm · gemma-4-26b")).toBeInTheDocument();
+    expect(screen.getByText("12 observations · 2 backlog · 1 failed")).toBeInTheDocument();
+    expect(screen.getByText("3 windows · latest 2026-06-20T18:30:00Z")).toBeInTheDocument();
+    expect(screen.getByText("provider unavailable")).toBeInTheDocument();
     expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();

@@ -260,6 +260,36 @@ async def test_screenshot_folder_scan_ignores_temporary_write_files(async_db, cl
 
 
 @pytest.mark.asyncio
+async def test_screenshot_folder_scan_rejects_symlink_escape(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    root.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside screenshot")
+    link = root / "linked-outside.png"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available on this filesystem")
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["scanned"] == 1
+    assert payload["ingested"] == 0
+    assert payload["skipped_duplicates"] == 0
+    assert payload["rejected"] == [
+        {"image_path": str(outside.resolve()), "reason": "image is outside screenshot folder root"}
+    ]
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
 async def test_screenshot_folder_scan_rejects_broad_workspace_root(client, tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -275,7 +305,6 @@ async def test_screenshot_folder_scan_rejects_broad_workspace_root(client, tmp_p
     assert "dedicated image directory" in resp.json()["detail"]
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_screenshot_folder_image_analysis_extracts_png_dimensions(async_db, client, tmp_path):
     root = tmp_path / "screenshots"

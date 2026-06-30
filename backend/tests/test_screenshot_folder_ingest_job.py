@@ -36,6 +36,8 @@ async def test_screenshot_folder_ingest_job_reads_images_from_configured_folder(
     ]
     assert artifact_payloads[0]["provider"] == "screenshot_folder"
     assert artifact_payloads[0]["source"] == "local_image_directory"
+    assert artifact_payloads[0]["screenshot_folder"] == str(root.resolve())
+    assert "artifact_root" not in artifact_payloads[0]
     assert artifact_payloads[0]["image_path"] == str(image.resolve())
     assert "manifest" not in json.dumps(artifact_payloads[0]).lower()
 

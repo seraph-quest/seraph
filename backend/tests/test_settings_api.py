@@ -216,6 +216,22 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_artifact_storage_defaults_to_seraph_owned_screenshot_folder(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    monkeypatch.delenv("SERAPH_SCREENSHOT_FOLDER", raising=False)
+    monkeypatch.delenv("SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER", raising=False)
+    monkeypatch.delenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", raising=False)
+    with patch.object(settings, "workspace_dir", str(workspace)):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screenshot_folder"]["path"] == str(workspace / "artifacts" / "screenshot-folder")
+    assert data["screenshot_folder"]["path_source"] == "default"
+    assert "Framekeeper" not in data["screenshot_folder"]["path"]
+
+
+@pytest.mark.asyncio
 async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"

@@ -95,8 +95,6 @@ interface ScreenAnalysisSettings {
   preserve_captures: boolean;
   archive_dir: string;
   screenshot_folder?: string;
-  framekeeper_screenshot_folder?: string;
-  framekeeper_artifact_root?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -132,7 +130,7 @@ interface ReportActionResult {
 }
 
 interface ScreenshotFolderScanResult {
-  artifact_root?: string;
+  screenshot_folder?: string;
   scanned?: number;
   ingested?: number;
   skipped_duplicates?: number;
@@ -264,8 +262,8 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
     screenshot_folder: {
       enabled: true,
       provider: "screenshot_folder",
-      path: screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-      path_source: (screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
+      path: screen.screenshot_folder ?? "Seraph workspace artifacts/screenshot-folder",
+      path_source: screen.screenshot_folder ? "screen-analysis-settings" : "default",
       image_count: 0,
       last_image_at: null,
       status: "metadata unavailable",

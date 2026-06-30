@@ -65,7 +65,7 @@ def resolve_screenshot_folder(configured: str | None = None) -> Path:
         env_root = os.environ.get(legacy_env, "").strip()
         if env_root:
             return Path(env_root).expanduser().resolve()
-    return Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve()
+    return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "screenshot-folder"
 
 
 async def scan_screenshot_folder(root: Path, *, limit: int = 100) -> ScreenshotFolderScanResult:
@@ -93,7 +93,7 @@ async def scan_screenshot_folder(root: Path, *, limit: int = 100) -> ScreenshotF
         name="screenshot_scan",
         outcome="succeeded" if not rejected else "degraded",
         details={
-            "root": str(screenshot_root),
+            "screenshot_folder": str(screenshot_root),
             "scanned": len(image_paths),
             "ingested": ingested,
             "skipped_duplicates": skipped,
@@ -172,7 +172,7 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
                 "provider": SCREENSHOT_FOLDER_PROVIDER,
                 "source": "local_image_directory",
                 "created_at": captured_at.isoformat(),
-                "artifact_root": str(root),
+                "screenshot_folder": str(root),
                 "image_path": str(resolved),
                 "image_sha256": image_sha256,
                 "image_bytes": stat.st_size,

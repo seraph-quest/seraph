@@ -15,10 +15,8 @@ function settingsFromScreenAnalysisFixture(screen: {
   provider: string;
   model: string;
   preserve_captures: boolean;
-	  archive_dir: string;
-	  screenshot_folder?: string;
-	  framekeeper_screenshot_folder?: string;
-	  framekeeper_artifact_root?: string;
+  archive_dir: string;
+  screenshot_folder?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -65,11 +63,11 @@ function settingsFromScreenAnalysisFixture(screen: {
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
       },
     },
-	    screenshot_folder: {
-	      enabled: true,
-	      provider: "screenshot_folder",
-	      path: screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-	      path_source: (screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
+    screenshot_folder: {
+      enabled: true,
+      provider: "screenshot_folder",
+      path: screen.screenshot_folder ?? "Seraph workspace artifacts/screenshot-folder",
+      path_source: screen.screenshot_folder ? "screen-analysis-settings" : "default",
       image_count: 0,
       last_image_at: null,
       status: "empty",
@@ -81,13 +79,13 @@ function settingsFromScreenAnalysisFixture(screen: {
       auto_ingest_limit: 100,
       scan_endpoint: "/api/observer/screenshot-folder/scan",
       inspection_endpoint: "/api/observer/screen-artifacts",
-	      inspection_visibility: "localhost_only",
-	      control_env: {
-	        path: "SERAPH_SCREENSHOT_FOLDER",
-	        auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
-	        auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
-	        auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
-	      },
+      inspection_visibility: "localhost_only",
+      control_env: {
+        path: "SERAPH_SCREENSHOT_FOLDER",
+        auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+        auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+        auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+      },
     },
     reports: {
       enabled: false,
@@ -172,11 +170,11 @@ describe("ArtifactStoragePanel", () => {
             archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
           },
         },
-	        screenshot_folder: {
-	          enabled: true,
-	          provider: "screenshot_folder",
-	          path: "/Users/test/Library/Application Support/Framekeeper/artifacts",
-	          path_source: "default",
+        screenshot_folder: {
+          enabled: true,
+          provider: "screenshot_folder",
+          path: "/Users/test/Pictures/Screenshots",
+          path_source: "default",
           image_count: 2,
           last_image_at: "2026-06-20T18:40:00Z",
           status: "ready",
@@ -188,14 +186,14 @@ describe("ArtifactStoragePanel", () => {
           auto_ingest_limit: 100,
           scan_endpoint: "/api/observer/screenshot-folder/scan",
           inspection_endpoint: "/api/observer/screen-artifacts",
-	          inspection_visibility: "localhost_only",
-	          control_env: {
-	            path: "SERAPH_SCREENSHOT_FOLDER",
-	            auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
-	            auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
-	            auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
-	          },
-	        },
+          inspection_visibility: "localhost_only",
+          control_env: {
+            path: "SERAPH_SCREENSHOT_FOLDER",
+            auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+            auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+            auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+          },
+        },
         reports: {
           enabled: true,
           hour: 21,
@@ -423,11 +421,11 @@ describe("ArtifactStoragePanel", () => {
         artifact_count: 0,
         last_artifact_at: null,
       }),
-	      screenshot_folder: {
-	        enabled: true,
-	        provider: "screenshot_folder",
-	        path: "/Users/test/Library/Application Support/Framekeeper/artifacts",
-	        path_source: "SERAPH_SCREENSHOT_FOLDER",
+      screenshot_folder: {
+        enabled: true,
+        provider: "screenshot_folder",
+        path: "/Users/test/Pictures/Screenshots",
+        path_source: "SERAPH_SCREENSHOT_FOLDER",
         image_count: 3,
         last_image_at: "2026-06-20T18:40:00Z",
         status: "ready",
@@ -439,13 +437,13 @@ describe("ArtifactStoragePanel", () => {
         auto_ingest_limit: 100,
         scan_endpoint: "/api/observer/screenshot-folder/scan",
         inspection_endpoint: "/api/observer/screen-artifacts",
-	        inspection_visibility: "localhost_only",
-	        control_env: {
-	          path: "SERAPH_SCREENSHOT_FOLDER",
-	          auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
-	          auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
-	          auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
-	        },
+        inspection_visibility: "localhost_only",
+        control_env: {
+          path: "SERAPH_SCREENSHOT_FOLDER",
+          auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+          auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+          auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+        },
 	      },
     };
     const refreshedStorage = {

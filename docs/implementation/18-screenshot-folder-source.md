@@ -40,9 +40,9 @@ Seraph resolves the screenshot folder in this order:
 2. Seraph settings key `screenshot_folder`
 3. Legacy Seraph settings keys `framekeeper_screenshot_folder` or `framekeeper_artifact_root`
 4. Legacy env fallbacks `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or `SERAPH_FRAMEKEEPER_ARTIFACT_ROOT`
-5. macOS default `~/Library/Application Support/Framekeeper/artifacts`
+5. Seraph workspace default `artifacts/screenshot-folder`
 
-The default remains Framekeeper's likely local screenshot directory only as a convenience for early testing. It is not an integration endpoint.
+The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume Framekeeper output, configure Seraph with Framekeeper's screenshot folder explicitly.
 
 ## Folder Scan
 

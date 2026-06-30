@@ -462,7 +462,7 @@ def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
 def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
     roots = [_screen_artifact_root()]
     if artifacts.get("provider") in {"screenshot_folder", "framekeeper"}:
-        configured_root = str(artifacts.get("artifact_root") or "").strip()
+        configured_root = str(artifacts.get("screenshot_folder") or artifacts.get("artifact_root") or "").strip()
         if configured_root:
             roots.append(Path(configured_root).expanduser().resolve())
     return roots
@@ -614,7 +614,6 @@ async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Req
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "screenshot_folder": str(root),
-        "artifact_root": str(root),
         "scanned": result.scanned,
         "ingested": result.ingested,
         "skipped_duplicates": result.skipped_duplicates,

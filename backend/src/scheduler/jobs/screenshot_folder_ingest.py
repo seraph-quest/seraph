@@ -31,7 +31,7 @@ async def run_screenshot_folder_ingest() -> None:
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
                 "reason": "disabled",
-                "artifact_root": str(root),
+                "screenshot_folder": str(root),
             },
         )
         return
@@ -42,8 +42,8 @@ async def run_screenshot_folder_ingest() -> None:
             outcome="skipped",
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
-                "reason": "artifact_root_missing",
-                "artifact_root": str(root),
+                "reason": "screenshot_folder_missing",
+                "screenshot_folder": str(root),
             },
         )
         return
@@ -60,7 +60,7 @@ async def run_screenshot_folder_ingest() -> None:
             outcome=outcome,
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
-                "artifact_root": str(root),
+                "screenshot_folder": str(root),
                 "scanned": result.scanned,
                 "ingested": result.ingested,
                 "skipped_duplicates": result.skipped_duplicates,
@@ -80,7 +80,7 @@ async def run_screenshot_folder_ingest() -> None:
             outcome="failed",
             details={
                 "duration_ms": int((perf_counter() - started_at) * 1000),
-                "artifact_root": str(root),
+                "screenshot_folder": str(root),
                 "error": str(exc),
             },
         )

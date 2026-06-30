@@ -158,11 +158,13 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
-        json={"artifact_root": str(root), "limit": 10},
+        json={"screenshot_folder": str(root), "limit": 10},
     )
 
     assert resp.status_code == 200
     payload = resp.json()
+    assert payload["screenshot_folder"] == str(root.resolve())
+    assert "artifact_root" not in payload
     assert payload["scanned"] == 1
     assert payload["ingested"] == 1
     assert payload["rejected"] == []
@@ -183,6 +185,8 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     ][0]
     assert artifact_details["provider"] == "screenshot_folder"
     assert artifact_details["source"] == "local_image_directory"
+    assert artifact_details["screenshot_folder"] == str(root.resolve())
+    assert "artifact_root" not in artifact_details
     assert artifact_details["image_path"] == str(image.resolve())
     assert artifact_details["image_sha256"] == image_sha256
     assert "analysis_path" not in artifact_details
@@ -221,7 +225,7 @@ async def test_screenshot_folder_scan_ignores_non_images(async_db, client, tmp_p
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
-        json={"artifact_root": str(root), "limit": 10},
+        json={"screenshot_folder": str(root), "limit": 10},
     )
 
     assert resp.status_code == 200
@@ -279,7 +283,7 @@ async def test_screenshot_folder_image_analysis_extracts_png_dimensions(async_db
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
-        json={"artifact_root": str(root), "limit": 10},
+        json={"screenshot_folder": str(root), "limit": 10},
     )
 
     assert resp.status_code == 200
@@ -303,7 +307,7 @@ async def test_screenshot_folder_jpeg_artifact_uses_jpeg_media_type(async_db, cl
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
-        json={"artifact_root": str(root), "limit": 10},
+        json={"screenshot_folder": str(root), "limit": 10},
     )
 
     assert resp.status_code == 200
@@ -323,11 +327,11 @@ async def test_screenshot_folder_scan_skips_duplicate_hash(async_db, client, tmp
 
     first = await client.post(
         "/api/observer/screenshot-folder/scan",
-        json={"artifact_root": str(root), "limit": 10},
+        json={"screenshot_folder": str(root), "limit": 10},
     )
     second = await client.post(
         "/api/observer/screenshot-folder/scan",
-        json={"artifact_root": str(root), "limit": 10},
+        json={"screenshot_folder": str(root), "limit": 10},
     )
 
     assert first.status_code == 200

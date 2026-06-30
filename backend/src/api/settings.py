@@ -111,10 +111,7 @@ def _screenshot_folder() -> tuple[Path, str]:
         configured = os.environ.get(env_name, "").strip()
         if configured:
             return Path(configured).expanduser().resolve(), env_name
-    return (
-        Path("~/Library/Application Support/Framekeeper/artifacts").expanduser().resolve(),
-        "default",
-    )
+    return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "screenshot-folder", "default"
 
 
 def _report_archive_dir() -> tuple[Path, str]:

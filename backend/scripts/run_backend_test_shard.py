@@ -23,6 +23,7 @@ RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_context_window.py": 1_200,
     "tests/test_delivery.py": 1_200,
     "tests/test_eval_harness.py": 1_500,
+    "tests/test_extensions_api.py": 1_500,
     "tests/test_observer_api.py": 1_200,
     "tests/test_tools_api.py": 1_500,
     "tests/test_workflows.py": 1_500,

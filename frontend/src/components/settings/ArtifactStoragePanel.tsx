@@ -55,6 +55,20 @@ interface ArtifactStorageSettings {
     exists: boolean;
     readable: boolean;
     stored_artifacts: string[];
+    analysis?: {
+      provider: string;
+      model: string;
+      base_url_configured: boolean;
+      observation_count: number;
+      analysis_status: Record<string, number>;
+      analysis_backlog: number;
+      analysis_failures: number;
+      latest_observation_at: string | null;
+      latest_analyzed_at: string | null;
+      latest_failure: string | null;
+      digest_count: number;
+      latest_digest_at: string | null;
+    };
     auto_ingest_enabled: boolean;
     auto_ingest_interval_min: number;
     auto_ingest_limit: number;
@@ -178,6 +192,15 @@ function screenshotFolderStateTone(settings: NonNullable<ArtifactStorageSettings
   return settings.image_count > 0 ? "good" : "normal";
 }
 
+function screenshotAnalysisTone(
+  analysis: NonNullable<ArtifactStorageSettings["screenshot_folder"]>["analysis"],
+): "normal" | "good" | "warn" {
+  if (!analysis) return "normal";
+  if (analysis.analysis_failures > 0) return "warn";
+  if (analysis.analysis_backlog > 0) return "normal";
+  return analysis.observation_count > 0 ? "good" : "normal";
+}
+
 function isArtifactStorageSettings(value: unknown): value is ArtifactStorageSettings {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<ArtifactStorageSettings>;
@@ -270,6 +293,20 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       exists: false,
       readable: false,
       stored_artifacts: ["image"],
+      analysis: {
+        provider: "metadata unavailable",
+        model: "",
+        base_url_configured: false,
+        observation_count: 0,
+        analysis_status: {},
+        analysis_backlog: 0,
+        analysis_failures: 0,
+        latest_observation_at: null,
+        latest_analyzed_at: null,
+        latest_failure: null,
+        digest_count: 0,
+        latest_digest_at: null,
+      },
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
@@ -649,6 +686,44 @@ export function ArtifactStoragePanel() {
                   tone={screenshotFolderSource.auto_ingest_enabled ? "good" : "normal"}
                 />
                 <ArtifactRow label="Reads" value="local image files only" tone="good" />
+                {screenshotFolderSource.analysis && (
+                  <>
+                    <ArtifactRow
+                      label="Analyzer"
+                      value={
+                        screenshotFolderSource.analysis.provider === "not_configured"
+                          ? "not configured"
+                          : `${screenshotFolderSource.analysis.provider}${screenshotFolderSource.analysis.model ? ` · ${screenshotFolderSource.analysis.model}` : ""}`
+                      }
+                      tone={screenshotFolderSource.analysis.provider === "not_configured" ? "warn" : "good"}
+                    />
+                    <ArtifactRow
+                      label="Analyzed"
+                      value={
+                        `${screenshotFolderSource.analysis.observation_count} observations · ` +
+                        `${screenshotFolderSource.analysis.analysis_backlog} backlog · ` +
+                        `${screenshotFolderSource.analysis.analysis_failures} failed`
+                      }
+                      tone={screenshotAnalysisTone(screenshotFolderSource.analysis)}
+                    />
+                    <ArtifactRow
+                      label="Latest"
+                      value={screenshotFolderSource.analysis.latest_analyzed_at ?? screenshotFolderSource.analysis.latest_observation_at ?? "none"}
+                      tone={screenshotFolderSource.analysis.latest_analyzed_at ? "good" : "normal"}
+                    />
+                    <ArtifactRow
+                      label="Digest"
+                      value={
+                        `${screenshotFolderSource.analysis.digest_count} windows` +
+                        (screenshotFolderSource.analysis.latest_digest_at ? ` · latest ${screenshotFolderSource.analysis.latest_digest_at}` : "")
+                      }
+                      tone={screenshotFolderSource.analysis.digest_count > 0 ? "good" : "normal"}
+                    />
+                    {screenshotFolderSource.analysis.latest_failure && (
+                      <ArtifactRow label="Failure" value={screenshotFolderSource.analysis.latest_failure} tone="warn" />
+                    )}
+                  </>
+                )}
                 <ArtifactRow label="Inspect" value={`${screenshotFolderSource.inspection_endpoint} (${screenshotFolderSource.inspection_visibility.replace(/_/g, " ")})`} />
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button

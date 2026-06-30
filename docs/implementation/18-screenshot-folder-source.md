@@ -122,6 +122,8 @@ The settings panel saves `screenshot_folder` through `/api/settings/screen-analy
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
+The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, analyzer status mix, backlog, failures, latest observation/analyzed timestamps, digest count, and latest digest timestamp. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed and rolled into report-ready digest windows.
+
 ## Remote VLM Analysis Target
 
 Seraph can keep screenshot production separate from analysis while still using a GPU on another machine. The target shape is:

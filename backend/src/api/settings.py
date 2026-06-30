@@ -9,12 +9,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
-from sqlmodel import select
+from sqlalchemy import func
+from sqlmodel import col, select
 
 from config.settings import settings
 from src.db.engine import get_session as get_db
-from src.db.models import UserProfile
+from src.db.models import MemoryEpisode, ScreenObservation, UserProfile
 from src.observer.manager import context_manager
+from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
 from src.observer.user_state import InterruptionMode
 from src.tools.policy import MCP_POLICY_MODES, TOOL_POLICY_MODES
 
@@ -70,6 +72,7 @@ _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
+_SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -329,6 +332,107 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
     }
 
 
+def _screen_observation_details(details_json: str | None) -> list[object]:
+    try:
+        payload = json.loads(details_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _is_screenshot_folder_observation(observation: ScreenObservation) -> bool:
+    if observation.app_name == "Screenshot Folder":
+        return True
+    for item in _screen_observation_details(observation.details_json):
+        if not (isinstance(item, str) and item.startswith("capture_artifacts:")):
+            continue
+        try:
+            artifacts = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(artifacts, dict) and artifacts.get("provider") == "screenshot_folder":
+            return True
+    return False
+
+
+async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
+    status_counts: dict[str, int] = {
+        "pending": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "needs_reanalysis": 0,
+        "unknown": 0,
+    }
+    latest_observation_at: str | None = None
+    latest_analyzed_at: str | None = None
+    latest_failure: str | None = None
+    async with get_db() as db:
+        observation_result = await db.execute(
+            select(ScreenObservation)
+            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+            .where(
+                (
+                    col(ScreenObservation.app_name) == "Screenshot Folder"
+                )
+                | col(ScreenObservation.details_json).contains('"provider":"screenshot_folder"')
+                | col(ScreenObservation.details_json).contains('"provider": "screenshot_folder"')
+            )
+            .order_by(col(ScreenObservation.timestamp).desc())
+            .limit(500)
+        )
+        observations = list(observation_result.scalars().all())
+        digest_result = await db.execute(
+            select(MemoryEpisode)
+            .where(col(MemoryEpisode.source_tool_name) == _SCREENSHOT_DIGEST_TOOL_NAME)
+            .order_by(col(MemoryEpisode.observed_at).desc())
+            .limit(1)
+        )
+        latest_digest = digest_result.scalar_one_or_none()
+        digest_count_result = await db.execute(
+            select(func.count())
+            .select_from(MemoryEpisode)
+            .where(col(MemoryEpisode.source_tool_name) == _SCREENSHOT_DIGEST_TOOL_NAME)
+        )
+        digest_count = int(digest_count_result.scalar_one() or 0)
+
+    for observation in observations:
+        if not _is_screenshot_folder_observation(observation):
+            continue
+        if latest_observation_at is None:
+            latest_observation_at = _utc_iso(observation.timestamp)
+        details = _screen_observation_details(observation.details_json)
+        status = semantic_analysis_status_from_details(details) or {}
+        status_name = str(status.get("status") or "unknown")
+        if status_name not in status_counts:
+            status_name = "unknown"
+        status_counts[status_name] += 1
+        recorded_at = status.get("recorded_at")
+        if isinstance(recorded_at, str) and status_name == "succeeded" and latest_analyzed_at is None:
+            latest_analyzed_at = recorded_at
+        if status_name == "failed" and latest_failure is None:
+            latest_failure = str(status.get("reason") or "analysis failed")
+
+    return {
+        "observation_count": sum(status_counts.values()),
+        "analysis_status": status_counts,
+        "analysis_backlog": status_counts["pending"] + status_counts["needs_reanalysis"],
+        "analysis_failures": status_counts["failed"],
+        "latest_observation_at": latest_observation_at,
+        "latest_analyzed_at": latest_analyzed_at,
+        "latest_failure": latest_failure,
+        "digest_count": digest_count,
+        "latest_digest_at": _utc_iso(latest_digest.observed_at) if latest_digest is not None else None,
+    }
+
+
 def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
     receipts_dir = report_dir / "receipts"
     if not receipts_dir.exists():
@@ -529,6 +633,7 @@ async def get_artifact_storage_settings():
     report_receipts = _report_receipt_summary(report_archive_dir)
     screenshot_folder, screenshot_folder_source = _screenshot_folder()
     screenshot_source = _screenshot_folder_summary(screenshot_folder)
+    screenshot_pipeline = await _screenshot_folder_pipeline_summary()
     screen_analysis = await get_screen_analysis_settings()
     screen_archive_dir = Path(str(screen_analysis["archive_dir"]))
     screen_dir_status = _archive_dir_status(screen_archive_dir)
@@ -574,6 +679,12 @@ async def get_artifact_storage_settings():
             "exists": screenshot_source["exists"],
             "readable": screenshot_source["readable"],
             "stored_artifacts": ["image"],
+            "analysis": {
+                "provider": settings.screen_analysis_provider or "not_configured",
+                "model": settings.local_vlm_model or "",
+                "base_url_configured": bool(settings.local_vlm_base_url.strip()),
+                **screenshot_pipeline,
+            },
             "auto_ingest_enabled": settings.screenshot_folder_ingest_enabled,
             "auto_ingest_interval_min": settings.screenshot_folder_ingest_interval_min,
             "auto_ingest_limit": settings.screenshot_folder_ingest_limit,

@@ -213,6 +213,23 @@ Duplicate screenshot files are still suppressed by image SHA-256, so the same im
 Reanalysis is explicit and local-only through `POST /api/observer/screen-artifacts/{observation_id}/reanalyze`; callers must provide one of `prompt_version_changed`, `model_version_changed`, `provider_failure_retry`, or `manual_operator_request`.
 Reanalysis replaces the semantic analysis/status details on the existing observation and preserves the original screenshot hash and file mtime-derived capture timestamp.
 
+## Rolling Observation Digests
+
+Seraph condenses analyzed screenshot-folder observations into rolling memory episodes before daily report generation. The scheduler job is `screenshot_observation_digest`.
+
+Default settings:
+
+- `SCREENSHOT_OBSERVATION_DIGEST_ENABLED=true`
+- `SCREENSHOT_OBSERVATION_DIGEST_INTERVAL_MIN=15`
+- `SCREENSHOT_OBSERVATION_DIGEST_WINDOW_MIN=30`
+- `SCREENSHOT_OBSERVATION_DIGEST_MAX_CHARS=6000`
+
+Each digest stores a `MemoryEpisode` with source tool `screenshot_observation_digest` and schema `seraph.screenshot_observation_digest.v1`. Digest metadata includes the digest key, window start/end, source screenshot observation ids, observation count, content character count, and payload SHA-256.
+
+The digest is intentionally text-only and privacy-bounded. It never embeds raw screenshots, image hashes, full visible text, or provider transcripts. It includes compact redacted progression notes, activity/project/app mixes, analysis status counts, confidence, blocker evidence, drift evidence, and the source observation ids needed for traceability.
+
+Digest writes are idempotent per window and schema. If a window has not changed, Seraph keeps the existing episode. If new observations appear in the same window, Seraph updates the same episode instead of creating duplicates.
+
 Current model notes:
 
 - Gemma 4 26B-A4B quantized via Unsloth is the preferred 24 GB GPU benchmark target.

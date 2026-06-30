@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
-from src.db.models import GoalStatus, MemoryEpisodeType, ScreenObservation
+from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback
 from src.observer.image_metadata import image_metadata_label
 
@@ -45,6 +45,9 @@ Use only the redacted structured inputs. Do not invent screen details.
 - Screenshot samples:
 {screenshot_samples}
 
+## Screenshot Observation Digests
+{screenshot_digests}
+
 ## Goals
 Active goals:
 {active_goals}
@@ -52,12 +55,12 @@ Active goals:
 Completed today:
 {completed_goals}
 
-## Alignment Hints
+## Critical Goal Comparison
 {alignment_hints}
 
 Write:
 1. A short summary of what the day was mostly about.
-2. A "Goals vs day" section that says what aligned, what drifted, and what is unclear.
+2. A "Goals vs day" section that critically says what aligned, what drifted, what was blocked, what is unclear, and whether the user pushed the needle.
 3. 3 practical tips for tomorrow.
 
 Keep it useful and concise. No private raw screen text, no copied secrets, no long logs."""
@@ -67,6 +70,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(sk-[A-Za-z0-9_-]{12,})\b"),
     re.compile(r"\b([A-Za-z0-9_./+=-]{24,})\b"),
 )
+
+_SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
+_SCREENSHOT_DIGEST_SCHEMA_VERSION = "seraph.screenshot_observation_digest.v1"
 
 
 @dataclass(frozen=True)
@@ -316,6 +322,56 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
     }
 
 
+async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> dict[str, Any]:
+    local_start = datetime.combine(report_day, time.min, tzinfo=tz)
+    local_end = datetime.combine(report_day, time.max, tzinfo=tz)
+    start_utc = local_start.astimezone(timezone.utc)
+    end_utc = local_end.astimezone(timezone.utc)
+
+    from sqlmodel import col, select
+    from src.db.engine import get_session
+
+    async with get_session() as db:
+        result = await db.execute(
+            select(MemoryEpisode)
+            .where(col(MemoryEpisode.source_tool_name) == _SCREENSHOT_DIGEST_TOOL_NAME)
+            .where(col(MemoryEpisode.observed_at) >= start_utc)
+            .where(col(MemoryEpisode.observed_at) <= end_utc)
+            .order_by(col(MemoryEpisode.observed_at))
+        )
+        episodes = list(result.scalars().all())
+
+    digests: list[dict[str, Any]] = []
+    observation_ids: list[str] = []
+    text_chunks: list[str] = []
+    for episode in episodes:
+        metadata = _episode_metadata(episode)
+        if metadata.get("artifact_schema") != _SCREENSHOT_DIGEST_SCHEMA_VERSION:
+            continue
+        ids = [str(item) for item in metadata.get("observation_ids", []) if item]
+        observation_ids.extend(ids)
+        content = _redact_report_body(episode.content, limit=1400)
+        digests.append(
+            {
+                "episode_id": episode.id,
+                "window_start": metadata.get("window_start"),
+                "window_end": metadata.get("window_end"),
+                "observation_count": int(metadata.get("observation_count") or len(ids)),
+                "observation_ids": ids,
+                "content": content,
+            }
+        )
+        if content:
+            text_chunks.append(content)
+
+    return {
+        "count": len(digests),
+        "observation_ids": _unique_strings(observation_ids)[:100],
+        "digests": digests[:16],
+        "redacted_text": "\n\n".join(text_chunks)[:8000],
+    }
+
+
 def _observation_source(observation: ScreenObservation) -> str:
     if observation.details_json:
         try:
@@ -395,32 +451,92 @@ def _tokens(value: str) -> set[str]:
     }
 
 
-def _goal_alignment(summary: dict[str, Any], active_goals: list[Any]) -> list[dict[str, Any]]:
+def _goal_alignment(
+    summary: dict[str, Any],
+    active_goals: list[Any],
+    screenshot_digests: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    screenshot_digests = screenshot_digests or {}
+    digest_text = str(screenshot_digests.get("redacted_text") or "")
     context_text = " ".join(
         [
             " ".join(summary.get("by_project", {}).keys()),
             " ".join(summary.get("by_activity", {}).keys()),
             " ".join(summary.get("by_app", {}).keys()),
             " ".join(summary.get("redacted_samples", [])),
+            digest_text,
         ]
     )
     context_tokens = _tokens(context_text)
+    digest_tokens = _tokens(digest_text)
+    blocked_signals = _digest_section_values(digest_text, "Blockers")
+    drift_signals = _digest_section_values(digest_text, "Drift")
     results: list[dict[str, Any]] = []
     for goal in active_goals:
         goal_text = " ".join(
             item for item in [goal.title, goal.description or "", goal.domain] if item
         )
-        overlap = sorted(_tokens(goal_text) & context_tokens)
+        goal_tokens = _tokens(goal_text)
+        overlap = sorted(goal_tokens & context_tokens)
+        digest_overlap = sorted(goal_tokens & digest_tokens)
+        status = "unclear"
+        needle_movement = "unclear"
+        evidence: list[str] = []
+        matching_blockers = [
+            signal for signal in blocked_signals if goal_tokens & _tokens(signal)
+        ]
+        matching_drift = [
+            signal for signal in drift_signals if goal_tokens & _tokens(signal)
+        ]
+        if digest_overlap or overlap:
+            status = "aligned"
+            needle_movement = "pushed"
+        if matching_drift and digest_overlap:
+            status = "drifted"
+            needle_movement = "drifted"
+            evidence.extend(matching_drift[:3])
+        if matching_blockers and digest_overlap:
+            status = "blocked"
+            needle_movement = "blocked"
+            evidence.extend(matching_blockers[:3])
+        if not evidence and digest_overlap:
+            evidence.extend(_digest_section_values(digest_text, "Progression")[:3])
         results.append(
             {
                 "goal_id": goal.id,
                 "title": _redact_text(goal.title, limit=120),
                 "domain": goal.domain,
-                "status": "aligned" if overlap else "unclear",
+                "status": status,
+                "needle_movement": needle_movement,
                 "evidence_tokens": overlap[:6],
+                "digest_evidence_tokens": digest_overlap[:6],
+                "evidence": _unique_strings(evidence)[:5],
+                "source_observation_ids": screenshot_digests.get("observation_ids", [])[:20]
+                if digest_overlap
+                else [],
             }
         )
     return results
+
+
+def _digest_section_values(text: str, heading: str) -> list[str]:
+    if not text:
+        return []
+    lines = text.splitlines()
+    values: list[str] = []
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == f"{heading}:":
+            in_section = True
+            continue
+        if in_section and stripped.endswith(":") and not stripped.startswith("- "):
+            break
+        if in_section and stripped.startswith("- "):
+            value = stripped[2:].strip()
+            if value and value.lower() != "none":
+                values.append(_redact_text(value, limit=180))
+    return _unique_strings([value for value in values if value])
 
 
 def _format_seconds_map(values: dict[str, int], *, empty: str) -> str:
@@ -461,6 +577,24 @@ def _format_samples(samples: list[str], *, empty: str) -> str:
     return "\n".join(f"- {_redact_text(sample, limit=160)}" for sample in samples[:8])
 
 
+def _format_screenshot_digests(screenshot_digests: dict[str, Any] | None) -> str:
+    if not screenshot_digests or not screenshot_digests.get("digests"):
+        return "- No rolling screenshot observation digests available"
+    lines = []
+    for digest in screenshot_digests.get("digests", [])[:8]:
+        window = " to ".join(
+            str(item)
+            for item in [digest.get("window_start"), digest.get("window_end")]
+            if item
+        )
+        prefix = f"- Window {window}" if window else "- Window"
+        lines.append(f"{prefix}: {digest.get('observation_count', 0)} observations")
+        content = _redact_report_body(str(digest.get("content") or ""), limit=700)
+        if content:
+            lines.extend(f"  {line}" for line in content.splitlines()[:12])
+    return "\n".join(lines)
+
+
 def _format_goals(goals: list[Any]) -> str:
     if not goals:
         return "- None"
@@ -475,15 +609,41 @@ def _format_alignment(alignment: list[dict[str, Any]]) -> str:
         return "- No active goals to compare."
     lines = []
     for item in alignment[:12]:
-        evidence = ", ".join(item["evidence_tokens"]) or "no clear screen-observation match"
-        lines.append(f"- {item['title']}: {item['status']} ({evidence})")
+        tokens = ", ".join(item.get("digest_evidence_tokens") or item.get("evidence_tokens") or [])
+        evidence = "; ".join(item.get("evidence") or [])
+        evidence_text = evidence or tokens or "no clear screen-observation match"
+        lines.append(
+            f"- {item['title']}: {item['status']}, needle={item.get('needle_movement', 'unclear')} "
+            f"({evidence_text})"
+        )
     return "\n".join(lines)
+
+
+def _episode_metadata(episode: MemoryEpisode) -> dict[str, Any]:
+    try:
+        payload = json.loads(episode.metadata_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = _redact_text(str(value), limit=240)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _deterministic_report_body(
     *,
     report_day: date,
     summary: dict[str, Any],
+    screenshot_digests: dict[str, Any],
     alignment: list[dict[str, Any]],
     completed_goals: list[Any],
 ) -> str:
@@ -498,9 +658,14 @@ def _deterministic_report_body(
         summary.get("screenshot_samples", []),
         empty="- No screenshot-folder images analyzed",
     )
+    digest_summary = _format_screenshot_digests(screenshot_digests)
     aligned = [item for item in alignment if item["status"] == "aligned"]
-    unclear = [item for item in alignment if item["status"] != "aligned"]
+    blocked = [item for item in alignment if item["status"] == "blocked"]
+    drifted = [item for item in alignment if item["status"] == "drifted"]
+    unclear = [item for item in alignment if item["status"] == "unclear"]
+    pushed = [item for item in alignment if item.get("needle_movement") == "pushed"]
     completed = _format_goals(completed_goals)
+    comparison = _format_alignment(alignment)
 
     tips = [
         "Start tomorrow by naming the one goal the first focus block should serve.",
@@ -531,11 +696,20 @@ def _deterministic_report_body(
             "Screenshot samples:",
             screenshot_samples,
             "",
+            "Screenshot observation digests:",
+            digest_summary,
+            "",
             "Goals vs day:",
             f"- Aligned goals: {len(aligned)}",
+            f"- Pushed-the-needle goals: {len(pushed)}",
+            f"- Blocked goals: {len(blocked)}",
+            f"- Drifted goals: {len(drifted)}",
             f"- Unclear goals: {len(unclear)}",
             f"- Completed today: {len(completed_goals)}",
             completed,
+            "",
+            "Critical comparison:",
+            comparison,
             "",
             "Useful tips for tomorrow:",
             *(f"- {tip}" for tip in tips),
@@ -546,12 +720,13 @@ def _deterministic_report_body(
 async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[str, Any]:
     tz = _safe_timezone()
     target_day = report_day or datetime.now(tz).date()
-    summary, goal_results = await asyncio.gather(
+    summary, screenshot_digests, goal_results = await asyncio.gather(
         _screen_summary_for_local_day(target_day, tz),
+        _screenshot_digests_for_local_day(target_day, tz),
         _goals_for_report(target_day),
     )
     active_goals, completed_goals = goal_results
-    alignment = _goal_alignment(summary, active_goals)
+    alignment = _goal_alignment(summary, active_goals, screenshot_digests)
 
     if settings.end_of_day_report_llm_enabled:
         prompt = _REPORT_PROMPT.format(
@@ -569,6 +744,7 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
                 summary.get("screenshot_samples", []),
                 empty="- No screenshot-folder images analyzed",
             ),
+            screenshot_digests=_format_screenshot_digests(screenshot_digests),
             active_goals=_format_goals(active_goals),
             completed_goals=_format_goals(completed_goals),
             alignment_hints=_format_alignment(alignment),
@@ -587,6 +763,7 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
             _deterministic_report_body(
                 report_day=target_day,
                 summary=summary,
+                screenshot_digests=screenshot_digests,
                 alignment=alignment,
                 completed_goals=completed_goals,
             ),
@@ -600,6 +777,7 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         "timezone": str(tz),
         "body": body,
         "summary": summary,
+        "screenshot_digests": screenshot_digests,
         "goal_alignment": alignment,
         "completed_goal_count": len(completed_goals),
         "active_goal_count": len(active_goals),
@@ -625,6 +803,10 @@ async def store_end_of_day_goal_report(report: dict[str, Any]) -> str:
             "date": report["date"],
             "timezone": report["timezone"],
             "screen_observation_count": report["summary"].get("total_observations", 0),
+            "screenshot_digest_count": (report.get("screenshot_digests") or {}).get("count", 0),
+            "screenshot_digest_observation_ids": (report.get("screenshot_digests") or {}).get(
+                "observation_ids", []
+            ),
             "total_tracked_minutes": report["summary"].get("total_tracked_minutes", 0),
             "active_goal_count": report["active_goal_count"],
             "completed_goal_count": report["completed_goal_count"],

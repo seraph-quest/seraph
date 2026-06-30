@@ -110,9 +110,6 @@ class Settings(BaseSettings):
     screenshot_folder_ingest_enabled: bool = True
     screenshot_folder_ingest_interval_min: int = 5
     screenshot_folder_ingest_limit: int = 100
-    framekeeper_ingest_enabled: bool | None = None
-    framekeeper_ingest_interval_min: int | None = None
-    framekeeper_ingest_limit: int | None = None
     report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21

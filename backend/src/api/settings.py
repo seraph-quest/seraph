@@ -243,8 +243,8 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     if screenshot_folder:
         normalized_folder = str(Path(screenshot_folder).expanduser().resolve())
         payload["screenshot_folder"] = normalized_folder
-        payload["framekeeper_screenshot_folder"] = normalized_folder
-        payload["framekeeper_artifact_root"] = normalized_folder
+        payload.pop("framekeeper_screenshot_folder", None)
+        payload.pop("framekeeper_artifact_root", None)
     else:
         payload.pop("screenshot_folder", None)
         payload.pop("framekeeper_screenshot_folder", None)
@@ -518,8 +518,8 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         if configured_root:
             normalized_root = str(Path(configured_root).expanduser().resolve())
             payload["screenshot_folder"] = normalized_root
-            payload["framekeeper_screenshot_folder"] = normalized_root
-            payload["framekeeper_artifact_root"] = normalized_root
+            payload.pop("framekeeper_screenshot_folder", None)
+            payload.pop("framekeeper_artifact_root", None)
         else:
             payload.pop("screenshot_folder", None)
             payload.pop("framekeeper_screenshot_folder", None)

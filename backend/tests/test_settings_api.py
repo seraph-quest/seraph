@@ -240,8 +240,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
         assert data["screenshot_folder"] == str(screenshot_root)
-        assert data["framekeeper_screenshot_folder"] == str(screenshot_root)
-        assert data["framekeeper_artifact_root"] == str(screenshot_root)
+        assert "framekeeper_screenshot_folder" not in data
+        assert "framekeeper_artifact_root" not in data
         assert data["max_daily_captures"] == 0
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
@@ -274,8 +274,8 @@ async def test_screen_analysis_settings_accept_legacy_framekeeper_artifact_root(
         assert resp.status_code == 200
         data = resp.json()
         assert data["screenshot_folder"] == str(framekeeper_root)
-        assert data["framekeeper_screenshot_folder"] == str(framekeeper_root)
-        assert data["framekeeper_artifact_root"] == str(framekeeper_root)
+        assert "framekeeper_screenshot_folder" not in data
+        assert "framekeeper_artifact_root" not in data
 
 
 @pytest.mark.asyncio

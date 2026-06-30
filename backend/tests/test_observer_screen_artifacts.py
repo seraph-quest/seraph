@@ -1,7 +1,9 @@
 """Tests for preserved screen capture artifact inspection endpoints."""
 
+import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -12,6 +14,7 @@ from src.db.models import ScreenObservation
 
 @pytest.mark.asyncio
 async def test_screen_artifacts_are_persisted_listed_and_served(async_db, client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.api.observer.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
     image_path = tmp_path / "capture.png"
     output_path = tmp_path / "capture.codex.txt"
@@ -123,6 +126,7 @@ async def test_screen_artifact_root_prefers_seraph_archive_env(tmp_path, monkeyp
 
     preferred = tmp_path / "seraph-screen"
     fallback = tmp_path / "fallback-screen"
+    monkeypatch.setattr("src.api.observer.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(preferred))
     monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(fallback))
 
@@ -145,3 +149,274 @@ async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, m
     monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(env_fallback))
 
     assert _screen_artifact_root() == preferred.resolve()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_persists_observation_and_serves_image(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-valid.png")
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["screenshot_folder"] == str(root.resolve())
+    assert "artifact_root" not in payload
+    assert payload["scanned"] == 1
+    assert payload["ingested"] == 1
+    assert payload["rejected"] == []
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    assert observation.app_name == "Screenshot Folder"
+    assert observation.summary == "Screenshot image added from folder: capture-valid.png."
+    stored_details = json.loads(observation.details_json or "[]")
+    image_sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
+    assert f"screenshot_folder_image_sha256:{image_sha256}" in stored_details
+    artifact_details = [
+        json.loads(item.removeprefix("capture_artifacts:"))
+        for item in stored_details
+        if isinstance(item, str) and item.startswith("capture_artifacts:")
+    ][0]
+    assert artifact_details["provider"] == "screenshot_folder"
+    assert artifact_details["source"] == "local_image_directory"
+    assert artifact_details["screenshot_folder"] == str(root.resolve())
+    assert "artifact_root" not in artifact_details
+    assert artifact_details["image_path"] == str(image.resolve())
+    assert artifact_details["image_sha256"] == image_sha256
+    assert "analysis_path" not in artifact_details
+    assert "provider_output_path" not in artifact_details
+
+    list_resp = await client.get("/api/observer/screen-artifacts")
+    assert list_resp.status_code == 200
+    item = list_resp.json()["items"][0]
+    assert item["artifacts"]["provider"] == "screenshot_folder"
+
+    image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
+    assert image_resp.status_code == 200
+    assert image_resp.content == image.read_bytes()
+
+    analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()
+    assert analysis["provider"] == "screenshot_folder"
+    assert analysis["analysis"]["analysis_owner"] == "seraph"
+    assert analysis["analysis"]["source"] == "local_screenshot_folder"
+    assert analysis["analysis"]["image_sha256"] == image_sha256
+    assert analysis["analysis"]["image_bytes"] == len(image.read_bytes())
+    assert analysis["analysis"]["report_ready"] is True
+    assert analysis["image_sha256"] == image_sha256
+
+    output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
+    assert output_resp.status_code == 200
+    assert "screenshot folder source only provided the image file" in output_resp.text
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_ignores_non_images(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    root.mkdir()
+    (root / "notes.txt").write_text("not a screenshot", encoding="utf-8")
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["scanned"] == 0
+    assert payload["ingested"] == 0
+    assert payload["rejected"] == []
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_ignores_temporary_write_files(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    root.mkdir()
+    (root / "capture.png.tmp").write_bytes(b"in-progress screenshot")
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["scanned"] == 0
+    assert payload["ingested"] == 0
+    assert payload["rejected"] == []
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_rejects_broad_workspace_root(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "capture.png").write_bytes(b"not a dedicated screenshot folder")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.settings.workspace_dir", str(workspace))
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(workspace), "limit": 10},
+    )
+
+    assert resp.status_code == 400
+    assert "dedicated image directory" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_screenshot_folder_image_analysis_extracts_png_dimensions(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-real.png", data=_sample_png())
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()["analysis"]
+    assert analysis["file_format"] == "png"
+    assert analysis["width"] == 1
+    assert analysis["height"] == 1
+    assert analysis["image_path"] == str(image.resolve())
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_jpeg_artifact_uses_jpeg_media_type(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="capture.jpg")
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
+    assert image_resp.status_code == 200
+    assert image_resp.headers["content-type"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_skips_duplicate_hash(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="capture-dupe.png")
+
+    first = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+    second = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["ingested"] == 1
+    assert second.status_code == 200
+    assert second.json()["ingested"] == 0
+    assert second.json()["skipped_duplicates"] == 1
+
+
+def _write_screenshot(root: Path, *, name: str, data: bytes = b"png bytes") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    image = root / name
+    image.write_bytes(data)
+    return image
+
+
+def _sample_png() -> bytes:
+    return bytes(
+        [
+            0x89,
+            0x50,
+            0x4E,
+            0x47,
+            0x0D,
+            0x0A,
+            0x1A,
+            0x0A,
+            0x00,
+            0x00,
+            0x00,
+            0x0D,
+            0x49,
+            0x48,
+            0x44,
+            0x52,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x08,
+            0x06,
+            0x00,
+            0x00,
+            0x00,
+            0x1F,
+            0x15,
+            0xC4,
+            0x89,
+            0x00,
+            0x00,
+            0x00,
+            0x0A,
+            0x49,
+            0x44,
+            0x41,
+            0x54,
+            0x78,
+            0x9C,
+            0x63,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            0x05,
+            0x00,
+            0x01,
+            0x0D,
+            0x0A,
+            0x2D,
+            0xB4,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x49,
+            0x45,
+            0x4E,
+            0x44,
+            0xAE,
+            0x42,
+            0x60,
+            0x82,
+        ]
+    )

@@ -2,7 +2,9 @@
 
 import json
 import logging
+import mimetypes
 import os
+import struct
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,12 @@ class ScreenContextRequest(BaseModel):
     screen_context: str | None = None
     observation: ScreenObservationData | None = None
     switch_timestamp: float | None = None
+
+
+class ScreenshotFolderScanRequest(BaseModel):
+    screenshot_folder: str | None = None
+    artifact_root: str | None = None
+    limit: int = 100
 
 
 class NativeNotificationResponse(BaseModel):
@@ -436,15 +444,28 @@ def _require_local_artifact_request(request: Request) -> None:
 
 
 def _screen_artifact_path(raw_path: str | None) -> Path:
+    return _artifact_path(raw_path, allowed_roots=[_screen_artifact_root()])
+
+
+def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
     if not raw_path:
         raise HTTPException(status_code=404, detail="Screen artifact is missing")
-    root = _screen_artifact_root()
     path = Path(raw_path).expanduser().resolve()
-    if not path.is_relative_to(root):
+    roots = [root.expanduser().resolve() for root in allowed_roots]
+    if not any(path.is_relative_to(root) for root in roots):
         raise HTTPException(status_code=403, detail="Screen artifact is outside the configured archive")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Screen artifact file not found")
     return path
+
+
+def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
+    roots = [_screen_artifact_root()]
+    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"}:
+        configured_root = str(artifacts.get("screenshot_folder") or artifacts.get("artifact_root") or "").strip()
+        if configured_root:
+            roots.append(Path(configured_root).expanduser().resolve())
+    return roots
 
 
 def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] | None:
@@ -532,8 +553,8 @@ async def get_screen_artifact_image(observation_id: str, request: Request) -> Fi
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("image_path") or ""))
-    return FileResponse(path, media_type="image/png")
+    path = _artifact_path(str(artifacts.get("image_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
+    return FileResponse(path, media_type=_image_media_type(path))
 
 
 @router.get("/observer/screen-artifacts/{observation_id}/codex-output")
@@ -542,7 +563,16 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""))
+    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"} and not (
+        artifacts.get("codex_output_path") or artifacts.get("provider_output_path")
+    ):
+        return PlainTextResponse(
+            "The screenshot folder source only provided the image file. Seraph has no provider output for this capture."
+        )
+    path = _artifact_path(
+        str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""),
+        allowed_roots=_artifact_allowed_roots(artifacts),
+    )
     return PlainTextResponse(path.read_text(encoding="utf-8"))
 
 
@@ -552,12 +582,129 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("analysis_path") or ""))
+    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"} and not artifacts.get("analysis_path"):
+        image_path = _artifact_path(
+            str(artifacts.get("image_path") or ""),
+            allowed_roots=_artifact_allowed_roots(artifacts),
+        )
+        return {
+            "provider": artifacts.get("provider") or "screenshot_folder",
+            "summary": observation.summary,
+            "image_sha256": artifacts.get("image_sha256"),
+            "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
+        }
+    path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Saved analysis artifact is invalid") from exc
     return payload if isinstance(payload, dict) else {"value": payload}
+
+
+@router.post("/observer/screenshot-folder/scan")
+async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Request) -> dict[str, Any]:
+    """Scan a local screenshot folder as a Seraph image source."""
+    from src.observer.screenshot_folder_source import ScreenshotFolderImageError, scan_screenshot_folder
+
+    _require_local_artifact_request(request)
+    root = _screenshot_folder_path(body.screenshot_folder or body.artifact_root)
+    try:
+        result = await scan_screenshot_folder(root, limit=body.limit)
+    except ScreenshotFolderImageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "screenshot_folder": str(root),
+        "scanned": result.scanned,
+        "ingested": result.ingested,
+        "skipped_duplicates": result.skipped_duplicates,
+        "rejected": result.rejected,
+    }
+
+
+def _screenshot_folder_path(configured: str | None = None) -> Path:
+    from src.observer.screenshot_folder_source import resolve_screenshot_folder
+
+    return resolve_screenshot_folder(configured)
+
+
+def _image_media_type(path: Path) -> str:
+    media_type, _ = mimetypes.guess_type(path.name)
+    if media_type in {"image/png", "image/jpeg"}:
+        return media_type
+    return "application/octet-stream"
+
+
+def _screenshot_folder_image_analysis(
+    image_path: Path,
+    artifacts: dict[str, Any],
+    observation: ScreenObservation,
+) -> dict[str, Any]:
+    image_bytes = image_path.stat().st_size
+    dimensions = _image_dimensions(image_path)
+    file_format = image_path.suffix.lower().lstrip(".") or "unknown"
+    return {
+        "source": "local_screenshot_folder",
+        "analysis_owner": "seraph",
+        "image_path": str(image_path),
+        "image_sha256": artifacts.get("image_sha256"),
+        "image_bytes": image_bytes,
+        "file_format": "jpeg" if file_format == "jpg" else file_format,
+        "width": dimensions.get("width"),
+        "height": dimensions.get("height"),
+        "observation_id": observation.id,
+        "observation_summary": observation.summary,
+        "report_ready": True,
+        "notes": [
+            "The screenshot folder source produced only the image file.",
+            "Seraph computed this local image analysis from the configured screenshot directory.",
+        ],
+    }
+
+
+def _image_dimensions(path: Path) -> dict[str, int | None]:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(32)
+            if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
+                width, height = struct.unpack(">II", header[16:24])
+                return {"width": int(width), "height": int(height)}
+            if header.startswith(b"\xff\xd8"):
+                return _jpeg_dimensions(path)
+    except OSError:
+        pass
+    return {"width": None, "height": None}
+
+
+def _jpeg_dimensions(path: Path) -> dict[str, int | None]:
+    try:
+        with path.open("rb") as handle:
+            handle.read(2)
+            while True:
+                marker_prefix = handle.read(1)
+                if marker_prefix == b"":
+                    break
+                if marker_prefix != b"\xff":
+                    continue
+                marker = handle.read(1)
+                while marker == b"\xff":
+                    marker = handle.read(1)
+                if marker in {b"\xc0", b"\xc1", b"\xc2", b"\xc3"}:
+                    segment_length = int.from_bytes(handle.read(2), "big")
+                    if segment_length < 7:
+                        break
+                    handle.read(1)
+                    height = int.from_bytes(handle.read(2), "big")
+                    width = int.from_bytes(handle.read(2), "big")
+                    return {"width": width, "height": height}
+                if marker in {b"\xd8", b"\xd9"}:
+                    continue
+                segment_length = int.from_bytes(handle.read(2), "big")
+                if segment_length < 2:
+                    break
+                handle.seek(segment_length - 2, os.SEEK_CUR)
+    except OSError:
+        pass
+    return {"width": None, "height": None}
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)

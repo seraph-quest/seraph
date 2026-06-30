@@ -16,6 +16,7 @@ function settingsFromScreenAnalysisFixture(screen: {
   model: string;
   preserve_captures: boolean;
   archive_dir: string;
+  screenshot_folder?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -60,6 +61,30 @@ function settingsFromScreenAnalysisFixture(screen: {
       control_env: {
         enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+      },
+    },
+    screenshot_folder: {
+      enabled: true,
+      provider: "screenshot_folder",
+      path: screen.screenshot_folder ?? "Seraph workspace artifacts/screenshot-folder",
+      path_source: screen.screenshot_folder ? "screen-analysis-settings" : "default",
+      image_count: 0,
+      last_image_at: null,
+      status: "empty",
+      exists: false,
+      readable: false,
+      stored_artifacts: ["image"],
+      auto_ingest_enabled: true,
+      auto_ingest_interval_min: 5,
+      auto_ingest_limit: 100,
+      scan_endpoint: "/api/observer/screenshot-folder/scan",
+      inspection_endpoint: "/api/observer/screen-artifacts",
+      inspection_visibility: "localhost_only",
+      control_env: {
+        path: "SERAPH_SCREENSHOT_FOLDER",
+        auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+        auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+        auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
       },
     },
     reports: {
@@ -145,6 +170,30 @@ describe("ArtifactStoragePanel", () => {
             archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
           },
         },
+        screenshot_folder: {
+          enabled: true,
+          provider: "screenshot_folder",
+          path: "/Users/test/Pictures/Screenshots",
+          path_source: "default",
+          image_count: 2,
+          last_image_at: "2026-06-20T18:40:00Z",
+          status: "ready",
+          exists: true,
+          readable: true,
+          stored_artifacts: ["image"],
+          auto_ingest_enabled: true,
+          auto_ingest_interval_min: 5,
+          auto_ingest_limit: 100,
+          scan_endpoint: "/api/observer/screenshot-folder/scan",
+          inspection_endpoint: "/api/observer/screen-artifacts",
+          inspection_visibility: "localhost_only",
+          control_env: {
+            path: "SERAPH_SCREENSHOT_FOLDER",
+            auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+            auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+            auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+          },
+        },
         reports: {
           enabled: true,
           hour: 21,
@@ -180,17 +229,23 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    await waitFor(() => expect(screen.getByText("Screen analysis")).toBeInTheDocument());
-    expect(screen.getByText("Screen Capture")).toBeInTheDocument();
-    expect(screen.getByText("screenshots, provider output, analysis JSON")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Seraph analysis")).toBeInTheDocument());
+    expect(screen.getByText("Screenshot Folder")).toBeInTheDocument();
+    expect(screen.getByText("scans a local screenshot folder; reports stay in Seraph")).toBeInTheDocument();
+    expect(screen.getByText("Local screenshot images")).toBeInTheDocument();
+    expect(screen.getByText(/2 images/)).toBeInTheDocument();
+    expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
+    expect(screen.getByText("local image files only")).toBeInTheDocument();
+    expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
     expect(screen.getByText("offline - no new captures")).toBeInTheDocument();
     expect(screen.getByText("Grant Screen Recording permission to the terminal/app running Seraph.")).toBeInTheDocument();
     expect(screen.getByText(/1 captures/)).toBeInTheDocument();
-    expect(screen.getByText("/api/observer/screen-artifacts (localhost only)")).toBeInTheDocument();
+    expect(screen.getAllByText("/api/observer/screen-artifacts (localhost only)")).toHaveLength(2);
     expect(screen.getByText("SERAPH_PRESERVE_SCREEN_CAPTURES")).toBeInTheDocument();
-    expect(screen.getAllByText("ready")).toHaveLength(2);
+    expect(screen.getAllByText("ready")).toHaveLength(3);
     expect(screen.getByText("End-of-day reports")).toBeInTheDocument();
     expect(screen.getByText("deterministic-local")).toBeInTheDocument();
     expect(screen.getByText("Email delivery")).toBeInTheDocument();
@@ -350,6 +405,131 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/receipt abcdef123456/)).toBeInTheDocument();
     expect(screen.queryByText(/user@example/)).not.toBeInTheDocument();
     await waitFor(() => expect(sendButton).not.toBeDisabled());
+  });
+
+  it("runs a local screenshot folder scan from the settings panel", async () => {
+    const artifactStorage = {
+      ...settingsFromScreenAnalysisFixture({
+        enabled: true,
+        provider: "codex-local",
+        model: "gpt-5.5",
+        preserve_captures: true,
+        archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+        capture_mode: "on_switch",
+        cadence_seconds: null,
+        daemon_connected: true,
+        artifact_count: 0,
+        last_artifact_at: null,
+      }),
+      screenshot_folder: {
+        enabled: true,
+        provider: "screenshot_folder",
+        path: "/Users/test/Pictures/Screenshots",
+        path_source: "SERAPH_SCREENSHOT_FOLDER",
+        image_count: 3,
+        last_image_at: "2026-06-20T18:40:00Z",
+        status: "ready",
+        exists: true,
+        readable: true,
+        stored_artifacts: ["image"],
+        auto_ingest_enabled: true,
+        auto_ingest_interval_min: 5,
+        auto_ingest_limit: 100,
+        scan_endpoint: "/api/observer/screenshot-folder/scan",
+        inspection_endpoint: "/api/observer/screen-artifacts",
+        inspection_visibility: "localhost_only",
+        control_env: {
+          path: "SERAPH_SCREENSHOT_FOLDER",
+          auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+          auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+          auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+        },
+	      },
+    };
+    const refreshedStorage = {
+      ...artifactStorage,
+	      screenshot_folder: {
+	        ...artifactStorage.screenshot_folder,
+	        image_count: 4,
+	      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(
+        mockResponse({
+	          screenshot_folder: artifactStorage.screenshot_folder.path,
+          scanned: 3,
+          ingested: 1,
+          skipped_duplicates: 2,
+          rejected: [],
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Scan folder" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/observer/screenshot-folder/scan"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+	            screenshot_folder: artifactStorage.screenshot_folder.path,
+            limit: 100,
+          }),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/scanned 3 · added 1/)).toBeInTheDocument();
+    expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
+  });
+
+  it("saves a configured screenshot folder", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "codex-local",
+      model: "gpt-5.5",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+    });
+	    const nextRoot = "/Users/test/Screenshot Folder";
+	    const refreshedStorage = {
+	      ...artifactStorage,
+	      screenshot_folder: {
+	        ...artifactStorage.screenshot_folder,
+	        path: nextRoot,
+	        path_source: "screen-analysis-settings",
+	      },
+	    };
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(mockResponse({ ok: true }))
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    const folderInput = await screen.findByLabelText("Screenshot folder");
+    fireEvent.change(folderInput, { target: { value: nextRoot } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/screen-analysis"),
+        expect.objectContaining({
+          method: "PUT",
+	          body: JSON.stringify({ screenshot_folder: nextRoot }),
+        }),
+      ),
+    );
+    expect(await screen.findByDisplayValue(nextRoot)).toBeInTheDocument();
+    expect(screen.getAllByText("screen-analysis-settings").length).toBeGreaterThanOrEqual(1);
   });
 
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {
@@ -516,7 +696,7 @@ describe("ArtifactStoragePanel", () => {
     expect(captureState).toHaveAttribute("title", "waiting for app/window switch");
   });
 
-  it("keeps screen capture controls visible when artifact metadata is unavailable", async () => {
+  it("keeps analysis controls visible when artifact metadata is unavailable", async () => {
     fetchMock
       .mockResolvedValueOnce(
         mockResponse({
@@ -536,12 +716,12 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Screen analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("on_switch")).toBeInTheDocument();
-    expect(screen.getByText("Archive metadata degraded; screen capture controls are still live.")).toBeInTheDocument();
+    expect(screen.getByText("Archive metadata degraded; analysis controls are still live.")).toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {
@@ -564,12 +744,12 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Screen analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(
-      await screen.findByText("Archive metadata degraded; screen capture controls are still live."),
+      await screen.findByText("Archive metadata degraded; analysis controls are still live."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Archive metadata loading; screen capture controls are live.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Archive metadata loading; analysis controls are live.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("ignores stale artifact metadata after a newer save refresh", async () => {
@@ -619,7 +799,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
   });
 
-  it("aborts hung artifact metadata and keeps screen capture controls visible", async () => {
+  it("aborts hung artifact metadata and keeps analysis controls visible", async () => {
     let artifactSignal: AbortSignal | undefined;
     fetchMock
       .mockResolvedValueOnce(
@@ -645,17 +825,17 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Screen analysis", undefined, { timeout: 5_000 })).toBeInTheDocument();
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(
       await screen.findByText(
-        "Archive metadata degraded; screen capture controls are still live.",
+        "Archive metadata degraded; analysis controls are still live.",
         undefined,
         { timeout: 5_000 },
       ),
     ).toBeInTheDocument();
     expect(artifactSignal?.aborted).toBe(true);
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Screen capture settings unavailable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   }, 7_000);
 });

@@ -36,6 +36,9 @@ class ScreenAnalysisSettingsRequest(BaseModel):
     model: str | None = None
     preserve_captures: bool | None = None
     archive_dir: str | None = None
+    screenshot_folder: str | None = None
+    framekeeper_screenshot_folder: str | None = None
+    framekeeper_artifact_root: str | None = None
     min_seconds_between_captures: int | None = None
     max_daily_captures: int | None = None
     archive_retention_days: int | None = None
@@ -66,6 +69,9 @@ _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
+_LEGACY_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV = "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
+_LEGACY_FRAMEKEEPER_ARTIFACT_ROOT_ENV = "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -86,6 +92,26 @@ def _screen_archive_dir() -> tuple[Path, str]:
         Path("~/Library/Application Support/Seraph/artifacts/screen-captures").expanduser().resolve(),
         "default",
     )
+
+
+def _screenshot_folder() -> tuple[Path, str]:
+    configured = os.environ.get(_SCREENSHOT_FOLDER_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(), _SCREENSHOT_FOLDER_ENV
+    payload = _read_screen_analysis_settings()
+    settings_configured = str(
+        payload.get("screenshot_folder")
+        or payload.get("framekeeper_screenshot_folder")
+        or payload.get("framekeeper_artifact_root")
+        or ""
+    ).strip()
+    if settings_configured:
+        return Path(settings_configured).expanduser().resolve(), "screen-analysis-settings"
+    for env_name in (_LEGACY_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV, _LEGACY_FRAMEKEEPER_ARTIFACT_ROOT_ENV):
+        configured = os.environ.get(env_name, "").strip()
+        if configured:
+            return Path(configured).expanduser().resolve(), env_name
+    return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "screenshot-folder", "default"
 
 
 def _report_archive_dir() -> tuple[Path, str]:
@@ -191,6 +217,9 @@ def _read_screen_analysis_settings() -> dict[str, object]:
                 "max_daily_captures",
                 "archive_retention_days",
                 "archive_max_mb",
+                "screenshot_folder",
+                "framekeeper_screenshot_folder",
+                "framekeeper_artifact_root",
             ):
                 if key in loaded:
                     payload[key] = loaded[key]
@@ -202,6 +231,21 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
     payload["model"] = str(payload.get("model") or "")
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
+    screenshot_folder = str(
+        payload.get("screenshot_folder")
+        or payload.get("framekeeper_screenshot_folder")
+        or payload.get("framekeeper_artifact_root")
+        or ""
+    ).strip()
+    if screenshot_folder:
+        normalized_folder = str(Path(screenshot_folder).expanduser().resolve())
+        payload["screenshot_folder"] = normalized_folder
+        payload.pop("framekeeper_screenshot_folder", None)
+        payload.pop("framekeeper_artifact_root", None)
+    else:
+        payload.pop("screenshot_folder", None)
+        payload.pop("framekeeper_screenshot_folder", None)
+        payload.pop("framekeeper_artifact_root", None)
     for key in (
         "min_seconds_between_captures",
         "max_daily_captures",
@@ -246,6 +290,48 @@ def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
     return {
         "artifact_count": len(image_mtimes),
         "last_artifact_at": datetime.fromtimestamp(latest_mtime, timezone.utc).isoformat(),
+    }
+
+
+def _screenshot_folder_summary(root: Path) -> dict[str, object]:
+    if not root.exists():
+        return {
+            "status": "not_found",
+            "image_count": 0,
+            "last_image_at": None,
+            "exists": False,
+            "readable": False,
+        }
+    if not root.is_dir():
+        return {
+            "status": "invalid_root",
+            "image_count": 0,
+            "last_image_at": None,
+            "exists": True,
+            "readable": False,
+        }
+    image_mtimes: list[float] = []
+    try:
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                image_mtimes.append(path.stat().st_mtime)
+    except OSError as exc:
+        logger.warning("Screenshot folder source summary failed: %s", exc)
+        return {
+            "status": "read_error",
+            "image_count": 0,
+            "last_image_at": None,
+            "exists": True,
+            "readable": False,
+        }
+    return {
+        "status": "ready" if image_mtimes else "empty",
+        "image_count": len(image_mtimes),
+        "last_image_at": datetime.fromtimestamp(max(image_mtimes), timezone.utc).isoformat()
+        if image_mtimes
+        else None,
+        "exists": True,
+        "readable": True,
     }
 
 
@@ -417,6 +503,24 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         ):
             raise HTTPException(status_code=422, detail="Screen archive directory must be private and writable")
         payload["archive_dir"] = str(archive_dir)
+    configured_screenshot_folder = body.screenshot_folder
+    if configured_screenshot_folder is None:
+        configured_screenshot_folder = (
+            body.framekeeper_screenshot_folder
+            if body.framekeeper_screenshot_folder is not None
+            else body.framekeeper_artifact_root
+        )
+    if configured_screenshot_folder is not None:
+        configured_root = configured_screenshot_folder.strip()
+        if configured_root:
+            normalized_root = str(Path(configured_root).expanduser().resolve())
+            payload["screenshot_folder"] = normalized_root
+            payload.pop("framekeeper_screenshot_folder", None)
+            payload.pop("framekeeper_artifact_root", None)
+        else:
+            payload.pop("screenshot_folder", None)
+            payload.pop("framekeeper_screenshot_folder", None)
+            payload.pop("framekeeper_artifact_root", None)
     for field_name in (
         "min_seconds_between_captures",
         "max_daily_captures",
@@ -441,6 +545,8 @@ async def get_artifact_storage_settings():
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
     report_receipts = _report_receipt_summary(report_archive_dir)
+    screenshot_folder, screenshot_folder_source = _screenshot_folder()
+    screenshot_source = _screenshot_folder_summary(screenshot_folder)
     screen_analysis = await get_screen_analysis_settings()
     screen_archive_dir = Path(str(screen_analysis["archive_dir"]))
     screen_dir_status = _archive_dir_status(screen_archive_dir)
@@ -473,6 +579,30 @@ async def get_artifact_storage_settings():
             "control_env": {
                 "enabled": "SERAPH_PRESERVE_SCREEN_CAPTURES",
                 "archive_dir": "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
+            },
+        },
+        "screenshot_folder": {
+            "enabled": True,
+            "provider": "screenshot_folder",
+            "path": str(screenshot_folder),
+            "path_source": screenshot_folder_source,
+            "image_count": screenshot_source["image_count"],
+            "last_image_at": screenshot_source["last_image_at"],
+            "status": screenshot_source["status"],
+            "exists": screenshot_source["exists"],
+            "readable": screenshot_source["readable"],
+            "stored_artifacts": ["image"],
+            "auto_ingest_enabled": settings.screenshot_folder_ingest_enabled,
+            "auto_ingest_interval_min": settings.screenshot_folder_ingest_interval_min,
+            "auto_ingest_limit": settings.screenshot_folder_ingest_limit,
+            "scan_endpoint": "/api/observer/screenshot-folder/scan",
+            "inspection_endpoint": "/api/observer/screen-artifacts",
+            "inspection_visibility": "localhost_only",
+            "control_env": {
+                "path": _SCREENSHOT_FOLDER_ENV,
+                "auto_ingest_enabled": "SCREENSHOT_FOLDER_INGEST_ENABLED",
+                "auto_ingest_interval": "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+                "auto_ingest_limit": "SCREENSHOT_FOLDER_INGEST_LIMIT",
             },
         },
         "reports": {

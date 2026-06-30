@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlmodel import select
 
 from src.db.models import ScreenObservation
+from src.observer.screenshot_analysis_contract import ScreenshotAnalysis
 
 
 @pytest.mark.asyncio
@@ -254,6 +255,134 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     output_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/codex-output")
     assert output_resp.status_code == 200
     assert "screenshot folder source only provided the image file" in output_resp.text
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_persists_local_vlm_semantic_analysis(
+    async_db, client, tmp_path, monkeypatch
+):
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-semantic.png", data=_sample_png())
+    image_sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
+    calls = []
+
+    async def fake_analyze_screenshot_image(image_path, artifacts):
+        calls.append((image_path, artifacts))
+        return ScreenshotAnalysis.model_validate(
+            {
+                "schema_version": "seraph.screenshot_analysis.v1",
+                "prompt_version": "seraph.screenshot_analysis.prompt.v1",
+                "summary": "The user is implementing screenshot ingestion in Seraph.",
+                "detailed_observations": ["A code editor and tests are visible."],
+                "activity_type": "coding",
+                "project": "seraph",
+                "applications": ["editor"],
+                "visible_artifacts": ["test_observer_screen_artifacts.py"],
+                "key_visible_text": ["screenshot-folder/scan"],
+                "user_intent": "Wire screenshot folder images into analysis.",
+                "goal_alignment": {
+                    "status": "aligned",
+                    "goal_refs": ["screenshot intelligence loop"],
+                    "evidence": ["The visible file concerns screenshot ingestion."],
+                    "needle_movement": "pushed",
+                },
+                "confidence": 0.86,
+                "sensitive_content_seen": False,
+                "privacy_notes": [],
+                "report_tags": ["screenshots", "seraph"],
+            }
+        )
+
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.analyze_screenshot_image",
+        fake_analyze_screenshot_image,
+    )
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ingested"] == 1
+    assert calls
+    assert calls[0][0] == image.resolve()
+    assert calls[0][1]["image_sha256"] == image_sha256
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    stored_details = json.loads(observation.details_json or "[]")
+    semantic_details = [
+        json.loads(item.removeprefix("screenshot_analysis:"))
+        for item in stored_details
+        if isinstance(item, str) and item.startswith("screenshot_analysis:")
+    ]
+    assert semantic_details[0]["summary"] == "The user is implementing screenshot ingestion in Seraph."
+    assert semantic_details[0]["goal_alignment"]["needle_movement"] == "pushed"
+
+    analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()["analysis"]
+    assert analysis["semantic_status"] == "ready"
+    assert analysis["semantic_analysis"]["project"] == "seraph"
+    assert analysis["semantic_analysis"]["activity_type"] == "coding"
+    assert analysis["semantic_analysis"]["goal_alignment"]["status"] == "aligned"
+    assert analysis["semantic_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_keeps_metadata_when_local_vlm_fails(
+    async_db, client, tmp_path, monkeypatch
+):
+    from src.observer.screenshot_semantic_analysis import ScreenshotSemanticAnalysisError
+
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="capture-failure.png")
+
+    async def failing_analyze_screenshot_image(_image_path, _artifacts):
+        raise ScreenshotSemanticAnalysisError("provider unavailable")
+
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.analyze_screenshot_image",
+        failing_analyze_screenshot_image,
+    )
+
+    first = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+    second = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["ingested"] == 1
+    assert first.json()["rejected"] == []
+    assert second.status_code == 200
+    assert second.json()["ingested"] == 0
+    assert second.json()["skipped_duplicates"] == 1
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    stored_details = json.loads(observation.details_json or "[]")
+    error_details = [
+        json.loads(item.removeprefix("screenshot_analysis_error:"))
+        for item in stored_details
+        if isinstance(item, str) and item.startswith("screenshot_analysis_error:")
+    ]
+    assert error_details[0]["reason"] == "provider unavailable"
+
+    analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()["analysis"]
+    assert analysis["semantic_status"] == "failed"
+    assert analysis["semantic_error"]["reason"] == "provider unavailable"
+    assert analysis["semantic_analysis"] is None
 
 
 @pytest.mark.asyncio

@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     screenshot_folder_ingest_enabled: bool = True
     screenshot_folder_ingest_interval_min: int = 5
     screenshot_folder_ingest_limit: int = 100
+    screen_analysis_provider: str = ""  # local-vlm enables semantic screenshot analysis
+    local_vlm_base_url: str = ""
+    local_vlm_model: str = ""
+    local_vlm_api_key: str = ""
+    local_vlm_timeout_seconds: int = 120
     report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21

@@ -493,6 +493,16 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
     return None
 
 
+def _screen_observation_details(observation: ScreenObservation) -> list[Any]:
+    if not observation.details_json:
+        return []
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return []
+    return details if isinstance(details, list) else []
+
+
 def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] | None:
     artifacts = _screen_capture_artifacts(observation)
     if artifacts is None:
@@ -647,10 +657,20 @@ def _screenshot_folder_image_analysis(
     artifacts: dict[str, Any],
     observation: ScreenObservation,
 ) -> dict[str, Any]:
+    from src.observer.screenshot_semantic_analysis import (
+        semantic_analysis_error_from_details,
+        semantic_analysis_from_details,
+    )
+
     metadata = local_image_metadata(image_path)
+    details = _screen_observation_details(observation)
+    semantic_analysis = semantic_analysis_from_details(details)
+    semantic_error = semantic_analysis_error_from_details(details)
+    semantic_status = "ready" if semantic_analysis else "failed" if semantic_error else "not_configured"
     return {
         "source": "local_screenshot_folder",
         "analysis_owner": "seraph",
+        "semantic_status": semantic_status,
         "image_path": str(image_path),
         "image_sha256": artifacts.get("image_sha256"),
         "image_bytes": metadata.get("image_bytes"),
@@ -659,6 +679,8 @@ def _screenshot_folder_image_analysis(
         "height": metadata.get("height"),
         "observation_id": observation.id,
         "observation_summary": observation.summary,
+        "semantic_analysis": semantic_analysis,
+        "semantic_error": semantic_error,
         "report_ready": True,
         "notes": [
             "The screenshot folder source produced only the image file.",

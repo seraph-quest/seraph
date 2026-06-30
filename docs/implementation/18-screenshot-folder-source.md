@@ -191,7 +191,7 @@ curl -F "file=@/path/to/screenshot.png" \
   http://GPU_SERVER_IP:8088/v1/analyze-file
 ```
 
-Seraph-side first-class `local-vlm` wiring is still a follow-up implementation item. The intended future settings shape is:
+Seraph-side first-class `local-vlm` wiring is available behind explicit settings:
 
 ```env
 SERAPH_SCREEN_ANALYSIS_PROVIDER=local-vlm
@@ -199,7 +199,7 @@ SERAPH_LOCAL_VLM_BASE_URL=http://GPU_SERVER_IP:8088
 SERAPH_LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
 ```
 
-Until that provider exists, this section is an operator target and integration contract, not a claim that current Seraph releases can call the wrapper automatically.
+When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`. If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
 
 Current model notes:
 

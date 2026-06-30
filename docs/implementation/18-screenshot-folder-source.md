@@ -38,11 +38,11 @@ Seraph resolves the screenshot folder in this order:
 
 1. `SERAPH_SCREENSHOT_FOLDER`
 2. Seraph settings key `screenshot_folder`
-3. Legacy Seraph settings keys `framekeeper_screenshot_folder` or `framekeeper_artifact_root`
-4. Legacy env fallbacks `SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER` or `SERAPH_FRAMEKEEPER_ARTIFACT_ROOT`
-5. Seraph workspace default `artifacts/screenshot-folder`
+3. Seraph workspace default `artifacts/screenshot-folder`
 
 The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume Framekeeper output, configure Seraph with Framekeeper's screenshot folder explicitly.
+
+Older local settings may still be migrated internally, but new API requests and docs should use only `screenshot_folder`. `artifact_root` and producer-specific key names are not part of the current public contract.
 
 ## Folder Scan
 
@@ -62,6 +62,8 @@ Optional JSON body:
 ```
 
 If `screenshot_folder` is omitted, Seraph uses the configured folder. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
+
+The request model is intentionally strict: legacy `artifact_root` or producer-specific fields are rejected instead of being treated as screenshot-folder aliases.
 
 The artifact analysis endpoint returns Seraph-owned local image analysis, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph.
 

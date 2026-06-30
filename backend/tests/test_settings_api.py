@@ -176,7 +176,10 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
     preferred = tmp_path / "seraph-screen"
     fallback = tmp_path / "fallback-screen"
     monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(preferred))
-    with patch.object(settings, "screen_capture_archive_dir", str(fallback)):
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_capture_archive_dir", str(fallback)),
+    ):
         resp = await client.get("/api/settings/artifact-storage")
 
     assert resp.status_code == 200
@@ -279,7 +282,7 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
 
 
 @pytest.mark.asyncio
-async def test_screen_analysis_settings_accept_legacy_framekeeper_artifact_root(client, tmp_path):
+async def test_screen_analysis_settings_reject_public_legacy_framekeeper_artifact_root(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         framekeeper_root = tmp_path / "legacy-framekeeper"
         resp = await client.put(
@@ -287,11 +290,68 @@ async def test_screen_analysis_settings_accept_legacy_framekeeper_artifact_root(
             json={"framekeeper_artifact_root": str(framekeeper_root)},
         )
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["screenshot_folder"] == str(framekeeper_root)
-        assert "framekeeper_screenshot_folder" not in data
-        assert "framekeeper_artifact_root" not in data
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_public_legacy_framekeeper_screenshot_folder(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        framekeeper_root = tmp_path / "legacy-framekeeper"
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={"framekeeper_screenshot_folder": str(framekeeper_root)},
+        )
+
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_migrates_legacy_local_file_without_exposing_keys(client, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    screenshot_root = tmp_path / "legacy-screenshots"
+    (workspace / "screen-analysis-settings.json").write_text(
+        json.dumps({"framekeeper_artifact_root": str(screenshot_root)}),
+        encoding="utf-8",
+    )
+
+    with patch.object(settings, "workspace_dir", str(workspace)):
+        resp = await client.get("/api/settings/screen-analysis")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screenshot_folder"] == str(screenshot_root)
+    assert "framekeeper_screenshot_folder" not in data
+    assert "framekeeper_artifact_root" not in data
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_relative_screenshot_folder(client, tmp_path):
+    with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={"screenshot_folder": "relative/screenshots"},
+        )
+
+        assert resp.status_code == 422
+        assert "absolute path" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_broad_screenshot_folder(client, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with (
+        patch.object(settings, "workspace_dir", str(workspace)),
+        patch("src.observer.screenshot_folder_source.settings.workspace_dir", str(workspace)),
+    ):
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={"screenshot_folder": str(workspace)},
+        )
+
+        assert resp.status_code == 422
+        assert "dedicated image directory" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

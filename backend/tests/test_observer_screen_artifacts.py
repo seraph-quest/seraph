@@ -196,6 +196,10 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert list_resp.status_code == 200
     item = list_resp.json()["items"][0]
     assert item["artifacts"]["provider"] == "screenshot_folder"
+    assert item["artifacts"]["image_url"].endswith(f"/{observation.id}/image")
+    assert item["artifacts"]["analysis_url"].endswith(f"/{observation.id}/analysis")
+    assert "codex_output_url" not in item["artifacts"]
+    assert "provider_output_url" not in item["artifacts"]
 
     image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
     assert image_resp.status_code == 200
@@ -303,6 +307,19 @@ async def test_screenshot_folder_scan_rejects_broad_workspace_root(client, tmp_p
 
     assert resp.status_code == 400
     assert "dedicated image directory" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_rejects_legacy_artifact_root_request_key(client, tmp_path):
+    root = tmp_path / "screenshots"
+    root.mkdir()
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"artifact_root": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -52,8 +52,9 @@ class ScreenContextRequest(BaseModel):
 
 
 class ScreenshotFolderScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     screenshot_folder: str | None = None
-    artifact_root: str | None = None
     limit: int = 100
 
 
@@ -491,6 +492,16 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
     artifacts = _screen_capture_artifacts(observation)
     if artifacts is None:
         return None
+    artifact_links = {
+        "id": artifacts.get("id"),
+        "created_at": artifacts.get("created_at"),
+        "provider": artifacts.get("provider"),
+        "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
+        "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
+    }
+    if artifacts.get("provider") not in {"screenshot_folder", "framekeeper"}:
+        artifact_links["codex_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
+        artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
     return {
         "observation_id": observation.id,
         "timestamp": observation.timestamp.isoformat(),
@@ -499,15 +510,7 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "activity": observation.activity_type,
         "project": observation.project,
         "summary": observation.summary,
-        "artifacts": {
-            "id": artifacts.get("id"),
-            "created_at": artifacts.get("created_at"),
-            "provider": artifacts.get("provider"),
-            "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
-            "codex_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
-            "provider_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
-            "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
-        },
+        "artifacts": artifact_links,
     }
 
 
@@ -607,7 +610,7 @@ async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Req
     from src.observer.screenshot_folder_source import ScreenshotFolderImageError, scan_screenshot_folder
 
     _require_local_artifact_request(request)
-    root = _screenshot_folder_path(body.screenshot_folder or body.artifact_root)
+    root = _screenshot_folder_path(body.screenshot_folder)
     try:
         result = await scan_screenshot_folder(root, limit=body.limit)
     except ScreenshotFolderImageError as exc:

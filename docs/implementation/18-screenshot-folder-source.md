@@ -61,13 +61,13 @@ Optional JSON body:
 }
 ```
 
-If `screenshot_folder` is omitted, Seraph uses the configured folder. For each new image, Seraph computes SHA-256, stores a duplicate marker in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
+If `screenshot_folder` is omitted, Seraph uses the configured folder. For each new image, Seraph computes SHA-256 plus local image facts such as byte size, file format, and dimensions when detectable. Seraph stores those Seraph-owned facts in observation details, persists a `ScreenObservation`, and leaves analysis and report generation inside Seraph.
 
 The request model is intentionally strict: legacy `artifact_root` or producer-specific fields are rejected instead of being treated as screenshot-folder aliases.
 
 The artifact analysis endpoint returns Seraph-owned local image analysis, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph.
 
-End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details.
+End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on Framekeeper manifests, sidecars, or service metadata.
 
 Configure a narrow, trusted screenshot directory. Seraph rejects obvious broad roots such as the filesystem root, home folder, Desktop, Downloads, and Seraph workspace root.
 

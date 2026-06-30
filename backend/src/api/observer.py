@@ -4,7 +4,6 @@ import json
 import logging
 import mimetypes
 import os
-import struct
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from src.audit.runtime import log_integration_event
 from src.agent.session import session_manager
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
+from src.observer.image_metadata import local_image_metadata
 from src.observer.manager import context_manager
 from src.observer.native_notification_queue import native_notification_queue
 
@@ -642,18 +642,16 @@ def _screenshot_folder_image_analysis(
     artifacts: dict[str, Any],
     observation: ScreenObservation,
 ) -> dict[str, Any]:
-    image_bytes = image_path.stat().st_size
-    dimensions = _image_dimensions(image_path)
-    file_format = image_path.suffix.lower().lstrip(".") or "unknown"
+    metadata = local_image_metadata(image_path)
     return {
         "source": "local_screenshot_folder",
         "analysis_owner": "seraph",
         "image_path": str(image_path),
         "image_sha256": artifacts.get("image_sha256"),
-        "image_bytes": image_bytes,
-        "file_format": "jpeg" if file_format == "jpg" else file_format,
-        "width": dimensions.get("width"),
-        "height": dimensions.get("height"),
+        "image_bytes": metadata.get("image_bytes"),
+        "file_format": metadata.get("file_format"),
+        "width": metadata.get("width"),
+        "height": metadata.get("height"),
         "observation_id": observation.id,
         "observation_summary": observation.summary,
         "report_ready": True,
@@ -662,52 +660,6 @@ def _screenshot_folder_image_analysis(
             "Seraph computed this local image analysis from the configured screenshot directory.",
         ],
     }
-
-
-def _image_dimensions(path: Path) -> dict[str, int | None]:
-    try:
-        with path.open("rb") as handle:
-            header = handle.read(32)
-            if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
-                width, height = struct.unpack(">II", header[16:24])
-                return {"width": int(width), "height": int(height)}
-            if header.startswith(b"\xff\xd8"):
-                return _jpeg_dimensions(path)
-    except OSError:
-        pass
-    return {"width": None, "height": None}
-
-
-def _jpeg_dimensions(path: Path) -> dict[str, int | None]:
-    try:
-        with path.open("rb") as handle:
-            handle.read(2)
-            while True:
-                marker_prefix = handle.read(1)
-                if marker_prefix == b"":
-                    break
-                if marker_prefix != b"\xff":
-                    continue
-                marker = handle.read(1)
-                while marker == b"\xff":
-                    marker = handle.read(1)
-                if marker in {b"\xc0", b"\xc1", b"\xc2", b"\xc3"}:
-                    segment_length = int.from_bytes(handle.read(2), "big")
-                    if segment_length < 7:
-                        break
-                    handle.read(1)
-                    height = int.from_bytes(handle.read(2), "big")
-                    width = int.from_bytes(handle.read(2), "big")
-                    return {"width": width, "height": height}
-                if marker in {b"\xd8", b"\xd9"}:
-                    continue
-                segment_length = int.from_bytes(handle.read(2), "big")
-                if segment_length < 2:
-                    break
-                handle.seek(segment_length - 2, os.SEEK_CUR)
-    except OSError:
-        pass
-    return {"width": None, "height": None}
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)

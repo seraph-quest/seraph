@@ -174,7 +174,7 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
         observation = result.scalar_one()
 
     assert observation.app_name == "Screenshot Folder"
-    assert observation.summary == "Screenshot image added from folder: capture-valid.png."
+    assert observation.summary == "Screenshot image added from folder: capture-valid.png (png, 9 B)."
     stored_details = json.loads(observation.details_json or "[]")
     image_sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
     assert f"screenshot_folder_image_sha256:{image_sha256}" in stored_details
@@ -189,6 +189,10 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert "artifact_root" not in artifact_details
     assert artifact_details["image_path"] == str(image.resolve())
     assert artifact_details["image_sha256"] == image_sha256
+    assert artifact_details["file_format"] == "png"
+    assert artifact_details["image_bytes"] == len(image.read_bytes())
+    assert artifact_details["width"] is None
+    assert artifact_details["height"] is None
     assert "analysis_path" not in artifact_details
     assert "provider_output_path" not in artifact_details
 
@@ -213,6 +217,7 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
     assert analysis["analysis"]["source"] == "local_screenshot_folder"
     assert analysis["analysis"]["image_sha256"] == image_sha256
     assert analysis["analysis"]["image_bytes"] == len(image.read_bytes())
+    assert analysis["analysis"]["file_format"] == "png"
     assert analysis["analysis"]["report_ready"] is True
     assert analysis["image_sha256"] == image_sha256
 
@@ -344,6 +349,16 @@ async def test_screenshot_folder_image_analysis_extracts_png_dimensions(async_db
     assert analysis["width"] == 1
     assert analysis["height"] == 1
     assert analysis["image_path"] == str(image.resolve())
+    stored_details = json.loads(observation.details_json or "[]")
+    artifact_details = [
+        json.loads(item.removeprefix("capture_artifacts:"))
+        for item in stored_details
+        if isinstance(item, str) and item.startswith("capture_artifacts:")
+    ][0]
+    assert artifact_details["file_format"] == "png"
+    assert artifact_details["width"] == 1
+    assert artifact_details["height"] == 1
+    assert observation.summary == "Screenshot image added from folder: capture-real.png (png, 1x1, 67 B)."
 
 
 @pytest.mark.asyncio

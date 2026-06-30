@@ -93,6 +93,10 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
                 "source": "local_image_directory",
                 "image_path": "/tmp/framekeeper/capture.png",
                 "image_sha256": "abc123",
+                "image_bytes": 67,
+                "file_format": "png",
+                "width": 1,
+                "height": 1,
             },
             sort_keys=True,
         )
@@ -119,8 +123,12 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
     assert report["summary"]["total_observations"] == 1
     assert report["summary"]["by_source"] == {"screenshot_folder": 0}
     assert report["summary"]["source_observations"] == {"screenshot_folder": 1}
+    assert report["summary"]["screenshot_samples"] == ["capture.png (png, 1x1, 67 B)"]
     assert "Source mix:" in report["body"]
     assert "- screenshot_folder: 1 observation, 0m" in report["body"]
+    assert "Screenshot samples:" in report["body"]
+    assert "- capture.png (png, 1x1, 67 B)" in report["body"]
+    assert "/tmp/framekeeper" not in report["body"]
 
 
 @pytest.mark.asyncio

@@ -130,6 +130,7 @@ class TestSchedulerEngine:
                     "activity_digest",
                     "end_of_day_goal_report",
                     "screenshot_folder_ingest",
+                    "screenshot_observation_digest",
                     "weekly_activity_review",
                     "screen_cleanup",
                 }

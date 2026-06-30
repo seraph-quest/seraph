@@ -89,6 +89,99 @@ The settings panel saves `screenshot_folder` through `/api/settings/screen-analy
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
+## Remote VLM Analysis Target
+
+Seraph can keep screenshot production separate from analysis while still using a GPU on another machine. The target shape is:
+
+1. A producer writes ordinary screenshot image files to the configured folder.
+2. Seraph scans that folder and owns observation/report persistence.
+3. A separate image-analysis service accepts image bytes and forwards them to a private LAN/VPN vision-language model backend.
+
+The reusable service repo is public under the Seraph organization:
+
+- repo: [seraph-quest/vlm-screenshot-server](https://github.com/seraph-quest/vlm-screenshot-server)
+- purpose: Dockerized FastAPI screenshot analysis wrapper for OpenAI-compatible VLM backends
+- endpoints: `POST /v1/analyze-file` for multipart uploads and `POST /v1/analyze` for base64 image payloads
+- run modes: API wrapper only, or API wrapper plus a GPU `vllm/vllm-openai` backend via `docker-compose.gpu.yml`
+
+For an RTX 3090 Ti 24 GB server, the current preferred Gemma-first target is Unsloth's Gemma 4 26B-A4B quantized GGUF/Dynamic 4-bit path. Unsloth's Gemma 4 docs list practical 4-bit memory footprints for this card class, including the 26B-A4B family in the high-teens GB range.
+
+Example GPU-server setup with `llama.cpp`:
+
+```bash
+curl -LsSf https://llama.app/install.sh | sh
+
+llama serve \
+  -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --ctx-size 32768 \
+  --chat-template-kwargs '{"enable_thinking":false}'
+```
+
+The VLM backend then exposes an OpenAI-compatible API at:
+
+```text
+http://GPU_SERVER_IP:8000/v1
+```
+
+Run the screenshot-analysis wrapper:
+
+```bash
+git clone https://github.com/seraph-quest/vlm-screenshot-server.git
+cd vlm-screenshot-server
+cp .env.example .env
+```
+
+Use:
+
+```env
+VLM_BASE_URL=http://GPU_SERVER_IP:8000/v1
+VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
+VLM_API_KEY=
+VLM_TIMEOUT_SECONDS=180
+VLM_MAX_TOKENS=700
+VLM_TEMPERATURE=0
+REDACT_VISIBLE_TEXT=true
+```
+
+Then start the wrapper:
+
+```bash
+docker compose up --build
+```
+
+Test the wrapper with a screenshot:
+
+```bash
+curl -F "file=@/path/to/screenshot.png" \
+  http://GPU_SERVER_IP:8088/v1/analyze-file
+```
+
+Seraph-side first-class `local-vlm` wiring is still a follow-up implementation item. The intended future settings shape is:
+
+```env
+SERAPH_SCREEN_ANALYSIS_PROVIDER=local-vlm
+SERAPH_LOCAL_VLM_BASE_URL=http://GPU_SERVER_IP:8088
+SERAPH_LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
+```
+
+Until that provider exists, this section is an operator target and integration contract, not a claim that current Seraph releases can call the wrapper automatically.
+
+Current model notes:
+
+- Gemma 4 26B-A4B quantized via Unsloth is the preferred 24 GB GPU benchmark target.
+- Gemma 4 12B QAT/Q4 is the safer fallback if 26B-A4B is too slow or unavailable.
+- MiniCPM-V 4.5 quantized variants remain the strongest small non-Gemma comparison.
+- Qwen2.5-VL-32B-Instruct-AWQ is the known Qwen VLM stress test for quality, but it is memory-sensitive on 24 GB.
+- Qwen3 3.6B or "Qwen 3.6" should not be used for screenshot analysis unless the exact checkpoint is confirmed as a vision-language model. Text-only Qwen3 checkpoints do not replace a VLM.
+
+Sources checked June 30, 2026:
+
+- [Unsloth Gemma 4 models](https://unsloth.ai/docs/models/gemma-4)
+- [Unsloth Gemma 4 26B-A4B GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)
+- [seraph-quest/vlm-screenshot-server](https://github.com/seraph-quest/vlm-screenshot-server)
+
 ## Verification
 
 This branch verifies the image-source path with:

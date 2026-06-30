@@ -63,6 +63,7 @@ def resolve_framekeeper_root(configured: str | None = None) -> Path:
 async def scan_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperScanResult:
     """Scan a Framekeeper screenshot directory and persist new images as observations."""
     screenshot_root = root.expanduser().resolve()
+    validate_framekeeper_scan_root(screenshot_root)
     image_paths = _image_paths(screenshot_root, limit=max(limit, 1))
     ingested = 0
     skipped = 0
@@ -100,6 +101,30 @@ async def scan_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperS
 
 
 ingest_framekeeper_root = scan_framekeeper_root
+
+
+def validate_framekeeper_scan_root(root: Path) -> None:
+    """Reject roots that are too broad to be a dedicated screenshot folder."""
+    dangerous_roots = _dangerous_scan_roots()
+    if root in dangerous_roots:
+        raise FramekeeperImageError(
+            "Framekeeper screenshot folder must be a dedicated image directory, not a broad home, desktop, downloads, workspace, or filesystem root"
+        )
+
+
+def _dangerous_scan_roots() -> set[Path]:
+    roots: set[Path] = {Path("/").resolve()}
+    for candidate in (
+        Path.home(),
+        Path.home() / "Desktop",
+        Path.home() / "Downloads",
+        Path(settings.workspace_dir).expanduser(),
+    ):
+        try:
+            roots.add(candidate.resolve())
+        except OSError:
+            continue
+    return roots
 
 
 def _image_paths(root: Path, *, limit: int) -> list[Path]:

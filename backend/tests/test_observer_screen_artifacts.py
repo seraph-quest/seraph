@@ -234,6 +234,43 @@ async def test_framekeeper_folder_scan_ignores_non_images(async_db, client, tmp_
 
 
 @pytest.mark.asyncio
+async def test_framekeeper_folder_scan_ignores_temporary_write_files(async_db, client, tmp_path):
+    root = tmp_path / "framekeeper"
+    root.mkdir()
+    (root / "capture.png.tmp").write_bytes(b"in-progress screenshot")
+
+    resp = await client.post(
+        "/api/observer/framekeeper/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["scanned"] == 0
+    assert payload["ingested"] == 0
+    assert payload["rejected"] == []
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_framekeeper_folder_scan_rejects_broad_workspace_root(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "capture.png").write_bytes(b"not a dedicated Framekeeper folder")
+    monkeypatch.setattr("src.observer.framekeeper_source.settings.workspace_dir", str(workspace))
+
+    resp = await client.post(
+        "/api/observer/framekeeper/scan",
+        json={"screenshot_folder": str(workspace), "limit": 10},
+    )
+
+    assert resp.status_code == 400
+    assert "dedicated image directory" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_framekeeper_legacy_ingest_endpoint_scans_same_image_folder(async_db, client, tmp_path):
     root = tmp_path / "framekeeper"
     _write_framekeeper_screenshot(root, name="capture-legacy.png")

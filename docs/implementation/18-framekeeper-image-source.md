@@ -65,7 +65,7 @@ The artifact analysis endpoint returns Seraph-owned local image analysis for Fra
 
 End-of-day reports consume Framekeeper-derived `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `framekeeper` from its own stored capture-artifact details, so reports can show Framekeeper image activity without requiring any Framekeeper manifest or service connection. Source mix includes both observation counts and tracked minutes, because Framekeeper screenshots are point-in-time images and may not carry a duration.
 
-Configure a narrow, trusted screenshot directory. Do not point folder scanning at a broad home, downloads, desktop, or project folder. A local caller that can invoke this endpoint can cause Seraph to read image files under the supplied path, hash them, and persist observations.
+Configure a narrow, trusted screenshot directory. Seraph rejects obvious broad roots such as the filesystem root, home folder, Desktop, Downloads, and Seraph workspace root. A local caller that can invoke this endpoint can still cause Seraph to read image files under an allowed supplied path, hash them, and persist observations, so the configured Framekeeper folder should be dedicated to screenshots.
 
 ## Settings Surface
 

@@ -605,11 +605,14 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
 @router.post("/observer/framekeeper/ingest")
 async def scan_framekeeper_screenshot_folder(body: FramekeeperScanRequest, request: Request) -> dict[str, Any]:
     """Scan a local Framekeeper screenshot folder as a Seraph image source."""
-    from src.observer.framekeeper_source import scan_framekeeper_root
+    from src.observer.framekeeper_source import FramekeeperImageError, scan_framekeeper_root
 
     _require_local_artifact_request(request)
     root = _framekeeper_artifact_root(body.screenshot_folder or body.artifact_root)
-    result = await scan_framekeeper_root(root, limit=body.limit)
+    try:
+        result = await scan_framekeeper_root(root, limit=body.limit)
+    except FramekeeperImageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "screenshot_folder": str(root),
         "artifact_root": str(root),

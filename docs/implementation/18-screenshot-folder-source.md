@@ -7,7 +7,7 @@ title: Screenshot Folder Source
 
 Seraph does not connect to a screenshot app or service. It can scan a local directory that contains ordinary screenshot image files.
 
-Framekeeper is one possible producer for that directory, but Seraph does not call Framekeeper, read Framekeeper metadata, require manifests, or expect any service handshake. The contract is just `.png`, `.jpg`, and `.jpeg` files in a configured folder.
+The producing app is intentionally anonymous to Seraph. Seraph does not call a recorder, read recorder metadata, require manifests, or expect any service handshake. The contract is just `.png`, `.jpg`, and `.jpeg` files in a configured folder.
 
 ## Boundary
 
@@ -40,7 +40,7 @@ Seraph resolves the screenshot folder in this order:
 2. Seraph settings key `screenshot_folder`
 3. Seraph workspace default `artifacts/screenshot-folder`
 
-The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume Framekeeper output, configure Seraph with Framekeeper's screenshot folder explicitly.
+The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume screenshots from another app, configure Seraph with that app's screenshot folder explicitly.
 
 Seraph does not migrate or resolve producer-specific screenshot keys. API requests, stored settings, and environment configuration use only `screenshot_folder` or `SERAPH_SCREENSHOT_FOLDER`. `artifact_root` and producer-specific key names are not part of the current contract.
 
@@ -67,7 +67,7 @@ The request model is intentionally strict: legacy `artifact_root` or producer-sp
 
 The artifact analysis endpoint returns Seraph-owned local image analysis, including source, hash, byte size, file format, dimensions when detectable, observation id, and report readiness. This analysis is computed from the image file in Seraph.
 
-End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on Framekeeper manifests, sidecars, or service metadata.
+End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on recorder manifests, sidecars, or service metadata.
 
 Configure a narrow, trusted screenshot directory. Seraph rejects obvious broad roots such as the filesystem root, home folder, Desktop, Downloads, and Seraph workspace root.
 

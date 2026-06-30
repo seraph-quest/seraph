@@ -486,7 +486,8 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
                 return None
             if not isinstance(payload, dict):
                 return None
-            if str(payload.get("provider") or "").strip() == "framekeeper":
+            provider = str(payload.get("provider") or "").strip()
+            if provider and provider != "screenshot_folder":
                 return None
             return payload
     return None

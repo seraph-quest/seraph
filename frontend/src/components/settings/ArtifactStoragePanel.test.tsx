@@ -66,7 +66,7 @@ function settingsFromScreenAnalysisFixture(screen: {
     },
     framekeeper: {
       enabled: true,
-      provider: "framekeeper",
+      provider: "screenshot_folder",
       screenshot_folder: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
       screenshot_folder_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
       artifact_root: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
@@ -80,7 +80,7 @@ function settingsFromScreenAnalysisFixture(screen: {
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
-      scan_endpoint: "/api/observer/framekeeper/scan",
+      scan_endpoint: "/api/observer/screenshot-folder/scan",
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
@@ -176,7 +176,7 @@ describe("ArtifactStoragePanel", () => {
         },
         framekeeper: {
           enabled: true,
-          provider: "framekeeper",
+          provider: "screenshot_folder",
           artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
           artifact_root_source: "default",
           image_count: 2,
@@ -188,7 +188,7 @@ describe("ArtifactStoragePanel", () => {
           auto_ingest_enabled: true,
           auto_ingest_interval_min: 5,
           auto_ingest_limit: 100,
-          scan_endpoint: "/api/observer/framekeeper/scan",
+          scan_endpoint: "/api/observer/screenshot-folder/scan",
           inspection_endpoint: "/api/observer/screen-artifacts",
           inspection_visibility: "localhost_only",
           control_env: {
@@ -240,6 +240,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/2 images/)).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
+    expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();
     expect(screen.queryByText("/api/observer/framekeeper/scan")).not.toBeInTheDocument();
     expect(screen.queryByText("/api/observer/framekeeper/ingest")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
@@ -412,7 +413,7 @@ describe("ArtifactStoragePanel", () => {
     await waitFor(() => expect(sendButton).not.toBeDisabled());
   });
 
-  it("runs a local Framekeeper folder scan from the settings panel", async () => {
+  it("runs a local screenshot folder scan from the settings panel", async () => {
     const artifactStorage = {
       ...settingsFromScreenAnalysisFixture({
         enabled: true,
@@ -428,7 +429,7 @@ describe("ArtifactStoragePanel", () => {
       }),
       framekeeper: {
         enabled: true,
-        provider: "framekeeper",
+        provider: "screenshot_folder",
         screenshot_folder: "/Users/test/Library/Application Support/Framekeeper/artifacts",
         screenshot_folder_source: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
         artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
@@ -442,7 +443,7 @@ describe("ArtifactStoragePanel", () => {
         auto_ingest_enabled: true,
         auto_ingest_interval_min: 5,
         auto_ingest_limit: 100,
-        scan_endpoint: "/api/observer/framekeeper/scan",
+        scan_endpoint: "/api/observer/screenshot-folder/scan",
         inspection_endpoint: "/api/observer/screen-artifacts",
         inspection_visibility: "localhost_only",
         control_env: {
@@ -480,7 +481,7 @@ describe("ArtifactStoragePanel", () => {
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/observer/framekeeper/scan"),
+        expect.stringContaining("/api/observer/screenshot-folder/scan"),
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({
@@ -494,7 +495,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
   });
 
-  it("saves a configured Framekeeper screenshot folder", async () => {
+  it("saves a configured screenshot folder", async () => {
     const artifactStorage = settingsFromScreenAnalysisFixture({
       enabled: true,
       provider: "codex-local",
@@ -525,7 +526,7 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    const folderInput = await screen.findByLabelText("Framekeeper screenshot folder");
+    const folderInput = await screen.findByLabelText("Screenshot folder");
     fireEvent.change(folderInput, { target: { value: nextRoot } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 

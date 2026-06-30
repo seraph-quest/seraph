@@ -1,4 +1,4 @@
-"""Scheduled Seraph ingestion for Framekeeper screenshot image folders."""
+"""Scheduled Seraph ingestion for local screenshot image folders."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _clamped_limit() -> int:
 
 
 async def run_framekeeper_image_ingest() -> None:
-    """Scan the configured Framekeeper screenshot folder for new image files."""
+    """Scan the configured screenshot folder for new image files."""
     started_at = perf_counter()
     root = resolve_framekeeper_root()
     if not settings.framekeeper_ingest_enabled:
@@ -68,7 +68,7 @@ async def run_framekeeper_image_ingest() -> None:
             },
         )
         logger.info(
-            "framekeeper_image_ingest: scanned=%d ingested=%d duplicates=%d rejected=%d",
+            "screenshot_folder_ingest: scanned=%d ingested=%d duplicates=%d rejected=%d",
             result.scanned,
             result.ingested,
             result.skipped_duplicates,
@@ -84,4 +84,4 @@ async def run_framekeeper_image_ingest() -> None:
                 "error": str(exc),
             },
         )
-        logger.exception("framekeeper_image_ingest failed")
+        logger.exception("screenshot_folder_ingest failed")

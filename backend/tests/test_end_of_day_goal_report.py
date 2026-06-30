@@ -81,7 +81,7 @@ async def test_build_report_is_deterministic_by_default(async_db):
 
 
 @pytest.mark.asyncio
-async def test_build_report_counts_framekeeper_observation_source(async_db):
+async def test_build_report_counts_screenshot_folder_observation_source(async_db):
     from src.db.models import ScreenObservation
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
 
@@ -89,8 +89,8 @@ async def test_build_report_counts_framekeeper_observation_source(async_db):
         "capture_artifacts:"
         + json.dumps(
             {
-                "provider": "framekeeper",
-                "source": "framekeeper",
+                "provider": "screenshot_folder",
+                "source": "local_image_directory",
                 "image_path": "/tmp/framekeeper/capture.png",
                 "image_sha256": "abc123",
             },
@@ -101,11 +101,11 @@ async def test_build_report_counts_framekeeper_observation_source(async_db):
         db.add(
             ScreenObservation(
                 timestamp=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
-                app_name="Framekeeper",
+                app_name="Screenshot Folder",
                 window_title="capture.png",
                 activity_type="screen",
                 project="seraph",
-                summary="Framekeeper screenshot ingested from capture.png.",
+                summary="Screenshot image ingested from capture.png.",
                 duration_s=None,
                 details_json=json.dumps(details),
             )
@@ -117,10 +117,10 @@ async def test_build_report_counts_framekeeper_observation_source(async_db):
         report = await build_end_of_day_goal_report(date(2026, 6, 20))
 
     assert report["summary"]["total_observations"] == 1
-    assert report["summary"]["by_source"] == {"framekeeper": 0}
-    assert report["summary"]["source_observations"] == {"framekeeper": 1}
+    assert report["summary"]["by_source"] == {"screenshot_folder": 0}
+    assert report["summary"]["source_observations"] == {"screenshot_folder": 1}
     assert "Source mix:" in report["body"]
-    assert "- framekeeper: 1 observation, 0m" in report["body"]
+    assert "- screenshot_folder: 1 observation, 0m" in report["body"]
 
 
 @pytest.mark.asyncio

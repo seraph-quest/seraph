@@ -197,7 +197,7 @@ async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_pa
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["framekeeper"]["provider"] == "framekeeper"
+    assert data["framekeeper"]["provider"] == "screenshot_folder"
     assert data["framekeeper"]["screenshot_folder"] == str(framekeeper_root)
     assert data["framekeeper"]["screenshot_folder_source"] == "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
     assert data["framekeeper"]["artifact_root"] == str(framekeeper_root)
@@ -212,7 +212,7 @@ async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_pa
     assert data["framekeeper"]["control_env"]["auto_ingest_enabled"] == "FRAMEKEEPER_INGEST_ENABLED"
     assert data["framekeeper"]["exists"] is True
     assert data["framekeeper"]["readable"] is True
-    assert data["framekeeper"]["scan_endpoint"] == "/api/observer/framekeeper/scan"
+    assert data["framekeeper"]["scan_endpoint"] == "/api/observer/screenshot-folder/scan"
     assert "ingest_endpoint" not in data["framekeeper"]
 
 

@@ -307,7 +307,7 @@ def _framekeeper_source_summary(root: Path) -> dict[str, object]:
             if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
                 image_mtimes.append(path.stat().st_mtime)
     except OSError as exc:
-        logger.warning("Framekeeper artifact source summary failed: %s", exc)
+        logger.warning("Screenshot folder source summary failed: %s", exc)
         return {
             "status": "read_error",
             "image_count": 0,
@@ -570,7 +570,7 @@ async def get_artifact_storage_settings():
         },
         "framekeeper": {
             "enabled": True,
-            "provider": "framekeeper",
+            "provider": "screenshot_folder",
             "screenshot_folder": str(framekeeper_root),
             "screenshot_folder_source": framekeeper_root_source,
             "artifact_root": str(framekeeper_root),
@@ -584,7 +584,7 @@ async def get_artifact_storage_settings():
             "auto_ingest_enabled": settings.framekeeper_ingest_enabled,
             "auto_ingest_interval_min": settings.framekeeper_ingest_interval_min,
             "auto_ingest_limit": settings.framekeeper_ingest_limit,
-            "scan_endpoint": "/api/observer/framekeeper/scan",
+            "scan_endpoint": "/api/observer/screenshot-folder/scan",
             "inspection_endpoint": "/api/observer/screen-artifacts",
             "inspection_visibility": "localhost_only",
             "control_env": {

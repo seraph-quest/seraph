@@ -160,7 +160,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
                 minutes=_settings_int("framekeeper_ingest_interval_min", 5, minimum=1, maximum=1440)
             ),
             "id": "framekeeper_image_ingest",
-            "name": "Framekeeper image ingest",
+            "name": "Screenshot folder image ingest",
         },
         {
             "func": _async_job_wrapper(run_screen_cleanup, loop),

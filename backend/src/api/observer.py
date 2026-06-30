@@ -461,7 +461,7 @@ def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
 
 def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
     roots = [_screen_artifact_root()]
-    if artifacts.get("provider") == "framekeeper":
+    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"}:
         configured_root = str(artifacts.get("artifact_root") or "").strip()
         if configured_root:
             roots.append(Path(configured_root).expanduser().resolve())
@@ -563,11 +563,11 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    if artifacts.get("provider") == "framekeeper" and not (
+    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"} and not (
         artifacts.get("codex_output_path") or artifacts.get("provider_output_path")
     ):
         return PlainTextResponse(
-            "Framekeeper only produced the screenshot image. Seraph has no provider output for this capture."
+            "The screenshot folder source only provided the image file. Seraph has no provider output for this capture."
         )
     path = _artifact_path(
         str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""),
@@ -582,13 +582,13 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    if artifacts.get("provider") == "framekeeper" and not artifacts.get("analysis_path"):
+    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"} and not artifacts.get("analysis_path"):
         image_path = _artifact_path(
             str(artifacts.get("image_path") or ""),
             allowed_roots=_artifact_allowed_roots(artifacts),
         )
         return {
-            "provider": "framekeeper",
+            "provider": artifacts.get("provider") or "screenshot_folder",
             "summary": observation.summary,
             "image_sha256": artifacts.get("image_sha256"),
             "analysis": _framekeeper_image_analysis(image_path, artifacts, observation),
@@ -601,10 +601,11 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     return payload if isinstance(payload, dict) else {"value": payload}
 
 
+@router.post("/observer/screenshot-folder/scan")
 @router.post("/observer/framekeeper/scan")
 @router.post("/observer/framekeeper/ingest")
 async def scan_framekeeper_screenshot_folder(body: FramekeeperScanRequest, request: Request) -> dict[str, Any]:
-    """Scan a local Framekeeper screenshot folder as a Seraph image source."""
+    """Scan a local screenshot folder as a Seraph image source."""
     from src.observer.framekeeper_source import FramekeeperImageError, scan_framekeeper_root
 
     _require_local_artifact_request(request)
@@ -645,7 +646,7 @@ def _framekeeper_image_analysis(
     dimensions = _image_dimensions(image_path)
     file_format = image_path.suffix.lower().lstrip(".") or "unknown"
     return {
-        "source": "framekeeper_image_directory",
+        "source": "local_screenshot_folder",
         "analysis_owner": "seraph",
         "image_path": str(image_path),
         "image_sha256": artifacts.get("image_sha256"),
@@ -657,7 +658,7 @@ def _framekeeper_image_analysis(
         "observation_summary": observation.summary,
         "report_ready": True,
         "notes": [
-            "Framekeeper produced only the screenshot image.",
+            "The screenshot folder source produced only the image file.",
             "Seraph computed this local image analysis from the configured screenshot directory.",
         ],
     }

@@ -26,15 +26,16 @@ async def test_framekeeper_ingest_job_reads_images_from_configured_folder(async_
 
     image_sha256 = hashlib.sha256(image.read_bytes()).hexdigest()
     details = json.loads(observation.details_json or "[]")
-    assert observation.app_name == "Framekeeper"
+    assert observation.app_name == "Screenshot Folder"
     assert observation.window_title == "job-capture.png"
-    assert f"framekeeper_image_sha256:{image_sha256}" in details
+    assert f"screenshot_folder_image_sha256:{image_sha256}" in details
     artifact_payloads = [
         json.loads(item.removeprefix("capture_artifacts:"))
         for item in details
         if isinstance(item, str) and item.startswith("capture_artifacts:")
     ]
-    assert artifact_payloads[0]["provider"] == "framekeeper"
+    assert artifact_payloads[0]["provider"] == "screenshot_folder"
+    assert artifact_payloads[0]["source"] == "local_image_directory"
     assert artifact_payloads[0]["image_path"] == str(image.resolve())
     assert "manifest" not in json.dumps(artifact_payloads[0]).lower()
 

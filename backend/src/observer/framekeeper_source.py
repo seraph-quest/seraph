@@ -1,4 +1,9 @@
-"""Framekeeper screenshot-folder scanning for screen observations."""
+"""Local screenshot-folder scanning for screen observations.
+
+Framekeeper is one producer that can write screenshots into this folder, but
+Seraph treats the folder as ordinary local image files rather than a connected
+service or metadata contract.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ from src.observer.screen_repository import screen_observation_repo
 
 
 class FramekeeperImageError(ValueError):
-    """Raised when a Framekeeper screenshot is unsafe or unsupported."""
+    """Raised when a screenshot-folder image is unsafe or unsupported."""
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,9 @@ class FramekeeperScanResult:
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
+SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
+LEGACY_FRAMEKEEPER_HASH_PREFIX = "framekeeper_image_sha256"
 FRAMEKEEPER_SCREENSHOT_FOLDER_ENV = "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
 FRAMEKEEPER_ARTIFACT_ROOT_ENV = "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
 
@@ -61,7 +69,7 @@ def resolve_framekeeper_root(configured: str | None = None) -> Path:
 
 
 async def scan_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperScanResult:
-    """Scan a Framekeeper screenshot directory and persist new images as observations."""
+    """Scan a local screenshot directory and persist new images as observations."""
     screenshot_root = root.expanduser().resolve()
     validate_framekeeper_scan_root(screenshot_root)
     image_paths = _image_paths(screenshot_root, limit=max(limit, 1))
@@ -81,7 +89,7 @@ async def scan_framekeeper_root(root: Path, *, limit: int = 100) -> FramekeeperS
             rejected.append({"image_path": str(image_path), "reason": str(exc)})
 
     await log_integration_event(
-        integration_type="framekeeper",
+        integration_type="screenshot_folder",
         name="screenshot_scan",
         outcome="succeeded" if not rejected else "degraded",
         details={
@@ -108,7 +116,7 @@ def validate_framekeeper_scan_root(root: Path) -> None:
     dangerous_roots = _dangerous_scan_roots()
     if root in dangerous_roots:
         raise FramekeeperImageError(
-            "Framekeeper screenshot folder must be a dedicated image directory, not a broad home, desktop, downloads, workspace, or filesystem root"
+            "Screenshot folder must be a dedicated image directory, not a broad home, desktop, downloads, workspace, or filesystem root"
         )
 
 
@@ -145,7 +153,7 @@ def _image_paths(root: Path, *, limit: int) -> list[Path]:
 async def _image_to_observation(image_path: Path, root: Path) -> dict[str, object] | None:
     resolved = image_path.resolve()
     if not resolved.is_relative_to(root):
-        raise FramekeeperImageError("image is outside Framekeeper screenshot root")
+        raise FramekeeperImageError("image is outside screenshot folder root")
     if resolved.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
         raise FramekeeperImageError("unsupported image type")
     if not resolved.is_file():
@@ -159,13 +167,13 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
     captured_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
     capture_id = image_sha256[:16]
     details = [
-        f"framekeeper_image_sha256:{image_sha256}",
+        f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}",
         "capture_artifacts:"
         + json.dumps(
             {
                 "id": capture_id,
-                "provider": "framekeeper",
-                "source": "framekeeper",
+                "provider": SCREENSHOT_FOLDER_PROVIDER,
+                "source": "local_image_directory",
                 "created_at": captured_at.isoformat(),
                 "artifact_root": str(root),
                 "image_path": str(resolved),
@@ -177,11 +185,11 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         ),
     ]
     return {
-        "app_name": "Framekeeper",
+        "app_name": "Screenshot Folder",
         "window_title": resolved.name,
         "activity_type": "screen",
         "project": None,
-        "summary": f"Framekeeper screenshot added from folder: {resolved.name}.",
+        "summary": f"Screenshot image added from folder: {resolved.name}.",
         "details": details,
         "blocked": False,
         "timestamp": captured_at,
@@ -189,14 +197,20 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
 
 
 async def _image_already_ingested(image_sha256: str) -> bool:
-    marker = f"framekeeper_image_sha256:{image_sha256}"
+    markers = [
+        f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}",
+        f"{LEGACY_FRAMEKEEPER_HASH_PREFIX}:{image_sha256}",
+    ]
     async with get_session() as db:
-        result = await db.execute(
-            select(ScreenObservation)
-            .where(col(ScreenObservation.details_json).contains(marker))
-            .limit(1)
-        )
-        return result.scalar_one_or_none() is not None
+        for marker in markers:
+            result = await db.execute(
+                select(ScreenObservation)
+                .where(col(ScreenObservation.details_json).contains(marker))
+                .limit(1)
+            )
+            if result.scalar_one_or_none() is not None:
+                return True
+    return False
 
 
 def _sha256_file(path: Path) -> str:

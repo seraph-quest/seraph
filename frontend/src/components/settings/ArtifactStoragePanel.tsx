@@ -265,7 +265,7 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
     },
     framekeeper: {
       enabled: true,
-      provider: "framekeeper",
+      provider: "screenshot_folder",
       screenshot_folder: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
       screenshot_folder_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
       artifact_root: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
@@ -279,7 +279,7 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
-      scan_endpoint: "/api/observer/framekeeper/scan",
+      scan_endpoint: "/api/observer/screenshot-folder/scan",
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
@@ -527,7 +527,7 @@ export function ArtifactStoragePanel() {
     setFramekeeperScanError(null);
     try {
       const scanEndpoint = framekeeperSource.scan_endpoint ?? framekeeperSource.ingest_endpoint;
-      if (!scanEndpoint) throw new Error("Framekeeper screenshot scan endpoint unavailable.");
+      if (!scanEndpoint) throw new Error("Screenshot folder scan endpoint unavailable.");
       const response = await fetch(`${API_URL}${scanEndpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -620,7 +620,7 @@ export function ArtifactStoragePanel() {
                 <div className="grid grid-cols-[92px_minmax(0,1fr)_auto] gap-2 text-[9px] items-center">
                   <div className="text-retro-text/30 uppercase tracking-wider">Folder</div>
                   <input
-                    aria-label="Framekeeper screenshot folder"
+                    aria-label="Screenshot folder"
                     value={framekeeperRootDraft}
                     disabled={saving || framekeeperRootLockedByEnv}
                     onChange={(event) => setFramekeeperRootDraft(event.target.value)}

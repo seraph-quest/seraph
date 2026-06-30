@@ -79,7 +79,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
     from src.scheduler.jobs.end_of_day_goal_report import run_end_of_day_goal_report
-    from src.scheduler.jobs.framekeeper_ingest import run_framekeeper_image_ingest
+    from src.scheduler.jobs.screenshot_folder_ingest import run_screenshot_folder_ingest
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
 
@@ -155,11 +155,11 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "name": "Weekly activity review",
         },
         {
-            "func": _async_job_wrapper(run_framekeeper_image_ingest, loop),
+            "func": _async_job_wrapper(run_screenshot_folder_ingest, loop),
             "trigger": IntervalTrigger(
-                minutes=_settings_int("framekeeper_ingest_interval_min", 5, minimum=1, maximum=1440)
+                minutes=_settings_int("screenshot_folder_ingest_interval_min", 5, minimum=1, maximum=1440)
             ),
-            "id": "framekeeper_image_ingest",
+            "id": "screenshot_folder_ingest",
             "name": "Screenshot folder image ingest",
         },
         {

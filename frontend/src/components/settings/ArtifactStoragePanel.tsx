@@ -44,13 +44,11 @@ interface ArtifactStorageSettings {
     };
     control_env: Record<string, string>;
   };
-  framekeeper?: {
+  screenshot_folder?: {
     enabled: boolean;
     provider: string;
-    screenshot_folder?: string;
-    screenshot_folder_source?: string;
-    artifact_root: string;
-    artifact_root_source: string;
+    path: string;
+    path_source: string;
     image_count: number;
     last_image_at: string | null;
     status: string;
@@ -61,7 +59,6 @@ interface ArtifactStorageSettings {
     auto_ingest_interval_min: number;
     auto_ingest_limit: number;
     scan_endpoint?: string;
-    ingest_endpoint?: string;
     inspection_endpoint: string;
     inspection_visibility: string;
     control_env: Record<string, string>;
@@ -97,6 +94,7 @@ interface ScreenAnalysisSettings {
   model: string;
   preserve_captures: boolean;
   archive_dir: string;
+  screenshot_folder?: string;
   framekeeper_screenshot_folder?: string;
   framekeeper_artifact_root?: string;
   capture_mode: string;
@@ -133,7 +131,7 @@ interface ReportActionResult {
   };
 }
 
-interface FramekeeperScanResult {
+interface ScreenshotFolderScanResult {
   artifact_root?: string;
   scanned?: number;
   ingested?: number;
@@ -175,7 +173,7 @@ function captureStateTone(settings: ArtifactStorageSettings["screen"]): "normal"
   return settings.daemon_status.capture_ready ? "good" : "warn";
 }
 
-function framekeeperStateTone(settings: NonNullable<ArtifactStorageSettings["framekeeper"]>): "normal" | "good" | "warn" {
+function screenshotFolderStateTone(settings: NonNullable<ArtifactStorageSettings["screenshot_folder"]>): "normal" | "good" | "warn" {
   if (!settings.exists || !settings.readable || settings.status === "invalid_root" || settings.status === "read_error") {
     return "warn";
   }
@@ -263,13 +261,11 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
       },
     },
-    framekeeper: {
+    screenshot_folder: {
       enabled: true,
       provider: "screenshot_folder",
-      screenshot_folder: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-      screenshot_folder_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
-      artifact_root: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-      artifact_root_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
+      path: screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
+      path_source: (screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
       image_count: 0,
       last_image_at: null,
       status: "metadata unavailable",
@@ -283,11 +279,10 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       inspection_endpoint: "/api/observer/screen-artifacts",
       inspection_visibility: "localhost_only",
       control_env: {
-        screenshot_folder: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
-        artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
-        auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
-        auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
-        auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
+        path: "SERAPH_SCREENSHOT_FOLDER",
+        auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+        auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+        auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
       },
     },
     reports: {
@@ -358,10 +353,10 @@ export function ArtifactStoragePanel() {
   const [reportAction, setReportAction] = useState<"idle" | "previewing" | "sending" | "testing">("idle");
   const [reportActionResult, setReportActionResult] = useState<ReportActionResult | null>(null);
   const [reportActionError, setReportActionError] = useState<string | null>(null);
-  const [framekeeperScanning, setFramekeeperScanning] = useState(false);
-  const [framekeeperScanResult, setFramekeeperScanResult] = useState<FramekeeperScanResult | null>(null);
-  const [framekeeperScanError, setFramekeeperScanError] = useState<string | null>(null);
-  const [framekeeperRootDraft, setFramekeeperRootDraft] = useState("");
+  const [screenshotFolderScanning, setScreenshotFolderScanning] = useState(false);
+  const [screenshotFolderScanResult, setScreenshotFolderScanResult] = useState<ScreenshotFolderScanResult | null>(null);
+  const [screenshotFolderScanError, setScreenshotFolderScanError] = useState<string | null>(null);
+  const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -478,10 +473,10 @@ export function ArtifactStoragePanel() {
     archive_retention_days: 365,
     archive_max_mb: 0,
   };
-  const framekeeperSource = settings?.framekeeper ?? null;
-  const framekeeperFolder = framekeeperSource?.screenshot_folder ?? framekeeperSource?.artifact_root ?? "";
-  const framekeeperFolderSource = framekeeperSource?.screenshot_folder_source ?? framekeeperSource?.artifact_root_source ?? "";
-  const framekeeperRootLockedByEnv = framekeeperFolderSource === "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER" || framekeeperFolderSource === "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT";
+  const screenshotFolderSource = settings?.screenshot_folder ?? null;
+  const screenshotFolderPath = screenshotFolderSource?.path ?? "";
+  const screenshotFolderPathSource = screenshotFolderSource?.path_source ?? "";
+  const screenshotFolderLockedByEnv = screenshotFolderPathSource === "SERAPH_SCREENSHOT_FOLDER";
   const previewReadyForSend =
     reportActionResult?.action === "manual-preview" &&
     reportActionResult?.status === "ok" &&
@@ -521,39 +516,39 @@ export function ArtifactStoragePanel() {
     }
   };
 
-  const runFramekeeperScan = async () => {
-    if (framekeeperScanning || framekeeperSource === null) return;
-    setFramekeeperScanning(true);
-    setFramekeeperScanError(null);
+  const runScreenshotFolderScan = async () => {
+    if (screenshotFolderScanning || screenshotFolderSource === null) return;
+    setScreenshotFolderScanning(true);
+    setScreenshotFolderScanError(null);
     try {
-      const scanEndpoint = framekeeperSource.scan_endpoint ?? framekeeperSource.ingest_endpoint;
+      const scanEndpoint = screenshotFolderSource.scan_endpoint;
       if (!scanEndpoint) throw new Error("Screenshot folder scan endpoint unavailable.");
       const response = await fetch(`${API_URL}${scanEndpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ screenshot_folder: framekeeperFolder, limit: 100 }),
+        body: JSON.stringify({ screenshot_folder: screenshotFolderPath, limit: 100 }),
       });
       if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-      const payload = (await response.json()) as FramekeeperScanResult;
+      const payload = (await response.json()) as ScreenshotFolderScanResult;
       if (!mountedRef.current) return;
-      setFramekeeperScanResult(payload);
+      setScreenshotFolderScanResult(payload);
       await fetchSettings(() => !mountedRef.current);
     } catch {
-      if (mountedRef.current) setFramekeeperScanError("Screenshot folder scan failed.");
+      if (mountedRef.current) setScreenshotFolderScanError("Screenshot folder scan failed.");
     } finally {
-      if (mountedRef.current) setFramekeeperScanning(false);
+      if (mountedRef.current) setScreenshotFolderScanning(false);
     }
   };
 
   useEffect(() => {
-    if (framekeeperSource !== null) setFramekeeperRootDraft(framekeeperFolder);
-  }, [framekeeperFolder, framekeeperSource]);
+    if (screenshotFolderSource !== null) setScreenshotFolderDraft(screenshotFolderPath);
+  }, [screenshotFolderPath, screenshotFolderSource]);
 
-  const saveFramekeeperRoot = async () => {
-    if (framekeeperSource === null || framekeeperRootLockedByEnv) return;
-    setFramekeeperScanResult(null);
-    setFramekeeperScanError(null);
-    await updateScreenAnalysis({ framekeeper_screenshot_folder: framekeeperRootDraft.trim() });
+  const saveScreenshotFolder = async () => {
+    if (screenshotFolderSource === null || screenshotFolderLockedByEnv) return;
+    setScreenshotFolderScanResult(null);
+    setScreenshotFolderScanError(null);
+    await updateScreenAnalysis({ screenshot_folder: screenshotFolderDraft.trim() });
   };
 
   return (
@@ -603,82 +598,82 @@ export function ArtifactStoragePanel() {
               </button>
             </div>
 
-            {framekeeperSource && (
+            {screenshotFolderSource && (
               <div className="border border-retro-text/10 px-2 py-2 flex flex-col gap-1">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-[10px] text-retro-text">Local screenshot images</div>
                   <div className={`text-[9px] uppercase tracking-wider ${
-                    framekeeperStateTone(framekeeperSource) === "good"
+                    screenshotFolderStateTone(screenshotFolderSource) === "good"
                       ? "text-green-400"
-                      : framekeeperStateTone(framekeeperSource) === "warn"
+                      : screenshotFolderStateTone(screenshotFolderSource) === "warn"
                         ? "text-yellow-400"
                         : "text-retro-text/50"
                   }`}>
-                    {framekeeperSource.status.replace(/_/g, " ")}
+                    {screenshotFolderSource.status.replace(/_/g, " ")}
                   </div>
                 </div>
                 <div className="grid grid-cols-[92px_minmax(0,1fr)_auto] gap-2 text-[9px] items-center">
                   <div className="text-retro-text/30 uppercase tracking-wider">Folder</div>
                   <input
                     aria-label="Screenshot folder"
-                    value={framekeeperRootDraft}
-                    disabled={saving || framekeeperRootLockedByEnv}
-                    onChange={(event) => setFramekeeperRootDraft(event.target.value)}
+                    value={screenshotFolderDraft}
+                    disabled={saving || screenshotFolderLockedByEnv}
+                    onChange={(event) => setScreenshotFolderDraft(event.target.value)}
                     className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
                   />
                   <button
                     type="button"
                     disabled={
                       saving ||
-                      framekeeperRootLockedByEnv ||
-                      framekeeperRootDraft.trim() === framekeeperFolder
+                      screenshotFolderLockedByEnv ||
+                      screenshotFolderDraft.trim() === screenshotFolderPath
                     }
-                    onClick={() => void saveFramekeeperRoot()}
+                    onClick={() => void saveScreenshotFolder()}
                     className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
                     Save
                   </button>
                 </div>
-                <ArtifactRow label="Folder" value={framekeeperFolder} />
-                <ArtifactRow label="Source" value={sourceLabel(framekeeperFolderSource)} />
+                <ArtifactRow label="Folder" value={screenshotFolderPath} />
+                <ArtifactRow label="Source" value={sourceLabel(screenshotFolderPathSource)} />
                 <ArtifactRow
                   label="Images"
-                  value={`${framekeeperSource.image_count} images${framekeeperSource.last_image_at ? ` · latest ${framekeeperSource.last_image_at}` : ""}`}
-                  tone={framekeeperStateTone(framekeeperSource)}
+                  value={`${screenshotFolderSource.image_count} images${screenshotFolderSource.last_image_at ? ` · latest ${screenshotFolderSource.last_image_at}` : ""}`}
+                  tone={screenshotFolderStateTone(screenshotFolderSource)}
                 />
                 <ArtifactRow
                   label="Auto scan"
                   value={
-                    framekeeperSource.auto_ingest_enabled
-                      ? `every ${framekeeperSource.auto_ingest_interval_min}m · up to ${framekeeperSource.auto_ingest_limit} images`
+                    screenshotFolderSource.auto_ingest_enabled
+                      ? `every ${screenshotFolderSource.auto_ingest_interval_min}m · up to ${screenshotFolderSource.auto_ingest_limit} images`
                       : "off"
                   }
-                  tone={framekeeperSource.auto_ingest_enabled ? "good" : "normal"}
+                  tone={screenshotFolderSource.auto_ingest_enabled ? "good" : "normal"}
                 />
                 <ArtifactRow label="Reads" value="local image files only" tone="good" />
-                <ArtifactRow label="Inspect" value={`${framekeeperSource.inspection_endpoint} (${framekeeperSource.inspection_visibility.replace(/_/g, " ")})`} />
+                <ArtifactRow label="Inspect" value={`${screenshotFolderSource.inspection_endpoint} (${screenshotFolderSource.inspection_visibility.replace(/_/g, " ")})`} />
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button
                     type="button"
-                    disabled={framekeeperScanning || !framekeeperSource.exists || !framekeeperSource.readable}
-                    onClick={() => void runFramekeeperScan()}
+                    disabled={screenshotFolderScanning || !screenshotFolderSource.exists || !screenshotFolderSource.readable}
+                    onClick={() => void runScreenshotFolderScan()}
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
-                    {framekeeperScanning ? "Scanning" : "Scan folder"}
+                    {screenshotFolderScanning ? "Scanning" : "Scan folder"}
                   </button>
                   <div className="text-[9px] text-retro-text/40">
                     local scan only
                   </div>
                 </div>
-                {framekeeperScanError && (
-                  <div className="text-[9px] text-red-400">{framekeeperScanError}</div>
+                {screenshotFolderScanError && (
+                  <div className="text-[9px] text-red-400">{screenshotFolderScanError}</div>
                 )}
-                {framekeeperScanResult && (
+                {screenshotFolderScanResult && (
                   <div className="border border-retro-text/10 px-2 py-1 text-[9px] text-retro-text/60">
-                    scanned {framekeeperScanResult.scanned ?? 0} · added {framekeeperScanResult.ingested ?? 0}
-                    {" · "}duplicates {framekeeperScanResult.skipped_duplicates ?? 0}
-                    {(framekeeperScanResult.rejected?.length ?? 0) > 0
-                      ? ` · rejected ${framekeeperScanResult.rejected?.length ?? 0}`
+                    scanned {screenshotFolderScanResult.scanned ?? 0} · added {screenshotFolderScanResult.ingested ?? 0}
+                    {" · "}duplicates {screenshotFolderScanResult.skipped_duplicates ?? 0}
+                    {(screenshotFolderScanResult.rejected?.length ?? 0) > 0
+                      ? ` · rejected ${screenshotFolderScanResult.rejected?.length ?? 0}`
                       : ""}
                   </div>
                 )}

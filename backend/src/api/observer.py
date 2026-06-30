@@ -51,7 +51,7 @@ class ScreenContextRequest(BaseModel):
     switch_timestamp: float | None = None
 
 
-class FramekeeperScanRequest(BaseModel):
+class ScreenshotFolderScanRequest(BaseModel):
     screenshot_folder: str | None = None
     artifact_root: str | None = None
     limit: int = 100
@@ -591,7 +591,7 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
             "provider": artifacts.get("provider") or "screenshot_folder",
             "summary": observation.summary,
             "image_sha256": artifacts.get("image_sha256"),
-            "analysis": _framekeeper_image_analysis(image_path, artifacts, observation),
+            "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
         }
     path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     try:
@@ -602,17 +602,15 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
 
 
 @router.post("/observer/screenshot-folder/scan")
-@router.post("/observer/framekeeper/scan")
-@router.post("/observer/framekeeper/ingest")
-async def scan_framekeeper_screenshot_folder(body: FramekeeperScanRequest, request: Request) -> dict[str, Any]:
+async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Request) -> dict[str, Any]:
     """Scan a local screenshot folder as a Seraph image source."""
-    from src.observer.framekeeper_source import FramekeeperImageError, scan_framekeeper_root
+    from src.observer.screenshot_folder_source import ScreenshotFolderImageError, scan_screenshot_folder
 
     _require_local_artifact_request(request)
-    root = _framekeeper_artifact_root(body.screenshot_folder or body.artifact_root)
+    root = _screenshot_folder_path(body.screenshot_folder or body.artifact_root)
     try:
-        result = await scan_framekeeper_root(root, limit=body.limit)
-    except FramekeeperImageError as exc:
+        result = await scan_screenshot_folder(root, limit=body.limit)
+    except ScreenshotFolderImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "screenshot_folder": str(root),
@@ -624,10 +622,10 @@ async def scan_framekeeper_screenshot_folder(body: FramekeeperScanRequest, reque
     }
 
 
-def _framekeeper_artifact_root(configured: str | None = None) -> Path:
-    from src.observer.framekeeper_source import resolve_framekeeper_root
+def _screenshot_folder_path(configured: str | None = None) -> Path:
+    from src.observer.screenshot_folder_source import resolve_screenshot_folder
 
-    return resolve_framekeeper_root(configured)
+    return resolve_screenshot_folder(configured)
 
 
 def _image_media_type(path: Path) -> str:
@@ -637,7 +635,7 @@ def _image_media_type(path: Path) -> str:
     return "application/octet-stream"
 
 
-def _framekeeper_image_analysis(
+def _screenshot_folder_image_analysis(
     image_path: Path,
     artifacts: dict[str, Any],
     observation: ScreenObservation,

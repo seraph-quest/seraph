@@ -9,16 +9,16 @@ from src.db.models import ScreenObservation
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_ingest_job_reads_images_from_configured_folder(async_db, tmp_path, monkeypatch):
-    from src.scheduler.jobs.framekeeper_ingest import run_framekeeper_image_ingest
+async def test_screenshot_folder_ingest_job_reads_images_from_configured_folder(async_db, tmp_path, monkeypatch):
+    from src.scheduler.jobs.screenshot_folder_ingest import run_screenshot_folder_ingest
 
-    root = tmp_path / "framekeeper"
+    root = tmp_path / "screenshots"
     image = _write_screenshot(root, "job-capture.png")
-    monkeypatch.setenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", str(root))
-    monkeypatch.setattr("src.scheduler.jobs.framekeeper_ingest.settings.framekeeper_ingest_enabled", True)
-    monkeypatch.setattr("src.scheduler.jobs.framekeeper_ingest.settings.framekeeper_ingest_limit", 20)
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(root))
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_ingest.settings.screenshot_folder_ingest_enabled", True)
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_ingest.settings.screenshot_folder_ingest_limit", 20)
 
-    await run_framekeeper_image_ingest()
+    await run_screenshot_folder_ingest()
 
     async with async_db() as db:
         result = await db.execute(select(ScreenObservation))
@@ -41,15 +41,15 @@ async def test_framekeeper_ingest_job_reads_images_from_configured_folder(async_
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_ingest_job_respects_disabled_setting(async_db, tmp_path, monkeypatch):
-    from src.scheduler.jobs.framekeeper_ingest import run_framekeeper_image_ingest
+async def test_screenshot_folder_ingest_job_respects_disabled_setting(async_db, tmp_path, monkeypatch):
+    from src.scheduler.jobs.screenshot_folder_ingest import run_screenshot_folder_ingest
 
-    root = tmp_path / "framekeeper"
+    root = tmp_path / "screenshots"
     _write_screenshot(root, "disabled.png")
-    monkeypatch.setenv("SERAPH_FRAMEKEEPER_ARTIFACT_ROOT", str(root))
-    monkeypatch.setattr("src.scheduler.jobs.framekeeper_ingest.settings.framekeeper_ingest_enabled", False)
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(root))
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_ingest.settings.screenshot_folder_ingest_enabled", False)
 
-    await run_framekeeper_image_ingest()
+    await run_screenshot_folder_ingest()
 
     async with async_db() as db:
         result = await db.execute(select(ScreenObservation))
@@ -59,5 +59,5 @@ async def test_framekeeper_ingest_job_respects_disabled_setting(async_db, tmp_pa
 def _write_screenshot(root: Path, name: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image = root / name
-    image.write_bytes(b"framekeeper scheduled screenshot")
+    image.write_bytes(b"scheduled screenshot")
     return image

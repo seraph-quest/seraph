@@ -153,8 +153,8 @@ async def test_screen_artifact_root_prefers_screen_analysis_settings(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_screenshot_folder_scan_persists_observation_and_serves_image(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
-    image = _write_framekeeper_screenshot(root, name="capture-valid.png")
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-valid.png")
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -214,8 +214,8 @@ async def test_screenshot_folder_scan_persists_observation_and_serves_image(asyn
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_folder_scan_ignores_non_images(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
+async def test_screenshot_folder_scan_ignores_non_images(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
     root.mkdir()
     (root / "notes.txt").write_text("not a screenshot", encoding="utf-8")
 
@@ -235,8 +235,8 @@ async def test_framekeeper_folder_scan_ignores_non_images(async_db, client, tmp_
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_folder_scan_ignores_temporary_write_files(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
+async def test_screenshot_folder_scan_ignores_temporary_write_files(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
     root.mkdir()
     (root / "capture.png.tmp").write_bytes(b"in-progress screenshot")
 
@@ -256,11 +256,11 @@ async def test_framekeeper_folder_scan_ignores_temporary_write_files(async_db, c
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_folder_scan_rejects_broad_workspace_root(client, tmp_path, monkeypatch):
+async def test_screenshot_folder_scan_rejects_broad_workspace_root(client, tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "capture.png").write_bytes(b"not a dedicated Framekeeper folder")
-    monkeypatch.setattr("src.observer.framekeeper_source.settings.workspace_dir", str(workspace))
+    (workspace / "capture.png").write_bytes(b"not a dedicated screenshot folder")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.settings.workspace_dir", str(workspace))
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -272,32 +272,10 @@ async def test_framekeeper_folder_scan_rejects_broad_workspace_root(client, tmp_
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_legacy_ingest_endpoint_scans_same_image_folder(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
-    _write_framekeeper_screenshot(root, name="capture-legacy.png")
-
-    resp = await client.post(
-        "/api/observer/framekeeper/ingest",
-        json={"screenshot_folder": str(root), "limit": 10},
-    )
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["screenshot_folder"] == str(root.resolve())
-    assert payload["scanned"] == 1
-    assert payload["ingested"] == 1
-
-    async with async_db() as db:
-        result = await db.execute(select(ScreenObservation))
-        observation = result.scalar_one()
-    assert observation.window_title == "capture-legacy.png"
-    assert observation.app_name == "Screenshot Folder"
-
-
 @pytest.mark.asyncio
-async def test_framekeeper_image_analysis_extracts_png_dimensions(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
-    image = _write_framekeeper_screenshot(root, name="capture-real.png", data=_sample_png())
+async def test_screenshot_folder_image_analysis_extracts_png_dimensions(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-real.png", data=_sample_png())
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -319,9 +297,9 @@ async def test_framekeeper_image_analysis_extracts_png_dimensions(async_db, clie
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_jpeg_artifact_uses_jpeg_media_type(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
-    _write_framekeeper_screenshot(root, name="capture.jpg")
+async def test_screenshot_folder_jpeg_artifact_uses_jpeg_media_type(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="capture.jpg")
 
     resp = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -339,9 +317,9 @@ async def test_framekeeper_jpeg_artifact_uses_jpeg_media_type(async_db, client, 
 
 
 @pytest.mark.asyncio
-async def test_framekeeper_folder_scan_skips_duplicate_hash(async_db, client, tmp_path):
-    root = tmp_path / "framekeeper"
-    _write_framekeeper_screenshot(root, name="capture-dupe.png")
+async def test_screenshot_folder_scan_skips_duplicate_hash(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="capture-dupe.png")
 
     first = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -359,7 +337,7 @@ async def test_framekeeper_folder_scan_skips_duplicate_hash(async_db, client, tm
     assert second.json()["skipped_duplicates"] == 1
 
 
-def _write_framekeeper_screenshot(root: Path, *, name: str, data: bytes = b"framekeeper png bytes") -> Path:
+def _write_screenshot(root: Path, *, name: str, data: bytes = b"png bytes") -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image = root / name
     image.write_bytes(data)

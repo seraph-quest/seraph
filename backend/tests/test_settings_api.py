@@ -187,40 +187,39 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_artifact_storage_exposes_framekeeper_source_status(client, tmp_path, monkeypatch):
-    framekeeper_root = tmp_path / "framekeeper"
-    framekeeper_root.mkdir()
-    (framekeeper_root / "capture-1.png").write_bytes(b"png bytes")
-    monkeypatch.setenv("SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER", str(framekeeper_root))
+async def test_artifact_storage_exposes_screenshot_folder_status(client, tmp_path, monkeypatch):
+    screenshot_root = tmp_path / "screenshots"
+    screenshot_root.mkdir()
+    (screenshot_root / "capture-1.png").write_bytes(b"png bytes")
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
 
     resp = await client.get("/api/settings/artifact-storage")
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["framekeeper"]["provider"] == "screenshot_folder"
-    assert data["framekeeper"]["screenshot_folder"] == str(framekeeper_root)
-    assert data["framekeeper"]["screenshot_folder_source"] == "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
-    assert data["framekeeper"]["artifact_root"] == str(framekeeper_root)
-    assert data["framekeeper"]["artifact_root_source"] == "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
-    assert data["framekeeper"]["status"] == "ready"
-    assert data["framekeeper"]["image_count"] == 1
-    assert data["framekeeper"]["stored_artifacts"] == ["image"]
-    assert data["framekeeper"]["auto_ingest_enabled"] is True
-    assert data["framekeeper"]["auto_ingest_interval_min"] == settings.framekeeper_ingest_interval_min
-    assert data["framekeeper"]["auto_ingest_limit"] == settings.framekeeper_ingest_limit
-    assert data["framekeeper"]["control_env"]["screenshot_folder"] == "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
-    assert data["framekeeper"]["control_env"]["auto_ingest_enabled"] == "FRAMEKEEPER_INGEST_ENABLED"
-    assert data["framekeeper"]["exists"] is True
-    assert data["framekeeper"]["readable"] is True
-    assert data["framekeeper"]["scan_endpoint"] == "/api/observer/screenshot-folder/scan"
-    assert "ingest_endpoint" not in data["framekeeper"]
+    assert "framekeeper" not in data
+    assert data["screenshot_folder"]["provider"] == "screenshot_folder"
+    assert data["screenshot_folder"]["path"] == str(screenshot_root)
+    assert data["screenshot_folder"]["path_source"] == "SERAPH_SCREENSHOT_FOLDER"
+    assert data["screenshot_folder"]["status"] == "ready"
+    assert data["screenshot_folder"]["image_count"] == 1
+    assert data["screenshot_folder"]["stored_artifacts"] == ["image"]
+    assert data["screenshot_folder"]["auto_ingest_enabled"] is True
+    assert data["screenshot_folder"]["auto_ingest_interval_min"] == settings.screenshot_folder_ingest_interval_min
+    assert data["screenshot_folder"]["auto_ingest_limit"] == settings.screenshot_folder_ingest_limit
+    assert data["screenshot_folder"]["control_env"]["path"] == "SERAPH_SCREENSHOT_FOLDER"
+    assert data["screenshot_folder"]["control_env"]["auto_ingest_enabled"] == "SCREENSHOT_FOLDER_INGEST_ENABLED"
+    assert data["screenshot_folder"]["exists"] is True
+    assert data["screenshot_folder"]["readable"] is True
+    assert data["screenshot_folder"]["scan_endpoint"] == "/api/observer/screenshot-folder/scan"
+    assert "ingest_endpoint" not in data["screenshot_folder"]
 
 
 @pytest.mark.asyncio
 async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"
-        framekeeper_root = tmp_path / "framekeeper"
+        screenshot_root = tmp_path / "screenshots"
         resp = await client.put(
             "/api/settings/screen-analysis",
             json={
@@ -229,7 +228,7 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
                 "model": "gpt-5.5",
                 "preserve_captures": True,
                 "archive_dir": str(archive),
-                "framekeeper_screenshot_folder": str(framekeeper_root),
+                "screenshot_folder": str(screenshot_root),
             },
         )
 
@@ -240,8 +239,9 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert data["model"] == "gpt-5.5"
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
-        assert data["framekeeper_screenshot_folder"] == str(framekeeper_root)
-        assert data["framekeeper_artifact_root"] == str(framekeeper_root)
+        assert data["screenshot_folder"] == str(screenshot_root)
+        assert data["framekeeper_screenshot_folder"] == str(screenshot_root)
+        assert data["framekeeper_artifact_root"] == str(screenshot_root)
         assert data["max_daily_captures"] == 0
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
@@ -249,14 +249,15 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert storage["screen"]["provider"] == "codex-local"
         assert storage["screen"]["archive_dir"] == str(archive)
         assert storage["screen"]["preservation_enabled"] is True
-        assert storage["framekeeper"]["screenshot_folder"] == str(framekeeper_root)
-        assert storage["framekeeper"]["screenshot_folder_source"] == "screen-analysis-settings"
+        assert storage["screenshot_folder"]["path"] == str(screenshot_root)
+        assert storage["screenshot_folder"]["path_source"] == "screen-analysis-settings"
 
         cleared = await client.put(
             "/api/settings/screen-analysis",
-            json={"framekeeper_screenshot_folder": ""},
+            json={"screenshot_folder": ""},
         )
         assert cleared.status_code == 200
+        assert "screenshot_folder" not in cleared.json()
         assert "framekeeper_screenshot_folder" not in cleared.json()
         assert "framekeeper_artifact_root" not in cleared.json()
 
@@ -272,6 +273,7 @@ async def test_screen_analysis_settings_accept_legacy_framekeeper_artifact_root(
 
         assert resp.status_code == 200
         data = resp.json()
+        assert data["screenshot_folder"] == str(framekeeper_root)
         assert data["framekeeper_screenshot_folder"] == str(framekeeper_root)
         assert data["framekeeper_artifact_root"] == str(framekeeper_root)
 

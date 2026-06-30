@@ -15,9 +15,10 @@ function settingsFromScreenAnalysisFixture(screen: {
   provider: string;
   model: string;
   preserve_captures: boolean;
-  archive_dir: string;
-  framekeeper_screenshot_folder?: string;
-  framekeeper_artifact_root?: string;
+	  archive_dir: string;
+	  screenshot_folder?: string;
+	  framekeeper_screenshot_folder?: string;
+	  framekeeper_artifact_root?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -64,13 +65,11 @@ function settingsFromScreenAnalysisFixture(screen: {
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
       },
     },
-    framekeeper: {
-      enabled: true,
-      provider: "screenshot_folder",
-      screenshot_folder: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-      screenshot_folder_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
-      artifact_root: screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
-      artifact_root_source: (screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
+	    screenshot_folder: {
+	      enabled: true,
+	      provider: "screenshot_folder",
+	      path: screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root ?? "~/Library/Application Support/Framekeeper/artifacts",
+	      path_source: (screen.screenshot_folder ?? screen.framekeeper_screenshot_folder ?? screen.framekeeper_artifact_root) ? "screen-analysis-settings" : "default",
       image_count: 0,
       last_image_at: null,
       status: "empty",
@@ -82,14 +81,13 @@ function settingsFromScreenAnalysisFixture(screen: {
       auto_ingest_limit: 100,
       scan_endpoint: "/api/observer/screenshot-folder/scan",
       inspection_endpoint: "/api/observer/screen-artifacts",
-      inspection_visibility: "localhost_only",
-      control_env: {
-        screenshot_folder: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
-        artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
-        auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
-        auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
-        auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
-      },
+	      inspection_visibility: "localhost_only",
+	      control_env: {
+	        path: "SERAPH_SCREENSHOT_FOLDER",
+	        auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+	        auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+	        auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+	      },
     },
     reports: {
       enabled: false,
@@ -174,11 +172,11 @@ describe("ArtifactStoragePanel", () => {
             archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
           },
         },
-        framekeeper: {
-          enabled: true,
-          provider: "screenshot_folder",
-          artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
-          artifact_root_source: "default",
+	        screenshot_folder: {
+	          enabled: true,
+	          provider: "screenshot_folder",
+	          path: "/Users/test/Library/Application Support/Framekeeper/artifacts",
+	          path_source: "default",
           image_count: 2,
           last_image_at: "2026-06-20T18:40:00Z",
           status: "ready",
@@ -190,14 +188,14 @@ describe("ArtifactStoragePanel", () => {
           auto_ingest_limit: 100,
           scan_endpoint: "/api/observer/screenshot-folder/scan",
           inspection_endpoint: "/api/observer/screen-artifacts",
-          inspection_visibility: "localhost_only",
-          control_env: {
-            artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
-            auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
-            auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
-            auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
-          },
-        },
+	          inspection_visibility: "localhost_only",
+	          control_env: {
+	            path: "SERAPH_SCREENSHOT_FOLDER",
+	            auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+	            auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+	            auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+	          },
+	        },
         reports: {
           enabled: true,
           hour: 21,
@@ -241,8 +239,6 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
     expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();
-    expect(screen.queryByText("/api/observer/framekeeper/scan")).not.toBeInTheDocument();
-    expect(screen.queryByText("/api/observer/framekeeper/ingest")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
@@ -427,13 +423,11 @@ describe("ArtifactStoragePanel", () => {
         artifact_count: 0,
         last_artifact_at: null,
       }),
-      framekeeper: {
-        enabled: true,
-        provider: "screenshot_folder",
-        screenshot_folder: "/Users/test/Library/Application Support/Framekeeper/artifacts",
-        screenshot_folder_source: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
-        artifact_root: "/Users/test/Library/Application Support/Framekeeper/artifacts",
-        artifact_root_source: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
+	      screenshot_folder: {
+	        enabled: true,
+	        provider: "screenshot_folder",
+	        path: "/Users/test/Library/Application Support/Framekeeper/artifacts",
+	        path_source: "SERAPH_SCREENSHOT_FOLDER",
         image_count: 3,
         last_image_at: "2026-06-20T18:40:00Z",
         status: "ready",
@@ -445,28 +439,27 @@ describe("ArtifactStoragePanel", () => {
         auto_ingest_limit: 100,
         scan_endpoint: "/api/observer/screenshot-folder/scan",
         inspection_endpoint: "/api/observer/screen-artifacts",
-        inspection_visibility: "localhost_only",
-        control_env: {
-          screenshot_folder: "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER",
-          artifact_root: "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT",
-          auto_ingest_enabled: "FRAMEKEEPER_INGEST_ENABLED",
-          auto_ingest_interval: "FRAMEKEEPER_INGEST_INTERVAL_MIN",
-          auto_ingest_limit: "FRAMEKEEPER_INGEST_LIMIT",
-        },
-      },
+	        inspection_visibility: "localhost_only",
+	        control_env: {
+	          path: "SERAPH_SCREENSHOT_FOLDER",
+	          auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+	          auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+	          auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+	        },
+	      },
     };
     const refreshedStorage = {
       ...artifactStorage,
-      framekeeper: {
-        ...artifactStorage.framekeeper,
-        image_count: 4,
-      },
+	      screenshot_folder: {
+	        ...artifactStorage.screenshot_folder,
+	        image_count: 4,
+	      },
     };
     fetchMock
       .mockResolvedValueOnce(mockResponse(artifactStorage))
       .mockResolvedValueOnce(
         mockResponse({
-          artifact_root: artifactStorage.framekeeper.artifact_root,
+	          screenshot_folder: artifactStorage.screenshot_folder.path,
           scanned: 3,
           ingested: 1,
           skipped_duplicates: 2,
@@ -485,7 +478,7 @@ describe("ArtifactStoragePanel", () => {
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({
-            screenshot_folder: artifactStorage.framekeeper.screenshot_folder,
+	            screenshot_folder: artifactStorage.screenshot_folder.path,
             limit: 100,
           }),
         }),
@@ -508,17 +501,15 @@ describe("ArtifactStoragePanel", () => {
       artifact_count: 0,
       last_artifact_at: null,
     });
-    const nextRoot = "/Users/test/Framekeeper Screens";
-    const refreshedStorage = {
-      ...artifactStorage,
-      framekeeper: {
-        ...artifactStorage.framekeeper,
-        screenshot_folder: nextRoot,
-        screenshot_folder_source: "screen-analysis-settings",
-        artifact_root: nextRoot,
-        artifact_root_source: "screen-analysis-settings",
-      },
-    };
+	    const nextRoot = "/Users/test/Screenshot Folder";
+	    const refreshedStorage = {
+	      ...artifactStorage,
+	      screenshot_folder: {
+	        ...artifactStorage.screenshot_folder,
+	        path: nextRoot,
+	        path_source: "screen-analysis-settings",
+	      },
+	    };
     fetchMock
       .mockResolvedValueOnce(mockResponse(artifactStorage))
       .mockResolvedValueOnce(mockResponse({ ok: true }))
@@ -535,7 +526,7 @@ describe("ArtifactStoragePanel", () => {
         expect.stringContaining("/api/settings/screen-analysis"),
         expect.objectContaining({
           method: "PUT",
-          body: JSON.stringify({ framekeeper_screenshot_folder: nextRoot }),
+	          body: JSON.stringify({ screenshot_folder: nextRoot }),
         }),
       ),
     );

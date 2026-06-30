@@ -42,7 +42,7 @@ Seraph resolves the screenshot folder in this order:
 
 The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume Framekeeper output, configure Seraph with Framekeeper's screenshot folder explicitly.
 
-Older local settings may still be migrated internally, but new API requests and docs should use only `screenshot_folder`. `artifact_root` and producer-specific key names are not part of the current public contract.
+Seraph does not migrate or resolve producer-specific screenshot keys. API requests, stored settings, and environment configuration use only `screenshot_folder` or `SERAPH_SCREENSHOT_FOLDER`. `artifact_root` and producer-specific key names are not part of the current contract.
 
 ## Folder Scan
 

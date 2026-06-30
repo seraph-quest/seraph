@@ -462,8 +462,8 @@ def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
 
 def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
     roots = [_screen_artifact_root()]
-    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"}:
-        configured_root = str(artifacts.get("screenshot_folder") or artifacts.get("artifact_root") or "").strip()
+    if artifacts.get("provider") == "screenshot_folder":
+        configured_root = str(artifacts.get("screenshot_folder") or "").strip()
         if configured_root:
             roots.append(Path(configured_root).expanduser().resolve())
     return roots
@@ -484,7 +484,11 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
                 payload = json.loads(item.removeprefix("capture_artifacts:"))
             except json.JSONDecodeError:
                 return None
-            return payload if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                return None
+            if str(payload.get("provider") or "").strip() == "framekeeper":
+                return None
+            return payload
     return None
 
 
@@ -499,7 +503,7 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
         "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
     }
-    if artifacts.get("provider") not in {"screenshot_folder", "framekeeper"}:
+    if artifacts.get("provider") != "screenshot_folder":
         artifact_links["codex_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
         artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
     return {
@@ -566,7 +570,7 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"} and not (
+    if artifacts.get("provider") == "screenshot_folder" and not (
         artifacts.get("codex_output_path") or artifacts.get("provider_output_path")
     ):
         return PlainTextResponse(
@@ -585,7 +589,7 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    if artifacts.get("provider") in {"screenshot_folder", "framekeeper"} and not artifacts.get("analysis_path"):
+    if artifacts.get("provider") == "screenshot_folder" and not artifacts.get("analysis_path"):
         image_path = _artifact_path(
             str(artifacts.get("image_path") or ""),
             allowed_roots=_artifact_allowed_roots(artifacts),

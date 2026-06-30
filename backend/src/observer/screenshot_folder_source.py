@@ -34,10 +34,7 @@ class ScreenshotFolderScanResult:
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
-LEGACY_FRAMEKEEPER_HASH_PREFIX = "framekeeper_image_sha256"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
-LEGACY_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV = "SERAPH_FRAMEKEEPER_SCREENSHOT_FOLDER"
-LEGACY_FRAMEKEEPER_ARTIFACT_ROOT_ENV = "SERAPH_FRAMEKEEPER_ARTIFACT_ROOT"
 
 
 def resolve_screenshot_folder(configured: str | None = None) -> Path:
@@ -54,18 +51,9 @@ def resolve_screenshot_folder(configured: str | None = None) -> Path:
         except (OSError, json.JSONDecodeError):
             payload = {}
         if isinstance(payload, dict):
-            settings_root = str(
-                payload.get("screenshot_folder")
-                or payload.get("framekeeper_screenshot_folder")
-                or payload.get("framekeeper_artifact_root")
-                or ""
-            ).strip()
+            settings_root = str(payload.get("screenshot_folder") or "").strip()
             if settings_root:
                 return Path(settings_root).expanduser().resolve()
-    for legacy_env in (LEGACY_FRAMEKEEPER_SCREENSHOT_FOLDER_ENV, LEGACY_FRAMEKEEPER_ARTIFACT_ROOT_ENV):
-        env_root = os.environ.get(legacy_env, "").strip()
-        if env_root:
-            return Path(env_root).expanduser().resolve()
     return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "screenshot-folder"
 
 
@@ -201,19 +189,15 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
 
 
 async def _image_already_ingested(image_sha256: str) -> bool:
-    markers = [
-        f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}",
-        f"{LEGACY_FRAMEKEEPER_HASH_PREFIX}:{image_sha256}",
-    ]
+    marker = f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}"
     async with get_session() as db:
-        for marker in markers:
-            result = await db.execute(
-                select(ScreenObservation)
-                .where(col(ScreenObservation.details_json).contains(marker))
-                .limit(1)
-            )
-            if result.scalar_one_or_none() is not None:
-                return True
+        result = await db.execute(
+            select(ScreenObservation)
+            .where(col(ScreenObservation.details_json).contains(marker))
+            .limit(1)
+        )
+        if result.scalar_one_or_none() is not None:
+            return True
     return False
 
 

@@ -6,7 +6,7 @@ title: Current App Guide
 # Current App Guide
 
 This is the short reader-facing guide to Seraph as it exists in the current
-`v2026.4.11` era. For exhaustive shipped-state detail, use
+`v2026.6.30` era. For exhaustive shipped-state detail, use
 [Development Status](./STATUS.md). For target shape and comparative evidence,
 use the [research tree](/research).
 

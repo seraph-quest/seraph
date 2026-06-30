@@ -9,6 +9,8 @@ const sidebars: SidebarsConfig = {
         'master-roadmap',
         'STATUS',
         'current-app-guide',
+        'screenshot-folder-source',
+        'release-2026-06-30',
       ],
     },
     {

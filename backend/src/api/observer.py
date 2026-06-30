@@ -2,6 +2,7 @@
 
 import json
 import logging
+import mimetypes
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -17,6 +18,7 @@ from src.audit.runtime import log_integration_event
 from src.agent.session import session_manager
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
+from src.observer.image_metadata import local_image_metadata
 from src.observer.manager import context_manager
 from src.observer.native_notification_queue import native_notification_queue
 
@@ -47,6 +49,13 @@ class ScreenContextRequest(BaseModel):
     screen_context: str | None = None
     observation: ScreenObservationData | None = None
     switch_timestamp: float | None = None
+
+
+class ScreenshotFolderScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    screenshot_folder: str | None = None
+    limit: int = 100
 
 
 class NativeNotificationResponse(BaseModel):
@@ -436,15 +445,28 @@ def _require_local_artifact_request(request: Request) -> None:
 
 
 def _screen_artifact_path(raw_path: str | None) -> Path:
+    return _artifact_path(raw_path, allowed_roots=[_screen_artifact_root()])
+
+
+def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
     if not raw_path:
         raise HTTPException(status_code=404, detail="Screen artifact is missing")
-    root = _screen_artifact_root()
     path = Path(raw_path).expanduser().resolve()
-    if not path.is_relative_to(root):
+    roots = [root.expanduser().resolve() for root in allowed_roots]
+    if not any(path.is_relative_to(root) for root in roots):
         raise HTTPException(status_code=403, detail="Screen artifact is outside the configured archive")
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Screen artifact file not found")
     return path
+
+
+def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
+    roots = [_screen_artifact_root()]
+    if artifacts.get("provider") == "screenshot_folder":
+        configured_root = str(artifacts.get("screenshot_folder") or "").strip()
+        if configured_root:
+            roots.append(Path(configured_root).expanduser().resolve())
+    return roots
 
 
 def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] | None:
@@ -462,7 +484,12 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
                 payload = json.loads(item.removeprefix("capture_artifacts:"))
             except json.JSONDecodeError:
                 return None
-            return payload if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                return None
+            provider = str(payload.get("provider") or "").strip()
+            if provider and provider != "screenshot_folder":
+                return None
+            return payload
     return None
 
 
@@ -470,6 +497,16 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
     artifacts = _screen_capture_artifacts(observation)
     if artifacts is None:
         return None
+    artifact_links = {
+        "id": artifacts.get("id"),
+        "created_at": artifacts.get("created_at"),
+        "provider": artifacts.get("provider"),
+        "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
+        "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
+    }
+    if artifacts.get("provider") != "screenshot_folder":
+        artifact_links["codex_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
+        artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/codex-output"
     return {
         "observation_id": observation.id,
         "timestamp": observation.timestamp.isoformat(),
@@ -478,15 +515,7 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "activity": observation.activity_type,
         "project": observation.project,
         "summary": observation.summary,
-        "artifacts": {
-            "id": artifacts.get("id"),
-            "created_at": artifacts.get("created_at"),
-            "provider": artifacts.get("provider"),
-            "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
-            "codex_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
-            "provider_output_url": f"/api/observer/screen-artifacts/{observation.id}/codex-output",
-            "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
-        },
+        "artifacts": artifact_links,
     }
 
 
@@ -532,8 +561,8 @@ async def get_screen_artifact_image(observation_id: str, request: Request) -> Fi
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("image_path") or ""))
-    return FileResponse(path, media_type="image/png")
+    path = _artifact_path(str(artifacts.get("image_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
+    return FileResponse(path, media_type=_image_media_type(path))
 
 
 @router.get("/observer/screen-artifacts/{observation_id}/codex-output")
@@ -542,7 +571,16 @@ async def get_screen_artifact_codex_output(observation_id: str, request: Request
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""))
+    if artifacts.get("provider") == "screenshot_folder" and not (
+        artifacts.get("codex_output_path") or artifacts.get("provider_output_path")
+    ):
+        return PlainTextResponse(
+            "The screenshot folder source only provided the image file. Seraph has no provider output for this capture."
+        )
+    path = _artifact_path(
+        str(artifacts.get("codex_output_path") or artifacts.get("provider_output_path") or ""),
+        allowed_roots=_artifact_allowed_roots(artifacts),
+    )
     return PlainTextResponse(path.read_text(encoding="utf-8"))
 
 
@@ -552,12 +590,81 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     _require_local_artifact_request(request)
     observation = await _screen_artifact_observation(observation_id)
     artifacts = _screen_capture_artifacts(observation) or {}
-    path = _screen_artifact_path(str(artifacts.get("analysis_path") or ""))
+    if artifacts.get("provider") == "screenshot_folder" and not artifacts.get("analysis_path"):
+        image_path = _artifact_path(
+            str(artifacts.get("image_path") or ""),
+            allowed_roots=_artifact_allowed_roots(artifacts),
+        )
+        return {
+            "provider": artifacts.get("provider") or "screenshot_folder",
+            "summary": observation.summary,
+            "image_sha256": artifacts.get("image_sha256"),
+            "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
+        }
+    path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="Saved analysis artifact is invalid") from exc
     return payload if isinstance(payload, dict) else {"value": payload}
+
+
+@router.post("/observer/screenshot-folder/scan")
+async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Request) -> dict[str, Any]:
+    """Scan a local screenshot folder as a Seraph image source."""
+    from src.observer.screenshot_folder_source import ScreenshotFolderImageError, scan_screenshot_folder
+
+    _require_local_artifact_request(request)
+    root = _screenshot_folder_path(body.screenshot_folder)
+    try:
+        result = await scan_screenshot_folder(root, limit=body.limit)
+    except ScreenshotFolderImageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "screenshot_folder": str(root),
+        "scanned": result.scanned,
+        "ingested": result.ingested,
+        "skipped_duplicates": result.skipped_duplicates,
+        "rejected": result.rejected,
+    }
+
+
+def _screenshot_folder_path(configured: str | None = None) -> Path:
+    from src.observer.screenshot_folder_source import resolve_screenshot_folder
+
+    return resolve_screenshot_folder(configured)
+
+
+def _image_media_type(path: Path) -> str:
+    media_type, _ = mimetypes.guess_type(path.name)
+    if media_type in {"image/png", "image/jpeg"}:
+        return media_type
+    return "application/octet-stream"
+
+
+def _screenshot_folder_image_analysis(
+    image_path: Path,
+    artifacts: dict[str, Any],
+    observation: ScreenObservation,
+) -> dict[str, Any]:
+    metadata = local_image_metadata(image_path)
+    return {
+        "source": "local_screenshot_folder",
+        "analysis_owner": "seraph",
+        "image_path": str(image_path),
+        "image_sha256": artifacts.get("image_sha256"),
+        "image_bytes": metadata.get("image_bytes"),
+        "file_format": metadata.get("file_format"),
+        "width": metadata.get("width"),
+        "height": metadata.get("height"),
+        "observation_id": observation.id,
+        "observation_summary": observation.summary,
+        "report_ready": True,
+        "notes": [
+            "The screenshot folder source produced only the image file.",
+            "Seraph computed this local image analysis from the configured screenshot directory.",
+        ],
+    }
 
 
 @router.get("/observer/daemon-status", response_model=DaemonStatusResponse)

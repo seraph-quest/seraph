@@ -44,6 +44,25 @@ interface ArtifactStorageSettings {
     };
     control_env: Record<string, string>;
   };
+  screenshot_folder?: {
+    enabled: boolean;
+    provider: string;
+    path: string;
+    path_source: string;
+    image_count: number;
+    last_image_at: string | null;
+    status: string;
+    exists: boolean;
+    readable: boolean;
+    stored_artifacts: string[];
+    auto_ingest_enabled: boolean;
+    auto_ingest_interval_min: number;
+    auto_ingest_limit: number;
+    scan_endpoint?: string;
+    inspection_endpoint: string;
+    inspection_visibility: string;
+    control_env: Record<string, string>;
+  };
   reports: {
     enabled: boolean;
     hour: number;
@@ -75,6 +94,7 @@ interface ScreenAnalysisSettings {
   model: string;
   preserve_captures: boolean;
   archive_dir: string;
+  screenshot_folder?: string;
   capture_mode: string;
   cadence_seconds: number | null;
   daemon_connected: boolean;
@@ -109,6 +129,14 @@ interface ReportActionResult {
   };
 }
 
+interface ScreenshotFolderScanResult {
+  screenshot_folder?: string;
+  scanned?: number;
+  ingested?: number;
+  skipped_duplicates?: number;
+  rejected?: Array<{ image_path?: string; reason?: string }>;
+}
+
 function boolLabel(value: boolean): string {
   return value ? "On" : "Off";
 }
@@ -141,6 +169,13 @@ function captureStateTone(settings: ArtifactStorageSettings["screen"]): "normal"
   if (settings.daemon_status.last_error || !settings.daemon_connected) return "warn";
   if (settings.capture_mode === "on_switch") return "normal";
   return settings.daemon_status.capture_ready ? "good" : "warn";
+}
+
+function screenshotFolderStateTone(settings: NonNullable<ArtifactStorageSettings["screenshot_folder"]>): "normal" | "good" | "warn" {
+  if (!settings.exists || !settings.readable || settings.status === "invalid_root" || settings.status === "read_error") {
+    return "warn";
+  }
+  return settings.image_count > 0 ? "good" : "normal";
 }
 
 function isArtifactStorageSettings(value: unknown): value is ArtifactStorageSettings {
@@ -224,6 +259,30 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
         archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
       },
     },
+    screenshot_folder: {
+      enabled: true,
+      provider: "screenshot_folder",
+      path: screen.screenshot_folder ?? "Seraph workspace artifacts/screenshot-folder",
+      path_source: screen.screenshot_folder ? "screen-analysis-settings" : "default",
+      image_count: 0,
+      last_image_at: null,
+      status: "metadata unavailable",
+      exists: false,
+      readable: false,
+      stored_artifacts: ["image"],
+      auto_ingest_enabled: true,
+      auto_ingest_interval_min: 5,
+      auto_ingest_limit: 100,
+      scan_endpoint: "/api/observer/screenshot-folder/scan",
+      inspection_endpoint: "/api/observer/screen-artifacts",
+      inspection_visibility: "localhost_only",
+      control_env: {
+        path: "SERAPH_SCREENSHOT_FOLDER",
+        auto_ingest_enabled: "SCREENSHOT_FOLDER_INGEST_ENABLED",
+        auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
+        auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
+      },
+    },
     reports: {
       enabled: false,
       hour: 21,
@@ -292,6 +351,10 @@ export function ArtifactStoragePanel() {
   const [reportAction, setReportAction] = useState<"idle" | "previewing" | "sending" | "testing">("idle");
   const [reportActionResult, setReportActionResult] = useState<ReportActionResult | null>(null);
   const [reportActionError, setReportActionError] = useState<string | null>(null);
+  const [screenshotFolderScanning, setScreenshotFolderScanning] = useState(false);
+  const [screenshotFolderScanResult, setScreenshotFolderScanResult] = useState<ScreenshotFolderScanResult | null>(null);
+  const [screenshotFolderScanError, setScreenshotFolderScanError] = useState<string | null>(null);
+  const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -316,10 +379,10 @@ export function ArtifactStoragePanel() {
         data = artifactData;
         hasArtifactMetadata = true;
       }
-      if (data === null) throw new Error("Screen capture settings response is unavailable.");
+      if (data === null) throw new Error("Screenshot folder settings response is unavailable.");
       if (canPublish()) {
         setSettings(data);
-        setMetadataWarning(hasArtifactMetadata ? null : "Archive metadata loading; screen capture controls are live.");
+        setMetadataWarning(hasArtifactMetadata ? null : "Archive metadata loading; analysis controls are live.");
         setFailed(false);
       }
       if (!hasArtifactMetadata) {
@@ -330,12 +393,12 @@ export function ArtifactStoragePanel() {
               setSettings(artifactData);
               setMetadataWarning(null);
             } else {
-              setMetadataWarning("Archive metadata degraded; screen capture controls are still live.");
+              setMetadataWarning("Archive metadata degraded; analysis controls are still live.");
             }
           })
           .catch(() => {
             if (canPublish()) {
-              setMetadataWarning("Archive metadata degraded; screen capture controls are still live.");
+              setMetadataWarning("Archive metadata degraded; analysis controls are still live.");
             }
           });
       }
@@ -408,6 +471,10 @@ export function ArtifactStoragePanel() {
     archive_retention_days: 365,
     archive_max_mb: 0,
   };
+  const screenshotFolderSource = settings?.screenshot_folder ?? null;
+  const screenshotFolderPath = screenshotFolderSource?.path ?? "";
+  const screenshotFolderPathSource = screenshotFolderSource?.path_source ?? "";
+  const screenshotFolderLockedByEnv = screenshotFolderPathSource === "SERAPH_SCREENSHOT_FOLDER";
   const previewReadyForSend =
     reportActionResult?.action === "manual-preview" &&
     reportActionResult?.status === "ok" &&
@@ -447,15 +514,50 @@ export function ArtifactStoragePanel() {
     }
   };
 
+  const runScreenshotFolderScan = async () => {
+    if (screenshotFolderScanning || screenshotFolderSource === null) return;
+    setScreenshotFolderScanning(true);
+    setScreenshotFolderScanError(null);
+    try {
+      const scanEndpoint = screenshotFolderSource.scan_endpoint;
+      if (!scanEndpoint) throw new Error("Screenshot folder scan endpoint unavailable.");
+      const response = await fetch(`${API_URL}${scanEndpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ screenshot_folder: screenshotFolderPath, limit: 100 }),
+      });
+      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      const payload = (await response.json()) as ScreenshotFolderScanResult;
+      if (!mountedRef.current) return;
+      setScreenshotFolderScanResult(payload);
+      await fetchSettings(() => !mountedRef.current);
+    } catch {
+      if (mountedRef.current) setScreenshotFolderScanError("Screenshot folder scan failed.");
+    } finally {
+      if (mountedRef.current) setScreenshotFolderScanning(false);
+    }
+  };
+
+  useEffect(() => {
+    if (screenshotFolderSource !== null) setScreenshotFolderDraft(screenshotFolderPath);
+  }, [screenshotFolderPath, screenshotFolderSource]);
+
+  const saveScreenshotFolder = async () => {
+    if (screenshotFolderSource === null || screenshotFolderLockedByEnv) return;
+    setScreenshotFolderScanResult(null);
+    setScreenshotFolderScanError(null);
+    await updateScreenAnalysis({ screenshot_folder: screenshotFolderDraft.trim() });
+  };
+
   return (
     <div className="px-1">
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
-        Screen Capture
+        Screenshot Folder
       </div>
       <div className="border border-retro-text/10 rounded px-2 py-2 flex flex-col gap-2">
         {failed ? (
           <div className="flex flex-col gap-2">
-            <div className="text-[9px] text-red-400">Screen capture settings unavailable.</div>
+            <div className="text-[9px] text-red-400">Screenshot folder settings unavailable.</div>
             <button
               type="button"
               onClick={() => void fetchSettings()}
@@ -465,7 +567,7 @@ export function ArtifactStoragePanel() {
             </button>
           </div>
         ) : settings === null ? (
-          <div className="text-[9px] text-retro-text/40">Loading screen capture settings...</div>
+          <div className="text-[9px] text-retro-text/40">Loading screenshot folder settings...</div>
         ) : (
           <>
             {metadataWarning && (
@@ -475,9 +577,9 @@ export function ArtifactStoragePanel() {
             )}
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
-                <div className="text-[10px] text-retro-text">Screen analysis</div>
+                <div className="text-[10px] text-retro-text">Seraph analysis</div>
                 <div className="text-[9px] text-retro-text/40 truncate">
-                  screenshots, provider output, analysis JSON
+                  scans a local screenshot folder; reports stay in Seraph
                 </div>
               </div>
               <button
@@ -493,6 +595,88 @@ export function ArtifactStoragePanel() {
                 {boolLabel(settings.screen.analysis_enabled)}
               </button>
             </div>
+
+            {screenshotFolderSource && (
+              <div className="border border-retro-text/10 px-2 py-2 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] text-retro-text">Local screenshot images</div>
+                  <div className={`text-[9px] uppercase tracking-wider ${
+                    screenshotFolderStateTone(screenshotFolderSource) === "good"
+                      ? "text-green-400"
+                      : screenshotFolderStateTone(screenshotFolderSource) === "warn"
+                        ? "text-yellow-400"
+                        : "text-retro-text/50"
+                  }`}>
+                    {screenshotFolderSource.status.replace(/_/g, " ")}
+                  </div>
+                </div>
+                <div className="grid grid-cols-[92px_minmax(0,1fr)_auto] gap-2 text-[9px] items-center">
+                  <div className="text-retro-text/30 uppercase tracking-wider">Folder</div>
+                  <input
+                    aria-label="Screenshot folder"
+                    value={screenshotFolderDraft}
+                    disabled={saving || screenshotFolderLockedByEnv}
+                    onChange={(event) => setScreenshotFolderDraft(event.target.value)}
+                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      saving ||
+                      screenshotFolderLockedByEnv ||
+                      screenshotFolderDraft.trim() === screenshotFolderPath
+                    }
+                    onClick={() => void saveScreenshotFolder()}
+                    className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    Save
+                  </button>
+                </div>
+                <ArtifactRow label="Folder" value={screenshotFolderPath} />
+                <ArtifactRow label="Source" value={sourceLabel(screenshotFolderPathSource)} />
+                <ArtifactRow
+                  label="Images"
+                  value={`${screenshotFolderSource.image_count} images${screenshotFolderSource.last_image_at ? ` · latest ${screenshotFolderSource.last_image_at}` : ""}`}
+                  tone={screenshotFolderStateTone(screenshotFolderSource)}
+                />
+                <ArtifactRow
+                  label="Auto scan"
+                  value={
+                    screenshotFolderSource.auto_ingest_enabled
+                      ? `every ${screenshotFolderSource.auto_ingest_interval_min}m · up to ${screenshotFolderSource.auto_ingest_limit} images`
+                      : "off"
+                  }
+                  tone={screenshotFolderSource.auto_ingest_enabled ? "good" : "normal"}
+                />
+                <ArtifactRow label="Reads" value="local image files only" tone="good" />
+                <ArtifactRow label="Inspect" value={`${screenshotFolderSource.inspection_endpoint} (${screenshotFolderSource.inspection_visibility.replace(/_/g, " ")})`} />
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={screenshotFolderScanning || !screenshotFolderSource.exists || !screenshotFolderSource.readable}
+                    onClick={() => void runScreenshotFolderScan()}
+                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    {screenshotFolderScanning ? "Scanning" : "Scan folder"}
+                  </button>
+                  <div className="text-[9px] text-retro-text/40">
+                    local scan only
+                  </div>
+                </div>
+                {screenshotFolderScanError && (
+                  <div className="text-[9px] text-red-400">{screenshotFolderScanError}</div>
+                )}
+                {screenshotFolderScanResult && (
+                  <div className="border border-retro-text/10 px-2 py-1 text-[9px] text-retro-text/60">
+                    scanned {screenshotFolderScanResult.scanned ?? 0} · added {screenshotFolderScanResult.ingested ?? 0}
+                    {" · "}duplicates {screenshotFolderScanResult.skipped_duplicates ?? 0}
+                    {(screenshotFolderScanResult.rejected?.length ?? 0) > 0
+                      ? ` · rejected ${screenshotFolderScanResult.rejected?.length ?? 0}`
+                      : ""}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-[9px]">
               <div className="text-retro-text/30 uppercase tracking-wider">Provider</div>

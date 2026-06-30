@@ -132,6 +132,133 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
 
 
 @pytest.mark.asyncio
+async def test_build_report_uses_screenshot_digests_for_needle_movement(async_db):
+    from src.db.models import Goal, MemoryEpisode, MemoryEpisodeType
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id="goal-digest",
+                path="/",
+                level="daily",
+                title="Ship Seraph screenshot digest report",
+                domain="productivity",
+                status="active",
+                sort_order=0,
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Screenshot digest window",
+                content="\n".join(
+                    [
+                        "Screenshot digest 2026-06-20T10:00:00+00:00 to 2026-06-20T10:30:00+00:00",
+                        "Observations: 2",
+                        "Progression:",
+                        "- Seraph screenshot digest report implementation was visible.",
+                        "Evidence observation IDs:",
+                        "- obs-a",
+                        "- obs-b",
+                        "Blockers:",
+                        "- Billing migration is blocked by an unrelated provider.",
+                        "Drift:",
+                        "- None",
+                    ]
+                ),
+                metadata_json=json.dumps(
+                    {
+                        "artifact_schema": "seraph.screenshot_observation_digest.v1",
+                        "window_start": "2026-06-20T10:00:00+00:00",
+                        "window_end": "2026-06-20T10:30:00+00:00",
+                        "observation_count": 2,
+                        "observation_ids": ["obs-a", "obs-b"],
+                    },
+                    sort_keys=True,
+                ),
+                observed_at=datetime(2026, 6, 20, 10, 30, tzinfo=timezone.utc),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch.object(
+        settings, "end_of_day_report_llm_enabled", False
+    ):
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["screenshot_digests"]["count"] == 1
+    assert report["goal_alignment"][0]["status"] == "aligned"
+    assert report["goal_alignment"][0]["needle_movement"] == "pushed"
+    assert report["goal_alignment"][0]["source_observation_ids"] == ["obs-a", "obs-b"]
+    assert "Screenshot observation digests:" in report["body"]
+    assert "- Pushed-the-needle goals: 1" in report["body"]
+    assert "needle=pushed" in report["body"]
+
+
+@pytest.mark.asyncio
+async def test_build_report_marks_digest_goal_blocked(async_db):
+    from src.db.models import Goal, MemoryEpisode, MemoryEpisodeType
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    async with async_db() as db:
+        db.add(
+            Goal(
+                id="goal-blocked",
+                path="/",
+                level="daily",
+                title="Finish Seraph screenshot reports",
+                domain="productivity",
+                status="active",
+                sort_order=0,
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Screenshot digest window",
+                content="\n".join(
+                    [
+                        "Screenshot digest 2026-06-20T11:00:00+00:00 to 2026-06-20T11:30:00+00:00",
+                        "Observations: 1",
+                        "Progression:",
+                        "- Seraph screenshot reports were being tested.",
+                        "Evidence observation IDs:",
+                        "- obs-c",
+                        "Blockers:",
+                        "- Seraph screenshot reports are blocked by local VLM provider failure.",
+                        "Drift:",
+                        "- None",
+                    ]
+                ),
+                metadata_json=json.dumps(
+                    {
+                        "artifact_schema": "seraph.screenshot_observation_digest.v1",
+                        "window_start": "2026-06-20T11:00:00+00:00",
+                        "window_end": "2026-06-20T11:30:00+00:00",
+                        "observation_count": 1,
+                        "observation_ids": ["obs-c"],
+                    },
+                    sort_keys=True,
+                ),
+                observed_at=datetime(2026, 6, 20, 11, 30, tzinfo=timezone.utc),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch.object(
+        settings, "end_of_day_report_llm_enabled", False
+    ):
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["goal_alignment"][0]["status"] == "blocked"
+    assert report["goal_alignment"][0]["needle_movement"] == "blocked"
+    assert "local VLM provider failure" in report["goal_alignment"][0]["evidence"][0]
+    assert "- Blocked goals: 1" in report["body"]
+    assert "needle=blocked" in report["body"]
+
+
+@pytest.mark.asyncio
 async def test_build_report_does_not_treat_named_external_provider_as_source(async_db):
     from src.db.models import ScreenObservation
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report

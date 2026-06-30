@@ -230,6 +230,10 @@ The digest is intentionally text-only and privacy-bounded. It never embeds raw s
 
 Digest writes are idempotent per window and schema. If a window has not changed, Seraph keeps the existing episode. If new observations appear in the same window, Seraph updates the same episode instead of creating duplicates.
 
+End-of-day reports consume these rolling digest episodes as the day-level screenshot evidence layer. The report builder passes redacted digest text into the optional LLM prompt and into the deterministic local fallback. Goal comparison uses the digest evidence to classify each active goal as aligned, blocked, drifted, or unclear, and records whether the day pushed the needle, got blocked, drifted, or remained unclear.
+
+The final report stores digest count and source screenshot observation ids in report metadata for traceability. It still does not copy raw screenshots, image hashes, long visible text, or provider transcripts into the report.
+
 Current model notes:
 
 - Gemma 4 26B-A4B quantized via Unsloth is the preferred 24 GB GPU benchmark target.

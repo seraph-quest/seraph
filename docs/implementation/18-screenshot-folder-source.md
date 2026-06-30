@@ -199,7 +199,19 @@ SERAPH_LOCAL_VLM_BASE_URL=http://GPU_SERVER_IP:8088
 SERAPH_LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
 ```
 
-When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`. If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`.
+If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+
+Each screenshot observation carries Seraph-owned analysis status details:
+
+- `pending` when the screenshot was ingested but no semantic provider was configured
+- `succeeded` when a validated semantic analysis payload was stored
+- `failed` when the provider call or schema validation failed
+- `needs_reanalysis` when a stored semantic payload was produced by an older prompt, schema, or configured model
+
+Duplicate screenshot files are still suppressed by image SHA-256, so the same image cannot accidentally create a second semantic observation.
+Reanalysis is explicit and local-only through `POST /api/observer/screen-artifacts/{observation_id}/reanalyze`; callers must provide one of `prompt_version_changed`, `model_version_changed`, `provider_failure_retry`, or `manual_operator_request`.
+Reanalysis replaces the semantic analysis/status details on the existing observation and preserves the original screenshot hash and file mtime-derived capture timestamp.
 
 Current model notes:
 

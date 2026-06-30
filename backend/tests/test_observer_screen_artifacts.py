@@ -121,23 +121,23 @@ async def test_screen_artifact_endpoints_are_localhost_only(app, async_db, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_screen_artifacts_ignore_legacy_framekeeper_provider(async_db, client, tmp_path, monkeypatch):
+async def test_screen_artifacts_ignore_named_external_provider(async_db, client, tmp_path, monkeypatch):
     monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
     image_path = tmp_path / "capture.png"
     image_path.write_bytes(b"png bytes")
     artifacts = {
-        "id": "legacy-framekeeper-artifact",
-        "provider": "framekeeper",
+        "id": "external-recorder-artifact",
+        "provider": "external_recorder",
         "screenshot_folder": str(tmp_path),
         "image_path": str(image_path),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     async with async_db() as db:
         observation = ScreenObservation(
-            app_name="Framekeeper",
+            app_name="External Recorder",
             window_title="capture.png",
             activity_type="screen",
-            summary="Legacy producer-specific artifact",
+            summary="Producer-specific artifact",
             details_json=json.dumps(["capture_artifacts:" + json.dumps(artifacts)]),
         )
         db.add(observation)

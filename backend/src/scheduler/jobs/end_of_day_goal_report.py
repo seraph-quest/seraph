@@ -331,7 +331,7 @@ def _observation_source(observation: ScreenObservation) -> str:
                         continue
                     if isinstance(artifacts, dict):
                         provider = str(artifacts.get("provider") or artifacts.get("source") or "").strip()
-                        if provider and provider != "framekeeper":
+                        if provider == "screenshot_folder":
                             return provider
     if observation.app_name == "Screenshot Folder":
         return "screenshot_folder"

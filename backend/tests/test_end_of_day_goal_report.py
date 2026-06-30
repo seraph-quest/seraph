@@ -91,7 +91,7 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
             {
                 "provider": "screenshot_folder",
                 "source": "local_image_directory",
-                "image_path": "/tmp/framekeeper/capture.png",
+                "image_path": "/tmp/screenshot-recorder/capture.png",
                 "image_sha256": "abc123",
                 "image_bytes": 67,
                 "file_format": "png",
@@ -128,11 +128,11 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
     assert "- screenshot_folder: 1 observation, 0m" in report["body"]
     assert "Screenshot samples:" in report["body"]
     assert "- capture.png (png, 1x1, 67 B)" in report["body"]
-    assert "/tmp/framekeeper" not in report["body"]
+    assert "/tmp/screenshot-recorder" not in report["body"]
 
 
 @pytest.mark.asyncio
-async def test_build_report_does_not_treat_framekeeper_as_source(async_db):
+async def test_build_report_does_not_treat_named_external_provider_as_source(async_db):
     from src.db.models import ScreenObservation
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
 
@@ -140,7 +140,7 @@ async def test_build_report_does_not_treat_framekeeper_as_source(async_db):
         "capture_artifacts:"
         + json.dumps(
             {
-                "provider": "framekeeper",
+                "provider": "external_recorder",
                 "image_path": "/tmp/screenshots/capture.png",
                 "image_bytes": 67,
                 "file_format": "png",
@@ -152,10 +152,10 @@ async def test_build_report_does_not_treat_framekeeper_as_source(async_db):
         db.add(
             ScreenObservation(
                 timestamp=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
-                app_name="Framekeeper",
+                app_name="External Recorder",
                 window_title="capture.png",
                 activity_type="screen",
-                summary="Legacy producer-specific observation.",
+                summary="Producer-specific observation.",
                 details_json=json.dumps(details),
             )
         )
@@ -166,9 +166,9 @@ async def test_build_report_does_not_treat_framekeeper_as_source(async_db):
         report = await build_end_of_day_goal_report(date(2026, 6, 20))
 
     assert report["summary"]["source_observations"] == {"observer_daemon": 1}
-    assert "framekeeper" not in report["summary"]["source_observations"]
+    assert "external_recorder" not in report["summary"]["source_observations"]
     assert report["summary"]["screenshot_samples"] == []
-    assert "framekeeper" not in report["body"].lower()
+    assert "external recorder" not in report["body"].lower()
 
 
 @pytest.mark.asyncio

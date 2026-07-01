@@ -719,6 +719,51 @@ async def test_email_delivery_uses_resend_template_when_configured():
 
 
 @pytest.mark.asyncio
+async def test_email_delivery_resend_template_missing_key_logs_skipped():
+    from src.scheduler.jobs.end_of_day_goal_report import _recipient_hash, deliver_report_email
+
+    with patch.object(settings, "email_reports_enabled", True), patch.object(
+        settings, "email_reports_preview_required", False
+    ), patch.object(settings, "email_reports_to", "user@example.com"), patch.object(
+        settings, "email_reports_from", "Seraph <reports@example.com>"
+    ), patch.object(settings, "email_reports_to_allowlist", "user@example.com"), patch.object(
+        settings, "resend_api_key", ""
+    ), patch.object(settings, "resend_template_id", "tpl_seraph_daily"), patch(
+        "src.scheduler.jobs.end_of_day_goal_report.log_integration_event",
+        new=AsyncMock(),
+    ) as log_event:
+        result = await deliver_report_email(
+            {
+                "date": "2026-06-20",
+                "timezone": "UTC",
+                "body": "hello from template",
+                "summary": {
+                    "total_tracked_minutes": 42,
+                    "switch_count": 7,
+                    "total_observations": 12,
+                },
+                "screenshot_digests": {"count": 2},
+                "goal_alignment": [{"status": "aligned", "needle_movement": "pushed"}],
+                "analysis_provider": "llm:test",
+            }
+        )
+
+    assert result.status == "skipped"
+    assert result.reason == "resend_api_key_missing"
+    assert result.recipient_hash == _recipient_hash("user@example.com")
+    log_event.assert_awaited_once_with(
+        integration_type="email_report",
+        name="resend_template",
+        outcome="skipped",
+        details={
+            "reason": "resend_api_key_missing",
+            "recipient_hash": _recipient_hash("user@example.com"),
+            "provider_receipt": None,
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_manual_report_preview_stores_report_and_receipt(async_db, tmp_path):
     from src.scheduler.jobs.end_of_day_goal_report import run_manual_end_of_day_goal_report
 

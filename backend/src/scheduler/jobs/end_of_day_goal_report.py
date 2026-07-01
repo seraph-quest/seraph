@@ -781,13 +781,6 @@ async def deliver_report_email(
             reason="recipient_not_allowlisted",
             recipient_hash=recipient_digest,
         )
-    if not settings.smtp_host:
-        return EmailDeliveryResult(
-            status="skipped",
-            reason="smtp_host_missing",
-            recipient_hash=recipient_digest,
-        )
-
     subject = f"Seraph end-of-day report: {report['date']}"
     if settings.resend_template_id.strip():
         try:
@@ -808,16 +801,25 @@ async def deliver_report_email(
         await log_integration_event(
             integration_type="email_report",
             name="resend_template",
-            outcome="succeeded",
+            outcome="succeeded" if result.status == "sent" else "skipped",
             details={
+                "reason": result.reason,
                 "recipient_hash": recipient_digest,
                 "provider_receipt": result.provider_receipt,
             },
         )
         return EmailDeliveryResult(
             status=result.status,
+            reason=result.reason,
             recipient_hash=recipient_digest,
             provider_receipt=result.provider_receipt,
+        )
+
+    if not settings.smtp_host:
+        return EmailDeliveryResult(
+            status="skipped",
+            reason="smtp_host_missing",
+            recipient_hash=recipient_digest,
         )
 
     message = EmailMessage()

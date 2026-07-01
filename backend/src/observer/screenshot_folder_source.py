@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
+_SCAN_LOCK = asyncio.Lock()
 
 
 def resolve_screenshot_folder(configured: str | None = None) -> Path:
@@ -66,42 +68,49 @@ def resolve_screenshot_folder(configured: str | None = None) -> Path:
 
 async def scan_screenshot_folder(root: Path, *, limit: int = 100) -> ScreenshotFolderScanResult:
     """Scan a local screenshot directory and persist new images as observations."""
-    screenshot_root = root.expanduser().resolve()
-    validate_screenshot_folder_root(screenshot_root)
-    image_paths = _image_paths(screenshot_root, limit=max(limit, 1))
-    ingested = 0
-    skipped = 0
-    rejected: list[dict[str, str]] = []
+    async with _SCAN_LOCK:
+        screenshot_root = root.expanduser().resolve()
+        validate_screenshot_folder_root(screenshot_root)
+        ingest_limit = max(limit, 1)
+        image_paths = await asyncio.to_thread(_image_paths, screenshot_root)
+        scanned = 0
+        ingested = 0
+        skipped = 0
+        rejected: list[dict[str, str]] = []
 
-    for image_path in image_paths:
-        try:
-            observation = await _image_to_observation(image_path, screenshot_root)
-            if observation is None:
-                skipped += 1
-                continue
-            await screen_observation_repo.create(**observation)
-            ingested += 1
-        except Exception as exc:
-            rejected.append({"image_path": str(image_path), "reason": str(exc)})
+        for image_path in image_paths:
+            if ingested >= ingest_limit:
+                break
+            scanned += 1
+            await asyncio.sleep(0)
+            try:
+                observation = await _image_to_observation(image_path, screenshot_root)
+                if observation is None:
+                    skipped += 1
+                    continue
+                await screen_observation_repo.create(**observation)
+                ingested += 1
+            except Exception as exc:
+                rejected.append({"image_path": str(image_path.resolve()), "reason": str(exc)})
 
-    await log_integration_event(
-        integration_type="screenshot_folder",
-        name="screenshot_scan",
-        outcome="succeeded" if not rejected else "degraded",
-        details={
-            "screenshot_folder": str(screenshot_root),
-            "scanned": len(image_paths),
-            "ingested": ingested,
-            "skipped_duplicates": skipped,
-            "rejected_count": len(rejected),
-        },
-    )
-    return ScreenshotFolderScanResult(
-        scanned=len(image_paths),
-        ingested=ingested,
-        skipped_duplicates=skipped,
-        rejected=rejected,
-    )
+        await log_integration_event(
+            integration_type="screenshot_folder",
+            name="screenshot_scan",
+            outcome="succeeded" if not rejected else "degraded",
+            details={
+                "screenshot_folder": str(screenshot_root),
+                "scanned": scanned,
+                "ingested": ingested,
+                "skipped_duplicates": skipped,
+                "rejected_count": len(rejected),
+            },
+        )
+        return ScreenshotFolderScanResult(
+            scanned=scanned,
+            ingested=ingested,
+            skipped_duplicates=skipped,
+            rejected=rejected,
+        )
 
 
 def validate_screenshot_folder_root(root: Path) -> None:
@@ -129,19 +138,18 @@ def _dangerous_scan_roots() -> set[Path]:
     return roots
 
 
-def _image_paths(root: Path, *, limit: int) -> list[Path]:
+def _image_paths(root: Path) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return []
-    images = sorted(
+    return sorted(
         (
-            path.resolve()
+            path
             for path in root.rglob("*")
             if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
         ),
-        key=lambda path: path.stat().st_mtime,
+        key=lambda path: _capture_timestamp(path, root)[0].timestamp(),
         reverse=True,
     )
-    return images[:limit]
 
 
 async def _image_to_observation(image_path: Path, root: Path) -> dict[str, object] | None:
@@ -153,21 +161,24 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
     if not resolved.is_file():
         raise ScreenshotFolderImageError("image file not found")
 
-    image_sha256 = _sha256_file(resolved)
+    image_sha256 = await asyncio.to_thread(_sha256_file, resolved)
     if await _image_already_ingested(image_sha256):
         return None
 
     stat = resolved.stat()
-    metadata = local_image_metadata(resolved)
-    captured_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+    metadata = await asyncio.to_thread(local_image_metadata, resolved)
+    captured_at, captured_at_source = _capture_timestamp(resolved, root)
+    relative_path = resolved.relative_to(root).as_posix()
     capture_id = image_sha256[:16]
     artifacts = {
         "id": capture_id,
         "provider": SCREENSHOT_FOLDER_PROVIDER,
         "source": "local_image_directory",
         "created_at": captured_at.isoformat(),
+        "created_at_source": captured_at_source,
         "screenshot_folder": str(root),
         "image_path": str(resolved),
+        "relative_path": relative_path,
         "image_sha256": image_sha256,
         "image_bytes": stat.st_size,
         "file_format": metadata.get("file_format"),
@@ -201,6 +212,29 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         "blocked": False,
         "timestamp": captured_at,
     }
+
+
+def _capture_timestamp(image_path: Path, root: Path) -> tuple[datetime, str]:
+    relative = image_path.relative_to(root)
+    for part in (image_path.stem, *reversed(relative.parts[:-1])):
+        parsed = _parse_capture_timestamp_token(part)
+        if parsed is not None:
+            return parsed, "path"
+    return datetime.fromtimestamp(image_path.stat().st_mtime, timezone.utc), "file_mtime"
+
+
+def _parse_capture_timestamp_token(token: str) -> datetime | None:
+    seconds_part, separator, fractional_part = token.partition("-")
+    if not separator or not seconds_part.isdigit() or not fractional_part.isdigit():
+        return None
+    try:
+        seconds = int(seconds_part)
+        fractional = int(fractional_part[:9].ljust(9, "0"))
+    except ValueError:
+        return None
+    if seconds <= 0:
+        return None
+    return datetime.fromtimestamp(seconds + fractional / 1_000_000_000, timezone.utc)
 
 
 async def _image_already_ingested(image_sha256: str) -> bool:

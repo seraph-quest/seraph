@@ -1,5 +1,6 @@
 """Settings API — runtime mode management."""
 
+import asyncio
 import json
 import logging
 import os
@@ -9,12 +10,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import col, select
 
 from config.settings import settings
 from src.db.engine import get_session as get_db
 from src.db.models import MemoryEpisode, ScreenObservation, UserProfile
+from src.local_runtime_profile_verifier import (
+    PROFILE_VERIFIER_VERSION,
+    latest_local_runtime_profile_proof,
+    local_runtime_profile_receipt_dir,
+)
+from src.local_runtime_profiles import local_runtime_profile_statuses
 from src.observer.manager import context_manager
 from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
 from src.observer.user_state import InterruptionMode
@@ -25,10 +32,6 @@ router = APIRouter()
 
 
 class InterruptionModeRequest(BaseModel):
-    mode: str
-
-
-class CaptureModeRequest(BaseModel):
     mode: str
 
 
@@ -65,14 +68,17 @@ class McpPolicyModeRequest(BaseModel):
     mode: str
 
 
-_VALID_CAPTURE_MODES = {"on_switch", "balanced", "detailed"}
-_VALID_SCREEN_ANALYSIS_PROVIDERS = {"apple-vision", "codex-local", "openrouter"}
+_VALID_SCREEN_ANALYSIS_PROVIDERS = {"apple-vision", "codex-local", "local-vlm", "openrouter"}
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
 _SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
+_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S = 3.0
+_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S = 10.0
+_REPORT_RECEIPT_SUMMARY_TIMEOUT_S = 1.5
+_LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S = 1.5
 
 
 def _env_enabled(name: str, default: bool = False) -> bool:
@@ -291,11 +297,15 @@ def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
 
 
 def _screenshot_folder_summary(root: Path) -> dict[str, object]:
+    from src.observer.screenshot_folder_source import SUPPORTED_IMAGE_EXTENSIONS, _capture_timestamp
+
+    resolved_root = root.resolve()
     if not root.exists():
         return {
             "status": "not_found",
             "image_count": 0,
             "last_image_at": None,
+            "last_image_at_source": None,
             "exists": False,
             "readable": False,
         }
@@ -304,32 +314,66 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "status": "invalid_root",
             "image_count": 0,
             "last_image_at": None,
+            "last_image_at_source": None,
             "exists": True,
             "readable": False,
         }
-    image_mtimes: list[float] = []
+    image_count = 0
+    latest_captured_at: datetime | None = None
+    latest_captured_at_source: str | None = None
     try:
         for path in root.rglob("*"):
-            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
-                image_mtimes.append(path.stat().st_mtime)
+            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+                image_count += 1
+                captured_at, captured_at_source = _capture_timestamp(path, resolved_root)
+                if latest_captured_at is None or captured_at > latest_captured_at:
+                    latest_captured_at = captured_at
+                    latest_captured_at_source = captured_at_source
     except OSError as exc:
         logger.warning("Screenshot folder source summary failed: %s", exc)
         return {
             "status": "read_error",
             "image_count": 0,
             "last_image_at": None,
+            "last_image_at_source": None,
             "exists": True,
             "readable": False,
         }
     return {
-        "status": "ready" if image_mtimes else "empty",
-        "image_count": len(image_mtimes),
-        "last_image_at": datetime.fromtimestamp(max(image_mtimes), timezone.utc).isoformat()
-        if image_mtimes
-        else None,
+        "status": "ready" if image_count else "empty",
+        "image_count": image_count,
+        "last_image_at": latest_captured_at.isoformat() if latest_captured_at is not None else None,
+        "last_image_at_source": latest_captured_at_source,
         "exists": True,
         "readable": True,
     }
+
+
+def _fallback_screenshot_folder_summary(root: Path, *, status: str) -> dict[str, object]:
+    exists = root.exists()
+    readable = root.is_dir() and os.access(root, os.R_OK)
+    return {
+        "status": status,
+        "image_count": 0,
+        "last_image_at": None,
+        "last_image_at_source": None,
+        "exists": exists,
+        "readable": readable,
+    }
+
+
+async def _screenshot_folder_summary_fast(root: Path) -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_screenshot_folder_summary, root),
+            timeout=_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Screenshot folder filesystem summary timed out: %s", root)
+        return _fallback_screenshot_folder_summary(root, status="summary_timeout")
+    except OSError as exc:
+        logger.warning("Screenshot folder filesystem summary failed: %s", exc)
+        return _fallback_screenshot_folder_summary(root, status="read_error")
 
 
 def _screen_observation_details(details_json: str | None) -> list[object]:
@@ -364,31 +408,77 @@ def _is_screenshot_folder_observation(observation: ScreenObservation) -> bool:
 
 
 async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
-    status_counts: dict[str, int] = {
-        "pending": 0,
-        "succeeded": 0,
-        "failed": 0,
-        "needs_reanalysis": 0,
-        "unknown": 0,
-    }
-    latest_observation_at: str | None = None
-    latest_analyzed_at: str | None = None
-    latest_failure: str | None = None
-    async with get_db() as db:
-        observation_result = await db.execute(
-            select(ScreenObservation)
-            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-            .where(
-                (
-                    col(ScreenObservation.app_name) == "Screenshot Folder"
-                )
-                | col(ScreenObservation.details_json).contains('"provider":"screenshot_folder"')
-                | col(ScreenObservation.details_json).contains('"provider": "screenshot_folder"')
-            )
-            .order_by(col(ScreenObservation.timestamp).desc())
-            .limit(500)
+    def status_patterns(status: str) -> tuple[str, ...]:
+        return (
+            f'"status":"{status}"',
+            f'"status": "{status}"',
+            f'\\"status\\":\\"{status}\\"',
+            f'\\"status\\": \\"{status}\\"',
         )
-        observations = list(observation_result.scalars().all())
+
+    async with get_db() as db:
+        base_filters = [
+            col(ScreenObservation.blocked) == False,  # noqa: E712
+            col(ScreenObservation.app_name) == "Screenshot Folder",
+        ]
+
+        async def count_matching(*patterns: str) -> int:
+            filters = list(base_filters)
+            if patterns:
+                filters.append(or_(*(col(ScreenObservation.details_json).contains(pattern) for pattern in patterns)))
+            result = await db.execute(
+                select(func.count())
+                .select_from(ScreenObservation)
+                .where(*filters)
+            )
+            return int(result.scalar_one() or 0)
+
+        total_observations = await count_matching()
+        status_counts: dict[str, int] = {
+            "pending": await count_matching(*status_patterns("pending")),
+            "succeeded": await count_matching(*status_patterns("succeeded")),
+            "failed": await count_matching(*status_patterns("failed")),
+            "needs_reanalysis": await count_matching(*status_patterns("needs_reanalysis")),
+            "unknown": 0,
+        }
+        status_counts["unknown"] = max(total_observations - sum(status_counts.values()), 0)
+
+        latest_observation_result = await db.execute(
+            select(ScreenObservation.timestamp)
+            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .order_by(col(ScreenObservation.timestamp).desc())
+            .limit(1)
+        )
+        latest_observation_at = _utc_iso(latest_observation_result.scalar_one_or_none())
+
+        latest_analyzed_result = await db.execute(
+            select(ScreenObservation.details_json)
+            .where(*base_filters)
+            .where(or_(*(col(ScreenObservation.details_json).contains(pattern) for pattern in status_patterns("succeeded"))))
+            .order_by(col(ScreenObservation.timestamp).desc())
+            .limit(1)
+        )
+        latest_analyzed_at = None
+        latest_analyzed_details = _screen_observation_details(latest_analyzed_result.scalar_one_or_none())
+        latest_analyzed_status = semantic_analysis_status_from_details(latest_analyzed_details) or {}
+        recorded_at = latest_analyzed_status.get("recorded_at")
+        if isinstance(recorded_at, str):
+            latest_analyzed_at = recorded_at
+
+        latest_failure_result = await db.execute(
+            select(ScreenObservation.details_json)
+            .where(*base_filters)
+            .where(or_(*(col(ScreenObservation.details_json).contains(pattern) for pattern in status_patterns("failed"))))
+            .order_by(col(ScreenObservation.timestamp).desc())
+            .limit(1)
+        )
+        latest_failure = None
+        latest_failure_details = _screen_observation_details(latest_failure_result.scalar_one_or_none())
+        latest_failure_status = semantic_analysis_status_from_details(latest_failure_details) or {}
+        if latest_failure_status:
+            latest_failure = str(latest_failure_status.get("reason") or "analysis failed")
+
         digest_result = await db.execute(
             select(MemoryEpisode)
             .where(col(MemoryEpisode.source_tool_name) == _SCREENSHOT_DIGEST_TOOL_NAME)
@@ -403,27 +493,10 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
         )
         digest_count = int(digest_count_result.scalar_one() or 0)
 
-    for observation in observations:
-        if not _is_screenshot_folder_observation(observation):
-            continue
-        if latest_observation_at is None:
-            latest_observation_at = _utc_iso(observation.timestamp)
-        details = _screen_observation_details(observation.details_json)
-        status = semantic_analysis_status_from_details(details) or {}
-        status_name = str(status.get("status") or "unknown")
-        if status_name not in status_counts:
-            status_name = "unknown"
-        status_counts[status_name] += 1
-        recorded_at = status.get("recorded_at")
-        if isinstance(recorded_at, str) and status_name == "succeeded" and latest_analyzed_at is None:
-            latest_analyzed_at = recorded_at
-        if status_name == "failed" and latest_failure is None:
-            latest_failure = str(status.get("reason") or "analysis failed")
-
     return {
-        "observation_count": sum(status_counts.values()),
+        "observation_count": total_observations,
         "analysis_status": status_counts,
-        "analysis_backlog": status_counts["pending"] + status_counts["needs_reanalysis"],
+        "analysis_backlog": status_counts["pending"] + status_counts["needs_reanalysis"] + status_counts["unknown"],
         "analysis_failures": status_counts["failed"],
         "latest_observation_at": latest_observation_at,
         "latest_analyzed_at": latest_analyzed_at,
@@ -431,6 +504,37 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
         "digest_count": digest_count,
         "latest_digest_at": _utc_iso(latest_digest.observed_at) if latest_digest is not None else None,
     }
+
+
+def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = None) -> dict[str, object]:
+    return {
+        "observation_count": 0,
+        "analysis_status": {
+            "pending": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "needs_reanalysis": 0,
+            "unknown": 0,
+        },
+        "analysis_backlog": 0,
+        "analysis_failures": 0,
+        "latest_observation_at": None,
+        "latest_analyzed_at": None,
+        "latest_failure": latest_failure,
+        "digest_count": 0,
+        "latest_digest_at": None,
+    }
+
+
+async def _screenshot_folder_pipeline_summary_fast() -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(
+            _screenshot_folder_pipeline_summary(),
+            timeout=_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Screenshot folder pipeline summary timed out")
+        return _empty_screenshot_folder_pipeline_summary(latest_failure="analysis metadata timed out")
 
 
 def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
@@ -451,6 +555,91 @@ def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
         "receipt_count": len(receipt_mtimes),
         "last_receipt_at": datetime.fromtimestamp(max(receipt_mtimes), timezone.utc).isoformat(),
     }
+
+
+async def _report_receipt_summary_fast(report_dir: Path) -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_report_receipt_summary, report_dir),
+            timeout=_REPORT_RECEIPT_SUMMARY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Report receipt filesystem summary timed out: %s", report_dir)
+        return {"receipt_count": 0, "last_receipt_at": None}
+    except OSError as exc:
+        logger.warning("Report receipt filesystem summary failed: %s", exc)
+        return {"receipt_count": 0, "last_receipt_at": None}
+
+
+def _local_runtime_profile_receipt_dir() -> Path:
+    return local_runtime_profile_receipt_dir()
+
+
+def _local_runtime_profile_proof_summary() -> dict[str, object]:
+    receipts_dir = _local_runtime_profile_receipt_dir()
+    summary: dict[str, object] = {
+        "schema_version": PROFILE_VERIFIER_VERSION,
+        "receipt_count": 0,
+        "last_receipt_at": None,
+        "last_receipt_sha256": None,
+        "last_receipt_path": None,
+        "status": "missing",
+        "per_request_reasoning_control": "unverified",
+        "safe_for_single_backend_profile_routing": False,
+        "notes": [],
+    }
+    try:
+        receipts = sorted((path for path in receipts_dir.glob("*.json") if path.is_file()))
+    except OSError as exc:
+        logger.warning("Local runtime profile receipt summary failed: %s", exc)
+        summary["status"] = "read_error"
+        summary["notes"] = ["profile receipt directory could not be read"]
+        return summary
+    summary["receipt_count"] = len(receipts)
+    if not receipts:
+        return summary
+
+    proof = latest_local_runtime_profile_proof(
+        expected_base_url=settings.local_llm_api_base or settings.local_vlm_base_url,
+        expected_model=settings.local_model or settings.local_vlm_model or settings.default_model,
+    )
+    summary.update(
+        {
+            "last_receipt_at": proof.get("finished_at"),
+            "last_receipt_sha256": proof.get("sha256"),
+            "last_receipt_path": proof.get("receipt_path"),
+            "status": proof.get("status", "unsafe"),
+            "per_request_reasoning_control": str(proof.get("per_request_reasoning_control") or "unverified"),
+            "safe_for_single_backend_profile_routing": bool(
+                proof.get("safe_for_single_backend_profile_routing") is True
+            ),
+            "notes": proof.get("notes") if isinstance(proof.get("notes"), list) else [],
+            "base_url": proof.get("base_url"),
+            "model": proof.get("model"),
+        }
+    )
+    return summary
+
+
+async def _local_runtime_profile_proof_summary_fast() -> dict[str, object]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_local_runtime_profile_proof_summary),
+            timeout=_LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Local runtime profile receipt summary timed out")
+        return {
+            "schema_version": PROFILE_VERIFIER_VERSION,
+            "receipt_count": 0,
+            "last_receipt_at": None,
+            "last_receipt_sha256": None,
+            "last_receipt_path": None,
+            "status": "summary_timeout",
+            "per_request_reasoning_control": "unverified",
+            "safe_for_single_backend_profile_routing": False,
+            "notes": ["profile receipt summary timed out"],
+        }
 
 
 def _archive_dir_status(path: Path) -> dict[str, object]:
@@ -518,61 +707,15 @@ async def set_interruption_mode(body: InterruptionModeRequest):
     }
 
 
-@router.get("/settings/capture-mode")
-async def get_capture_mode():
-    """Get current capture mode setting."""
-    ctx = context_manager.get_context()
-    return {"mode": ctx.capture_mode}
-
-
-@router.put("/settings/capture-mode")
-async def set_capture_mode(body: CaptureModeRequest):
-    """Update capture mode (on_switch | balanced | detailed)."""
-    if body.mode not in _VALID_CAPTURE_MODES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid mode '{body.mode}'. Must be one of: {', '.join(sorted(_VALID_CAPTURE_MODES))}",
-        )
-
-    # Update in-memory context
-    context_manager.update_capture_mode(body.mode)
-
-    # Persist to DB
-    async with get_db() as db:
-        result = await db.execute(
-            select(UserProfile).where(UserProfile.id == "singleton")
-        )
-        profile = result.scalars().first()
-        if profile:
-            profile.capture_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
-            db.add(profile)
-
-    return {"mode": body.mode}
-
-
 @router.get("/settings/screen-analysis")
 async def get_screen_analysis_settings():
-    """Return runtime screen-analysis settings consumed by the native daemon."""
-    payload = _read_screen_analysis_settings()
-    ctx = context_manager.get_context()
-    daemon_status = _read_daemon_status()
-    payload.update(
-        {
-            "capture_mode": ctx.capture_mode,
-            "cadence_seconds": 60 if ctx.capture_mode == "detailed" else 300 if ctx.capture_mode == "balanced" else None,
-            "daemon_connected": context_manager.is_daemon_connected(),
-            "daemon_alive": bool(daemon_status["alive"]),
-            "artifact_count": 0,
-            "last_artifact_at": None,
-        }
-    )
-    return payload
+    """Return screenshot analysis settings for local image-folder ingestion."""
+    return _read_screen_analysis_settings()
 
 
 @router.put("/settings/screen-analysis")
 async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
-    """Persist runtime screen-analysis settings for the native daemon."""
+    """Persist screenshot analysis settings for local image-folder ingestion."""
     payload = _read_screen_analysis_settings()
     if body.enabled is not None:
         payload["enabled"] = body.enabled
@@ -630,43 +773,36 @@ async def get_artifact_storage_settings():
     """Return operator-visible evidence/report archive configuration."""
     report_archive_dir, report_archive_source = _report_archive_dir()
     report_dir_status = _archive_dir_status(report_archive_dir)
-    report_receipts = _report_receipt_summary(report_archive_dir)
     screenshot_folder, screenshot_folder_source = _screenshot_folder()
-    screenshot_source = _screenshot_folder_summary(screenshot_folder)
-    screenshot_pipeline = await _screenshot_folder_pipeline_summary()
+    screenshot_source, report_receipts, screenshot_pipeline, local_runtime_proof = await asyncio.gather(
+        _screenshot_folder_summary_fast(screenshot_folder),
+        _report_receipt_summary_fast(report_archive_dir),
+        _screenshot_folder_pipeline_summary_fast(),
+        _local_runtime_profile_proof_summary_fast(),
+    )
+    screenshot_image_count = int(screenshot_source["image_count"] or 0)
+    screenshot_observation_count = int(screenshot_pipeline["observation_count"] or 0)
+    screenshot_processed_count = int(
+        dict(screenshot_pipeline["analysis_status"]).get("succeeded", 0)
+        if isinstance(screenshot_pipeline.get("analysis_status"), dict)
+        else 0
+    )
+    screenshot_pipeline.update(
+        {
+            "folder_image_count": screenshot_image_count,
+            "ingested_count": screenshot_observation_count,
+            "remaining_to_ingest": max(screenshot_image_count - screenshot_observation_count, 0),
+            "processed_count": screenshot_processed_count,
+            "remaining_to_analyze": max(screenshot_observation_count - screenshot_processed_count, 0),
+            "folder_remaining_to_analyze": max(screenshot_image_count - screenshot_processed_count, 0),
+        }
+    )
     screen_analysis = await get_screen_analysis_settings()
-    screen_archive_dir = Path(str(screen_analysis["archive_dir"]))
-    screen_dir_status = _archive_dir_status(screen_archive_dir)
-    screen_summary = _screen_artifact_summary(screen_archive_dir)
     return {
         "screen": {
             "analysis_enabled": screen_analysis["enabled"],
             "provider": screen_analysis["provider"],
             "model": screen_analysis["model"],
-            "capture_mode": screen_analysis["capture_mode"],
-            "cadence_seconds": screen_analysis["cadence_seconds"],
-            "daemon_connected": screen_analysis["daemon_connected"],
-            "daemon_alive": screen_analysis["daemon_alive"],
-            "artifact_count": screen_summary["artifact_count"],
-            "last_artifact_at": screen_summary["last_artifact_at"],
-            "budget": {
-                "min_seconds_between_captures": screen_analysis["min_seconds_between_captures"],
-                "max_daily_captures": screen_analysis["max_daily_captures"],
-                "archive_retention_days": screen_analysis["archive_retention_days"],
-                "archive_max_mb": screen_analysis["archive_max_mb"],
-            },
-            "preservation_enabled": screen_analysis["preserve_captures"],
-            "archive_dir": str(screen_analysis["archive_dir"]),
-            "archive_dir_source": "screen-analysis-settings",
-            **screen_dir_status,
-            "stored_artifacts": ["image", "provider_output", "analysis_json"],
-            "inspection_endpoint": "/api/observer/screen-artifacts",
-            "inspection_visibility": "localhost_only",
-            "daemon_status": _read_daemon_status(),
-            "control_env": {
-                "enabled": "SERAPH_PRESERVE_SCREEN_CAPTURES",
-                "archive_dir": "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
-            },
         },
         "screenshot_folder": {
             "enabled": True,
@@ -675,6 +811,7 @@ async def get_artifact_storage_settings():
             "path_source": screenshot_folder_source,
             "image_count": screenshot_source["image_count"],
             "last_image_at": screenshot_source["last_image_at"],
+            "last_image_at_source": screenshot_source["last_image_at_source"],
             "status": screenshot_source["status"],
             "exists": screenshot_source["exists"],
             "readable": screenshot_source["readable"],
@@ -698,10 +835,24 @@ async def get_artifact_storage_settings():
                 "auto_ingest_limit": "SCREENSHOT_FOLDER_INGEST_LIMIT",
             },
         },
+        "local_runtime": {
+            "gateway_configured": bool(
+                settings.local_llm_api_base.strip() or settings.local_vlm_base_url.strip()
+            ),
+            "llm_base_url_configured": bool(settings.local_llm_api_base.strip()),
+            "vlm_base_url_configured": bool(settings.local_vlm_base_url.strip()),
+            "model": settings.local_model or settings.local_vlm_model or "",
+            "profiles": local_runtime_profile_statuses(),
+            "profile_proof": local_runtime_proof,
+            "proof_command": (
+                "PYTHONPATH=. uv run python ../scripts/verify_local_gemma_profiles.py "
+                "--base-url ${LOCAL_LLM_API_BASE:-$LOCAL_VLM_BASE_URL}"
+            ),
+        },
         "reports": {
             "enabled": settings.end_of_day_report_enabled,
             "hour": settings.end_of_day_report_hour,
-            "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "deterministic-local",
+            "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "llm_disabled",
             "archive_dir": str(report_archive_dir),
             "archive_dir_source": report_archive_source,
             **report_dir_status,

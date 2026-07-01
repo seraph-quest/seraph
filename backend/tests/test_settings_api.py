@@ -105,9 +105,7 @@ async def test_get_reflects_put(client, async_db):
 
 @pytest.mark.asyncio
 async def test_artifact_storage_settings_exposes_safe_operator_posture(client, tmp_path, monkeypatch):
-    monkeypatch.setenv("SERAPH_PRESERVE_SCREEN_CAPTURES", "true")
     with (
-        patch.object(settings, "screen_capture_archive_dir", str(tmp_path / "screen")),
         patch.object(settings, "report_archive_dir", str(tmp_path / "reports")),
         patch.object(settings, "end_of_day_report_enabled", True),
         patch.object(settings, "end_of_day_report_hour", 21),
@@ -117,54 +115,38 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "smtp_host", "smtp.example.test"),
         patch.object(settings, "smtp_password", "secret-password"),
         patch.object(settings, "email_reports_to", "user@example.test"),
+        patch.object(settings, "email_reports_from", ""),
         patch.object(settings, "email_reports_to_allowlist", "hash-value"),
         patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
-        patch("src.api.settings.context_manager.is_daemon_connected", return_value=False),
+        patch.object(settings, "local_llm_api_base", ""),
+        patch.object(settings, "local_vlm_base_url", ""),
     ):
-        status_file = tmp_path / "workspace" / "daemon-status.json"
-        status_file.parent.mkdir(parents=True)
-        status_file.write_text(
-            json.dumps(
-                {
-                    "state": "running",
-                    "screen_analysis": "capture_error",
-                    "capture_ready": False,
-                    "last_error": "Grant Screen Recording permission.",
-                    "last_error_kind": "screen_capture_permission",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ),
-            encoding="utf-8",
-        )
         resp = await client.get("/api/settings/artifact-storage")
 
     assert resp.status_code == 200
     data = resp.json()
     assert data["screen"]["analysis_enabled"] is True
     assert data["screen"]["provider"] == "codex-local"
-    assert data["screen"]["daemon_connected"] is False
-    assert data["screen"]["artifact_count"] == 0
-    assert data["screen"]["daemon_alive"] is True
-    assert data["screen"]["preservation_enabled"] is True
-    assert data["screen"]["budget"]["archive_retention_days"] >= 1
-    assert data["screen"]["archive_dir"].endswith("/screen")
-    assert data["screen"]["exists"] is True
-    assert data["screen"]["writable"] is True
-    assert data["screen"]["creation_error"] is None
-    assert stat.S_IMODE((tmp_path / "screen").stat().st_mode) == 0o700
-    assert data["screen"]["stored_artifacts"] == ["image", "provider_output", "analysis_json"]
-    assert data["screen"]["inspection_visibility"] == "localhost_only"
-    assert data["screen"]["daemon_status"]["screen_analysis"] == "capture_error"
-    assert data["screen"]["daemon_status"]["last_error"] == "Grant Screen Recording permission."
-    assert data["screen"]["daemon_status"]["status_source"] == "daemon-status-file"
-    assert "status_file" not in data["screen"]["daemon_status"]
+    assert data["screen"]["model"]
+    assert "capture_mode" not in data["screen"]
+    assert "daemon_status" not in data["screen"]
+    assert "archive_dir" not in data["screen"]
+    assert "preservation_enabled" not in data["screen"]
     assert data["reports"]["archive_dir"].endswith("/reports")
     assert data["reports"]["exists"] is True
     assert data["reports"]["writable"] is True
     assert data["reports"]["creation_error"] is None
     assert stat.S_IMODE((tmp_path / "reports").stat().st_mode) == 0o700
-    assert data["reports"]["analysis_provider"] == "deterministic-local"
+    assert data["reports"]["analysis_provider"] == "llm_disabled"
     assert data["reports"]["receipt_count"] == 0
+    assert data["local_runtime"]["gateway_configured"] is False
+    assert {profile["id"] for profile in data["local_runtime"]["profiles"]} >= {
+        "screenshot_fast",
+        "report_thinking",
+        "chat_thinking",
+    }
+    assert data["local_runtime"]["profile_proof"]["status"] == "missing"
+    assert data["local_runtime"]["profile_proof"]["safe_for_single_backend_profile_routing"] is False
     assert data["email"]["enabled"] is True
     assert data["email"]["smtp_configured"] is True
     assert data["email"]["sender_configured"] is False
@@ -184,9 +166,9 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["screen"]["archive_dir"] == str(preferred)
-    assert data["screen"]["archive_dir_source"] == "screen-analysis-settings"
-    assert data["screen"]["exists"] is True
+    assert "archive_dir" not in data["screen"]
+    assert str(preferred) not in str(data["screen"])
+    assert str(fallback) not in str(data["screen"])
 
 
 @pytest.mark.asyncio
@@ -243,7 +225,8 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
             )
         )
 
-    resp = await client.get("/api/settings/artifact-storage")
+    with patch.object(settings, "screenshot_folder_ingest_enabled", True):
+        resp = await client.get("/api/settings/artifact-storage")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -253,10 +236,17 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["path_source"] == "SERAPH_SCREENSHOT_FOLDER"
     assert data["screenshot_folder"]["status"] == "ready"
     assert data["screenshot_folder"]["image_count"] == 1
+    assert data["screenshot_folder"]["last_image_at_source"] == "file_mtime"
     assert data["screenshot_folder"]["stored_artifacts"] == ["image"]
     assert data["screenshot_folder"]["analysis"]["observation_count"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_failures"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_backlog"] == 0
+    assert data["screenshot_folder"]["analysis"]["folder_image_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["ingested_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["remaining_to_ingest"] == 0
+    assert data["screenshot_folder"]["analysis"]["processed_count"] == 0
+    assert data["screenshot_folder"]["analysis"]["remaining_to_analyze"] == 1
+    assert data["screenshot_folder"]["analysis"]["folder_remaining_to_analyze"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_status"]["failed"] == 1
     assert data["screenshot_folder"]["analysis"]["latest_failure"] == "provider unavailable"
     assert data["screenshot_folder"]["analysis"]["digest_count"] == 1
@@ -270,6 +260,52 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["readable"] is True
     assert data["screenshot_folder"]["scan_endpoint"] == "/api/observer/screenshot-folder/scan"
     assert "ingest_endpoint" not in data["screenshot_folder"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_exposes_latest_local_runtime_profile_proof(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    receipts = workspace / "local-runtime-profile-receipts"
+    receipts.mkdir(parents=True)
+    (receipts / "proof.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "seraph.local_runtime_profiles.proof.v1",
+                "sha256": "proof-sha",
+                "conclusion": {
+                    "per_request_reasoning_control": "failed",
+                    "safe_for_single_backend_profile_routing": False,
+                    "notes": ["screenshot_fast emitted visible reasoning markers"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch.object(settings, "workspace_dir", str(workspace)),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma"),
+    ):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    proof = data["local_runtime"]["profile_proof"]
+    assert data["local_runtime"]["gateway_configured"] is True
+    assert data["local_runtime"]["model"] == "openai/unsloth/gemma"
+    assert proof["status"] == "unsafe"
+    assert proof["per_request_reasoning_control"] == "failed"
+    assert proof["safe_for_single_backend_profile_routing"] is False
+    assert proof["last_receipt_sha256"] == "proof-sha"
+    assert "screenshot_fast emitted visible reasoning markers" in proof["notes"]
+    assert "latest local runtime profile proof receipt hash did not verify" in proof["notes"]
+    assert "latest local runtime profile proof receipt does not match the current profile contract" in proof["notes"]
+    assert (
+        "latest local runtime profile proof receipt does not match the configured local base URL"
+        in proof["notes"]
+    )
+    assert "latest local runtime profile proof receipt does not match the configured local model" in proof["notes"]
 
 
 @pytest.mark.asyncio
@@ -295,8 +331,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
             "/api/settings/screen-analysis",
             json={
                 "enabled": True,
-                "provider": "codex-local",
-                "model": "gpt-5.5",
+                "provider": "local-vlm",
+                "model": "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M",
                 "preserve_captures": True,
                 "archive_dir": str(archive),
                 "screenshot_folder": str(screenshot_root),
@@ -306,8 +342,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is True
-        assert data["provider"] == "codex-local"
-        assert data["model"] == "gpt-5.5"
+        assert data["provider"] == "local-vlm"
+        assert data["model"] == "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M"
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
         assert data["screenshot_folder"] == str(screenshot_root)
@@ -317,9 +353,9 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
         assert storage["screen"]["analysis_enabled"] is True
-        assert storage["screen"]["provider"] == "codex-local"
-        assert storage["screen"]["archive_dir"] == str(archive)
-        assert storage["screen"]["preservation_enabled"] is True
+        assert storage["screen"]["provider"] == "local-vlm"
+        assert "archive_dir" not in storage["screen"]
+        assert "preservation_enabled" not in storage["screen"]
         assert storage["screenshot_folder"]["path"] == str(screenshot_root)
         assert storage["screenshot_folder"]["path_source"] == "screen-analysis-settings"
 

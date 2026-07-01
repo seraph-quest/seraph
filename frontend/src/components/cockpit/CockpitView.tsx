@@ -1266,7 +1266,6 @@ interface PendingApproval {
 interface DaemonPresenceState {
   connected: boolean;
   pending_notification_count: number;
-  capture_mode: string;
   last_native_notification_outcome?: string | null;
 }
 
@@ -6631,6 +6630,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [browserSessions, setBrowserSessions] = useState<BrowserSessionControlInfo[]>([]);
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
+  const cockpitRefreshInFlightRef = useRef(false);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -6778,6 +6778,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
+    type FetchResult = { ok: boolean; payload: unknown | null };
     const fetchJson = async (url: string, timeoutMs = 5000) => {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -6797,7 +6798,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         window.clearTimeout(timeout);
       }
     };
-
+    const fetchWithConcurrency = async (
+      requests: Array<() => Promise<FetchResult>>,
+      concurrency = 4,
+    ): Promise<FetchResult[]> => {
+      const results: FetchResult[] = new Array(requests.length);
+      let nextIndex = 0;
+      const workers = Array.from({ length: Math.min(concurrency, requests.length) }, async () => {
+        while (!isCancelled()) {
+          const index = nextIndex;
+          nextIndex += 1;
+          if (index >= requests.length) return;
+          results[index] = await requests[index]();
+        }
+      });
+      await Promise.all(workers);
+      return results.map((result) => result ?? { ok: false, payload: null });
+    };
     const [
       runtimeStatusResult,
       observerResult,
@@ -6826,36 +6843,36 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       toolModeResult,
       mcpModeResult,
       approvalModeResult,
-    ] = await Promise.all([
-      fetchJson(`${API_URL}/api/runtime/status`),
-      fetchJson(`${API_URL}/api/observer/state`),
-      fetchJson(`${API_URL}/api/audit/events?limit=12`),
-      fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
-      fetchJson(`${API_URL}/api/observer/continuity`),
-      fetchJson(`${API_URL}/api/capabilities/overview`),
-      fetchJson(`${API_URL}/api/extensions`),
-      fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/control-plane`),
-      fetchJson(`${API_URL}/api/operator/benchmark-proof`),
-      fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
-      fetchJson(`${API_URL}/api/operator/background-sessions`),
-      fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
-      fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
-      fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
-      fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
-      fetchJson(`${API_URL}/api/browser/providers`),
-      sessionId
+    ] = await fetchWithConcurrency([
+      () => fetchJson(`${API_URL}/api/runtime/status`),
+      () => fetchJson(`${API_URL}/api/observer/state`),
+      () => fetchJson(`${API_URL}/api/audit/events?limit=12`),
+      () => fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
+      () => fetchJson(`${API_URL}/api/observer/continuity`),
+      () => fetchJson(`${API_URL}/api/capabilities/overview`),
+      () => fetchJson(`${API_URL}/api/extensions`),
+      () => fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/control-plane`),
+      () => fetchJson(`${API_URL}/api/operator/benchmark-proof`),
+      () => fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
+      () => fetchJson(`${API_URL}/api/operator/background-sessions`),
+      () => fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
+      () => fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
+      () => fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
+      () => fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
+      () => fetchJson(`${API_URL}/api/browser/providers`),
+      () => sessionId
         ? fetchJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`)
         : Promise.resolve({ ok: true, payload: { sessions: [] } }),
-      fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
-      fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
-      fetchJson(`${API_URL}/api/settings/approval-mode`),
+      () => fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
+      () => fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
+      () => fetchJson(`${API_URL}/api/settings/approval-mode`),
     ]);
 
     if (isCancelled()) return;
@@ -6982,9 +6999,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     let cancelled = false;
 
     const refresh = async () => {
+      if (cockpitRefreshInFlightRef.current) return;
+      cockpitRefreshInFlightRef.current = true;
       try {
         await refreshCockpit(() => cancelled);
-      } catch {}
+      } catch {
+      } finally {
+        cockpitRefreshInFlightRef.current = false;
+      }
     };
 
     void refresh();
@@ -14389,7 +14411,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
                   <div className="cockpit-sublist-item">
-                    capture {daemonPresence?.capture_mode ?? "unknown"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
+                    presence {daemonPresence?.connected ? "linked" : "offline"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
                   </div>
                   {continuitySummary && (
                     <>

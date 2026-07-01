@@ -6,7 +6,6 @@ interface DaemonStatusData {
   last_post: number | null;
   active_window: string | null;
   has_screen_context: boolean;
-  capture_mode: "on_switch" | "balanced" | "detailed";
   pending_notification_count: number;
   last_native_notification_at: string | null;
   last_native_notification_title: string | null;
@@ -180,7 +179,6 @@ export function DaemonStatus() {
   const dotColor = connected ? "bg-green-400" : "bg-retro-text/30";
   const activeWindow = status?.active_window;
   const pendingCount = status?.pending_notification_count ?? 0;
-  const captureMode = status?.capture_mode ?? "on_switch";
   const lastNativeOutcome = status?.last_native_notification_outcome;
   const lastNativeTitle = status?.last_native_notification_title;
 
@@ -188,12 +186,6 @@ export function DaemonStatus() {
     activeWindow && activeWindow.length > 40
       ? activeWindow.slice(0, 37) + "..."
       : activeWindow;
-  const captureLabel =
-    captureMode === "on_switch"
-      ? "On Switch"
-      : captureMode === "balanced"
-        ? "Balanced"
-        : "Detailed";
   const lastNativeLabel =
     lastNativeOutcome === "queued"
       ? "Queued for desktop delivery"
@@ -228,8 +220,8 @@ export function DaemonStatus() {
 
         <div className="grid grid-cols-2 gap-2 text-[9px] text-retro-text/50 uppercase tracking-wider">
           <div>
-            <div className="text-retro-text/30">Capture</div>
-            <div className="text-retro-text">{captureLabel}</div>
+            <div className="text-retro-text/30">Presence</div>
+            <div className="text-retro-text">{connected ? "Linked" : "Offline"}</div>
           </div>
           <div>
             <div className="text-retro-text/30">Pending</div>

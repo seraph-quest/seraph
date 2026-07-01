@@ -58,8 +58,26 @@ async def test_screenshot_folder_ingest_job_respects_disabled_setting(async_db, 
         assert result.scalar_one_or_none() is None
 
 
+@pytest.mark.asyncio
+async def test_screenshot_folder_ingest_job_uses_configured_limit(async_db, tmp_path, monkeypatch):
+    from src.scheduler.jobs.screenshot_folder_ingest import run_screenshot_folder_ingest
+
+    root = tmp_path / "screenshots"
+    for index in range(12):
+        _write_screenshot(root, f"capture-{index:02d}.png")
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(root))
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_ingest.settings.screenshot_folder_ingest_enabled", True)
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_ingest.settings.screenshot_folder_ingest_limit", 20)
+
+    await run_screenshot_folder_ingest()
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        assert len(result.scalars().all()) == 12
+
+
 def _write_screenshot(root: Path, name: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image = root / name
-    image.write_bytes(b"scheduled screenshot")
+    image.write_bytes(f"scheduled screenshot {name}".encode())
     return image

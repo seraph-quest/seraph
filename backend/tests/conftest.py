@@ -15,6 +15,7 @@ from sqlmodel import SQLModel
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 
+from config.settings import settings
 from src.app import create_app
 from src.llm_runtime import _reset_target_health
 from src.db.engine import _ensure_search_indexes
@@ -148,6 +149,15 @@ def reset_memory_flush_cache():
     _reset_memory_flush_state()
     yield
     _reset_memory_flush_state()
+
+
+@pytest.fixture(autouse=True)
+def clear_ambient_screenshot_analysis_provider():
+    with (
+        patch.object(settings, "screen_analysis_provider", ""),
+        patch.object(settings, "local_vlm_base_url", ""),
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)

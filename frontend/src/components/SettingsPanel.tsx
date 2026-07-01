@@ -3,7 +3,6 @@ import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
-import { CaptureModeToggle } from "./settings/CaptureModeToggle";
 import { ToolPolicyModeToggle } from "./settings/ToolPolicyModeToggle";
 import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
 import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
@@ -635,8 +634,6 @@ export function SettingsPanel() {
           <InterruptionModeToggle />
 
           <DaemonStatus />
-
-          <CaptureModeToggle />
 
           <ArtifactStoragePanel />
 

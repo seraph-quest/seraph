@@ -102,7 +102,7 @@ Receive (streamed):
 | `END_OF_DAY_REPORT_ENABLED` | `true` | Enables the stored end-of-day goal report scheduler job |
 | `END_OF_DAY_REPORT_HOUR` | `21` | Local hour for the end-of-day goal report |
 | `END_OF_DAY_REPORT_LLM_ENABLED` | `false` | Enables LLM drafting for the report; default deterministic mode avoids sending screen-derived summaries to a provider |
-| `EMAIL_REPORTS_ENABLED` | `false` | Enables SMTP delivery for reports after local storage |
+| `EMAIL_REPORTS_ENABLED` | `false` | Enables email delivery for reports after local storage |
 | `EMAIL_REPORTS_PREVIEW_REQUIRED` | `true` | Blocks scheduled outbound report email unless operator preview is acknowledged for manual sends or deliberately disabled for scheduled delivery |
 | `EMAIL_REPORTS_TO` | - | Recipient for report email |
 | `EMAIL_REPORTS_TO_ALLOWLIST` | - | Comma-separated recipient allowlist; recipient must be present before sending |
@@ -112,6 +112,9 @@ Receive (streamed):
 | `SMTP_USERNAME` | - | SMTP username |
 | `SMTP_PASSWORD` | - | SMTP password |
 | `SMTP_USE_TLS` | `true` | Use STARTTLS before SMTP login/send |
+| `RESEND_API_KEY` | - | Resend API key for hosted-template delivery; if empty, Seraph can reuse `SMTP_PASSWORD` when `SMTP_HOST=smtp.resend.com` and `SMTP_USERNAME=resend` |
+| `RESEND_API_URL` | `https://api.resend.com/emails` | Resend Email API endpoint |
+| `RESEND_TEMPLATE_ID` | - | Published Resend template id or alias. When set, Seraph sends report variables through the Resend API instead of SMTP inline HTML |
 | `LOCAL_RUNTIME_PATHS` | - | Comma-separated runtime paths or glob patterns that should prefer the local profile |
 | `RUNTIME_PROFILE_PREFERENCES` | - | Semicolon-separated `runtime_path=profile_a|profile_b` chains; `runtime_path` may be an exact path or glob |
 | `RUNTIME_POLICY_INTENTS` | - | Semicolon-separated `runtime_path=intent_a|intent_b` entries for capability-aware routing; `runtime_path` may be an exact path or glob |

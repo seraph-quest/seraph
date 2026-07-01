@@ -6,43 +6,6 @@ interface ArtifactStorageSettings {
     analysis_enabled: boolean;
     provider: string;
     model: string;
-    capture_mode: string;
-    cadence_seconds: number | null;
-    daemon_connected: boolean;
-    daemon_alive: boolean;
-    artifact_count: number;
-    last_artifact_at: string | null;
-    budget: {
-      min_seconds_between_captures: number;
-      max_daily_captures: number;
-      archive_retention_days: number;
-      archive_max_mb: number;
-    };
-    preservation_enabled: boolean;
-    archive_dir: string;
-    archive_dir_source: string;
-    exists: boolean;
-    writable: boolean;
-    creation_error: string | null;
-    stored_artifacts: string[];
-    inspection_endpoint: string;
-    inspection_visibility: string;
-    daemon_status: {
-      state: string | null;
-      screen_analysis: string | null;
-      capture_ready: boolean;
-      last_error: string | null;
-      last_error_kind: string | null;
-      updated_at: string | null;
-      active_window?: string | null;
-      frontmost_app?: string | null;
-      window_title?: string | null;
-      last_poll_at?: string | null;
-      last_capture_at?: string | null;
-      last_context_post_at?: string | null;
-      status_source: string;
-    };
-    control_env: Record<string, string>;
   };
   screenshot_folder?: {
     enabled: boolean;
@@ -68,6 +31,12 @@ interface ArtifactStorageSettings {
       latest_failure: string | null;
       digest_count: number;
       latest_digest_at: string | null;
+      folder_image_count?: number;
+      ingested_count?: number;
+      remaining_to_ingest?: number;
+      processed_count?: number;
+      remaining_to_analyze?: number;
+      folder_remaining_to_analyze?: number;
     };
     auto_ingest_enabled: boolean;
     auto_ingest_interval_min: number;
@@ -76,6 +45,30 @@ interface ArtifactStorageSettings {
     inspection_endpoint: string;
     inspection_visibility: string;
     control_env: Record<string, string>;
+  };
+  local_runtime?: {
+    gateway_configured: boolean;
+    llm_base_url_configured: boolean;
+    vlm_base_url_configured: boolean;
+    model: string;
+    profiles: Array<{
+      id: string;
+      runtime_path: string;
+      priority: string;
+      reasoning: string;
+      max_tokens: number;
+      timeout_seconds: number;
+    }>;
+    profile_proof: {
+      status: string;
+      per_request_reasoning_control: string;
+      safe_for_single_backend_profile_routing: boolean;
+      receipt_count: number;
+      last_receipt_at: string | null;
+      last_receipt_sha256: string | null;
+      notes: string[];
+    };
+    proof_command?: string;
   };
   reports: {
     enabled: boolean;
@@ -106,20 +99,16 @@ interface ScreenAnalysisSettings {
   enabled: boolean;
   provider: string;
   model: string;
-  preserve_captures: boolean;
-  archive_dir: string;
   screenshot_folder?: string;
-  capture_mode: string;
-  cadence_seconds: number | null;
-  daemon_connected: boolean;
-  daemon_alive: boolean;
-  artifact_count: number;
-  last_artifact_at: string | null;
-  min_seconds_between_captures: number;
-  max_daily_captures: number;
-  archive_retention_days: number;
-  archive_max_mb: number;
 }
+
+const FALLBACK_SCREEN_ANALYSIS_SETTINGS: ScreenAnalysisSettings = {
+  enabled: true,
+  provider: "codex-local",
+  model: "",
+};
+
+const ARTIFACT_METADATA_TIMEOUT_MS = import.meta.env.MODE === "test" ? 100 : 30_000;
 
 interface ReportActionResult {
   action?: string;
@@ -170,21 +159,6 @@ function dirStateTone(exists: boolean, writable: boolean, creationError: string 
   return "good";
 }
 
-function captureStateLabel(settings: ArtifactStorageSettings["screen"]): string {
-  if (!settings.analysis_enabled) return "disabled";
-  if (settings.daemon_status.last_error) return settings.daemon_status.last_error;
-  if (!settings.daemon_connected) return "daemon offline";
-  if (settings.capture_mode === "on_switch") return "waiting for app/window switch";
-  if (settings.daemon_status.capture_ready) return "ready";
-  return "waiting for next capture";
-}
-
-function captureStateTone(settings: ArtifactStorageSettings["screen"]): "normal" | "good" | "warn" {
-  if (settings.daemon_status.last_error || !settings.daemon_connected) return "warn";
-  if (settings.capture_mode === "on_switch") return "normal";
-  return settings.daemon_status.capture_ready ? "good" : "warn";
-}
-
 function screenshotFolderStateTone(settings: NonNullable<ArtifactStorageSettings["screenshot_folder"]>): "normal" | "good" | "warn" {
   if (!settings.exists || !settings.readable || settings.status === "invalid_root" || settings.status === "read_error") {
     return "warn";
@@ -201,14 +175,21 @@ function screenshotAnalysisTone(
   return analysis.observation_count > 0 ? "good" : "normal";
 }
 
+function localRuntimeProofTone(
+  proof: NonNullable<ArtifactStorageSettings["local_runtime"]>["profile_proof"],
+): "normal" | "good" | "warn" {
+  if (proof.safe_for_single_backend_profile_routing) return "good";
+  if (proof.status === "missing") return "normal";
+  return "warn";
+}
+
 function isArtifactStorageSettings(value: unknown): value is ArtifactStorageSettings {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<ArtifactStorageSettings>;
   return (
-    typeof candidate.screen?.archive_dir === "string" &&
     typeof candidate.screen?.analysis_enabled === "boolean" &&
     typeof candidate.screen?.provider === "string" &&
-    typeof candidate.screen?.preservation_enabled === "boolean" &&
+    typeof candidate.screen?.model === "string" &&
     typeof candidate.reports?.archive_dir === "string" &&
     typeof candidate.reports?.enabled === "boolean" &&
     typeof candidate.email?.enabled === "boolean"
@@ -221,24 +202,45 @@ function isScreenAnalysisSettings(value: unknown): value is ScreenAnalysisSettin
   return (
     typeof candidate.enabled === "boolean" &&
     typeof candidate.provider === "string" &&
-    typeof candidate.model === "string" &&
-    typeof candidate.preserve_captures === "boolean" &&
-    typeof candidate.archive_dir === "string" &&
-    typeof candidate.capture_mode === "string" &&
-    typeof candidate.daemon_connected === "boolean"
+    typeof candidate.model === "string"
   );
 }
 
-async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000): Promise<unknown> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${API_URL}${path}`, { signal: controller.signal });
-    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-    return await response.json();
-  } finally {
-    window.clearTimeout(timeout);
+function localApiCandidates(): string[] {
+  const candidates: string[] = [];
+  if (
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+  ) {
+    candidates.push("");
+    candidates.push(`http://${window.location.hostname}:8004`);
   }
+  candidates.push(API_URL);
+  if (API_URL.includes("://localhost:")) {
+    candidates.push(API_URL.replace("://localhost:", "://127.0.0.1:"));
+  }
+  if (API_URL.includes("://127.0.0.1:")) {
+    candidates.push(API_URL.replace("://127.0.0.1:", "://localhost:"));
+  }
+  return Array.from(new Set(candidates));
+}
+
+async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: RequestInit): Promise<unknown> {
+  let lastError: unknown = null;
+  for (const apiUrl of localApiCandidates()) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
+      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+  throw lastError ?? new Error("Request failed.");
 }
 
 function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactStorageSettings {
@@ -247,40 +249,6 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
       analysis_enabled: screen.enabled,
       provider: screen.provider,
       model: screen.model,
-      capture_mode: screen.capture_mode,
-      cadence_seconds: screen.cadence_seconds,
-      daemon_connected: screen.daemon_connected,
-      daemon_alive: screen.daemon_alive ?? screen.daemon_connected,
-      artifact_count: screen.artifact_count ?? 0,
-      last_artifact_at: screen.last_artifact_at ?? null,
-      budget: {
-        min_seconds_between_captures: screen.min_seconds_between_captures ?? 0,
-        max_daily_captures: screen.max_daily_captures ?? 0,
-        archive_retention_days: screen.archive_retention_days ?? 365,
-        archive_max_mb: screen.archive_max_mb ?? 0,
-      },
-      preservation_enabled: screen.preserve_captures,
-      archive_dir: screen.archive_dir,
-      archive_dir_source: "screen-analysis-settings",
-      exists: true,
-      writable: true,
-      creation_error: null,
-      stored_artifacts: ["image", "provider_output", "analysis_json"],
-      inspection_endpoint: "/api/observer/screen-artifacts",
-      inspection_visibility: "localhost_only",
-      daemon_status: {
-        state: screen.daemon_connected ? "running" : "unknown",
-        screen_analysis: screen.enabled ? "active" : "disabled",
-        capture_ready: screen.daemon_connected,
-        last_error: null,
-        last_error_kind: null,
-        updated_at: null,
-        status_source: "screen-analysis",
-      },
-      control_env: {
-        enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
-        archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
-      },
     },
     screenshot_folder: {
       enabled: true,
@@ -306,6 +274,12 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
         latest_failure: null,
         digest_count: 0,
         latest_digest_at: null,
+        folder_image_count: 0,
+        ingested_count: 0,
+        remaining_to_ingest: 0,
+        processed_count: 0,
+        remaining_to_analyze: 0,
+        folder_remaining_to_analyze: 0,
       },
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
@@ -319,6 +293,23 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
         auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
         auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
       },
+    },
+    local_runtime: {
+      gateway_configured: false,
+      llm_base_url_configured: false,
+      vlm_base_url_configured: false,
+      model: "",
+      profiles: [],
+      profile_proof: {
+        status: "missing",
+        per_request_reasoning_control: "unverified",
+        safe_for_single_backend_profile_routing: false,
+        receipt_count: 0,
+        last_receipt_at: null,
+        last_receipt_sha256: null,
+        notes: [],
+      },
+      proof_command: "PYTHONPATH=. uv run python ../scripts/verify_local_gemma_profiles.py",
     },
     reports: {
       enabled: false,
@@ -381,9 +372,14 @@ function ArtifactRow({
 export function ArtifactStoragePanel() {
   const mountedRef = useRef(true);
   const fetchGenerationRef = useRef(0);
-  const [settings, setSettings] = useState<ArtifactStorageSettings | null>(null);
+  const fallbackRetryRef = useRef(0);
+  const [settings, setSettings] = useState<ArtifactStorageSettings | null>(
+    () => settingsFromScreenAnalysis(FALLBACK_SCREEN_ANALYSIS_SETTINGS),
+  );
   const [failed, setFailed] = useState(false);
-  const [metadataWarning, setMetadataWarning] = useState<string | null>(null);
+  const [metadataWarning, setMetadataWarning] = useState<string | null>(
+    "Settings metadata is loading; folder controls are available.",
+  );
   const [saving, setSaving] = useState(false);
   const [reportAction, setReportAction] = useState<"idle" | "previewing" | "sending" | "testing">("idle");
   const [reportActionResult, setReportActionResult] = useState<ReportActionResult | null>(null);
@@ -398,55 +394,55 @@ export function ArtifactStoragePanel() {
     fetchGenerationRef.current = generation;
     const canPublish = () => !isCancelled() && fetchGenerationRef.current === generation;
     try {
-      let data: ArtifactStorageSettings | null = null;
-      let hasArtifactMetadata = false;
       try {
-        const screenData = await fetchJsonWithTimeout("/api/settings/screen-analysis");
-        if (isScreenAnalysisSettings(screenData)) {
-          data = settingsFromScreenAnalysis(screenData);
-        } else if (isArtifactStorageSettings(screenData)) {
-          data = screenData;
-          hasArtifactMetadata = true;
+        const artifactData = await fetchJsonWithTimeout("/api/settings/artifact-storage", ARTIFACT_METADATA_TIMEOUT_MS);
+        if (isArtifactStorageSettings(artifactData)) {
+          if (canPublish()) {
+            fallbackRetryRef.current = 0;
+            setSettings(artifactData);
+            setMetadataWarning(null);
+            setFailed(false);
+          }
+          return;
         } else {
-          throw new Error("Screen analysis settings response is invalid.");
+          throw new Error("Artifact storage response is invalid.");
         }
-      } catch {
-        const artifactData = await fetchJsonWithTimeout("/api/settings/artifact-storage");
-        if (!isArtifactStorageSettings(artifactData)) throw new Error("Artifact storage response is invalid.");
-        data = artifactData;
-        hasArtifactMetadata = true;
+      } catch {}
+
+      const screenData = await fetchJsonWithTimeout("/api/settings/screen-analysis", 20_000);
+      let screenSettings: ArtifactStorageSettings;
+      if (isArtifactStorageSettings(screenData)) {
+        screenSettings = screenData;
+      } else if (isScreenAnalysisSettings(screenData)) {
+        screenSettings = settingsFromScreenAnalysis(screenData);
+      } else {
+        throw new Error("Screen analysis settings response is invalid.");
       }
-      if (data === null) throw new Error("Screenshot folder settings response is unavailable.");
       if (canPublish()) {
-        setSettings(data);
-        setMetadataWarning(hasArtifactMetadata ? null : "Archive metadata loading; analysis controls are live.");
+        setSettings(screenSettings);
         setFailed(false);
-      }
-      if (!hasArtifactMetadata) {
-        void fetchJsonWithTimeout("/api/settings/artifact-storage")
-          .then((artifactData) => {
-            if (!canPublish()) return;
-            if (isArtifactStorageSettings(artifactData)) {
-              setSettings(artifactData);
-              setMetadataWarning(null);
-            } else {
-              setMetadataWarning("Archive metadata degraded; analysis controls are still live.");
-            }
-          })
-          .catch(() => {
-            if (canPublish()) {
-              setMetadataWarning("Archive metadata degraded; analysis controls are still live.");
-            }
-          });
+        setMetadataWarning("Folder metadata is still loading; analysis controls are live.");
+        if (fallbackRetryRef.current < 12) {
+          fallbackRetryRef.current += 1;
+          window.setTimeout(() => {
+            if (mountedRef.current && fetchGenerationRef.current === generation) void fetchSettings(() => !mountedRef.current);
+          }, 5_000);
+        }
       }
     } catch {
       if (canPublish()) {
-        setFailed(true);
-        setMetadataWarning(null);
+        setSettings(settingsFromScreenAnalysis(FALLBACK_SCREEN_ANALYSIS_SETTINGS));
+        setFailed(false);
+        setMetadataWarning("Settings metadata is temporarily unavailable; folder controls are still editable.");
+        if (fallbackRetryRef.current < 12) {
+          fallbackRetryRef.current += 1;
+          window.setTimeout(() => {
+            if (mountedRef.current && fetchGenerationRef.current === generation) void fetchSettings(() => !mountedRef.current);
+          }, 5_000);
+        }
       }
     }
   }
-
   useEffect(() => {
     let cancelled = false;
     mountedRef.current = true;
@@ -462,52 +458,20 @@ export function ArtifactStoragePanel() {
     if (settings === null || saving) return;
     setSaving(true);
     try {
-      const response = await fetch(`${API_URL}/api/settings/screen-analysis`, {
+      await fetchJsonWithTimeout("/api/settings/screen-analysis", 20_000, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
-      if (!response.ok) {
-        if (mountedRef.current) setMetadataWarning("Save failed; screen capture settings were not updated.");
-        return;
-      }
       if (!mountedRef.current) return;
       await fetchSettings(() => !mountedRef.current);
     } catch {
-      if (mountedRef.current) setMetadataWarning("Save failed; screen capture settings were not updated.");
+      if (mountedRef.current) setMetadataWarning("Save failed; screenshot analysis settings were not updated.");
     } finally {
       if (mountedRef.current) setSaving(false);
     }
   };
 
-  const updateCaptureMode = async (mode: string) => {
-    if (settings === null || saving) return;
-    setSaving(true);
-    try {
-      const response = await fetch(`${API_URL}/api/settings/capture-mode`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
-      });
-      if (!response.ok) {
-        if (mountedRef.current) setMetadataWarning("Save failed; capture mode was not updated.");
-        return;
-      }
-      if (!mountedRef.current) return;
-      await fetchSettings(() => !mountedRef.current);
-    } catch {
-      if (mountedRef.current) setMetadataWarning("Save failed; capture mode was not updated.");
-    } finally {
-      if (mountedRef.current) setSaving(false);
-    }
-  };
-
-  const screenBudget = settings?.screen.budget ?? {
-    min_seconds_between_captures: 0,
-    max_daily_captures: 0,
-    archive_retention_days: 365,
-    archive_max_mb: 0,
-  };
   const screenshotFolderSource = settings?.screenshot_folder ?? null;
   const screenshotFolderPath = screenshotFolderSource?.path ?? "";
   const screenshotFolderPathSource = screenshotFolderSource?.path_source ?? "";
@@ -526,21 +490,20 @@ export function ArtifactStoragePanel() {
     setReportAction(action === "preview" ? "previewing" : action === "send" ? "sending" : "testing");
     setReportActionError(null);
     try {
-      const response = await fetch(
-        `${API_URL}${action === "test" ? "/api/settings/end-of-day-report/test-email" : "/api/settings/end-of-day-report/manual"}`,
+      const payload = (await fetchJsonWithTimeout(
+        action === "test" ? "/api/settings/end-of-day-report/test-email" : "/api/settings/end-of-day-report/manual",
+        20_000,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-              body: action === "test"
-                ? undefined
-                : JSON.stringify({
-                    send_email: action === "send",
-                    preview_acknowledged: action === "send" && previewReadyForSend,
-                  }),
-            }
-          );
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-      const payload = (await response.json()) as ReportActionResult;
+          body: action === "test"
+            ? undefined
+            : JSON.stringify({
+                send_email: action === "send",
+                preview_acknowledged: action === "send" && previewReadyForSend,
+              }),
+        },
+      )) as ReportActionResult;
       if (!mountedRef.current) return;
       setReportActionResult(payload);
       await fetchSettings(() => !mountedRef.current);
@@ -558,13 +521,11 @@ export function ArtifactStoragePanel() {
     try {
       const scanEndpoint = screenshotFolderSource.scan_endpoint;
       if (!scanEndpoint) throw new Error("Screenshot folder scan endpoint unavailable.");
-      const response = await fetch(`${API_URL}${scanEndpoint}`, {
+      const payload = (await fetchJsonWithTimeout(scanEndpoint, 30_000, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ screenshot_folder: screenshotFolderPath, limit: 100 }),
-      });
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
-      const payload = (await response.json()) as ScreenshotFolderScanResult;
+      })) as ScreenshotFolderScanResult;
       if (!mountedRef.current) return;
       setScreenshotFolderScanResult(payload);
       await fetchSettings(() => !mountedRef.current);
@@ -698,7 +659,29 @@ export function ArtifactStoragePanel() {
                       tone={screenshotFolderSource.analysis.provider === "not_configured" ? "warn" : "good"}
                     />
                     <ArtifactRow
-                      label="Analyzed"
+                      label="Ingested"
+                      value={
+                        `${screenshotFolderSource.analysis.ingested_count ?? screenshotFolderSource.analysis.observation_count} / ` +
+                        `${screenshotFolderSource.analysis.folder_image_count ?? screenshotFolderSource.image_count}` +
+                        ` · remaining ${screenshotFolderSource.analysis.remaining_to_ingest ?? Math.max(screenshotFolderSource.image_count - screenshotFolderSource.analysis.observation_count, 0)}`
+                      }
+                      tone={
+                        (screenshotFolderSource.analysis.remaining_to_ingest ?? 1) === 0 &&
+                        (screenshotFolderSource.analysis.ingested_count ?? screenshotFolderSource.analysis.observation_count) > 0
+                          ? "good"
+                          : "normal"
+                      }
+                    />
+                    <ArtifactRow
+                      label="Processed"
+                      value={
+                        `${screenshotFolderSource.analysis.processed_count ?? screenshotFolderSource.analysis.analysis_status.succeeded ?? 0} analyzed · ` +
+                        `${screenshotFolderSource.analysis.remaining_to_analyze ?? screenshotFolderSource.analysis.analysis_backlog} queued`
+                      }
+                      tone={screenshotAnalysisTone(screenshotFolderSource.analysis)}
+                    />
+                    <ArtifactRow
+                      label="Status"
                       value={
                         `${screenshotFolderSource.analysis.observation_count} observations · ` +
                         `${screenshotFolderSource.analysis.analysis_backlog} backlog · ` +
@@ -763,84 +746,79 @@ export function ArtifactStoragePanel() {
               >
                 <option value="codex-local">codex-local</option>
                 <option value="apple-vision">apple-vision</option>
+                <option value="local-vlm">local-vlm</option>
                 <option value="openrouter">openrouter</option>
               </select>
             </div>
-            <div className="grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-[9px]">
-              <div className="text-retro-text/30 uppercase tracking-wider">Mode</div>
-              <select
-                value={settings.screen.capture_mode}
-                disabled={saving}
-                onChange={(event) => void updateCaptureMode(event.target.value)}
-                className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text"
-              >
-                <option value="on_switch">on_switch</option>
-                <option value="balanced">balanced / 300s</option>
-                <option value="detailed">detailed / 60s</option>
-              </select>
-            </div>
-            <ArtifactRow
-              label="Daemon"
-              value={settings.screen.daemon_connected ? "linked" : settings.screen.daemon_alive ? "alive, waiting for context post" : "offline - no new captures"}
-              tone={settings.screen.daemon_connected || settings.screen.daemon_alive ? "good" : "warn"}
-            />
-            <ArtifactRow
-              label="Capture"
-              value={captureStateLabel(settings.screen)}
-              tone={captureStateTone(settings.screen)}
-            />
-            <ArtifactRow
-              label="Active"
-              value={settings.screen.daemon_status.active_window ?? "not observed"}
-              tone={settings.screen.daemon_status.active_window ? "normal" : "warn"}
-            />
-            <ArtifactRow
-              label="Last capture"
-              value={settings.screen.daemon_status.last_capture_at ?? "none"}
-              tone={settings.screen.daemon_status.last_capture_at ? "good" : "warn"}
-            />
-            <ArtifactRow
-              label="Stored"
-              value={`${settings.screen.artifact_count} captures${settings.screen.last_artifact_at ? ` · latest ${settings.screen.last_artifact_at}` : ""}`}
-              tone={settings.screen.artifact_count > 0 ? "good" : "warn"}
-            />
-            <div className="grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-[9px]">
-              <div className="text-retro-text/30 uppercase tracking-wider">Preserve</div>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => void updateScreenAnalysis({ preserve_captures: !settings.screen.preservation_enabled })}
-                className={`w-fit border px-2 py-1 uppercase tracking-wider ${
-                  settings.screen.preservation_enabled
-                    ? "border-green-400 text-green-400"
-                    : "border-retro-text/20 text-retro-text/40"
-                }`}
-              >
-                {boolLabel(settings.screen.preservation_enabled)}
-              </button>
-            </div>
-            <ArtifactRow label="Screen dir" value={settings.screen.archive_dir} />
-            <ArtifactRow
-              label="Budget"
-              value={`min ${screenBudget.min_seconds_between_captures}s · day ${screenBudget.max_daily_captures || "unlimited"}`}
-            />
-            <ArtifactRow
-              label="Retention"
-              value={`${screenBudget.archive_retention_days}d · ${screenBudget.archive_max_mb || "unlimited"} MB`}
-            />
-            <ArtifactRow
-              label="Dir state"
-              value={dirStateLabel(settings.screen.exists, settings.screen.writable, settings.screen.creation_error)}
-              tone={dirStateTone(settings.screen.exists, settings.screen.writable, settings.screen.creation_error)}
-            />
-            <ArtifactRow label="Source" value={sourceLabel(settings.screen.archive_dir_source)} />
-            <ArtifactRow label="Status" value={sourceLabel(settings.screen.daemon_status.status_source)} />
-            <ArtifactRow
-              label="Inspect"
-              value={`${settings.screen.inspection_endpoint} (${settings.screen.inspection_visibility.replace(/_/g, " ")})`}
-              tone="good"
-            />
-            <ArtifactRow label="Enable via" value={settings.screen.control_env.enabled} />
+
+            {settings.local_runtime && (
+              <div className="border-t border-retro-text/10 pt-2 mt-1">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="text-[10px] text-retro-text">Local Gemma runtime</div>
+                  <div
+                    className={`text-[9px] uppercase tracking-wider ${
+                      localRuntimeProofTone(settings.local_runtime.profile_proof) === "good"
+                        ? "text-green-400"
+                        : localRuntimeProofTone(settings.local_runtime.profile_proof) === "warn"
+                          ? "text-yellow-400"
+                          : "text-retro-text/40"
+                    }`}
+                  >
+                    {settings.local_runtime.profile_proof.status.replace(/_/g, " ")}
+                  </div>
+                </div>
+                <ArtifactRow
+                  label="Gateway"
+                  value={settings.local_runtime.gateway_configured ? "configured" : "not configured"}
+                  tone={settings.local_runtime.gateway_configured ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Model"
+                  value={settings.local_runtime.model || "not configured"}
+                  tone={settings.local_runtime.model ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Proof"
+                  value={settings.local_runtime.profile_proof.per_request_reasoning_control.replace(/_/g, " ")}
+                  tone={localRuntimeProofTone(settings.local_runtime.profile_proof)}
+                />
+                <ArtifactRow
+                  label="Routing"
+                  value={
+                    settings.local_runtime.profile_proof.safe_for_single_backend_profile_routing
+                      ? "single backend profile routing safe"
+                      : "single backend profile routing not safe"
+                  }
+                  tone={localRuntimeProofTone(settings.local_runtime.profile_proof)}
+                />
+                <ArtifactRow
+                  label="Profiles"
+                  value={
+                    settings.local_runtime.profiles.length > 0
+                      ? settings.local_runtime.profiles
+                          .map((profile) => `${profile.id}:${profile.priority}/${profile.reasoning}`)
+                          .join(" · ")
+                      : "none"
+                  }
+                  tone={settings.local_runtime.profiles.length > 0 ? "good" : "normal"}
+                />
+                <ArtifactRow
+                  label="Receipt"
+                  value={
+                    settings.local_runtime.profile_proof.last_receipt_sha256
+                      ? `${settings.local_runtime.profile_proof.last_receipt_sha256.slice(0, 12)} · ${settings.local_runtime.profile_proof.last_receipt_at ?? "time unknown"}`
+                      : `${settings.local_runtime.profile_proof.receipt_count} receipts`
+                  }
+                />
+                {settings.local_runtime.profile_proof.notes.length > 0 && (
+                  <ArtifactRow
+                    label="Note"
+                    value={settings.local_runtime.profile_proof.notes.slice(0, 2).join(" · ")}
+                    tone="warn"
+                  />
+                )}
+              </div>
+            )}
 
             <div className="border-t border-retro-text/10 pt-2 mt-1">
               <div className="flex items-center justify-between gap-2 mb-1">

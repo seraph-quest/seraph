@@ -1,5 +1,6 @@
 """Tests for preserved screen capture artifact inspection endpoints."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -287,6 +288,118 @@ async def test_screenshot_folder_scan_uses_file_mtime_as_observation_timestamp(a
         if isinstance(item, str) and item.startswith("capture_artifacts:")
     ][0]
     assert artifacts["created_at"] == captured_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_prefers_recursive_path_timestamp(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root / "2026" / "06" / "30", name="1782833902-144658000.png")
+    stale_mtime = datetime(2026, 6, 29, 8, 0, 0, tzinfo=timezone.utc)
+    os.utime(image, (stale_mtime.timestamp(), stale_mtime.timestamp()))
+    captured_at = datetime.fromtimestamp(1782833902 + 144658000 / 1_000_000_000, timezone.utc)
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    timestamp = observation.timestamp
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    assert timestamp == captured_at
+    artifacts = [
+        json.loads(item.removeprefix("capture_artifacts:"))
+        for item in json.loads(observation.details_json or "[]")
+        if isinstance(item, str) and item.startswith("capture_artifacts:")
+    ][0]
+    assert artifacts["created_at"] == captured_at.isoformat()
+    assert artifacts["created_at_source"] == "path"
+    assert artifacts["relative_path"] == "2026/06/30/1782833902-144658000.png"
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_continues_past_newest_duplicates(async_db, client, tmp_path, monkeypatch):
+    root = tmp_path / "screenshots"
+    oldest = _write_screenshot(root, name="1782833900-000000000.png", data=b"oldest")
+    newest = _write_screenshot(root, name="1782833902-000000000.png", data=b"newest")
+    middle = _write_screenshot(root, name="1782833901-000000000.png", data=b"middle")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", _no_semantic_analysis)
+
+    first = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 2},
+    )
+    second = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 1},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["ingested"] == 2
+    assert second.status_code == 200
+    assert second.json()["scanned"] == 3
+    assert second.json()["skipped_duplicates"] == 2
+    assert second.json()["ingested"] == 1
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observations = result.scalars().all()
+
+    assert len(observations) == 3
+    assert {observation.window_title for observation in observations} == {
+        newest.name,
+        middle.name,
+        oldest.name,
+    }
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_serializes_concurrent_duplicate_checks(
+    async_db, client, tmp_path, monkeypatch
+):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="1782833900-000000000.png")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_analysis(_image_path: Path, _artifacts: dict[str, object]):
+        started.set()
+        await release.wait()
+        return None
+
+    monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", slow_analysis)
+
+    first = asyncio.create_task(
+        client.post(
+            "/api/observer/screenshot-folder/scan",
+            json={"screenshot_folder": str(root), "limit": 1},
+        )
+    )
+    await started.wait()
+    second = asyncio.create_task(
+        client.post(
+            "/api/observer/screenshot-folder/scan",
+            json={"screenshot_folder": str(root), "limit": 1},
+        )
+    )
+    release.set()
+    first_resp, second_resp = await asyncio.gather(first, second)
+
+    assert first_resp.status_code == 200
+    assert second_resp.status_code == 200
+    assert sorted([first_resp.json()["ingested"], second_resp.json()["ingested"]]) == [0, 1]
+    assert sorted([first_resp.json()["skipped_duplicates"], second_resp.json()["skipped_duplicates"]]) == [0, 1]
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observations = result.scalars().all()
+
+    assert len(observations) == 1
 
 
 @pytest.mark.asyncio
@@ -784,6 +897,10 @@ def _write_screenshot(root: Path, *, name: str, data: bytes = b"png bytes") -> P
     image = root / name
     image.write_bytes(data)
     return image
+
+
+async def _no_semantic_analysis(_image_path: Path, _artifacts: dict[str, object]):
+    return None
 
 
 def _sample_png() -> bytes:

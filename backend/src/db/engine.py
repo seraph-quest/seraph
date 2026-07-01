@@ -16,12 +16,17 @@ engine = create_async_engine(
     _db_url,
     echo=settings.debug,
     connect_args={"check_same_thread": False},
+    pool_size=20,
+    max_overflow=20,
+    pool_timeout=5,
 )
 
 
 def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 

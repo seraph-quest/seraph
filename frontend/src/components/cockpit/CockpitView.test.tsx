@@ -12159,7 +12159,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(27));
+    await waitFor(() => expect(cockpitFetchCount).toBe(4));
     view.unmount();
 
     await act(async () => {

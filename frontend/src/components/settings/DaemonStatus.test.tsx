@@ -96,7 +96,8 @@ describe("DaemonStatus", () => {
     render(<DaemonStatus />);
 
     await waitFor(() => expect(screen.getByText("Desktop link live")).toBeInTheDocument());
-    expect(screen.getByText("Balanced")).toBeInTheDocument();
+    expect(screen.getByText("Linked")).toBeInTheDocument();
+    expect(screen.queryByText("Balanced")).not.toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.getByText("Queued test notification")).toBeInTheDocument();
     expect(screen.getAllByText("Seraph desktop shell")).toHaveLength(2);

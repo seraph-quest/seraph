@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlmodel import select
 
 import src.db.models  # noqa: F401
 from src.db.models import MemoryEpisode, ScreenObservation
+
+
+@pytest.fixture(autouse=True)
+def allow_remote_screen_llm_for_existing_digest_tests():
+    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", True):
+        yield
 
 
 @pytest.mark.asyncio
@@ -65,10 +72,22 @@ async def test_screenshot_digest_groups_window_and_links_evidence(async_db):
             )
         )
 
-    result = await build_screenshot_observation_digest(window_start=start, window_end=end)
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="LLM digest: provider retry was blocked."))]
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=AsyncMock(return_value=response),
+    ) as completion:
+        result = await build_screenshot_observation_digest(window_start=start, window_end=end)
 
     assert result.status == "created"
     assert result.observation_count == 2
+    completion.assert_awaited_once()
+    prompt = completion.await_args.kwargs["messages"][0]["content"]
+    assert completion.await_args.kwargs["runtime_path"] == "screenshot_observation_digest"
+    assert completion.await_args.kwargs["local_runtime_only"] is False
+    assert "api_key=super-secret-token" in prompt
     async with async_db() as db:
         episodes = list((await db.execute(select(MemoryEpisode))).scalars().all())
     assert len(episodes) == 1
@@ -77,10 +96,72 @@ async def test_screenshot_digest_groups_window_and_links_evidence(async_db):
     assert metadata["kind"] == "screenshot_observation_digest"
     assert metadata["observation_count"] == 2
     assert len(metadata["observation_ids"]) == 2
-    assert "hash-one" not in episode.content
-    assert "api_key=super-secret-token" not in episode.content
-    assert "[redacted]" in episode.content
-    assert "Provider unavailable." in episode.content
+    assert episode.content == "LLM digest: provider retry was blocked."
+
+
+@pytest.mark.asyncio
+async def test_screenshot_digest_blocks_without_local_profile_or_remote_opt_in(async_db):
+    from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
+
+    start = datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 30, 9, 30, tzinfo=timezone.utc)
+    async with async_db() as db:
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc),
+                image_sha256="hash-private",
+                summary="Private screenshot-derived observation",
+            )
+        )
+
+    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", False), patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=AsyncMock(),
+    ) as completion:
+        result = await build_screenshot_observation_digest(window_start=start, window_end=end)
+
+    assert result.status == "blocked"
+    completion.assert_not_awaited()
+    async with async_db() as db:
+        episodes = list((await db.execute(select(MemoryEpisode))).scalars().all())
+    assert episodes == []
+
+
+@pytest.mark.asyncio
+async def test_screenshot_digest_blocks_generic_local_profile_even_with_safe_proof(async_db):
+    from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
+
+    start = datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 30, 9, 30, tzinfo=timezone.utc)
+    async with async_db() as db:
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc),
+                image_sha256="hash-generic-local",
+                summary="Private screenshot-derived observation",
+            )
+        )
+
+    with patch("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", False), patch(
+        "src.scheduler.screen_llm_policy.settings.runtime_profile_preferences",
+        "screenshot_observation_digest=local",
+    ), patch(
+        "src.scheduler.screen_llm_policy.settings.local_model",
+        "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+    ), patch(
+        "src.scheduler.screen_llm_policy.settings.local_llm_api_base",
+        "http://127.0.0.1:8000/v1",
+    ), patch(
+        "src.scheduler.screen_llm_policy.latest_local_runtime_profile_proof",
+        return_value={"safe_for_single_backend_profile_routing": True},
+    ), patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=AsyncMock(),
+    ) as completion:
+        result = await build_screenshot_observation_digest(window_start=start, window_end=end)
+
+    assert result.status == "blocked"
+    completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -98,8 +179,18 @@ async def test_screenshot_digest_is_idempotent_and_updates_when_window_changes(a
             )
         )
 
-    created = await build_screenshot_observation_digest(window_start=start, window_end=end)
-    unchanged = await build_screenshot_observation_digest(window_start=start, window_end=end)
+    first_response = MagicMock()
+    first_response.choices = [MagicMock(message=MagicMock(content="LLM digest v1"))]
+    second_response = MagicMock()
+    second_response.choices = [MagicMock(message=MagicMock(content="LLM digest v2"))]
+    completion = AsyncMock(side_effect=[first_response, second_response])
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=completion,
+    ):
+        created = await build_screenshot_observation_digest(window_start=start, window_end=end)
+        unchanged = await build_screenshot_observation_digest(window_start=start, window_end=end)
     async with async_db() as db:
         db.add(
             _observation(
@@ -108,12 +199,17 @@ async def test_screenshot_digest_is_idempotent_and_updates_when_window_changes(a
                 summary="Second digest observation",
             )
         )
-    updated = await build_screenshot_observation_digest(window_start=start, window_end=end)
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=completion,
+    ):
+        updated = await build_screenshot_observation_digest(window_start=start, window_end=end)
 
     assert created.status == "created"
     assert unchanged.status == "unchanged"
     assert updated.status == "updated"
     assert created.episode_id == unchanged.episode_id == updated.episode_id
+    assert completion.await_count == 2
     async with async_db() as db:
         episodes = list((await db.execute(select(MemoryEpisode))).scalars().all())
     assert len(episodes) == 1
@@ -141,12 +237,21 @@ async def test_screenshot_digest_respects_content_size_limit(async_db, monkeypat
                 )
             )
 
-    result = await build_screenshot_observation_digest(window_start=start, window_end=end)
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="LLM digest ignores Python size shaping."))]
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=AsyncMock(return_value=response),
+    ) as completion:
+        result = await build_screenshot_observation_digest(window_start=start, window_end=end)
 
     assert result.status == "created"
+    prompt = completion.await_args.kwargs["messages"][0]["content"]
+    assert len(prompt) >= 500
     async with async_db() as db:
         episode = (await db.execute(select(MemoryEpisode))).scalar_one()
-    assert len(episode.content) <= 500
+    assert episode.content == "LLM digest ignores Python size shaping."
 
 
 def _observation(

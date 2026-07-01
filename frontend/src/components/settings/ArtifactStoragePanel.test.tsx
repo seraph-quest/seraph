@@ -637,7 +637,7 @@ describe("ArtifactStoragePanel", () => {
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
-    expect(screen.getByText("Folder metadata is still loading; analysis controls are live.")).toBeInTheDocument();
+    expect(await screen.findByText("Folder metadata is still loading; analysis controls are live.")).toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   });
@@ -720,7 +720,7 @@ describe("ArtifactStoragePanel", () => {
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(screen.getByLabelText("Screenshot folder")).toBeInTheDocument();
     expect(
-      screen.getByText("Settings metadata is temporarily unavailable; folder controls are still editable."),
+      await screen.findByText("Settings metadata is temporarily unavailable; folder controls are still editable."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   });

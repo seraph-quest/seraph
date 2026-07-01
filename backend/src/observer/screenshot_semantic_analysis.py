@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 import httpx
 
 from config.settings import settings
+from src.local_runtime_profiles import (
+    local_runtime_profile_form_fields,
+    local_runtime_profile_headers,
+)
 from src.observer.screenshot_analysis_contract import (
     ScreenshotAnalysis,
     ScreenshotAnalysisContractError,
@@ -203,10 +207,13 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
     }
     prompt = screenshot_analysis_prompt(metadata)
     endpoint = settings.local_vlm_base_url.rstrip("/") + "/v1/analyze-file"
-    data = {"prompt": prompt}
+    data = {
+        "prompt": prompt,
+        **local_runtime_profile_form_fields("screenshot_fast"),
+    }
     if settings.local_vlm_model.strip():
         data["model"] = settings.local_vlm_model.strip()
-    headers = {}
+    headers = local_runtime_profile_headers("screenshot_fast")
     if settings.local_vlm_api_key.strip():
         headers["Authorization"] = f"Bearer {settings.local_vlm_api_key.strip()}"
 

@@ -23,6 +23,7 @@ from smolagents.models import ChatMessage, MessageRole
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
+from src.local_runtime_profiles import local_runtime_profile
 from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,8 @@ def _secret_value(env_name: str) -> str:
         return settings.anthropic_api_key or os.getenv(env_name, "")
     if env_name == "LLM_API_KEY":
         return settings.llm_api_key or os.getenv(env_name, "")
+    if env_name == "LOCAL_LLM_API_KEY":
+        return settings.local_llm_api_key or os.getenv(env_name, "")
     return os.getenv(env_name, "")
 
 
@@ -381,7 +384,34 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
             keyless=True,
             safety_notes="Local Ollama-compatible profile.",
         )
+        if settings.local_llm_api_base.strip():
+            for profile_id in ("screenshot_fast", "report_thinking", "chat_thinking"):
+                runtime_profile = local_runtime_profile(profile_id)
+                profiles[f"local-gemma-{profile_id.replace('_', '-')}"] = ProviderProfile(
+                    id=f"local-gemma-{profile_id.replace('_', '-')}",
+                    provider_kind="openai_compatible",
+                    model=settings.local_model.strip(),
+                    api_base=settings.local_llm_api_base.strip(),
+                    capabilities=("local", "private", "reasoning_profile", runtime_profile.reasoning),
+                    cost_tier="low",
+                    latency_tier="low" if runtime_profile.priority != "background" else "medium",
+                    task_class=runtime_profile.runtime_path,
+                    budget_class="low",
+                    keyless=not bool(settings.local_llm_api_key.strip()),
+                    secret_env="LOCAL_LLM_API_KEY",
+                    options=_local_gemma_profile_options(profile_id),
+                    safety_notes=(
+                        "Local Gemma profile contract. Treat as unsafe for production "
+                        "profile routing until the local runtime proof receipt says safe."
+                    ),
+                )
     return profiles
+
+
+def _local_gemma_profile_options(profile_id: str) -> dict[str, Any]:
+    options = dict(local_runtime_profile(profile_id).options)
+    options.pop("response_shape", None)
+    return options
 
 
 def provider_profiles() -> dict[str, ProviderProfile]:
@@ -402,8 +432,16 @@ def _is_local_profile(profile: str | None) -> bool:
     provider_profile = _provider_profile(profile)
     return bool(
         provider_profile is not None
-        and provider_profile.provider_kind in {"local", "ollama"}
+        and (
+            provider_profile.provider_kind in {"local", "ollama"}
+            or "local" in provider_profile.capabilities
+        )
     )
+
+
+def is_local_runtime_profile(profile: str | None) -> bool:
+    """Return whether a resolved runtime profile stays on a local provider."""
+    return _is_local_profile(profile)
 
 
 def provider_profile_statuses() -> list[dict[str, Any]]:
@@ -1122,7 +1160,7 @@ def has_fallback_model(*, runtime_path: str | None = None) -> bool:
 def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "default") -> str:
     if settings.fallback_llm_api_key:
         return settings.fallback_llm_api_key
-    if primary_profile == "local":
+    if _is_local_profile(primary_profile):
         return _primary_api_key()
     return primary_api_key or _primary_api_key()
 
@@ -1130,7 +1168,7 @@ def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "de
 def _fallback_api_base(primary_api_base: str | None, *, primary_profile: str = "default") -> str:
     if settings.fallback_llm_api_base:
         return settings.fallback_llm_api_base
-    if primary_profile == "local":
+    if _is_local_profile(primary_profile):
         return settings.llm_api_base
     return primary_api_base or settings.llm_api_base
 
@@ -1236,6 +1274,11 @@ def _fallback_targets(
             }
         )
     return _order_targets_by_policy(targets, runtime_path=runtime_path)
+
+
+def _target_uses_local_runtime_profile(target: dict[str, Any]) -> bool:
+    profile = target.get("profile")
+    return bool(profile and is_local_runtime_profile(str(profile)))
 
 
 def _target_cooldown_seconds() -> int:
@@ -2707,6 +2750,7 @@ def completion_with_fallback_sync(
     request_id: str | None = None,
     runtime_path: str = "completion",
     profile: str | None = None,
+    local_runtime_only: bool = False,
 ):
     """Execute a litellm completion with an optional fallback target."""
     import litellm
@@ -2729,6 +2773,10 @@ def completion_with_fallback_sync(
             "profile": resolved_profile,
             "source": "primary",
         }
+        if local_runtime_only and not _target_uses_local_runtime_profile(primary_target):
+            raise ProviderProfileConfigurationError(
+                f"Runtime path '{runtime_path}' requires a local runtime profile"
+            )
         fallback_targets = _fallback_targets(
             primary_model_id=primary_model,
             primary_api_base=primary_kwargs.get("api_base"),
@@ -2737,6 +2785,10 @@ def completion_with_fallback_sync(
             runtime_path=runtime_path,
             profile=profile,
         )
+        if local_runtime_only:
+            fallback_targets = [
+                target for target in fallback_targets if _target_uses_local_runtime_profile(target)
+            ]
         ordered_targets = _ordered_candidate_targets(
             primary_target=primary_target,
             fallback_targets=fallback_targets,
@@ -2974,6 +3026,7 @@ async def completion_with_fallback(
     model_id: str | None = None,
     runtime_path: str = "completion",
     profile: str | None = None,
+    local_runtime_only: bool = False,
 ):
     """Async wrapper around the shared completion fallback flow."""
     request_id = uuid4().hex
@@ -2988,6 +3041,7 @@ async def completion_with_fallback(
         request_id=request_id,
         runtime_path=runtime_path,
         profile=profile,
+        local_runtime_only=local_runtime_only,
     )
     try:
         if timeout is None:

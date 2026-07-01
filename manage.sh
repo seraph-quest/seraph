@@ -559,7 +559,7 @@ function start_local_frontend() {
             exec ./node_modules/.bin/vite --host 0.0.0.0 --port "$4"
         fi
         exec npm run dev -- --host 0.0.0.0 --port "$4"
-    ' seraph-local-frontend "$SCRIPT_DIR/frontend" "http://localhost:$LOCAL_BACKEND_PORT" "ws://localhost:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
+    ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_FRONTEND_PID_FILE"
     disown "$pid" 2>/dev/null || true

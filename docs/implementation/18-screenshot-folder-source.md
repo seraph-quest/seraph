@@ -96,7 +96,7 @@ The semantic analysis schema captures:
 - privacy notes
 - report tags
 
-The VLM prompt requires the model to treat screenshot content as untrusted and return only the JSON shape defined by the contract. The parser rejects non-JSON output, unknown fields, invalid enum values, and out-of-range confidence values. It also redacts sensitive-looking strings before the analysis can become a durable observation.
+The VLM prompt requires the model to treat screenshot content as untrusted and return only the JSON shape defined by the contract. The parser rejects non-JSON output, unknown fields, invalid enum values, and out-of-range confidence values. Seraph orchestration must not author semantic screenshot summaries or daily report conclusions with deterministic Python parsing; those reasoning steps belong to the configured LLM runtime.
 
 This contract is the boundary between local image ingestion and screenshot understanding. The folder scan calls the configured Seraph-side analyzer when one is available, validates the output with this contract, and persists the semantic analysis without requiring any direct connection to the screenshot producer.
 
@@ -123,6 +123,8 @@ The settings panel saves `screenshot_folder` through `/api/settings/screen-analy
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
 The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, analyzer status mix, backlog, failures, latest observation/analyzed timestamps, digest count, and latest digest timestamp. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed and rolled into report-ready digest windows.
+
+The same surface exposes local Gemma runtime profile status: configured gateway state, active model, built-in profile contracts, latest profile-proof receipt, and whether single-backend profile routing is currently safe.
 
 ## Remote VLM Analysis Target
 
@@ -151,8 +153,11 @@ llama serve \
   --host 0.0.0.0 \
   --port 8000 \
   --ctx-size 32768 \
-  --chat-template-kwargs '{"enable_thinking":false}'
+  --reasoning off \
+  --no-mmproj-offload
 ```
+
+`--no-mmproj-offload` is currently the stable workaround for RTX 3090 Ti BF16 mmproj CUDA failures. Remove it only after a GPU-server/library change is verified with the profile-proof harness.
 
 The VLM backend then exposes an OpenAI-compatible API at:
 
@@ -196,13 +201,46 @@ curl -F "file=@/path/to/screenshot.png" \
 Seraph-side first-class `local-vlm` wiring is available behind explicit settings:
 
 ```env
-SERAPH_SCREEN_ANALYSIS_PROVIDER=local-vlm
-SERAPH_LOCAL_VLM_BASE_URL=http://GPU_SERVER_IP:8088
-SERAPH_LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
+SCREEN_ANALYSIS_PROVIDER=local-vlm
+LOCAL_VLM_BASE_URL=http://127.0.0.1:8000
+LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
+LOCAL_MODEL=openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF
+LOCAL_LLM_API_BASE=http://127.0.0.1:8000/v1
+LOCAL_LLM_API_KEY=<same-local-token-as-wrapper-CHAT_PROXY_API_KEY>
+LOCAL_RUNTIME_PATHS=screenshot_observation_digest,end_of_day_goal_report,chat_agent
+RUNTIME_PROFILE_PREFERENCES=chat_agent=local-gemma-chat-thinking;end_of_day_goal_report=local-gemma-report-thinking;screenshot_observation_digest=local-gemma-report-thinking
+SCREEN_DERIVED_LLM_ALLOW_REMOTE=false
+SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF=true
 ```
 
 When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`.
 If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+
+## Local Gemma Profile Proof
+
+Seraph ships a proof harness for local Gemma profile behavior:
+
+```bash
+PYTHONPATH=. WORKSPACE_DIR=/tmp/seraph-dev-data \
+  uv run python ../scripts/verify_local_gemma_profiles.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --timeout-seconds 120
+```
+
+The harness verifies `screenshot_fast`, `report_thinking`, and `chat_thinking` against the live OpenAI-compatible gateway, writes a sanitized JSON receipt under `local-runtime-profile-receipts`, and reports whether one backend is safe for profile routing.
+
+Current verified receipt from 2026-07-01:
+
+- path: `/private/tmp/seraph-dev-data/local-runtime-profile-receipts/20260701T163430Z-ac5f047522024ebe835824efc70c12d3.json`
+- sha256: `6ea55a9fd469a9c97b1fd5554e1d585682527b2356bd6d559e3db75332b56974`
+- profile contract sha256: `30387cf96b71c50e85dd0bb5f3a7d82b012879b7341be8b621cefdc52b30c51a`
+- conclusion: `per_request_reasoning_control=verified`
+- routing state: `safe_for_single_backend_profile_routing=true`
+- notes: none
+
+The current local wrapper normalizes Gemma channel markers for the `screenshot_fast` / `reasoning=off` path before Seraph parses or stores the response. The proof receipt verifies that callers do not receive visible reasoning markers after gateway normalization and that the shared local backend can serve the configured profile contract. It does not prove the backend performed no internal reasoning.
+
+Seraph blocks screen-derived digest/report LLM calls unless the resolved runtime profile is the verified `local-gemma-report-thinking` profile and the latest proof receipt matches the configured local model, local base URL, and current Seraph profile contract hash. Generic local profiles such as `local` or `local-ollama` are not enough for screenshot-derived report text because they do not carry the verified Gemma profile request contract. When remote screen routing is not explicitly enabled, those calls also run in local-runtime-only mode so fallback/reroute candidates are filtered to local profiles and a local outage fails closed instead of trying a remote fallback. Operators may set `SCREEN_DERIVED_LLM_ALLOW_REMOTE=true` only when they intentionally want screenshot-derived text to leave the local runtime boundary.
 
 Each screenshot observation carries Seraph-owned analysis status details:
 
@@ -228,11 +266,11 @@ Default settings:
 
 Each digest stores a `MemoryEpisode` with source tool `screenshot_observation_digest` and schema `seraph.screenshot_observation_digest.v1`. Digest metadata includes the digest key, window start/end, source screenshot observation ids, observation count, content character count, and payload SHA-256.
 
-The digest is intentionally text-only and privacy-bounded. It never embeds raw screenshots, image hashes, full visible text, or provider transcripts. It includes compact redacted progression notes, activity/project/app mixes, analysis status counts, confidence, blocker evidence, drift evidence, and the source observation ids needed for traceability.
+The digest is intentionally text-only and privacy-bounded. It never embeds raw screenshots, image hashes, full visible text, or provider transcripts. It is generated by the configured LLM from stored LLM screenshot analyses and carries the source observation ids needed for traceability.
 
 Digest writes are idempotent per window and schema. If a window has not changed, Seraph keeps the existing episode. If new observations appear in the same window, Seraph updates the same episode instead of creating duplicates.
 
-End-of-day reports consume these rolling digest episodes as the day-level screenshot evidence layer. The report builder passes redacted digest text into the optional LLM prompt and into the deterministic local fallback. Goal comparison uses the digest evidence to classify each active goal as aligned, blocked, drifted, or unclear, and records whether the day pushed the needle, got blocked, drifted, or remained unclear.
+End-of-day reports consume these rolling digest episodes as the day-level screenshot evidence layer. The report builder passes digest text and goal context to the configured LLM runtime. Daily synthesis and critical goal comparison are LLM-authored; deterministic Python code may orchestrate, validate, persist, and deliver artifacts, but must not author the semantic report conclusions.
 
 The final report stores digest count and source screenshot observation ids in report metadata for traceability. It still does not copy raw screenshots, image hashes, long visible text, or provider transcripts into the report.
 

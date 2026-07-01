@@ -8,6 +8,7 @@ import json
 from datetime import date, datetime, timezone
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from config.settings import settings
 
@@ -70,10 +71,43 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
         analyzer_calls.append((_image_path, dict(_artifacts)))
         return analysis
 
+    digest_response = MagicMock()
+    digest_response.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=(
+                    "LLM digest: the user worked on the Seraph screenshot intelligence loop "
+                    "and made report-pipeline progress."
+                )
+            )
+        )
+    ]
+    report_response = MagicMock()
+    report_response.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=(
+                    "LLM report: the day pushed the Seraph screenshot intelligence loop forward. "
+                    "Goals vs day: aligned and moving, with no Python-authored semantic summary."
+                )
+            )
+        )
+    ]
+    completion = AsyncMock(side_effect=[digest_response, report_response])
+
     monkeypatch.setattr(
         "src.observer.screenshot_folder_source.analyze_screenshot_image",
         fake_analyze_screenshot_image,
     )
+    monkeypatch.setattr(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        completion,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
+        completion,
+    )
+    monkeypatch.setattr("src.scheduler.screen_llm_policy.settings.screen_derived_llm_allow_remote", True)
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
     monkeypatch.setattr("src.api.settings.settings.screen_analysis_provider", "local-vlm")
     monkeypatch.setattr("src.api.settings.settings.local_vlm_base_url", "http://gpu:8088")
@@ -99,7 +133,6 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
     )
     with monkeypatch.context() as report_patch:
         report_patch.setattr(settings, "user_timezone", "UTC")
-        report_patch.setattr(settings, "end_of_day_report_llm_enabled", False)
         report = await build_end_of_day_goal_report(date(2026, 6, 30))
 
     status = (await client.get("/api/settings/artifact-storage")).json()
@@ -135,22 +168,26 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
     digest_metadata = json.loads(digest_episode.metadata_json or "{}")
     assert digest_metadata["observation_ids"] == [observations[0].id]
     assert digest_metadata["observation_count"] == 1
-    assert "Evidence observation IDs:" in digest_episode.content
-    assert observations[0].id in digest_episode.content
-    assert "screenshot intelligence loop" in digest_episode.content
+    assert digest_episode.content == (
+        "LLM digest: the user worked on the Seraph screenshot intelligence loop "
+        "and made report-pipeline progress."
+    )
     assert str(image.resolve()) not in digest_episode.content
     assert image_sha256 not in digest_episode.content
     assert report["screenshot_digests"]["count"] == 1
-    assert report["screenshot_digests"]["observation_ids"] == ["[redacted]"]
-    assert observations[0].id not in report["screenshot_digests"]["redacted_text"]
-    assert "[redacted]" in report["screenshot_digests"]["redacted_text"]
-    assert "screenshot intelligence loop" in report["screenshot_digests"]["redacted_text"]
-    assert str(image.resolve()) not in report["screenshot_digests"]["redacted_text"]
-    assert image_sha256 not in report["screenshot_digests"]["redacted_text"]
-    assert report["goal_alignment"][0]["status"] == "aligned"
-    assert report["goal_alignment"][0]["needle_movement"] == "pushed"
-    assert report["goal_alignment"][0]["source_observation_ids"] == ["[redacted]"]
-    assert "- Pushed-the-needle goals: 1" in report["body"]
+    assert report["screenshot_digests"]["observation_ids"] == [observations[0].id]
+    assert report["screenshot_digests"]["digest_text"] == digest_episode.content
+    assert report["goal_alignment"] == []
+    assert report["body"] == (
+        "LLM report: the day pushed the Seraph screenshot intelligence loop forward. "
+        "Goals vs day: aligned and moving, with no Python-authored semantic summary."
+    )
+    assert completion.await_count == 2
+    assert completion.await_args_list[0].kwargs["runtime_path"] == "screenshot_observation_digest"
+    assert completion.await_args_list[1].kwargs["runtime_path"] == "end_of_day_goal_report"
+    report_prompt = completion.await_args_list[1].kwargs["messages"][0]["content"]
+    assert digest_episode.content in report_prompt
+    assert "screenshot intelligence loop" in report_prompt
     assert status["screenshot_folder"]["analysis"]["observation_count"] == 1
     assert status["screenshot_folder"]["analysis"]["analysis_status"]["succeeded"] == 1
     assert status["screenshot_folder"]["analysis"]["analysis_failures"] == 0

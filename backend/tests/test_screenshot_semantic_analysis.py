@@ -88,11 +88,22 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
     assert analysis.goal_alignment.needle_movement == "pushed"
     assert calls[0]["endpoint"] == "http://gpu:8088/v1/analyze-file"
     assert calls[0]["data"]["model"] == "gemma-4-test"
+    assert calls[0]["data"]["runtime_profile"] == "screenshot_fast"
+    assert calls[0]["data"]["runtime_path"] == "screenshot_image_analysis"
+    assert calls[0]["data"]["priority"] == "background"
+    assert calls[0]["data"]["reasoning"] == "off"
+    assert '"enable_thinking":false' in calls[0]["data"]["profile_options"]
     assert "seraph.screenshot_analysis.v1" in calls[0]["data"]["prompt"]
     assert calls[0]["file_name"] == "capture.png"
     assert calls[0]["file_bytes"] == b"png bytes"
     assert calls[0]["media_type"] == "image/png"
-    assert calls[0]["headers"] == {"Authorization": "Bearer secret-token"}
+    assert calls[0]["headers"] == {
+        "Authorization": "Bearer secret-token",
+        "X-Seraph-Priority": "background",
+        "X-Seraph-Reasoning": "off",
+        "X-Seraph-Runtime-Path": "screenshot_image_analysis",
+        "X-Seraph-Runtime-Profile": "screenshot_fast",
+    }
     assert calls[0]["timeout"] == 9
 
 

@@ -95,9 +95,6 @@ class Settings(BaseSettings):
     observer_git_repo_path: str = ""
     deep_work_apps: str = ""  # comma-separated extra app keywords for deep work detection
 
-    # Capture mode
-    default_capture_mode: str = "on_switch"  # on_switch | balanced | detailed
-
     # Screen Activity Tracking
     activity_digest_hour: int = 20                    # 8 PM daily digest
     weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
@@ -114,6 +111,8 @@ class Settings(BaseSettings):
     screenshot_observation_digest_interval_min: int = 15
     screenshot_observation_digest_window_min: int = 30
     screenshot_observation_digest_max_chars: int = 6000
+    screen_derived_llm_allow_remote: bool = False
+    screen_derived_llm_require_profile_proof: bool = True
     screen_analysis_provider: str = ""  # local-vlm enables semantic screenshot analysis
     local_vlm_base_url: str = ""
     local_vlm_model: str = ""
@@ -122,7 +121,7 @@ class Settings(BaseSettings):
     report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21
-    end_of_day_report_llm_enabled: bool = False
+    end_of_day_report_llm_enabled: bool = True
     email_reports_enabled: bool = False
     email_reports_preview_required: bool = True
     email_reports_to: str = ""
@@ -134,6 +133,9 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+    resend_api_key: str = ""
+    resend_api_url: str = "https://api.resend.com/emails"
+    resend_template_id: str = ""
 
     # Vault
     vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty

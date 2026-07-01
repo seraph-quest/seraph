@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -22,12 +21,34 @@ from src.observer.screenshot_semantic_analysis import (
     semantic_analysis_from_details,
     semantic_analysis_status_from_details,
 )
-from src.scheduler.jobs.end_of_day_goal_report import _redact_text
+from src.llm_runtime import completion_with_fallback
+from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 
 logger = logging.getLogger(__name__)
 
 SCREENSHOT_DIGEST_SCHEMA_VERSION = "seraph.screenshot_observation_digest.v1"
 SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
+
+_SCREENSHOT_DIGEST_PROMPT = """\
+You are Seraph. Create a rolling screenshot-observation digest for the human.
+
+Use only the stored LLM screenshot-analysis records below. Do not invent screen details.
+If sensitive content appears in the records, summarize it safely instead of copying it.
+
+## Window
+{window_start} to {window_end}
+
+## Stored Screenshot Analysis Records
+{analysis_records}
+
+Write a concise digest that captures:
+1. What the window was mostly about.
+2. Meaningful progress or lack of progress.
+3. Possible blockers, drift, or uncertainty.
+4. Goal-relevant evidence if present.
+
+Do not include raw observation IDs, hashes, filenames, secrets, or long copied visible text.
+"""
 
 
 @dataclass(frozen=True)
@@ -102,10 +123,39 @@ async def build_screenshot_observation_digest(
         )
 
     payload = _digest_payload(start, end, observations, digest_key=digest_key)
-    content = _digest_content(payload)
     payload_digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
+
+    async with get_session() as db:
+        existing = await _existing_digest_episode(db, digest_key)
+        if existing is not None:
+            existing_metadata = _metadata(existing)
+            if existing_metadata.get("payload_sha256") == payload_digest:
+                return ScreenshotDigestResult(
+                    status="unchanged",
+                    window_start=start,
+                    window_end=end,
+                    observation_count=len(observations),
+                    episode_id=existing.id,
+                    digest_key=digest_key,
+                )
+
+    decision = screen_derived_llm_decision("screenshot_observation_digest")
+    if not decision.allowed:
+        logger.warning(
+            "screenshot observation digest blocked by screen LLM policy: %s",
+            decision.reason,
+        )
+        return ScreenshotDigestResult(
+            status="blocked",
+            window_start=start,
+            window_end=end,
+            observation_count=len(observations),
+            digest_key=digest_key,
+        )
+
+    content = await _llm_digest_content(payload)
 
     async with get_session() as db:
         existing = await _existing_digest_episode(db, digest_key)
@@ -121,16 +171,6 @@ async def build_screenshot_observation_digest(
             "content_char_count": len(content),
         }
         if existing is not None:
-            existing_metadata = _metadata(existing)
-            if existing_metadata.get("payload_sha256") == payload_digest:
-                return ScreenshotDigestResult(
-                    status="unchanged",
-                    window_start=start,
-                    window_end=end,
-                    observation_count=len(observations),
-                    episode_id=existing.id,
-                    digest_key=digest_key,
-                )
             existing.summary = _digest_summary(payload)
             existing.content = content
             existing.metadata_json = json.dumps(metadata, sort_keys=True)
@@ -195,43 +235,25 @@ def _digest_payload(
     *,
     digest_key: str,
 ) -> dict[str, Any]:
-    activities: Counter[str] = Counter()
-    projects: Counter[str] = Counter()
-    statuses: Counter[str] = Counter()
-    apps: Counter[str] = Counter()
-    summaries: list[str] = []
-    snippets: list[str] = []
-    blockers: list[str] = []
-    drift: list[str] = []
-    confidence_values: list[float] = []
-
+    records: list[dict[str, Any]] = []
     for obs in observations:
         details = _details(obs)
         analysis = semantic_analysis_from_details(details) or {}
         status = semantic_analysis_status_from_details(details) or {}
         error = semantic_analysis_error_from_details(details) or {}
-        activity = str(analysis.get("activity_type") or obs.activity_type or "unknown")
-        project = str(analysis.get("project") or obs.project or "unknown")
-        activities[activity] += 1
-        projects[project] += 1
-        apps[obs.app_name or "unknown"] += 1
-        statuses[str(status.get("status") or ("failed" if error else "pending"))] += 1
-        summary = _redact_text(str(analysis.get("summary") or obs.summary or ""), limit=180)
-        if summary and summary not in summaries:
-            summaries.append(summary)
-        for text in analysis.get("key_visible_text") or []:
-            snippet = _redact_text(str(text), limit=120)
-            if snippet and snippet not in snippets:
-                snippets.append(snippet)
-        alignment = analysis.get("goal_alignment") if isinstance(analysis.get("goal_alignment"), dict) else {}
-        alignment_status = str(alignment.get("status") or "")
-        if alignment_status == "blocked":
-            blockers.extend(_redacted_list(alignment.get("evidence"), limit=120))
-        if alignment_status == "drifted":
-            drift.extend(_redacted_list(alignment.get("evidence"), limit=120))
-        confidence = analysis.get("confidence")
-        if isinstance(confidence, (int, float)):
-            confidence_values.append(float(confidence))
+        records.append(
+            {
+                "timestamp": _ensure_utc(obs.timestamp).isoformat(),
+                "app_name": obs.app_name,
+                "window_title": obs.window_title,
+                "activity_type": obs.activity_type,
+                "project": obs.project,
+                "summary": obs.summary,
+                "analysis_status": status,
+                "analysis_error": error,
+                "analysis": analysis,
+            }
+        )
 
     return {
         "artifact_schema": SCREENSHOT_DIGEST_SCHEMA_VERSION,
@@ -240,56 +262,32 @@ def _digest_payload(
         "window_end": end.isoformat(),
         "observation_count": len(observations),
         "observation_ids": [obs.id for obs in observations],
-        "activity_mix": dict(activities.most_common(8)),
-        "project_mix": dict(projects.most_common(8)),
-        "app_mix": dict(apps.most_common(8)),
-        "analysis_status": dict(statuses.most_common()),
-        "average_confidence": round(sum(confidence_values) / len(confidence_values), 3)
-        if confidence_values
-        else None,
-        "progression": summaries[:12],
-        "privacy_safe_snippets": snippets[:12],
-        "blockers": _unique(blockers)[:8],
-        "drift": _unique(drift)[:8],
+        "records": records,
     }
 
 
-def _digest_content(payload: dict[str, Any]) -> str:
-    blockers = [f"- {item}" for item in payload["blockers"]] or ["- None"]
-    drift = [f"- {item}" for item in payload["drift"]] or ["- None"]
-    snippets = [f"- {item}" for item in payload["privacy_safe_snippets"]] or ["- None"]
-    lines = [
-        f"Screenshot digest {payload['window_start']} to {payload['window_end']}",
-        f"Observations: {payload['observation_count']}",
-        f"Analysis status: {payload['analysis_status']}",
-        f"Activity mix: {payload['activity_mix']}",
-        f"Project mix: {payload['project_mix']}",
-        f"Average confidence: {payload['average_confidence']}",
-        "",
-        "Progression:",
-        *[f"- {item}" for item in payload["progression"]],
-        "",
-        "Privacy-safe snippets:",
-        *snippets,
-        "",
-        "Evidence observation IDs:",
-        *[f"- {item}" for item in payload["observation_ids"]],
-        "",
-        "Blockers:",
-        *blockers,
-        "",
-        "Drift:",
-        *drift,
-    ]
-    content = "\n".join(lines)
-    return content[: max(settings.screenshot_observation_digest_max_chars, 500)]
+async def _llm_digest_content(payload: dict[str, Any]) -> str:
+    records_json = json.dumps(payload["records"], ensure_ascii=False, default=str)
+    prompt = _SCREENSHOT_DIGEST_PROMPT.format(
+        window_start=payload["window_start"],
+        window_end=payload["window_end"],
+        analysis_records=records_json[: max(settings.screenshot_observation_digest_max_chars, 500)],
+    )
+    response = await completion_with_fallback(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=800,
+        timeout=settings.agent_briefing_timeout,
+        runtime_path="screenshot_observation_digest",
+        local_runtime_only=not settings.screen_derived_llm_allow_remote,
+    )
+    return str(response.choices[0].message.content or "").strip()
 
 
 def _digest_summary(payload: dict[str, Any]) -> str:
-    project = next(iter(payload["project_mix"]), "unknown")
     return (
         f"Screenshot digest {payload['window_start']} to {payload['window_end']}: "
-        f"{payload['observation_count']} observations, main project {project}"
+        f"{payload['observation_count']} observations"
     )
 
 
@@ -341,20 +339,3 @@ def _metadata(episode: MemoryEpisode) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _redacted_list(values: Any, *, limit: int) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [_redact_text(str(value), limit=limit) for value in values if _redact_text(str(value), limit=limit)]
-
-
-def _unique(values: list[str]) -> list[str]:
-    seen = set()
-    result = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        result.append(value)
-    return result

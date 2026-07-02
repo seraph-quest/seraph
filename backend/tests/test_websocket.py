@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import tempfile
 from contextlib import asynccontextmanager, ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,20 +16,23 @@ from starlette.testclient import TestClient
 # Ensure models are registered in SQLModel.metadata before create_all
 import src.db.models  # noqa: F401
 from src.api.ws import _build_agent
+from src.utils.background import drain_tracked_tasks
 
 
 def _make_sync_client_with_db():
-    """Create a sync TestClient with an in-memory DB patched in.
+    """Create a sync TestClient with an isolated DB patched in.
 
     Patches init_db (so the lifespan creates tables on the test engine),
-    close_db (no-op), and get_session everywhere (so queries use the test DB).
+    close_db (so the lifespan drains tasks and disposes the test engine),
+    and get_session everywhere (so queries use the test DB).
 
     Returns (client, cleanup_list). The TestClient is already entered as a
     context manager so the lifespan has run. Call p.stop() on each item in
     cleanup_list when done.
     """
+    tmpdir = tempfile.mkdtemp(prefix="seraph-ws-test-")
     engine = create_async_engine(
-        "sqlite+aiosqlite://",
+        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-test.db')}",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
@@ -47,7 +53,10 @@ def _make_sync_client_with_db():
             await conn.run_sync(SQLModel.metadata.create_all)
 
     async def _test_close_db():
-        await engine.dispose()
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+        finally:
+            await engine.dispose()
 
     targets = [
         "src.db.engine.get_session",
@@ -64,6 +73,7 @@ def _make_sync_client_with_db():
     patches.append(patch("src.app.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))
+    patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
     for p in patches:
         p.start()
 
@@ -72,6 +82,7 @@ def _make_sync_client_with_db():
 
     # Enter TestClient as context manager so the lifespan runs (init_db, etc.)
     stack = ExitStack()
+    stack.callback(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
     client = stack.enter_context(TestClient(app))
 
     # Return stack in patches list so cleanup exits the context manager too

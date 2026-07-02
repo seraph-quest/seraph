@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from unittest.mock import patch
+from contextlib import ExitStack
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -4374,6 +4375,31 @@ def test_make_sync_client_with_db_unwinds_patches_when_client_startup_fails():
             harness._make_sync_client_with_db()
 
     assert settings.workspace_dir == original_workspace_dir
+
+
+def test_eval_sync_client_patches_known_sync_runtime_db_aliases():
+    assert "src.api.capabilities.get_db" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.api.profile.get_db" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.api.observer.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.api.workflows.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.observer.screen_repository.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.workflows.durable_state.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.workflows.manager.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+    assert "src.memory.superiority.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+
+
+def test_close_sync_client_with_db_closes_stack_before_caller_side_drain():
+    events: list[str] = []
+    stack = ExitStack()
+    stack.callback(lambda: events.append("stack_closed"))
+    drain = AsyncMock()
+    drain.side_effect = lambda **_: events.append("drained")
+
+    with patch("src.evals.harness.drain_tracked_tasks", drain):
+        harness._close_sync_client_with_db([], stack)
+
+    drain.assert_awaited_once_with(timeout_seconds=5.0)
+    assert events == ["stack_closed", "drained"]
 
 
 def test_runtime_eval_scenarios_expose_expected_details():

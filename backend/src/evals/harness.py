@@ -991,6 +991,7 @@ from src.tools.process_tools import (
 from src.tools.secret_ref_tools import SecretRefResolvingTool
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
+from src.db.engine import _ensure_search_indexes
 from src.utils.background import drain_tracked_tasks
 from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
@@ -1001,6 +1002,36 @@ from src.vault.repository import VaultRepository
 Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
+
+EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
+    "src.db.engine.get_session",
+    "src.agent.session.get_session",
+    "src.approval.repository.get_session",
+    "src.audit.repository.get_session",
+    "src.goals.repository.get_session",
+    "src.guardian.feedback.get_session",
+    "src.observer.insight_queue.get_session",
+    "src.vault.repository.get_session",
+    "src.api.settings.get_db",
+    "src.api.profile.get_db",
+    "src.api.observer.get_session",
+    "src.api.capabilities.get_db",
+    "src.api.workflows.get_session",
+    "src.scheduler.jobs.memory_consolidation.get_session",
+    "src.scheduler.jobs.screenshot_observation_digest.get_session",
+    "src.scheduler.scheduled_jobs.get_session",
+    "src.observer.screenshot_folder_source.get_session",
+    "src.observer.screen_repository.get_session",
+    "src.workflows.durable_state.get_session",
+    "src.workflows.manager.get_session",
+    "src.workflows.production_workflow_guarantees.get_session",
+    "src.memory.repository.get_session",
+    "src.profile.service.get_db",
+    "src.memory.hybrid_retrieval.get_session",
+    "src.memory.decay.get_session",
+    "src.memory.flush.get_session",
+    "src.memory.superiority.get_session",
+)
 
 
 @dataclass(frozen=True)
@@ -1302,7 +1333,7 @@ async def _patched_async_db(*patch_targets: str):
 def _make_sync_client_with_db():
     tmpdir = tempfile.mkdtemp(prefix="seraph-eval-")
     engine = create_async_engine(
-        "sqlite+aiosqlite://",
+        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-eval.db')}",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
@@ -1321,27 +1352,15 @@ def _make_sync_client_with_db():
     async def _test_init_db():
         async with engine.begin() as conn:
             await conn.run_sync(SQLModel.metadata.create_all)
+            await _ensure_search_indexes(conn)
 
     async def _test_close_db():
-        await engine.dispose()
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+        finally:
+            await engine.dispose()
 
-    targets = [
-        "src.db.engine.get_session",
-        "src.agent.session.get_session",
-        "src.approval.repository.get_session",
-        "src.audit.repository.get_session",
-        "src.goals.repository.get_session",
-        "src.guardian.feedback.get_session",
-        "src.observer.insight_queue.get_session",
-        "src.vault.repository.get_session",
-        "src.api.settings.get_db",
-        "src.memory.repository.get_session",
-        "src.profile.service.get_db",
-        "src.memory.hybrid_retrieval.get_session",
-        "src.memory.decay.get_session",
-        "src.memory.flush.get_session",
-    ]
-    patches = [patch(target, _get_session) for target in targets]
+    patches = [patch(target, _get_session) for target in EVAL_SYNC_CLIENT_DB_PATCH_TARGETS]
     patches.append(patch("src.app.init_db", _test_init_db))
     patches.append(patch("src.app.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))
@@ -1350,6 +1369,7 @@ def _make_sync_client_with_db():
     patches.append(patch.object(settings, "llm_log_dir", os.path.join(tmpdir, "logs")))
     patches.append(patch.object(soul_mod, "_soul_path", os.path.join(tmpdir, settings.soul_file)))
     patches.append(patch("src.vault.crypto._fernet", None))
+    patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
 
     stack = ExitStack()
     stack.callback(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
@@ -1364,6 +1384,27 @@ def _make_sync_client_with_db():
             with suppress(Exception):
                 item.stop()
         raise
+
+
+def _close_sync_client_with_db(patches: list[Any], stack: ExitStack) -> None:
+    try:
+        stack.close()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(drain_tracked_tasks(timeout_seconds=5.0))
+    finally:
+        for item in reversed(patches):
+            item.stop()
+
+
+async def _aclose_sync_client_with_db(patches: list[Any], stack: ExitStack) -> None:
+    try:
+        stack.close()
+        await drain_tracked_tasks(timeout_seconds=5.0)
+    finally:
+        for item in reversed(patches):
+            item.stop()
 
 
 def _receive_ws_json(ws: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
@@ -1535,9 +1576,7 @@ def _eval_rest_chat_behavior() -> dict[str, Any]:
             "audit_transport": success_event["details"]["transport"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_rest_chat_approval_contract() -> dict[str, Any]:
@@ -1576,9 +1615,7 @@ def _eval_rest_chat_approval_contract() -> dict[str, Any]:
             "audit_summary_contains_shell": "shell_execute" in approval_event["summary"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_rest_chat_timeout_contract() -> dict[str, Any]:
@@ -1616,9 +1653,7 @@ def _eval_rest_chat_timeout_contract() -> dict[str, Any]:
             "timeout_seconds": timeout_event["details"]["timeout_seconds"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_websocket_chat_behavior() -> dict[str, Any]:
@@ -1668,9 +1703,7 @@ def _eval_websocket_chat_behavior() -> dict[str, Any]:
             "audit_tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
@@ -1723,9 +1756,7 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
             "audit_summary_contains_shell": "shell_execute" in approval_event["summary"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
@@ -1786,9 +1817,7 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
             ),
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_delegated_tool_workflow_behavior() -> dict[str, Any]:
@@ -1849,9 +1878,7 @@ def _eval_delegated_tool_workflow_behavior() -> dict[str, Any]:
             "tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
@@ -1918,9 +1945,7 @@ def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
             "tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_workflow_composition_behavior() -> dict[str, Any]:
@@ -13433,9 +13458,7 @@ async def _eval_governed_self_evolution_behavior() -> dict[str, Any]:
             ),
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        await _aclose_sync_client_with_db(patches, stack)
 
 
 async def _eval_governed_preference_diversity_behavior() -> dict[str, Any]:
@@ -13497,9 +13520,7 @@ async def _eval_governed_preference_diversity_behavior() -> dict[str, Any]:
             ),
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        await _aclose_sync_client_with_db(patches, stack)
 
 
 async def _eval_governed_canary_rollout_behavior() -> dict[str, Any]:
@@ -13556,9 +13577,7 @@ async def _eval_governed_canary_rollout_behavior() -> dict[str, Any]:
             "stored_receipt_rollback_ready": stored_receipt["benchmark_gate"]["rollback_ready"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        await _aclose_sync_client_with_db(patches, stack)
 
 
 async def _eval_operator_governed_improvement_benchmark_surface_behavior() -> dict[str, Any]:
@@ -25300,9 +25319,7 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "mcp_approval_credential_egress_visible": approval_tools["mcp_tasks"]["credential_egress_policy"]["allowed_hosts"] == ["api.example.com"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:

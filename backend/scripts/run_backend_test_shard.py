@@ -363,6 +363,8 @@ def run_shard_files(
         return 0
 
     extra_args = list(pytest_args or [])
+    if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
+        extra_args.append("--no-cov")
     for path in files:
         for label, invocation_args in pytest_invocations_for_target(path):
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args]

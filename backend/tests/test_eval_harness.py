@@ -4810,8 +4810,8 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["cross_surface_continuity_behavior"]["queued_thread_id"] == "continuity-session"
     assert details_by_name["cross_surface_continuity_behavior"]["recent_continuation_mode"] == "resume_thread"
     assert details_by_name["cross_surface_continuity_behavior"]["recent_thread_id"] == "continuity-session"
-    assert details_by_name["cross_surface_continuity_behavior"]["live_route_status"] == "fallback_active"
-    assert details_by_name["cross_surface_continuity_behavior"]["live_route_transport"] == "native_notification"
+    assert details_by_name["cross_surface_continuity_behavior"]["live_route_status"] == "ready"
+    assert details_by_name["cross_surface_continuity_behavior"]["live_route_transport"] == "websocket"
     assert details_by_name["cross_surface_continuity_behavior"]["native_surface_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["bundle_surface_present"] is True
     assert details_by_name["cross_surface_continuity_behavior"]["degraded_source_adapter_count"] == 1

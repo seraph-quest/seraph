@@ -15,7 +15,7 @@ from src.agent.exceptions import ClarificationRequired
 from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
-from tests.test_websocket import _make_sync_client_with_db
+from tests.test_websocket import _close_sync_client_with_db, _make_sync_client_with_db
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
 
@@ -86,9 +86,7 @@ class TestE2EConversation:
                         if m["type"] not in ("pong",):
                             assert m.get("seq") is not None, f"Missing seq in {m['type']} message"
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_seq_numbers_monotonically_increase(self):
         """Verify sequence numbers increase across all messages."""
@@ -123,9 +121,7 @@ class TestE2EConversation:
                     for i in range(1, len(seqs)):
                         assert seqs[i] > seqs[i - 1], f"seq not monotonic: {seqs}"
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_tool_name_in_step_content(self):
         """Verify tool calls appear in step content for frontend detection."""
@@ -160,9 +156,7 @@ class TestE2EConversation:
                     assert any("web_search" in s["content"] for s in steps), \
                         f"No step mentions web_search: {[s['content'] for s in steps]}"
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_agent_run_success_is_written_to_audit_log(self):
         client, patches, stack = _make_sync_client_with_db()
@@ -197,9 +191,7 @@ class TestE2EConversation:
                     for event in events
                 )
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_high_risk_tool_sends_approval_required_message(self):
         client, patches, stack = _make_sync_client_with_db()
@@ -238,9 +230,7 @@ class TestE2EConversation:
                     else:
                         raise AssertionError("Expected approval_required message")
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_missing_input_sends_clarification_required_message(self):
         client, patches, stack = _make_sync_client_with_db()
@@ -277,9 +267,7 @@ class TestE2EConversation:
                     else:
                         raise AssertionError("Expected clarification_required message")
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_timeout_logs_only_timed_out_runtime_event(self):
         client, patches, stack = _make_sync_client_with_db()
@@ -329,9 +317,7 @@ class TestE2EConversation:
                     for event in events
                 )
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_secret_values_are_redacted_in_streamed_messages(self):
         client, patches, stack = _make_sync_client_with_db()
@@ -377,9 +363,7 @@ class TestE2EConversation:
                     assert any("[redacted secret]" in content for content in contents)
                     assert all("super-secret-token" not in content for content in contents)
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)
 
     def test_resume_message_does_not_duplicate_user_turn(self):
         client, patches, stack = _make_sync_client_with_db()
@@ -423,6 +407,4 @@ class TestE2EConversation:
                 assert len(user_messages) == 1
                 assert user_messages[0]["content"] == "run this snippet"
         finally:
-            stack.close()
-            for p in patches:
-                p.stop()
+            _close_sync_client_with_db(patches, stack)

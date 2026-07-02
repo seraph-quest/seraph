@@ -2,7 +2,9 @@ import json
 import os
 import shutil
 import tempfile
+import asyncio
 from contextlib import asynccontextmanager, ExitStack
+from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -87,6 +89,19 @@ def _make_sync_client_with_db():
 
     # Return stack in patches list so cleanup exits the context manager too
     return client, patches, stack
+
+
+def _close_sync_client_with_db(patches, stack):
+    try:
+        stack.close()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(drain_tracked_tasks(timeout_seconds=5.0))
+    finally:
+        for item in reversed(patches):
+            with suppress(Exception):
+                item.stop()
 
 
 class TestWebSocket:

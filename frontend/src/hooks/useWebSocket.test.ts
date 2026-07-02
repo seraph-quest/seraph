@@ -9,7 +9,15 @@ import { describe, it, expect, vi } from "vitest";
 // We test the constants and behavior rather than the hook directly
 // since hooks require a React rendering context.
 import { WS_RECONNECT_DELAY_MS } from "../config/constants";
-import { WS_RESPONSE_TIMEOUT_MS, buildClarificationMessage, resolveClarificationSessionId } from "./useWebSocket";
+import {
+  WS_RESPONSE_TIMEOUT_MS,
+  buildClarificationMessage,
+  reconcileStreamedFinalAnswer,
+  reduceAssistantDelta,
+  resolveClarificationSessionId,
+  shouldAcceptActiveResponseSession,
+} from "./useWebSocket";
+import type { ChatMessage } from "../types";
 
 describe("WS reconnection constants", () => {
   it("has a sensible initial reconnect delay", () => {
@@ -131,5 +139,91 @@ describe("clarification transport helpers", () => {
 
     expect(message.content).toBe("Which city should I check?");
     expect(message.clarificationQuestion).toBe("Which city should I check?");
+  });
+});
+
+describe("active websocket session transitions", () => {
+  it("accepts final replies for a backend-created session while a user turn is active", () => {
+    expect(shouldAcceptActiveResponseSession("stale-session", "new-session", "final", true)).toBe(true);
+  });
+
+  it("accepts streamed delta replies for a backend-created session while a user turn is active", () => {
+    expect(shouldAcceptActiveResponseSession("stale-session", "new-session", "delta", true)).toBe(true);
+  });
+
+  it("rejects foreign proactive session activity when no user turn is active", () => {
+    expect(shouldAcceptActiveResponseSession("current-session", "other-session", "proactive", false)).toBe(false);
+  });
+});
+
+describe("streamed assistant message reconciliation", () => {
+  it("appends deltas into one assistant message and reconciles the final frame", () => {
+    const initialMessages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "Hello",
+        timestamp: 1,
+        sessionId: "session-1",
+      },
+    ];
+
+    const first = reduceAssistantDelta(
+      initialMessages,
+      null,
+      { content: "Hel", session_id: "session-1" },
+      "assistant-stream",
+      2,
+    );
+    const second = reduceAssistantDelta(
+      first.messages,
+      first.streaming,
+      { content: "lo", session_id: "session-1" },
+      "unused-id",
+      3,
+    );
+    const final = reconcileStreamedFinalAnswer(
+      second.messages,
+      second.streaming,
+      { content: "Hello.", session_id: "session-1" },
+      4,
+    );
+
+    expect(second.messages.filter((message) => message.role === "agent")).toHaveLength(1);
+    expect(second.messages[1]).toMatchObject({
+      id: "assistant-stream",
+      role: "agent",
+      content: "Hello",
+      sessionId: "session-1",
+    });
+    expect(final.reconciled).toBe(true);
+    expect(final.messages.filter((message) => message.role === "agent")).toHaveLength(1);
+    expect(final.messages[1]).toMatchObject({
+      id: "assistant-stream",
+      content: "Hello.",
+      sessionId: "session-1",
+    });
+  });
+
+  it("does not reconcile a final frame from a different session", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "assistant-stream",
+        role: "agent",
+        content: "Hel",
+        timestamp: 2,
+        sessionId: "session-1",
+      },
+    ];
+
+    const final = reconcileStreamedFinalAnswer(
+      messages,
+      { id: "assistant-stream", sessionId: "session-1", content: "Hel" },
+      { content: "Other", session_id: "session-2" },
+      4,
+    );
+
+    expect(final.reconciled).toBe(false);
+    expect(final.messages).toBe(messages);
   });
 });

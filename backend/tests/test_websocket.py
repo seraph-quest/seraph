@@ -1,7 +1,7 @@
 import json
 from contextlib import asynccontextmanager, ExitStack
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -121,6 +121,79 @@ class TestWebSocket:
                 assert resp["type"] == "final"
                 assert "skipped" in resp["content"].lower()
                 assert "full workspace" in resp["content"].lower()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_message_emits_status_before_final(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            yield "Re"
+            yield "ady."
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+
+                received = [json.loads(ws.receive_text()) for _ in range(5)]
+
+            assert received[0]["type"] == "status"
+            assert received[0]["content"] == "Seraph received the message."
+            assert received[1]["type"] == "status"
+            assert "local chat runtime" in received[1]["content"]
+            assert received[2]["type"] == "delta"
+            assert received[2]["content"] == "Re"
+            assert received[3]["type"] == "delta"
+            assert received[3]["content"] == "ady."
+            assert received[4]["type"] == "final"
+            assert received[4]["content"] == "Ready."
+
+            messages_response = client.get(f"/api/sessions/{received[4]['session_id']}/messages")
+            assert messages_response.status_code == 200
+            messages = messages_response.json()
+            assistant_messages = [message for message in messages if message["role"] == "assistant"]
+            assert [message["content"] for message in assistant_messages] == ["Ready."]
+            assert all("Response interrupted" not in message["content"] for message in messages)
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_direct_chat_falls_back_when_streaming_fails_before_delta(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            raise RuntimeError("streaming endpoint failed")
+            yield "unreachable"
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Fallback ready.")),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+
+                received = [json.loads(ws.receive_text()) for _ in range(4)]
+
+            assert received[0]["type"] == "status"
+            assert received[0]["content"] == "Seraph received the message."
+            assert received[1]["type"] == "status"
+            assert "local chat runtime" in received[1]["content"]
+            assert received[2]["type"] == "status"
+            assert "falling back" in received[2]["content"]
+            assert received[3]["type"] == "final"
+            assert received[3]["content"] == "Fallback ready."
         finally:
             stack.close()
             for p in patches:

@@ -1,4 +1,4 @@
-export type MessageRole = "user" | "agent" | "step" | "error" | "proactive" | "approval" | "clarification";
+export type MessageRole = "user" | "agent" | "step" | "status" | "error" | "proactive" | "approval" | "clarification";
 
 export interface ChatMessage {
   id: string;
@@ -26,7 +26,7 @@ export interface WSMessage {
 }
 
 export interface WSResponse {
-  type: "step" | "final" | "error" | "pong" | "proactive" | "ambient" | "approval_required" | "clarification_required";
+  type: "status" | "step" | "delta" | "final" | "error" | "pong" | "proactive" | "ambient" | "approval_required" | "clarification_required";
   content: string;
   session_id: string;
   step: number | null;

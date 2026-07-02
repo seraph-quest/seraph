@@ -9,13 +9,15 @@ Seraph uses a two-step integration flow:
 - feature and fix branches merge into `develop`
 - `develop` merges into `main` only when a human explicitly requests it
 
+This page is archival contributor guidance. For agent execution, `AGENTS.md` is
+the current authority. If this page and `AGENTS.md` disagree, follow
+`AGENTS.md`.
+
 ## Branching Model
 
 ```
 feat/my-feature  →  develop  →  main
 fix/broken-thing →  develop  →  main
-docs/update-docs →  develop  →  main
-chore/cleanup    →  develop  →  main
 ```
 
 All active work happens on short-lived topic branches created from `develop`.
@@ -24,11 +26,8 @@ All active work happens on short-lived topic branches created from `develop`.
 
 | Prefix | Use for |
 |--------|---------|
-| `feat/` | New features |
-| `fix/` | Bug fixes |
-| `docs/` | Documentation changes |
-| `chore/` | Maintenance, CI, dependencies |
-| `refactor/` | Code restructuring without behavior change |
+| `feat/` | New features or planned capability batches |
+| `fix/` | Bug fixes, docs/process corrections, maintenance, and refactors |
 
 ### Workflow
 
@@ -78,23 +77,12 @@ PR titles should stay short and concrete:
 - `Trace observer time source runtime boundaries`
 - `Refresh failed-session retry readiness`
 
-PR bodies should use the shared checklist format:
-
-```md
-## Done on develop
-- [x] <already shipped baseline>
-
-## Working in this PR
-- [ ] <what this branch changes>
-
-## Still to do after this PR
-- [ ] <real remaining work after merge>
-
-## Validation
-- <command>
-```
-
-Keep the `Done on develop` section factual against `develop`. Do not mark branch-only work as already done.
+PR bodies should use the current shared template in
+`.github/pull_request_template.md`. Keep the `Done on develop` section factual
+against `develop`. Do not mark branch-only work as already done, and do not omit
+the tracked issue, project receipt, validation receipt, agent team, critic
+disposition, or blocked-claim posture unless the current template explicitly no
+longer requires them.
 
 ## CI/CD
 

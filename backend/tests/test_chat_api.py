@@ -10,6 +10,13 @@ from src.vault.repository import vault_repository
 
 @pytest.mark.asyncio
 class TestChatAPI:
+    @pytest.fixture(autouse=True)
+    def _disable_direct_local_chat_by_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.api.chat.should_use_direct_local_chat",
+            lambda *args, **kwargs: False,
+        )
+
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
@@ -30,6 +37,32 @@ class TestChatAPI:
             event["event_type"] == "agent_run_succeeded"
             and event["tool_name"] == "onboarding_agent"
             and event["details"]["transport"] == "rest"
+            for event in events
+        )
+
+    @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
+    @patch("src.api.chat.run_direct_local_chat", return_value="Hello. What should I call you?")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_onboarding_hello_can_use_direct_local_path(
+        self,
+        mock_onboarding,
+        mock_direct_chat,
+        mock_should_use_direct,
+        client,
+    ):
+        response = await client.post("/api/chat", json={"message": "Hello"})
+
+        assert response.status_code == 200
+        assert response.json()["response"] == "Hello. What should I call you?"
+        mock_should_use_direct.assert_called_once()
+        mock_direct_chat.assert_awaited_once()
+        mock_onboarding.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["runtime"] == "direct-local-chat"
             for event in events
         )
 

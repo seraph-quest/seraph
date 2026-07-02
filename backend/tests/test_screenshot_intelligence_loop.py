@@ -22,7 +22,10 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
 ):
     from src.db.models import Goal, MemoryEpisode, ScreenObservation
     from src.observer.screenshot_analysis_contract import parse_screenshot_analysis_output
-    from src.observer.screenshot_folder_source import scan_screenshot_folder
+    from src.observer.screenshot_folder_source import (
+        analyze_pending_screenshot_folder_observations,
+        scan_screenshot_folder,
+    )
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
     from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
     from sqlmodel import select
@@ -127,6 +130,7 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
 
     scan_result = await scan_screenshot_folder(screenshot_root, limit=10)
     duplicate_scan_result = await scan_screenshot_folder(screenshot_root, limit=10)
+    analysis_result = await analyze_pending_screenshot_folder_observations(limit=10)
     digest_result = await build_screenshot_observation_digest(
         window_start=datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc),
         window_end=datetime(2026, 6, 30, 10, 30, tzinfo=timezone.utc),
@@ -144,6 +148,9 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
     assert scan_result.skipped_duplicates == 1
     assert duplicate_scan_result.ingested == 0
     assert duplicate_scan_result.skipped_duplicates == 2
+    assert analysis_result.scanned == 1
+    assert analysis_result.analyzed == 1
+    assert analysis_result.failed == 0
     assert len(analyzer_calls) == 1
     analyzed_path, analyzed_artifacts = analyzer_calls[0]
     assert analyzed_path in {image.resolve(), duplicate_image.resolve()}

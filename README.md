@@ -90,6 +90,10 @@ open http://localhost:8004/docs   # Swagger API docs
 
 `./manage.sh -e dev local up` is the canonical direct browser-development path. It explicitly loads the repo-root `.env.dev`, starts the backend on `8004`, starts the frontend on `3001`, and avoids the cwd-sensitive env drift that can otherwise change the active model/provider.
 
+When running Seraph from a managed Codex/Desktop shell and watching a live chat session, use `./manage.sh -e dev local run` instead of fire-and-forget `local up`. The managed shell can clean up background children after a command exits even when `manage.sh` briefly reports successful PIDs, which shows up as empty `pids/`, `local status` reporting stopped, and immediate `curl` connection refused on `8004` or `3001`. Keep the `local run` session open while observing, verify with `./manage.sh -e dev local status` plus `curl -sS http://127.0.0.1:8004/health`, and stop with `./manage.sh -e dev local down` when finished.
+
+For local Gemma/VLM screenshot analysis, Seraph expects the Mac wrapper from `/Users/bigcube/Desktop/repos/vlm-screenshot-server` to run through Docker Compose. The concrete path is `Seraph frontend 127.0.0.1:3001 -> Seraph backend 127.0.0.1:8004 -> Dockerized Mac VLM wrapper 127.0.0.1:8000 -> GPU model server 192.168.1.26:8000/v1`. Start the wrapper with `cd /Users/bigcube/Desktop/repos/vlm-screenshot-server && docker compose up -d --build`, then verify `docker compose ps`, `curl http://127.0.0.1:8000/health`, and `curl http://127.0.0.1:8000/health/backend`.
+
 Seraph's provider setup is intentionally routing-oriented rather than provider-locked. The examples support:
 
 - **Local Ollama** through `local-ollama` when `LOCAL_MODEL` and `LOCAL_LLM_API_BASE=http://localhost:11434/v1` are configured

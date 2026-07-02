@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from sqlalchemy import or_, update
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -24,7 +26,11 @@ from src.observer.screenshot_semantic_analysis import (
     screenshot_analysis_detail,
     screenshot_analysis_error_detail,
     screenshot_analysis_status_detail,
+    semantic_analysis_status_from_details,
+    screenshot_semantic_analysis_enabled,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ScreenshotFolderImageError(ValueError):
@@ -39,11 +45,21 @@ class ScreenshotFolderScanResult:
     rejected: list[dict[str, str]]
 
 
+@dataclass(frozen=True)
+class ScreenshotFolderAnalysisResult:
+    scanned: int
+    analyzed: int
+    failed: int
+    skipped: int
+
+
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
 _SCAN_LOCK = asyncio.Lock()
+_MAX_ANALYSIS_ATTEMPTS = 3
+_FAILED_ANALYSIS_RETRY_AFTER = timedelta(minutes=2)
 
 
 def resolve_screenshot_folder(configured: str | None = None) -> Path:
@@ -111,6 +127,95 @@ async def scan_screenshot_folder(root: Path, *, limit: int = 100) -> ScreenshotF
             skipped_duplicates=skipped,
             rejected=rejected,
         )
+
+
+async def analyze_pending_screenshot_folder_observations(
+    *,
+    limit: int = 5,
+    concurrency: int = 1,
+) -> ScreenshotFolderAnalysisResult:
+    """Analyze already-ingested screenshot-folder observations without blocking folder scans."""
+    analysis_limit = max(limit, 1)
+    worker_limit = max(concurrency, 1)
+
+    if not screenshot_semantic_analysis_enabled():
+        return ScreenshotFolderAnalysisResult(scanned=0, analyzed=0, failed=0, skipped=0)
+
+    async with get_session() as db:
+        result = await db.execute(
+            select(ScreenObservation)
+            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
+            .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
+            .where(_analysis_candidate_status_filter())
+            .order_by(col(ScreenObservation.timestamp).asc())
+            .limit(analysis_limit * 20)
+        )
+        candidates = list(result.scalars().all())
+    observations = [
+        observation
+        for observation in candidates
+        if _analysis_candidate_ready(_observation_details(observation))
+    ][:analysis_limit]
+    logger.info(
+        "screenshot_folder_analysis: selected %d pending observations (limit=%d concurrency=%d)",
+        len(observations),
+        analysis_limit,
+        worker_limit,
+    )
+
+    semaphore = asyncio.Semaphore(worker_limit)
+
+    async def analyze_one(observation: ScreenObservation) -> tuple[bool, bool, bool]:
+        details = _observation_details(observation)
+        artifacts = _capture_artifacts_from_details(details)
+        if not artifacts:
+            return False, False, True
+
+        image_path = Path(str(artifacts.get("image_path") or "")).expanduser().resolve()
+        analysis = None
+        failed_reason: str | None = None
+        try:
+            if not image_path.is_file():
+                raise ScreenshotFolderImageError("image file not found")
+            async with semaphore:
+                logger.info("screenshot_folder_analysis: analyzing %s", image_path.name)
+                analysis = await analyze_screenshot_image(image_path, artifacts)
+                logger.info("screenshot_folder_analysis: analyzed %s", image_path.name)
+            details = _replace_analysis_details(
+                details,
+                analysis=analysis,
+                error_reason=None if analysis is not None else "provider not configured",
+            )
+        except (OSError, ScreenshotFolderImageError, ScreenshotSemanticAnalysisError) as exc:
+            failed_reason = str(exc)
+            logger.warning("screenshot_folder_analysis: failed %s: %s", image_path.name, failed_reason)
+            details = _replace_analysis_details(
+                details,
+                analysis=None,
+                error_reason=str(exc),
+                consume_attempt=not _is_retryable_provider_failure(str(exc)),
+            )
+
+        details_json = json.dumps(details)
+        async with get_session() as db:
+            await db.execute(
+                update(ScreenObservation)
+                .where(ScreenObservation.id == observation.id)
+                .values(details_json=details_json)
+            )
+        if analysis is not None:
+            return True, False, False
+        if failed_reason is not None:
+            return False, True, False
+        return False, False, True
+
+    results = await asyncio.gather(*(analyze_one(observation) for observation in observations))
+    analyzed = sum(1 for item in results if item[0])
+    failed = sum(1 for item in results if item[1])
+    skipped = sum(1 for item in results if item[2])
+
+    return ScreenshotFolderAnalysisResult(scanned=len(observations), analyzed=analyzed, failed=failed, skipped=skipped)
 
 
 def validate_screenshot_folder_root(root: Path) -> None:
@@ -189,17 +294,10 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}",
         "capture_artifacts:" + json.dumps(artifacts, sort_keys=True, separators=(",", ":")),
     ]
-    try:
-        analysis = await analyze_screenshot_image(resolved, artifacts)
-    except ScreenshotSemanticAnalysisError as exc:
-        details.append(screenshot_analysis_error_detail(str(exc)))
-        details.append(screenshot_analysis_status_detail("failed", reason=str(exc)))
+    if screenshot_semantic_analysis_enabled():
+        details.append(screenshot_analysis_status_detail("pending", reason="queued_for_analysis"))
     else:
-        if analysis is not None:
-            details.append(screenshot_analysis_detail(analysis))
-            details.append(screenshot_analysis_status_detail("succeeded"))
-        else:
-            details.append(screenshot_analysis_status_detail("pending", reason="provider not configured"))
+        details.append(screenshot_analysis_status_detail("pending", reason="provider not configured"))
     metadata_label = image_metadata_label(metadata)
     summary_suffix = f" ({metadata_label})" if metadata_label else ""
     return {
@@ -248,6 +346,125 @@ async def _image_already_ingested(image_sha256: str) -> bool:
         if result.scalar_one_or_none() is not None:
             return True
     return False
+
+
+def _observation_details(observation: ScreenObservation) -> list[str]:
+    try:
+        payload = json.loads(observation.details_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload if isinstance(item, str)]
+
+
+def _capture_artifacts_from_details(details: list[str]) -> dict[str, object] | None:
+    for item in details:
+        if not item.startswith("capture_artifacts:"):
+            continue
+        try:
+            payload = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict) and payload.get("provider") == SCREENSHOT_FOLDER_PROVIDER:
+            return payload
+    return None
+
+
+def _analysis_candidate_ready(details: list[str], *, now: datetime | None = None) -> bool:
+    status = semantic_analysis_status_from_details(details) or {}
+    state = str(status.get("status") or "").strip().lower()
+    if state in {"", "pending", "needs_reanalysis"}:
+        return True
+    if state != "failed":
+        return False
+    try:
+        attempts = int(status.get("attempts") or 1)
+    except (TypeError, ValueError):
+        attempts = 1
+    if attempts >= _MAX_ANALYSIS_ATTEMPTS:
+        return False
+    recorded_at = _parse_status_recorded_at(status.get("recorded_at"))
+    if recorded_at is None:
+        return True
+    return (now or datetime.now(timezone.utc)) - recorded_at >= _FAILED_ANALYSIS_RETRY_AFTER
+
+
+def _analysis_candidate_status_filter():
+    return or_(
+        col(ScreenObservation.details_json).contains('"status":"pending"'),
+        col(ScreenObservation.details_json).contains('"status": "pending"'),
+        col(ScreenObservation.details_json).contains('\\"status\\":\\"pending\\"'),
+        col(ScreenObservation.details_json).contains('\\"status\\": \\"pending\\"'),
+        col(ScreenObservation.details_json).contains('"status":"needs_reanalysis"'),
+        col(ScreenObservation.details_json).contains('"status": "needs_reanalysis"'),
+        col(ScreenObservation.details_json).contains('\\"status\\":\\"needs_reanalysis\\"'),
+        col(ScreenObservation.details_json).contains('\\"status\\": \\"needs_reanalysis\\"'),
+        col(ScreenObservation.details_json).contains('"status":"failed"'),
+        col(ScreenObservation.details_json).contains('"status": "failed"'),
+        col(ScreenObservation.details_json).contains('\\"status\\":\\"failed\\"'),
+        col(ScreenObservation.details_json).contains('\\"status\\": \\"failed\\"'),
+    )
+
+
+def _parse_status_recorded_at(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _replace_analysis_details(
+    details: list[str],
+    *,
+    analysis,
+    error_reason: str | None,
+    consume_attempt: bool = True,
+) -> list[str]:
+    previous_status = semantic_analysis_status_from_details(details) or {}
+    try:
+        previous_attempts = int(previous_status.get("attempts") or 0)
+    except (TypeError, ValueError):
+        previous_attempts = 0
+    attempts = previous_attempts + 1 if consume_attempt else previous_attempts
+    next_details = [
+        item
+        for item in details
+        if not (
+            item.startswith("screenshot_analysis:")
+            or item.startswith("screenshot_analysis_error:")
+            or item.startswith("screenshot_analysis_status:")
+        )
+    ]
+    if analysis is not None:
+        next_details.append(screenshot_analysis_detail(analysis))
+        next_details.append(screenshot_analysis_status_detail("succeeded"))
+    else:
+        reason = error_reason or "unknown"
+        next_details.append(screenshot_analysis_error_detail(reason))
+        next_details.append(screenshot_analysis_status_detail("failed", reason=reason, attempts=attempts))
+    return next_details
+
+
+def _is_retryable_provider_failure(reason: str) -> bool:
+    normalized = reason.lower()
+    retryable_markers = (
+        "502",
+        "503",
+        "504",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "connection refused",
+        "connect error",
+        "read timeout",
+    )
+    return any(marker in normalized for marker in retryable_markers)
 
 
 def _sha256_file(path: Path) -> str:

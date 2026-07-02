@@ -11,6 +11,7 @@ from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
+from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -117,14 +118,100 @@ async def chat(request: ChatRequest):
         )
         return ChatResponse(response=response_text, session_id=session.id)
 
-    if not profile.onboarding_completed:
+    is_onboarding = not profile.onboarding_completed
+    direct_runtime_path = "onboarding_agent" if is_onboarding else "chat_agent"
+    if should_use_direct_local_chat(
+        request.message,
+        runtime_path=direct_runtime_path,
+        is_onboarding=is_onboarding,
+    ):
+        started_at = perf_counter()
+        llm_request_id = f"direct-rest:{session.id}:{started_at}"
+        _register_request(llm_request_id)
+        try:
+            response_text = await asyncio.wait_for(
+                run_direct_local_chat(
+                    request.message,
+                    runtime_path=direct_runtime_path,
+                    is_onboarding=is_onboarding,
+                    request_id=llm_request_id,
+                ),
+                timeout=min(settings.agent_chat_timeout, 60),
+            )
+            response_text = await redact_secrets_in_text(response_text)
+        except asyncio.TimeoutError:
+            _mark_request_timed_out(llm_request_id)
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=is_onboarding,
+                outcome="timed_out",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "timeout_seconds": min(settings.agent_chat_timeout, 60),
+                    "request_id": llm_request_id,
+                    "runtime": "direct-local-chat",
+                },
+            )
+            raise HTTPException(status_code=504, detail="Local chat timed out — try again")
+        except Exception as e:
+            logger.exception("Direct local chat failed")
+            safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=is_onboarding,
+                outcome="failed",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "error": safe_detail,
+                    "request_id": llm_request_id,
+                    "runtime": "direct-local-chat",
+                },
+            )
+            raise HTTPException(status_code=500, detail=safe_detail)
+        finally:
+            _finish_request(llm_request_id)
+
+        await session_manager.add_message(session.id, "assistant", response_text)
+        await log_agent_run_event(
+            session_id=session.id,
+            transport="rest",
+            is_onboarding=is_onboarding,
+            outcome="succeeded",
+            policy_mode=get_current_tool_policy_mode(),
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "message_length": len(request.message),
+                "response_length": len(response_text),
+                "request_id": llm_request_id,
+                "runtime": "direct-local-chat",
+            },
+        )
+        return ChatResponse(response=response_text, session_id=session.id)
+
+    if is_onboarding:
         agent = create_onboarding_agent(request.message)
     else:
-        guardian_state = await build_guardian_state(
-            session_id=session.id,
-            user_message=request.message,
-        )
-        agent = build_agent(guardian_state=guardian_state)
+        try:
+            guardian_state = await asyncio.wait_for(
+                build_guardian_state(
+                    session_id=session.id,
+                    user_message=request.message,
+                ),
+                timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
+            )
+            agent = build_agent(guardian_state=guardian_state)
+        except Exception:
+            logger.warning(
+                "Guardian state unavailable for REST chat; continuing with minimal agent context",
+                exc_info=True,
+            )
+            agent = build_agent()
 
     try:
         from src.observer.manager import context_manager as obs_manager

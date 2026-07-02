@@ -21,7 +21,7 @@ def test_local_runtime_profile_contract_includes_screenshot_fast_controls(monkey
 
     assert fields["runtime_profile"] == "screenshot_fast"
     assert fields["runtime_path"] == "screenshot_image_analysis"
-    assert fields["priority"] == "background"
+    assert fields["priority"] == "normal"
     assert fields["reasoning"] == "off"
     assert json.loads(fields["profile_options"])["chat_template_kwargs"] == {"enable_thinking": False}
     assert headers["X-Seraph-Runtime-Profile"] == "screenshot_fast"

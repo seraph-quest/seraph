@@ -14,7 +14,7 @@ _db_url = f"sqlite+aiosqlite:///{_db_path}"
 
 engine = create_async_engine(
     _db_url,
-    echo=settings.debug,
+    echo=settings.database_echo,
     connect_args={"check_same_thread": False},
     pool_size=20,
     max_overflow=20,
@@ -317,6 +317,9 @@ async def _ensure_memory_indexes(conn) -> None:
 
 async def init_db() -> None:
     """Create all tables on startup."""
+    # Ensure every SQLModel table class is registered before create_all runs.
+    from src.db import models as _models  # noqa: F401
+
     os.makedirs(os.path.dirname(_db_path), exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)

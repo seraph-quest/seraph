@@ -76,6 +76,7 @@ def _make_sync_client_with_db():
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))
     patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
+    patches.append(patch("src.api.ws.should_use_direct_local_chat", return_value=False))
     for p in patches:
         p.start()
 

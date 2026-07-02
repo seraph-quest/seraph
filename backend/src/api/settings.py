@@ -8,7 +8,7 @@ import stat
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_
 from sqlmodel import col, select
@@ -23,6 +23,15 @@ from src.local_runtime_profile_verifier import (
 )
 from src.local_runtime_profiles import local_runtime_profile_statuses
 from src.observer.manager import context_manager
+from src.observer.screen_analysis_settings import (
+    SCREENSHOT_FOLDER_ENV,
+    VALID_SCREEN_ANALYSIS_PROVIDERS,
+    effective_screen_analysis_model,
+    effective_screen_analysis_provider,
+    read_screen_analysis_settings,
+    screen_analysis_settings_path,
+    write_screen_analysis_settings,
+)
 from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
 from src.observer.user_state import InterruptionMode
 from src.tools.policy import MCP_POLICY_MODES, TOOL_POLICY_MODES
@@ -56,6 +65,11 @@ class ManualReportRequest(BaseModel):
     report_date: date | None = None
 
 
+class ScreenshotFolderPickResponse(BaseModel):
+    screenshot_folder: str
+    screenshot_folder_source: str
+
+
 class ToolPolicyModeRequest(BaseModel):
     mode: str
 
@@ -68,24 +82,16 @@ class McpPolicyModeRequest(BaseModel):
     mode: str
 
 
-_VALID_SCREEN_ANALYSIS_PROVIDERS = {"apple-vision", "codex-local", "local-vlm", "openrouter"}
+_VALID_SCREEN_ANALYSIS_PROVIDERS = VALID_SCREEN_ANALYSIS_PROVIDERS
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
-_TRUE_VALUES = {"1", "true", "yes", "on"}
-_SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
+_SCREENSHOT_FOLDER_ENV = SCREENSHOT_FOLDER_ENV
 _SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
-_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S = 3.0
-_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S = 10.0
+_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S = 2.0
+_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S = 1.5
 _REPORT_RECEIPT_SUMMARY_TIMEOUT_S = 1.5
 _LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S = 1.5
-
-
-def _env_enabled(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in _TRUE_VALUES
 
 
 def _screen_archive_dir() -> tuple[Path, str]:
@@ -120,7 +126,7 @@ def _report_archive_dir() -> tuple[Path, str]:
 
 
 def _screen_analysis_settings_path() -> Path:
-    return Path(settings.workspace_dir).expanduser().resolve() / "screen-analysis-settings.json"
+    return screen_analysis_settings_path()
 
 
 def _daemon_status_file_path() -> Path:
@@ -177,83 +183,43 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
     return status
 
 
-def _default_screen_analysis_settings() -> dict[str, object]:
-    screen_archive_dir, _ = _screen_archive_dir()
-    provider = os.environ.get("SERAPH_SCREEN_ANALYSIS_PROVIDER", "").strip() or "codex-local"
-    if provider not in _VALID_SCREEN_ANALYSIS_PROVIDERS:
-        provider = "codex-local"
-    return {
-        "enabled": _env_enabled("SERAPH_SCREEN_ANALYSIS_ENABLED", True),
-        "provider": provider,
-        "model": os.environ.get("SERAPH_SCREEN_ANALYSIS_MODEL", "").strip()
-        or settings.codex_local_model,
-        "preserve_captures": _env_enabled("SERAPH_PRESERVE_SCREEN_CAPTURES", True),
-        "archive_dir": str(screen_archive_dir),
-        "min_seconds_between_captures": max(0, settings.screen_analysis_min_seconds_between_captures),
-        "max_daily_captures": max(0, settings.screen_analysis_max_daily_captures),
-        "archive_retention_days": max(1, settings.screen_capture_archive_retention_days),
-        "archive_max_mb": max(0, settings.screen_capture_archive_max_mb),
-    }
-
-
 def _read_screen_analysis_settings() -> dict[str, object]:
-    payload = _default_screen_analysis_settings()
-    path = _screen_analysis_settings_path()
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            loaded = {}
-        if isinstance(loaded, dict):
-            for key in (
-                "enabled",
-                "provider",
-                "model",
-                "preserve_captures",
-                "archive_dir",
-                "min_seconds_between_captures",
-                "max_daily_captures",
-                "archive_retention_days",
-                "archive_max_mb",
-                "screenshot_folder",
-            ):
-                if key in loaded:
-                    payload[key] = loaded[key]
-    provider = str(payload.get("provider") or "codex-local")
-    if provider not in _VALID_SCREEN_ANALYSIS_PROVIDERS:
-        provider = "codex-local"
-    payload["provider"] = provider
-    payload["enabled"] = bool(payload.get("enabled"))
-    payload["preserve_captures"] = bool(payload.get("preserve_captures"))
-    payload["model"] = str(payload.get("model") or "")
-    payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
-    screenshot_folder = str(payload.get("screenshot_folder") or "").strip()
-    if screenshot_folder:
-        normalized_folder = str(Path(screenshot_folder).expanduser().resolve())
-        payload["screenshot_folder"] = normalized_folder
-    else:
-        payload.pop("screenshot_folder", None)
-    for key in (
-        "min_seconds_between_captures",
-        "max_daily_captures",
-        "archive_max_mb",
-    ):
-        try:
-            payload[key] = max(0, int(payload.get(key) or 0))
-        except (TypeError, ValueError):
-            payload[key] = 0
-    try:
-        payload["archive_retention_days"] = max(1, int(payload.get("archive_retention_days") or 365))
-    except (TypeError, ValueError):
-        payload["archive_retention_days"] = 365
-    return payload
+    return read_screen_analysis_settings()
 
 
 def _write_screen_analysis_settings(payload: dict[str, object]) -> None:
-    path = _screen_analysis_settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    path.chmod(0o600)
+    write_screen_analysis_settings(payload)
+
+
+def _is_local_request(request: Request) -> bool:
+    client_host = request.client.host if request.client is not None else ""
+    return client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+async def _choose_screenshot_folder_with_native_dialog() -> str:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "osascript",
+            "-e",
+            'POSIX path of (choose folder with prompt "Choose Seraph screenshot folder")',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Native folder picker is unavailable") from exc
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise HTTPException(status_code=504, detail="Native folder picker timed out") from exc
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip() or "Native folder picker was cancelled"
+        raise HTTPException(status_code=400, detail=detail)
+    selected = stdout.decode("utf-8", errors="replace").strip()
+    if not selected:
+        raise HTTPException(status_code=400, detail="Native folder picker returned no folder")
+    return selected
 
 
 def _normalize_screenshot_folder_for_save(configured_root: str) -> str:
@@ -535,6 +501,9 @@ async def _screenshot_folder_pipeline_summary_fast() -> dict[str, object]:
     except asyncio.TimeoutError:
         logger.warning("Screenshot folder pipeline summary timed out")
         return _empty_screenshot_folder_pipeline_summary(latest_failure="analysis metadata timed out")
+    except Exception as exc:
+        logger.warning("Screenshot folder pipeline summary failed: %s", exc)
+        return _empty_screenshot_folder_pipeline_summary(latest_failure="analysis metadata unavailable")
 
 
 def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
@@ -639,6 +608,19 @@ async def _local_runtime_profile_proof_summary_fast() -> dict[str, object]:
             "per_request_reasoning_control": "unverified",
             "safe_for_single_backend_profile_routing": False,
             "notes": ["profile receipt summary timed out"],
+        }
+    except Exception as exc:
+        logger.warning("Local runtime profile receipt summary failed: %s", exc)
+        return {
+            "schema_version": PROFILE_VERIFIER_VERSION,
+            "receipt_count": 0,
+            "last_receipt_at": None,
+            "last_receipt_sha256": None,
+            "last_receipt_path": None,
+            "status": "summary_unavailable",
+            "per_request_reasoning_control": "unverified",
+            "safe_for_single_backend_profile_routing": False,
+            "notes": ["profile receipt summary unavailable"],
         }
 
 
@@ -768,6 +750,25 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
     return await get_screen_analysis_settings()
 
 
+@router.post("/settings/screen-analysis/screenshot-folder/pick", response_model=ScreenshotFolderPickResponse)
+async def pick_screenshot_folder(request: Request):
+    """Open a local native folder picker and persist the selected screenshot folder."""
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Screenshot folder picker is only available from localhost")
+    if os.environ.get(_SCREENSHOT_FOLDER_ENV, "").strip():
+        raise HTTPException(status_code=409, detail="Screenshot folder is locked by SERAPH_SCREENSHOT_FOLDER")
+    selected = await _choose_screenshot_folder_with_native_dialog()
+    normalized = _normalize_screenshot_folder_for_save(selected)
+    payload = _read_screen_analysis_settings()
+    payload["screenshot_folder"] = normalized
+    payload["screenshot_folder_source"] = "screen-analysis-settings"
+    _write_screen_analysis_settings(payload)
+    return ScreenshotFolderPickResponse(
+        screenshot_folder=normalized,
+        screenshot_folder_source="screen-analysis-settings",
+    )
+
+
 @router.get("/settings/artifact-storage")
 async def get_artifact_storage_settings():
     """Return operator-visible evidence/report archive configuration."""
@@ -817,8 +818,8 @@ async def get_artifact_storage_settings():
             "readable": screenshot_source["readable"],
             "stored_artifacts": ["image"],
             "analysis": {
-                "provider": settings.screen_analysis_provider or "not_configured",
-                "model": settings.local_vlm_model or "",
+                "provider": effective_screen_analysis_provider() or "not_configured",
+                "model": effective_screen_analysis_model(),
                 "base_url_configured": bool(settings.local_vlm_base_url.strip()),
                 **screenshot_pipeline,
             },

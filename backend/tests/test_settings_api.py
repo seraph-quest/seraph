@@ -1,5 +1,6 @@
 """Tests for settings API — GET/PUT interruption mode."""
 
+import asyncio
 import json
 import stat
 from datetime import datetime, timezone
@@ -120,13 +121,14 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
         patch.object(settings, "local_llm_api_base", ""),
         patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "screen_analysis_provider", ""),
     ):
         resp = await client.get("/api/settings/artifact-storage")
 
     assert resp.status_code == 200
     data = resp.json()
     assert data["screen"]["analysis_enabled"] is True
-    assert data["screen"]["provider"] == "codex-local"
+    assert data["screen"]["provider"] == ""
     assert data["screen"]["model"]
     assert "capture_mode" not in data["screen"]
     assert "daemon_status" not in data["screen"]
@@ -151,6 +153,57 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
     assert data["email"]["smtp_configured"] is True
     assert data["email"]["sender_configured"] is False
     assert "secret-password" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_exposes_env_screenshot_folder_and_local_vlm(client, tmp_path, monkeypatch):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch.object(settings, "local_vlm_model", "gemma-local"),
+    ):
+        resp = await client.get("/api/settings/screen-analysis")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["provider"] == "local-vlm"
+    assert data["model"] == "gemma-local"
+    assert data["screenshot_folder"] == str(screenshot_root.resolve())
+    assert data["screenshot_folder_source"] == "SERAPH_SCREENSHOT_FOLDER"
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_out(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    (screenshot_root / "capture.png").write_bytes(b"png bytes")
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+
+    async def slow_pipeline_summary():
+        await asyncio.sleep(2)
+        return {}
+
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+    ):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screenshot_folder"]["path"] == str(screenshot_root.resolve())
+    assert data["screenshot_folder"]["path_source"] == "SERAPH_SCREENSHOT_FOLDER"
+    assert data["screenshot_folder"]["image_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["latest_failure"] == "analysis metadata timed out"
 
 
 @pytest.mark.asyncio
@@ -367,6 +420,37 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
         assert "screenshot_folder" not in cleared.json()
         assert "framekeeper_screenshot_folder" not in cleared.json()
         assert "framekeeper_artifact_root" not in cleared.json()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_picker_persists_native_selection(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    screenshot_root = tmp_path / "picked-screenshots"
+    screenshot_root.mkdir()
+    monkeypatch.delenv("SERAPH_SCREENSHOT_FOLDER", raising=False)
+    with (
+        patch.object(settings, "workspace_dir", str(workspace)),
+        patch("src.api.settings._choose_screenshot_folder_with_native_dialog", new=AsyncMock(return_value=str(screenshot_root))),
+    ):
+        resp = await client.post("/api/settings/screen-analysis/screenshot-folder/pick")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screenshot_folder"] == str(screenshot_root.resolve())
+    assert data["screenshot_folder_source"] == "screen-analysis-settings"
+
+    saved = json.loads((workspace / "screen-analysis-settings.json").read_text(encoding="utf-8"))
+    assert saved["screenshot_folder"] == str(screenshot_root.resolve())
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_picker_refuses_env_locked_folder(client, tmp_path, monkeypatch):
+    screenshot_root = tmp_path / "env-screenshots"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    resp = await client.post("/api/settings/screen-analysis/screenshot-folder/pick")
+
+    assert resp.status_code == 409
 
 
 @pytest.mark.asyncio

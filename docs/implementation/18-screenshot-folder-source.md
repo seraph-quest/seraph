@@ -98,7 +98,7 @@ The semantic analysis schema captures:
 
 The VLM prompt requires the model to treat screenshot content as untrusted and return only the JSON shape defined by the contract. The parser rejects non-JSON output, unknown fields, invalid enum values, and out-of-range confidence values. Seraph orchestration must not author semantic screenshot summaries or daily report conclusions with deterministic Python parsing; those reasoning steps belong to the configured LLM runtime.
 
-This contract is the boundary between local image ingestion and screenshot understanding. The folder scan calls the configured Seraph-side analyzer when one is available, validates the output with this contract, and persists the semantic analysis without requiring any direct connection to the screenshot producer.
+This contract is the boundary between local image ingestion and screenshot understanding. The folder scan stores the local image metadata observation and marks semantic work as pending. The separate `screenshot_folder_analysis` scheduler job calls the configured Seraph-side analyzer, validates the output with this contract, and replaces the pending status on the existing observation without requiring any direct connection to the screenshot producer.
 
 End-of-day reports consume screenshot-folder `ScreenObservation` rows through the same report builder as other screen observations. Seraph records the observation source as `screenshot_folder` from its own stored capture-artifact details and includes report-safe screenshot samples using filenames, format, dimensions, and size. Reports do not rely on recorder manifests, sidecars, or service metadata.
 
@@ -118,7 +118,9 @@ The Seraph settings UI describes this as a local screenshot folder, not as Serap
 - inspection endpoint
 - stored artifact type: `image`
 
-The settings panel saves `screenshot_folder` through `/api/settings/screen-analysis`. The manual scan action calls Seraph's local `/api/observer/screenshot-folder/scan` endpoint. Seraph can also run its own `screenshot_folder_ingest` scheduler job, controlled by `SCREENSHOT_FOLDER_INGEST_ENABLED`, `SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN`, and `SCREENSHOT_FOLDER_INGEST_LIMIT`.
+The settings panel saves `screenshot_folder` through `/api/settings/screen-analysis`. The manual scan action calls Seraph's local `/api/observer/screenshot-folder/scan` endpoint. Seraph can also run its own `screenshot_folder_ingest` scheduler job, controlled by `SCREENSHOT_FOLDER_INGEST_ENABLED`, `SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN`, and `SCREENSHOT_FOLDER_INGEST_LIMIT`. The local default is enabled, every 1 minute, up to 100 images per tick so a newly mounted backlog is ingested quickly enough for the VLM lane to stay busy.
+
+Semantic analysis is a second scheduler lane, controlled by `SCREENSHOT_FOLDER_ANALYSIS_LIMIT`, `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY`, and `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS`. In the one-GPU local topology, Seraph runs screenshot analysis serially with concurrency `1`. The VLM wrapper also runs the GPU serially with one worker and owns priority ordering for the next accepted job; Seraph does not cancel an already-running GPU request. The analysis job starts only when screenshot-folder ingestion is enabled and the local VLM service answers `/health` with free queue capacity, then records `succeeded`, `failed`, or `skipped` scheduler receipts. A transient failed analysis is retried after a short cooldown up to a bounded attempt count, so one bad VLM response does not strand the item while repeated bad rows remain visible as failed. This keeps folder scanning cheap and lets the VLM queue stay fed without blocking the producer or duplicating observations.
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
@@ -140,6 +142,46 @@ The reusable service repo is public under the Seraph organization:
 - purpose: Dockerized FastAPI screenshot analysis wrapper for OpenAI-compatible VLM backends
 - endpoints: `POST /v1/analyze-file` for multipart uploads and `POST /v1/analyze` for base64 image payloads
 - run modes: API wrapper only, or API wrapper plus a GPU `vllm/vllm-openai` backend via `docker-compose.gpu.yml`
+
+### Current Local Topology
+
+The development topology is concrete and should be verified exactly before debugging screenshot or chat routing:
+
+```text
+Seraph frontend       http://127.0.0.1:3001
+  -> Seraph backend   http://127.0.0.1:8004
+  -> Mac VLM wrapper  http://127.0.0.1:8000
+  -> GPU model server http://192.168.1.26:8000/v1
+```
+
+The Mac-side VLM wrapper runs through Docker Compose to avoid local Python/runtime drift:
+
+```bash
+cd /Users/bigcube/Desktop/repos/vlm-screenshot-server
+docker compose up -d --build
+```
+
+The container publishes `127.0.0.1:8000` on the Mac and forwards to `http://192.168.1.26:8000/v1`. Docker Desktop must be running on the Mac for this path. If Docker is absent or stopped, start Docker Desktop before declaring the VLM service unavailable.
+
+Required readiness checks from the Mac:
+
+```bash
+cd /Users/bigcube/Desktop/repos/vlm-screenshot-server
+docker compose ps
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health/backend
+
+cd /Users/bigcube/Desktop/repos/seraph
+./manage.sh -e dev local status
+curl http://127.0.0.1:8004/health
+```
+
+Interpretation:
+
+- `127.0.0.1:8004/health` proves Seraph backend is running.
+- `docker compose ps` plus `127.0.0.1:8000/health` proves the Dockerized Mac VLM wrapper is running.
+- `127.0.0.1:8000/health/backend` proves the wrapper can reach the GPU model server at `192.168.1.26:8000/v1`.
+- A `502` from `/health/backend` means the wrapper is up but the GPU backend edge is broken.
 
 For an RTX 3090 Ti 24 GB server, the current preferred Gemma-first target is Unsloth's Gemma 4 26B-A4B quantized GGUF/Dynamic 4-bit path. Unsloth's Gemma 4 docs list practical 4-bit memory footprints for this card class, including the 26B-A4B family in the high-teens GB range.
 
@@ -165,7 +207,7 @@ The VLM backend then exposes an OpenAI-compatible API at:
 http://GPU_SERVER_IP:8000/v1
 ```
 
-Run the screenshot-analysis wrapper:
+Run the screenshot-analysis wrapper on the Mac with Docker Compose:
 
 ```bash
 git clone https://github.com/seraph-quest/vlm-screenshot-server.git
@@ -204,17 +246,68 @@ Seraph-side first-class `local-vlm` wiring is available behind explicit settings
 SCREEN_ANALYSIS_PROVIDER=local-vlm
 LOCAL_VLM_BASE_URL=http://127.0.0.1:8000
 LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
-LOCAL_MODEL=openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF
 LOCAL_LLM_API_BASE=http://127.0.0.1:8000/v1
 LOCAL_LLM_API_KEY=<same-local-token-as-wrapper-CHAT_PROXY_API_KEY>
-LOCAL_RUNTIME_PATHS=screenshot_observation_digest,end_of_day_goal_report,chat_agent
-RUNTIME_PROFILE_PREFERENCES=chat_agent=local-gemma-chat-thinking;end_of_day_goal_report=local-gemma-report-thinking;screenshot_observation_digest=local-gemma-report-thinking
+LOCAL_MODEL=openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF
+LOCAL_RUNTIME_PATHS=screenshot_observation_digest,end_of_day_goal_report,chat_agent,onboarding_agent,orchestrator_agent,session_consolidation
+RUNTIME_PROFILE_PREFERENCES="chat_agent=local-gemma-chat-thinking;onboarding_agent=local-gemma-chat-thinking;orchestrator_agent=local-gemma-chat-thinking;end_of_day_goal_report=local-gemma-report-thinking;screenshot_observation_digest=local-gemma-report-thinking"
 SCREEN_DERIVED_LLM_ALLOW_REMOTE=false
 SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF=true
 ```
 
-When configured, screenshot-folder ingestion posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the Seraph `ScreenObservation`.
-If the provider is not configured or fails, ingestion still stores the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+Quote `RUNTIME_PROFILE_PREFERENCES` whenever it contains semicolons. The managed local launcher sources `.env.dev` as shell, so an unquoted value is split into partial shell assignments and Seraph can silently lose the `chat_agent` profile preference.
+
+When configured, `screenshot_folder_analysis` posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the existing Seraph `ScreenObservation`.
+If the provider is not configured or fails, Seraph still keeps the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
+
+## GPU/VLM Queue Architecture
+
+The GPU path has two layers:
+
+- Seraph owns observation persistence, pending-work selection, priority metadata, privacy constraints, and report consumption.
+- The VLM wrapper owns request admission, priority-aware queuing, GPU worker slots, model invocation, and wrapper-level health.
+
+The service contract is intentionally producer-neutral and model-neutral. The current verified target is local Gemma through an OpenAI-compatible gateway; if a future Gemini-backed service is used, it must honor the same Seraph request fields, status semantics, and privacy contract before it is considered equivalent.
+
+Priority lanes sent by Seraph:
+
+- `chat_thinking`: `interactive`; operator chat must preempt screenshot backlog.
+- `report_thinking`: `high`; report and digest synthesis outrank bulk screenshot analysis.
+- `screenshot_fast`: `normal`; screenshots are bounded background work that should run whenever higher-priority lanes are empty or have spare worker capacity.
+
+The wrapper should implement a work-conserving queue:
+
+1. Accept Seraph profile metadata from multipart form fields and `X-Seraph-*` headers.
+2. Dispatch available GPU worker capacity to the highest-priority ready lane.
+3. Never leave the GPU idle while accepted work exists, except during health failure, backoff, shutdown, or an explicit operator pause.
+4. Preserve fairness so `normal` screenshot batches cannot starve `interactive` chat, while `interactive` bursts cannot permanently prevent older screenshot work from draining once the high-priority lane is empty.
+5. Return bounded failures quickly enough for Seraph to mark an observation `failed` or leave it pending for explicit retry, rather than blocking the scheduler indefinitely.
+
+Seraph-side controls:
+
+- `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS` controls how often Seraph checks for the next background screenshot job.
+- `SCREENSHOT_FOLDER_ANALYSIS_LIMIT` caps the number of pending or retryable failed observations selected per scheduler tick. In the one-GPU local topology, the scheduled job clamps this to at most 100 so a backlog drains in one scheduler run instead of one image per tick.
+- `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY` caps concurrent Seraph HTTP calls to the wrapper, not concurrent GPU inference. In the one-GPU local topology, the scheduled job clamps this to `1` because there is only one GPU worker. Priority is enforced at wrapper admission for the next job, never by interrupting the job already running on the GPU.
+- `SCREENSHOT_FOLDER_ANALYSIS_JOB_TIMEOUT_SECONDS` is the per-image base timeout. The scheduled job multiplies it by the number of selected serial batches, so a 100-image backlog with concurrency `1` gets enough wall-clock time to drain while still preventing a locked SQLite write or hung wrapper call from leaving the scheduler permanently stuck.
+- `GUARDIAN_STATE_TIMEOUT_SECONDS` bounds chat context assembly. If guardian/operator context is slow or degraded, chat falls back to a minimal agent context instead of leaving the operator stuck at "responding" before the model request is dispatched.
+- `LOCAL_RUNTIME_CONTEXT_WINDOW_TOKENS` is Seraph's configured prompt budget for local Gemma-compatible chat backends. It must match the GPU server `--ctx-size` operationally; the current local target is `32768`.
+- `LOCAL_RUNTIME_PROMPT_SAFETY_RATIO`, `LOCAL_RUNTIME_TOOL_RESERVE_TOKENS`, and `LOCAL_RUNTIME_MIN_SECTION_TOKENS` control deterministic prompt compaction for local runtime profiles. Seraph compacts guardian state, observer context, memories, active skills, and conversation history before creating the `ToolCallingAgent`, while preserving the fixed Seraph identity instructions. This is the Seraph-side guardrail that prevents oversized system prompts from reaching the local backend as `exceed_context_size_error`.
+- `LOCAL_MODEL` must be set alongside `LOCAL_LLM_API_BASE` for the built-in `local-gemma-*` runtime profiles to register. Use the LiteLLM `openai/` prefix for this value because Seraph talks to the Docker wrapper through an OpenAI-compatible API. Keep `LOCAL_VLM_MODEL` as the raw wrapper/backend model name. Without `LOCAL_MODEL`, `chat_agent=local-gemma-chat-thinking` cannot resolve and Seraph can fall back to the cloud default profile.
+- Fresh profiles use `onboarding_agent` before normal chat. Configure `onboarding_agent=local-gemma-chat-thinking` alongside `chat_agent=local-gemma-chat-thinking`, or the first "Hello" from a new operator can still route through the cloud default while the normal chat profile is correctly registered.
+- If delegation is enabled, chat uses `orchestrator_agent`, so `orchestrator_agent=local-gemma-chat-thinking` must also be configured. Otherwise the delegated chat surface can still route through the cloud default while the local chat profile is correctly registered.
+- Lightweight onboarding and greeting-style local chat turns use a bounded direct completion path instead of the full `ToolCallingAgent` loop. The local Gemma backend is reliable for normal chat completions, but it is not safe to make every "Hello" exercise multi-step tool-call JSON parsing. Direct local chat is capped to 512 output tokens, uses local-only runtime routing, and leaves non-lightweight work on the normal agent/tool path.
+- The analysis job checks VLM queue capacity before taking work, avoiding needless queue churn during outages or while a chat/report job is already active or queued.
+- The analysis job uses an in-process lock so overlapping scheduler ticks cannot stampede the wrapper.
+- The scan path never calls the VLM; it only creates pending observations and returns promptly.
+
+Observability receipts:
+
+- `screenshot_folder_ingest` records scanned, ingested, duplicate, and rejected counts.
+- `screenshot_folder_analysis` records scanned, analyzed, failed, skipped, duration, and concurrency.
+- artifact-storage status exposes observation count, analyzer status mix, backlog, failures, and latest analyzed timestamp.
+- local Gemma profile proof receipts verify that profile-specific request controls are accepted by the shared backend.
+
+This means "GPU constantly working" is enforced as a joint contract: Seraph continuously feeds bounded pending work when the VLM is healthy, and the wrapper must keep GPU workers busy from its priority queue whenever accepted work exists.
 
 ## Local Gemma Profile Proof
 

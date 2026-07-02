@@ -76,6 +76,40 @@ def test_parse_screenshot_analysis_output_accepts_valid_payload():
     assert analysis.confidence == pytest.approx(0.82)
 
 
+def test_parse_screenshot_analysis_output_coerces_legacy_provider_payload():
+    analysis = parse_screenshot_analysis_output(
+        """```json
+        {
+          "activity": "coding",
+          "app_guess": "VS Code and Terminal",
+          "project": null,
+          "summary": "The user is working in a terminal and code editor.",
+          "visible_text": ["git push", "token=super-secret-value"],
+          "sensitive": false,
+          "confidence": 0.95
+        }
+        ```"""
+    )
+
+    assert analysis.schema_version == SCREENSHOT_ANALYSIS_SCHEMA_VERSION
+    assert analysis.prompt_version == SCREENSHOT_ANALYSIS_PROMPT_VERSION
+    assert analysis.activity_type == "coding"
+    assert analysis.applications == ["VS Code", "Terminal"]
+    assert analysis.key_visible_text == ["git push", "[redacted]"]
+    assert analysis.goal_alignment.status == "unknown"
+
+
+def test_parse_screenshot_analysis_output_normalizes_string_list_fields():
+    payload = _valid_payload()
+    payload["key_visible_text"] = "single visible note"
+    payload["goal_alignment"]["evidence"] = "The terminal shows an error."
+
+    analysis = parse_screenshot_analysis_output(payload)
+
+    assert analysis.key_visible_text == ["single visible note"]
+    assert analysis.goal_alignment.evidence == ["The terminal shows an error."]
+
+
 def test_parse_screenshot_analysis_output_sanitizes_sensitive_strings():
     payload = _valid_payload()
     payload["summary"] = "Visible terminal includes token=super-secret-value but user is coding."

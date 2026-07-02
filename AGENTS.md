@@ -1,5 +1,149 @@
 # Agent Guidelines
 
+## What Seraph Is
+
+Seraph is a local-first operator cockpit and agent runtime. The repo spans a
+FastAPI backend, React cockpit/settings UI, scheduler jobs, screen observation
+storage, local model routing, VLM screenshot analysis, reports, skills,
+workflows, and external service adapters.
+
+The current development topology is part of the product contract, not incidental
+developer setup:
+
+```text
+Seraph frontend       http://127.0.0.1:3001
+  -> Seraph backend   http://127.0.0.1:8004
+  -> Mac VLM wrapper  http://127.0.0.1:8000
+  -> GPU model server http://192.168.1.26:8000/v1
+```
+
+The Mac VLM wrapper is run through Docker from
+`/Users/bigcube/Desktop/repos/vlm-screenshot-server`. The GPU model server is a
+separate machine and may already be running. Seraph agents are responsible for
+Seraph and the VLM wrapper lifecycle; do not assume Docker is optional for the
+wrapper unless the user explicitly changes the operating mode.
+
+Two properties shape most Seraph decisions:
+
+- Runtime truth must be operator-visible. If chat, screenshots, reports, or
+  settings use local Gemma/VLM/GPU paths, the UI and APIs must say that, not a
+  stale default model or fallback provider.
+- Work should be queued, bounded, and priority-aware. One GPU means no fantasy
+  parallelism. Active GPU work is allowed to finish; the next accepted job must
+  be the highest-priority ready job, and background screenshot work should keep
+  the GPU busy when higher-priority work is absent.
+
+## Contribution Rubric
+
+### What We Want
+
+- Fix real reported behavior and the whole bug class. Reproduce the symptom on
+  the current branch, identify the line or contract that makes it happen, and
+  cover sibling paths that would fail the same way.
+- Preserve Seraph's runtime contracts. Settings, status badges, scheduler
+  receipts, API health, and docs must agree with the actually running backend,
+  VLM wrapper, and GPU edge.
+- Prefer explicit operational receipts over plausible code inspection. For
+  lifecycle, model routing, Docker/VLM, queueing, or settings work, prove the
+  live endpoint or command path before saying it works.
+- Keep the core narrow and capability at the right layer. Extend existing
+  scheduler jobs, settings APIs, runtime profiles, skills, or wrappers before
+  adding new broad agent surfaces.
+- Make failures visible and bounded. A missing Docker wrapper, broken GPU edge,
+  invalid env value, stale settings fetch, or unavailable metadata path should
+  fail loudly enough for the operator to recover without killing the app.
+- Document shipped truth in `docs/implementation/` when runtime topology,
+  workflow contracts, settings behavior, queueing, or user-visible operations
+  change.
+
+### What We Do Not Want
+
+- Silent fallbacks that make the UI lie. Do not show OpenRouter, Grok, Codex, or
+  any other default when the effective runtime path is local Gemma/VLM, and do
+  not hide missing local runtime proof behind "configured" labels.
+- New raw env knobs as the first solution for operator behavior. Prefer existing
+  settings surfaces, runtime profile contracts, managed scripts, or documented
+  config groups. If an env var is necessary, quote shell-sensitive values in
+  `.env.*` and add a launcher guard or test when parsing would be fragile.
+- Detached process tricks that only work in one terminal. Use the repo lifecycle
+  commands and verify the managed status. In Codex/Desktop managed shells,
+  foreground `local run` is the reliable observation mode.
+- Poll loops, schedulers, or retries that can DoS the backend, starve chat, or
+  leave the GPU idle while accepted work exists.
+- "Fixes" that remove the feature instead of preserving the contract. If
+  settings metadata is slow, keep controls usable with last-known state; do not
+  solve it by disabling configuration.
+- Claims that issues, project fields, PR review, services, or tests changed
+  unless a tool confirmed the change.
+
+## Verify The Premise Before Fixing
+
+Before treating something as a bug, verify both the symptom and the intended
+design:
+
+- Check the live surface the user sees. If the screenshot shows a status label,
+  query the endpoint that feeds that label and inspect the frontend binding.
+- Check runtime configuration as loaded by the actual launcher, not just the
+  file on disk. Values with semicolons, quotes, shell expansion, Docker env
+  files, and process managers can change what the backend receives.
+- Trace the intended path before patching. For chat, distinguish direct local
+  chat, onboarding, orchestrator, tool-using agent, and fallback routes. For
+  screenshots, distinguish folder scan, pending observation storage, VLM
+  analysis, digest/report synthesis, and settings summaries.
+- Verify local services with concrete probes:
+
+```bash
+./manage.sh -e dev local status
+curl -sS http://127.0.0.1:8004/health
+curl -sS http://127.0.0.1:8004/api/runtime/status
+curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
+curl -sS http://127.0.0.1:8000/health
+curl -sS http://127.0.0.1:8000/health/backend
+```
+
+If sandboxed localhost checks fail but the app is supposed to be running on the
+host, rerun the same probe with the proper approval instead of assuming the
+service is down.
+
+## Footprint Ladder For New Capability
+
+Choose the smallest durable surface that solves the problem:
+
+1. Extend an existing function, endpoint, scheduler job, or UI state path.
+2. Extend an existing runtime profile, settings API, or managed script.
+3. Add a focused helper module behind an existing API or job.
+4. Add a skill or documented operator workflow.
+5. Add a plugin/MCP/service adapter when the capability is optional or
+   integration-specific.
+6. Add a new core tool, broad API, or global scheduler lane only when the
+   capability is fundamental and cannot fit the layers above.
+
+When multiple features want the same category of behavior, design the shared
+contract first. Do not merge one-off settings panels, queue semantics, provider
+switches, or lifecycle paths that will fight each other later.
+
+## Runtime And Lifecycle Rules
+
+- Use `./manage.sh -e dev local run` for live observation in managed Codex
+  sessions. Use `./manage.sh -e dev local up/down/status/logs` for normal local
+  lifecycle. Do not start backend/frontend directly with `uvicorn`, `npm run
+  dev`, or Vite unless the user explicitly asks.
+- Keep `.env.*` shell-safe. Any value containing semicolons must be quoted
+  because `manage.sh` sources env files as shell.
+- Runtime status must report the effective path for the current operator
+  surface. `/api/runtime/status` should describe `chat_agent`, while default
+  model/provider values belong in explicit `default_*` fields.
+- The Docker VLM wrapper health is not the same as GPU backend health. Check
+  both `/health` and `/health/backend`.
+- One-GPU scheduling is serial at the GPU. Seraph may keep a tiny feeder window
+  to avoid idle time, but queue priority determines the next job.
+- Background screenshot analysis must not block interactive chat. Chat and
+  onboarding routes using local Gemma must be configured alongside screenshot
+  and report routes.
+- Settings pages must remain usable through partial metadata failures. Preserve
+  last-known values and surface degraded metadata instead of disabling controls
+  or crashing the modal.
+
 ## Git Branching Strategy
 
 **Never commit directly to `develop` or `main`.**

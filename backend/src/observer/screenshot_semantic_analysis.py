@@ -15,6 +15,11 @@ from src.local_runtime_profiles import (
     local_runtime_profile_form_fields,
     local_runtime_profile_headers,
 )
+from src.observer.screen_analysis_settings import (
+    effective_screen_analysis_enabled,
+    effective_screen_analysis_model,
+    effective_screen_analysis_provider,
+)
 from src.observer.screenshot_analysis_contract import (
     ScreenshotAnalysis,
     ScreenshotAnalysisContractError,
@@ -43,9 +48,65 @@ class ScreenshotSemanticAnalysisError(RuntimeError):
 
 def screenshot_semantic_analysis_enabled() -> bool:
     """Return true when Seraph should call the local VLM screenshot analyzer."""
-    return settings.screen_analysis_provider.strip().lower() == "local-vlm" and bool(
-        settings.local_vlm_base_url.strip()
+    return (
+        effective_screen_analysis_enabled()
+        and effective_screen_analysis_provider().lower() == "local-vlm"
+        and bool(settings.local_vlm_base_url.strip())
     )
+
+
+async def screenshot_semantic_analysis_ready(*, timeout_seconds: float = 2.0) -> bool:
+    """Return true when the configured local VLM screenshot analyzer is reachable."""
+    status = await _screenshot_semantic_analysis_health(timeout_seconds=timeout_seconds)
+    return status is not None
+
+
+async def screenshot_semantic_analysis_accepting_background_work(*, timeout_seconds: float = 2.0) -> bool:
+    """Return true when the local VLM wrapper can accept one background image job."""
+    status = await _screenshot_semantic_analysis_health(timeout_seconds=timeout_seconds)
+    if status is None:
+        return False
+    if not await _screenshot_semantic_analysis_backend_ready(timeout_seconds=timeout_seconds):
+        return False
+    queue = status.get("queue")
+    if not isinstance(queue, dict):
+        return True
+    try:
+        active = int(queue.get("active", 0))
+        queued = int(queue.get("queued", 0))
+        workers = int(queue.get("workers", 1))
+    except (TypeError, ValueError):
+        return False
+    return active + queued < max(workers, 1)
+
+
+async def _screenshot_semantic_analysis_health(*, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
+    """Return the local VLM wrapper health payload when reachable."""
+    if not screenshot_semantic_analysis_enabled():
+        return None
+    endpoint = settings.local_vlm_base_url.rstrip("/") + "/health"
+    try:
+        async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
+            response = await client.get(endpoint)
+        if not (200 <= response.status_code < 500):
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+async def _screenshot_semantic_analysis_backend_ready(*, timeout_seconds: float = 2.0) -> bool:
+    """Return true when the wrapper's configured GPU backend is reachable."""
+    if not screenshot_semantic_analysis_enabled():
+        return False
+    endpoint = settings.local_vlm_base_url.rstrip("/") + "/health/backend"
+    try:
+        async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
+            response = await client.get(endpoint)
+        return 200 <= response.status_code < 300
+    except httpx.HTTPError:
+        return False
 
 
 async def analyze_screenshot_image(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis | None:
@@ -66,12 +127,13 @@ def screenshot_analysis_status_detail(
     *,
     reason: str | None = None,
     reanalysis_reason: str | None = None,
+    attempts: int | None = None,
 ) -> str:
     """Serialize semantic analysis status for idempotency and reanalysis decisions."""
     payload = {
         "status": status,
-        "provider": settings.screen_analysis_provider or "not_configured",
-        "model": settings.local_vlm_model or None,
+        "provider": effective_screen_analysis_provider() or "not_configured",
+        "model": effective_screen_analysis_model() or None,
         "schema_version": SCREENSHOT_ANALYSIS_SCHEMA_VERSION,
         "prompt_version": SCREENSHOT_ANALYSIS_PROMPT_VERSION,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -80,13 +142,15 @@ def screenshot_analysis_status_detail(
         payload["reason"] = _bounded_reason(reason)
     if reanalysis_reason:
         payload["reanalysis_reason"] = reanalysis_reason
+    if attempts is not None:
+        payload["attempts"] = max(int(attempts), 0)
     return SCREENSHOT_ANALYSIS_STATUS_DETAIL_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def screenshot_analysis_error_detail(reason: str) -> str:
     """Serialize a bounded analyzer failure for ScreenObservation details."""
     return SCREENSHOT_ANALYSIS_ERROR_DETAIL_PREFIX + json.dumps(
-        {"provider": settings.screen_analysis_provider or "unknown", "reason": _bounded_reason(reason)},
+        {"provider": effective_screen_analysis_provider() or "unknown", "reason": _bounded_reason(reason)},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -144,7 +208,7 @@ def semantic_analysis_needs_reanalysis(details: list[Any]) -> bool:
     return (
         analysis.get("prompt_version") != SCREENSHOT_ANALYSIS_PROMPT_VERSION
         or analysis.get("schema_version") != SCREENSHOT_ANALYSIS_SCHEMA_VERSION
-        or status.get("model") != (settings.local_vlm_model or None)
+        or status.get("model") != (effective_screen_analysis_model() or None)
     )
 
 
@@ -211,8 +275,9 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
         "prompt": prompt,
         **local_runtime_profile_form_fields("screenshot_fast"),
     }
-    if settings.local_vlm_model.strip():
-        data["model"] = settings.local_vlm_model.strip()
+    model = effective_screen_analysis_model()
+    if model:
+        data["model"] = model
     headers = local_runtime_profile_headers("screenshot_fast")
     if settings.local_vlm_api_key.strip():
         headers["Authorization"] = f"Bearer {settings.local_vlm_api_key.strip()}"

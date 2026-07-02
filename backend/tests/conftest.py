@@ -17,6 +17,7 @@ os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 
 from config.settings import settings
 from src.app import create_app
+from src.audit.repository import AuditRepository, audit_repository
 from src.llm_runtime import _reset_target_health
 from src.db.engine import _ensure_search_indexes
 from src.memory.flush import _reset_memory_flush_state
@@ -149,6 +150,24 @@ def reset_memory_flush_cache():
     _reset_memory_flush_state()
     yield
     _reset_memory_flush_state()
+
+
+def _restore_audit_repository_methods() -> None:
+    audit_repository.log_event = AuditRepository.log_event.__get__(
+        audit_repository,
+        AuditRepository,
+    )
+    audit_repository.list_events = AuditRepository.list_events.__get__(
+        audit_repository,
+        AuditRepository,
+    )
+
+
+@pytest.fixture(autouse=True)
+def reset_audit_repository_method_patches():
+    _restore_audit_repository_methods()
+    yield
+    _restore_audit_repository_methods()
 
 
 @pytest.fixture(autouse=True)

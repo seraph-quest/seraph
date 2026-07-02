@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     model_max_tokens: int = 4096
     agent_max_steps: int = 10
     debug: bool = False
+    database_echo: bool = False
     workspace_dir: str = "/app/data"
 
     # Phase 1 — Soul & Memory
@@ -60,6 +61,10 @@ class Settings(BaseSettings):
     context_window_token_budget: int = 12000  # max tokens for conversation history
     context_window_keep_first: int = 2        # always keep first N messages
     context_window_keep_recent: int = 20      # always keep last N messages
+    local_runtime_context_window_tokens: int = 32768  # configured ctx-size for local Gemma-compatible backends
+    local_runtime_prompt_safety_ratio: float = 0.9    # keep prompt+output below ctx to leave tokenizer/server margin
+    local_runtime_tool_reserve_tokens: int = 14000    # reserve for smolagents tool schemas and step traces
+    local_runtime_min_section_tokens: int = 256       # minimum retained text budget per compacted section
 
     # Phase 2 — Capable Executor
     sandbox_url: str = "http://sandbox:8060"
@@ -70,6 +75,7 @@ class Settings(BaseSettings):
 
     # Phase 3.5 — Timeouts
     agent_chat_timeout: int = 120    # seconds
+    guardian_state_timeout_seconds: int = 5
     agent_strategist_timeout: int = 60  # seconds
     agent_briefing_timeout: int = 60  # daily briefing + evening review LiteLLM calls
     consolidation_llm_timeout: int = 30  # memory consolidation LiteLLM call
@@ -105,8 +111,12 @@ class Settings(BaseSettings):
     screen_capture_archive_retention_days: int = 365
     screen_capture_archive_max_mb: int = 0
     screenshot_folder_ingest_enabled: bool = True
-    screenshot_folder_ingest_interval_min: int = 5
+    screenshot_folder_ingest_interval_min: int = 1
     screenshot_folder_ingest_limit: int = 100
+    screenshot_folder_analysis_interval_seconds: int = 1
+    screenshot_folder_analysis_limit: int = 100
+    screenshot_folder_analysis_concurrency: int = 1
+    screenshot_folder_analysis_job_timeout_seconds: int = 30
     screenshot_observation_digest_enabled: bool = True
     screenshot_observation_digest_interval_min: int = 15
     screenshot_observation_digest_window_min: int = 30

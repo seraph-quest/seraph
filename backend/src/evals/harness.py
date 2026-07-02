@@ -1370,6 +1370,8 @@ def _make_sync_client_with_db():
     patches.append(patch.object(soul_mod, "_soul_path", os.path.join(tmpdir, settings.soul_file)))
     patches.append(patch("src.vault.crypto._fernet", None))
     patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
+    patches.append(patch("src.api.chat.should_use_direct_local_chat", return_value=False))
+    patches.append(patch("src.api.ws.should_use_direct_local_chat", return_value=False))
 
     stack = ExitStack()
     stack.callback(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
@@ -1524,6 +1526,8 @@ def _eval_chat_model_wrapper() -> dict[str, Any]:
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
         patch.object(settings, "fallback_llm_api_key", ""),
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "local_runtime_paths", ""),
     ):
         model = get_model()
 
@@ -4790,6 +4794,9 @@ def _eval_runtime_fallback_overrides() -> dict[str, Any]:
             patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
             patch.object(settings, "fallback_model", ""),
             patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+            patch.object(settings, "local_runtime_paths", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "runtime_profile_preferences", ""),
             patch.object(
                 settings,
                 "runtime_fallback_overrides",
@@ -4957,6 +4964,8 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
             patch.object(settings, "local_model", "ollama/llama3.2"),
             patch.object(settings, "local_llm_api_key", ""),
             patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "runtime_profile_preferences", ""),
+            patch.object(settings, "local_runtime_paths", "chat_agent"),
             patch.object(settings, "fallback_model", ""),
             patch.object(
                 settings,
@@ -5028,6 +5037,9 @@ def _eval_provider_policy_scoring() -> dict[str, Any]:
             patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
             patch.object(settings, "fallback_model", ""),
             patch.object(settings, "fallback_models", ""),
+            patch.object(settings, "local_runtime_paths", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "runtime_profile_preferences", ""),
             patch.object(
                 settings,
                 "runtime_fallback_overrides",
@@ -5109,49 +5121,60 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
     _reset_target_health()
     try:
         async with _patched_async_db("src.audit.repository.get_session"):
-            with (
-                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-                patch.object(settings, "llm_api_key", "primary-key"),
-                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-                patch.object(settings, "fallback_model", ""),
-                patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
-                patch.object(
-                    settings,
-                    "provider_capability_overrides",
-                    (
-                        "openrouter/anthropic/claude-sonnet-4=reasoning;"
-                        "openai/gpt-4o-mini=tool_use|fast;"
-                        "openai/gpt-4.1-nano=cheap"
-                    ),
-                ),
-                patch.object(
-                    settings,
-                    "provider_cost_tiers",
-                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                ),
-                patch.object(
-                    settings,
-                    "provider_latency_tiers",
-                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                ),
-                patch.object(
-                    settings,
-                    "provider_task_classes",
-                    "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
-                ),
-                patch.object(
-                    settings,
-                    "provider_budget_classes",
-                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                ),
-                patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"),
-                patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"),
-                patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"),
-                patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"),
-                patch.object(settings, "runtime_task_class", "chat_agent=chat"),
-                patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"),
-                patch("litellm.completion", return_value=completion_response) as mock_completion,
-            ):
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"))
+                stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
+                stack.enter_context(patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"))
+                stack.enter_context(patch.object(settings, "runtime_profile_preferences", ""))
+                stack.enter_context(patch.object(settings, "local_runtime_paths", ""))
+                stack.enter_context(patch.object(settings, "fallback_model", ""))
+                stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"))
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_capability_overrides",
+                        (
+                            "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                            "openai/gpt-4o-mini=tool_use|fast;"
+                            "openai/gpt-4.1-nano=cheap"
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_cost_tiers",
+                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_latency_tiers",
+                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_task_classes",
+                        "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_budget_classes",
+                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                    )
+                )
+                stack.enter_context(patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"))
+                stack.enter_context(patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"))
+                stack.enter_context(patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"))
+                stack.enter_context(patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"))
+                stack.enter_context(patch.object(settings, "runtime_task_class", "chat_agent=chat"))
+                stack.enter_context(patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"))
+                mock_completion = stack.enter_context(patch("litellm.completion", return_value=completion_response))
                 response = completion_with_fallback_sync(
                     messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
                     temperature=0.2,
@@ -5202,6 +5225,9 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
             patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
             patch.object(settings, "fallback_llm_api_key", ""),
             patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "runtime_profile_preferences", ""),
             patch.object(
                 settings,
                 "runtime_fallback_overrides",

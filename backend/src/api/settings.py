@@ -374,6 +374,8 @@ def _is_screenshot_folder_observation(observation: ScreenObservation) -> bool:
 
 
 async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
+    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
+
     def status_patterns(status: str) -> tuple[str, ...]:
         return (
             f'"status":"{status}"',
@@ -475,6 +477,7 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
         "analysis_failures": status_counts["failed"],
         "visual_run_count": visual_runs["visual_run_count"],
         "visual_suppressed_count": visual_runs["visual_suppressed_count"],
+        "persistence": screenshot_folder_persistence_status(),
         "latest_observation_at": latest_observation_at,
         "latest_analyzed_at": latest_analyzed_at,
         "latest_failure": latest_failure,
@@ -484,6 +487,8 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
 
 
 def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = None) -> dict[str, object]:
+    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
+
     return {
         "observation_count": 0,
         "analysis_status": {
@@ -497,6 +502,7 @@ def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = No
         "analysis_failures": 0,
         "visual_run_count": 0,
         "visual_suppressed_count": 0,
+        "persistence": screenshot_folder_persistence_status(),
         "latest_observation_at": None,
         "latest_analyzed_at": None,
         "latest_failure": latest_failure,

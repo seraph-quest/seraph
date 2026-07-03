@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from src.db.models import ScreenObservation
@@ -56,6 +57,117 @@ def test_failed_screenshot_analysis_is_retried_after_cooldown():
         screenshot_analysis_status_detail("failed", reason="bad output", attempts=_MAX_ANALYSIS_ATTEMPTS),
     ]
     assert not _analysis_candidate_ready(exhausted, now=now + timedelta(minutes=10))
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_analysis_selection_retries_database_lock(monkeypatch):
+    from src.observer import screenshot_folder_source as source
+
+    for key in source._PERSISTENCE_STATS:
+        monkeypatch.setitem(source._PERSISTENCE_STATS, key, 0)
+    attempts = 0
+
+    class FakeScalars:
+        def all(self):
+            return []
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalars()
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def execute(self, _statement):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError("select", {}, Exception("database is locked"))
+            return FakeResult()
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(source, "get_session", lambda: FakeSession())
+    monkeypatch.setattr(source.asyncio, "sleep", no_sleep)
+
+    result = await source._select_analysis_candidates_with_retry(limit=10)
+
+    assert result == []
+    assert attempts == 2
+    assert source.screenshot_folder_persistence_status()["selection_db_lock_retries"] == 1
+    assert source.screenshot_folder_persistence_status()["db_lock_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_analysis_persistence_retries_database_lock(monkeypatch):
+    from src.observer import screenshot_folder_source as source
+
+    for key in source._PERSISTENCE_STATS:
+        monkeypatch.setitem(source._PERSISTENCE_STATS, key, 0)
+    attempts = 0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def execute(self, _statement):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise OperationalError("update", {}, Exception("database is locked"))
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(source, "get_session", lambda: FakeSession())
+    monkeypatch.setattr(source.asyncio, "sleep", no_sleep)
+
+    await source._persist_analysis_details_with_retry("obs-1", ["capture_artifacts:{}"])
+
+    status = source.screenshot_folder_persistence_status()
+    assert attempts == 3
+    assert status["persistence_db_lock_retries"] == 2
+    assert status["db_lock_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_analysis_persistence_reports_exhausted_database_lock(monkeypatch):
+    from src.observer import screenshot_folder_source as source
+
+    for key in source._PERSISTENCE_STATS:
+        monkeypatch.setitem(source._PERSISTENCE_STATS, key, 0)
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def execute(self, _statement):
+            raise OperationalError("update", {}, Exception("database is locked"))
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(source, "get_session", lambda: FakeSession())
+    monkeypatch.setattr(source.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(source.ScreenshotFolderPersistenceError):
+        await source._persist_analysis_details_with_retry("obs-1", ["capture_artifacts:{}"])
+
+    status = source.screenshot_folder_persistence_status()
+    assert status["persistence_db_lock_retries"] == 3
+    assert status["persistence_db_lock_failures"] == 1
+    assert status["db_lock_failures"] == 1
 
 
 @pytest.mark.asyncio
@@ -332,18 +444,6 @@ async def test_screenshot_folder_analysis_drains_older_pending_rows_behind_newer
         calls.append({"image_path": image_path, "artifacts": dict(artifacts)})
         return analysis
 
-    def capture_artifacts(path, index):
-        return "capture_artifacts:" + json.dumps(
-            {
-                "provider": "screenshot_folder",
-                "source": "local_image_directory",
-                "image_path": str(path),
-                "image_sha256": f"sha-{index}",
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
     now = datetime.now(timezone.utc)
     async with async_db() as db:
         db.add(
@@ -355,7 +455,7 @@ async def test_screenshot_folder_analysis_drains_older_pending_rows_behind_newer
                 summary="old pending",
                 details_json=json.dumps(
                     [
-                        capture_artifacts(image, 0),
+                        _capture_artifacts(image, 0),
                         screenshot_analysis_status_detail("pending", reason="queued_for_analysis"),
                     ]
                 ),
@@ -365,7 +465,7 @@ async def test_screenshot_folder_analysis_drains_older_pending_rows_behind_newer
         )
         succeeded_details = json.dumps(
             [
-                capture_artifacts(image, 1),
+                _capture_artifacts(image, 1),
                 screenshot_analysis_detail(analysis),
                 screenshot_analysis_status_detail("succeeded"),
             ]
@@ -401,3 +501,102 @@ async def test_screenshot_folder_analysis_drains_older_pending_rows_behind_newer
             )
         ).scalar_one()
     assert "screenshot_analysis:" in (stored.details_json or "")
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_analysis_counts_persistence_lock_as_failed(
+    async_db,
+    tmp_path,
+    monkeypatch,
+):
+    from src.observer.screenshot_analysis_contract import parse_screenshot_analysis_output
+    from src.observer.screenshot_folder_source import (
+        ScreenshotFolderPersistenceError,
+        _persist_analysis_details_with_retry,
+        analyze_pending_screenshot_folder_observations,
+    )
+    from src.observer.screenshot_semantic_analysis import screenshot_analysis_status_detail
+
+    image = tmp_path / "pending-lock.png"
+    image.write_bytes(b"pending screenshot")
+    analysis = parse_screenshot_analysis_output(
+        {
+            "summary": "A pending screenshot was analyzed but persistence failed.",
+            "activity_type": "reviewing",
+            "confidence": 0.82,
+        }
+    )
+
+    async def fake_analyze(_image_path, _artifacts):
+        return analysis
+
+    persist_locked = True
+
+    async def locked_persist(_observation_id, _details):
+        if persist_locked:
+            raise ScreenshotFolderPersistenceError("database is locked while saving screenshot analysis")
+        await _persist_analysis_details_with_retry(_observation_id, _details)
+
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                app_name="Screenshot Folder",
+                window_title="pending-lock.png",
+                activity_type="screen",
+                project=None,
+                summary="pending lock",
+                details_json=json.dumps(
+                    [
+                        _capture_artifacts(image, 0),
+                        screenshot_analysis_status_detail("pending", reason="queued_for_analysis"),
+                    ]
+                ),
+                blocked=False,
+                timestamp=datetime.now(timezone.utc),
+            )
+        )
+
+    monkeypatch.setattr("src.observer.screenshot_folder_source.settings.screen_analysis_provider", "local-vlm")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", fake_analyze)
+    monkeypatch.setattr("src.observer.screenshot_folder_source._persist_analysis_details_with_retry", locked_persist)
+
+    result = await analyze_pending_screenshot_folder_observations(limit=1)
+
+    assert result.scanned == 1
+    assert result.analyzed == 0
+    assert result.failed == 1
+    async with async_db() as db:
+        stored = (
+            await db.execute(
+                select(ScreenObservation).where(ScreenObservation.window_title == "pending-lock.png")
+            )
+        ).scalar_one()
+    assert "screenshot_analysis:" not in (stored.details_json or "")
+
+    persist_locked = False
+    second = await analyze_pending_screenshot_folder_observations(limit=1)
+
+    assert second.scanned == 1
+    assert second.analyzed == 1
+    assert second.failed == 0
+    async with async_db() as db:
+        drained = (
+            await db.execute(
+                select(ScreenObservation).where(ScreenObservation.window_title == "pending-lock.png")
+            )
+        ).scalar_one()
+    assert "screenshot_analysis:" in (drained.details_json or "")
+
+
+def _capture_artifacts(path, index):
+    return "capture_artifacts:" + json.dumps(
+        {
+            "provider": "screenshot_folder",
+            "source": "local_image_directory",
+            "image_path": str(path),
+            "image_sha256": f"sha-{index}",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )

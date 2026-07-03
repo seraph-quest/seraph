@@ -247,6 +247,11 @@ class TestE2EConversation:
                             break
                     else:
                         raise AssertionError("Expected approval_required message")
+
+                messages_response = client.get(f"/api/sessions/{msg['session_id']}/messages")
+                assert messages_response.status_code == 200
+                messages = messages_response.json()
+                assert all("Response interrupted" not in message["content"] for message in messages)
         finally:
             _close_sync_client_with_db(patches, stack)
 
@@ -285,6 +290,42 @@ class TestE2EConversation:
                             break
                     else:
                         raise AssertionError("Expected clarification_required message")
+        finally:
+            _close_sync_client_with_db(patches, stack)
+
+    def test_agent_error_close_does_not_record_interrupted_turn(self):
+        client, patches, stack = _make_sync_client_with_db()
+        try:
+            mock_agent = MagicMock()
+            mock_agent.run.side_effect = RuntimeError("agent failed")
+
+            with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
+                 patch("src.memory.consolidator.consolidate_session"):
+                with client.websocket_connect("/ws/chat") as ws:
+                    _ = _receive_text(ws)
+                    ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                    _ = _receive_text(ws)
+
+                    ws.send_text(json.dumps({
+                        "type": "message",
+                        "message": "trigger agent failure",
+                        "session_id": None,
+                    }))
+
+                    for _ in range(10):
+                        raw = _receive_text(ws)
+                        msg = json.loads(raw)
+                        if msg["type"] == "error":
+                            assert "agent failed" in msg["content"]
+                            ws.close()
+                            break
+                    else:
+                        raise AssertionError("Expected error message")
+
+                messages_response = client.get(f"/api/sessions/{msg['session_id']}/messages")
+                assert messages_response.status_code == 200
+                messages = messages_response.json()
+                assert all("Response interrupted" not in message["content"] for message in messages)
         finally:
             _close_sync_client_with_db(patches, stack)
 

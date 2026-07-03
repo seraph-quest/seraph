@@ -191,6 +191,22 @@ Interpretation:
 - `192.168.1.26:8001/queue/status` proves Seraph can observe admission pressure before feeding screenshot work.
 - A `502` from `/health/backend` means the wrapper is up but the GPU backend edge is broken.
 
+Run the direct-route receipt from the normal operator shell that starts Seraph
+when Codex/Desktop reports a LAN failure. A normal Terminal-launched receipt on
+July 3, 2026 proved `ssh -o BatchMode=yes -o ConnectTimeout=5 jupyter true`
+exits `0` for this GPU host, even though Codex/Desktop-launched direct SSH can
+report `No route to host` for the same alias. If Codex reports `No route to
+host` or connection failures for `192.168.1.26` while the operator shell can
+reach `jupyter`, record the Codex result as an agent-network limitation, not as
+evidence that the product topology requires a tunnel.
+
+Codex maintenance access is allowed to use `ssh jupyter` for GPU-host
+administration. That route has confirmed host `jupyter`, user `pawel`, and the
+GPU wrapper repo at `/home/pawel/repos/vlm-screenshot-server`. Use it for
+inventory, Docker Compose checks, process inspection, listener checks, and log
+reads. Do not use it as a Seraph runtime base URL or a passing direct-route
+acceptance receipt.
+
 Seraph also probes these three wrapper endpoints from the running backend process and exposes the safe result in `/api/runtime/status` and `/api/settings/artifact-storage` as `vlm_runtime.live_probe`. The settings UI renders this as a `Reach` row for both screenshot analysis and the local Gemma runtime. This status distinguishes "configured for GPU wrapper" from "this Seraph process can actually reach the direct LAN route"; diagnostic SSH forwards are not a substitute for `live_probe.reachable=true` on the direct `SERAPH_VLM_BASE_URL`.
 
 `scripts/diagnose_gpu_vlm_route.py` is the operator-shell receipt command for the direct route. It reads `SERAPH_VLM_BASE_URL`, `SERAPH_VLM_API_KEY`, and `LOCAL_VLM_MODEL`/`LOCAL_MODEL`, prints sanitized JSON, and exits non-zero when the direct wrapper route, chat check, or requested image check fails. Loopback and localhost base URLs are rejected by default so a tunnel cannot accidentally pass as the direct-route receipt. Use `--allow-non-direct-base-url` only for explicitly labeled diagnostic bridge checks. Use `--image /path/to/screenshot.png` when the validation receipt also needs a wrapper-level `/v1/analyze-file` check.
@@ -213,41 +229,55 @@ llama serve \
 
 `--no-mmproj-offload` is currently the stable workaround for RTX 3090 Ti BF16 mmproj CUDA failures. Remove it only after a GPU-server/library change is verified with the profile-proof harness.
 
-The VLM backend then exposes an OpenAI-compatible API at:
+The GPU model backend exposes an OpenAI-compatible API on the GPU host at:
 
 ```text
-http://GPU_SERVER_IP:8000/v1
+http://192.168.1.26:8000/v1
 ```
 
-Run the screenshot-analysis wrapper on the Mac with Docker Compose:
+Run the screenshot-analysis wrapper on the GPU server with Docker Compose. The
+repo on the GPU host is `/home/pawel/repos/vlm-screenshot-server`; the wrapper
+publishes `http://192.168.1.26:8001` and forwards to the local GPU model
+backend above.
 
 ```bash
-git clone https://github.com/seraph-quest/vlm-screenshot-server.git
-cd vlm-screenshot-server
+ssh jupyter
+cd /home/pawel/repos/vlm-screenshot-server
 cp .env.example .env
 ```
 
 Use:
 
 ```env
-VLM_BASE_URL=http://GPU_SERVER_IP:8000/v1
-VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
+HOST=0.0.0.0
+PORT=8001
+HOST_BIND=0.0.0.0
+HOST_PORT=8001
+VLM_BASE_URL=http://192.168.1.26:8000/v1
+VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF
 VLM_API_KEY=
 VLM_TIMEOUT_SECONDS=180
 VLM_MAX_TOKENS=700
 VLM_TEMPERATURE=0
 REDACT_VISIBLE_TEXT=true
+QUEUE_MAX_SIZE=1000
+QUEUE_WORKERS=1
+QUEUE_BACKGROUND_WORKERS=1
 ```
 
 Then start the wrapper:
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
-Test the wrapper with a screenshot:
+Test the wrapper and backend from the Mac/operator shell through direct HTTP
+API calls:
 
 ```bash
+curl http://192.168.1.26:8001/health
+curl http://192.168.1.26:8001/health/backend
+curl http://192.168.1.26:8001/queue/status
 curl -F "file=@/path/to/screenshot.png" \
   http://192.168.1.26:8001/v1/analyze-file
 ```
@@ -280,6 +310,16 @@ Seraph backend     http://127.0.0.1:8004
 ```
 
 SSH forwarding is acceptable only as a diagnostic bridge for an agent sandbox that cannot open the LAN route. It is not the operator runtime contract, and Seraph status must not require or imply a tunnel.
+
+The user should not have to set up tunnels to access Seraph's GPU VLM API. If a
+tunnel is needed for a Codex diagnostic session, keep it out of `.env.dev`, do
+not use it as a passing acceptance receipt, and prefer an operator-shell
+`scripts/diagnose_gpu_vlm_route.py` receipt against
+`http://192.168.1.26:8001`.
+
+When Codex needs to administer the GPU host, use `ssh jupyter` for admin work
+only. Keep that maintenance route labeled separately from the product topology
+above.
 
 When configured, `screenshot_folder_analysis` posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the existing Seraph `ScreenObservation`.
 If the provider is not configured or fails, Seraph still keeps the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.

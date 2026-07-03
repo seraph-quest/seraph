@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 
 # Ensure models are registered in SQLModel.metadata before create_all
 import src.db.models  # noqa: F401
+from src.agent.direct_chat import should_use_direct_local_chat as real_should_use_direct_local_chat
 from src.api.ws import _build_agent
 from src.utils.background import drain_tracked_tasks
 
@@ -194,6 +195,40 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
+    def test_websocket_comma_greeting_uses_real_direct_chat_classifier(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            yield "Hello."
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", side_effect=real_should_use_direct_local_chat),
+                patch("src.agent.direct_chat._uses_local_gemma_profile", return_value=True),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "skip_onboarding"}))
+                _ = ws.receive_text()
+
+                ws.send_text(json.dumps({"type": "message", "message": "Hello, reply in one short sentence."}))
+                received = [json.loads(ws.receive_text()) for _ in range(4)]
+
+            assert received[0]["type"] == "status"
+            assert received[0]["content"] == "Seraph received the message."
+            assert received[1]["type"] == "status"
+            assert "local chat runtime" in received[1]["content"]
+            assert received[2]["type"] == "delta"
+            assert received[2]["content"] == "Hello."
+            assert received[3]["type"] == "final"
+            assert received[3]["content"] == "Hello."
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
     def test_websocket_direct_chat_falls_back_when_streaming_fails_before_delta(self):
         client, patches, stack = _make_sync_client_with_db()
 
@@ -221,6 +256,42 @@ class TestWebSocket:
             assert "falling back" in received[2]["content"]
             assert received[3]["type"] == "final"
             assert received[3]["content"] == "Fallback ready."
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_direct_chat_error_close_does_not_record_interrupted_turn(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            raise RuntimeError("streaming endpoint failed")
+            yield "unreachable"
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+
+                received = []
+                for _ in range(5):
+                    msg = json.loads(ws.receive_text())
+                    received.append(msg)
+                    if msg["type"] == "error":
+                        ws.close()
+                        break
+
+            error = next(msg for msg in received if msg["type"] == "error")
+            assert "chat failed" in error["content"]
+            messages_response = client.get(f"/api/sessions/{error['session_id']}/messages")
+            assert messages_response.status_code == 200
+            messages = messages_response.json()
+            assert all("Response interrupted" not in message["content"] for message in messages)
         finally:
             stack.close()
             for p in patches:

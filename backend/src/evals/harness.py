@@ -1740,7 +1740,7 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
                         approval_msg = msg
                         break
 
-            events = client.get("/api/audit/events").json()
+                events = client.get("/api/audit/events").json()
 
         if approval_msg is None:
             raise AssertionError("Expected approval_required WebSocket message")
@@ -6277,17 +6277,19 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     audited_tool = wrap_tools_for_audit([_DummyStrategistTool()])[0]
     mock_log_event = AsyncMock()
 
-    class DummyAgent:
-        def run(self, _prompt: str) -> str:
-            audited_tool()
-            return (
-                '{"should_intervene": false, "content": "", "intervention_type": "nudge", '
-                '"urgency": 0, "reasoning": "No intervention"}'
-            )
+    async def mock_strategist_completion(*_args: object, **_kwargs: object) -> str:
+        audited_tool()
+        return (
+            '{"should_intervene": false, "content": "", "intervention_type": "nudge", '
+            '"urgency": 0, "reasoning": "No intervention"}'
+        )
 
     with (
         patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
-        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=DummyAgent()),
+        patch(
+            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+            AsyncMock(side_effect=mock_strategist_completion),
+        ),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         await run_strategist_tick()
@@ -6303,8 +6305,7 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
 async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context(time_of_day="afternoon"))
-    mock_agent = MagicMock()
-    mock_agent.run.return_value = (
+    strategist_response = (
         '{"should_intervene": true, "content": "Time to refocus on the eval roadmap.", '
         '"intervention_type": "advisory", "urgency": 3, "reasoning": "Focus drift"}'
     )
@@ -6313,7 +6314,10 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
 
     with (
         patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
-        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+        patch(
+            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+            AsyncMock(return_value=strategist_response),
+        ),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
@@ -6387,8 +6391,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         mock_context_manager.get_context.return_value = strategist_ctx
         mock_context_manager.is_daemon_connected.return_value = True
         mock_context_manager.decrement_attention_budget = MagicMock()
-        mock_agent = MagicMock()
-        mock_agent.run.return_value = (
+        strategist_response = (
             '{"should_intervene": true, '
             '"content": "Stay on the workflow review while the current context is still loaded.", '
             '"intervention_type": "advisory", "urgency": 2, "reasoning": "Aligned work"}'
@@ -6403,7 +6406,10 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
 
         with (
             patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=guardian_state)),
-            patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+            patch(
+                "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+                AsyncMock(return_value=strategist_response),
+            ),
             patch("src.observer.manager.context_manager", mock_context_manager),
             patch("src.api.observer.context_manager", mock_context_manager),
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),

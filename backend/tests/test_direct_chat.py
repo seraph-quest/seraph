@@ -63,6 +63,11 @@ def test_direct_local_chat_accepts_lightweight_greeting_punctuation():
             runtime_path="chat_agent",
             is_onboarding=False,
         )
+        assert should_use_direct_local_chat(
+            "Hello, reply in one short sentence.",
+            runtime_path="chat_agent",
+            is_onboarding=False,
+        )
 
 
 def test_direct_local_chat_does_not_intercept_onboarding_bare_domain():

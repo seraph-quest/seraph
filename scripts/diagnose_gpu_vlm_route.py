@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,18 @@ def _default_api_key() -> str:
 
 def _is_direct_route_candidate(base_url: str) -> bool:
     host = (urlparse(base_url).hostname or "").lower()
-    return host not in {"", "localhost", "127.0.0.1", "::1"}
+    if host in {"", "localhost"}:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    if address.is_loopback or address.is_unspecified:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        mapped = address.ipv4_mapped
+        return not (mapped.is_loopback or mapped.is_unspecified)
+    return True
 
 
 def _endpoint_result(response: httpx.Response) -> dict[str, Any]:

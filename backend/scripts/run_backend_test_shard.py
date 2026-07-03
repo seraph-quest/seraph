@@ -98,6 +98,62 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             ],
         ),
     ],
+    "tests/test_e2e_conversation.py": [
+        (
+            "tests/test_e2e_conversation.py::test_full_message_flow",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_full_message_flow",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_seq_numbers_monotonically_increase",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_seq_numbers_monotonically_increase",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_tool_name_in_step_content",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_tool_name_in_step_content",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_agent_run_success_is_written_to_audit_log",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_agent_run_success_is_written_to_audit_log",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_high_risk_tool_sends_approval_required_message",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_high_risk_tool_sends_approval_required_message",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_missing_input_sends_clarification_required_message",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_missing_input_sends_clarification_required_message",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_timeout_logs_only_timed_out_runtime_event",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_timeout_logs_only_timed_out_runtime_event",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_secret_values_are_redacted_in_streamed_messages",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_secret_values_are_redacted_in_streamed_messages",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_resume_message_does_not_duplicate_user_turn",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_resume_message_does_not_duplicate_user_turn",
+            ],
+        ),
+    ],
     "tests/test_eval_harness.py": [
         (
             "tests/test_eval_harness.py::runtime_group_1",

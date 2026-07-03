@@ -235,6 +235,25 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
     assert invocations == _expected_eval_harness_invocations()
 
 
+def test_pytest_invocations_for_target_splits_e2e_conversation_contract():
+    invocations = pytest_invocations_for_target("tests/test_e2e_conversation.py")
+
+    assert [label for label, _ in invocations] == [
+        "tests/test_e2e_conversation.py::test_full_message_flow",
+        "tests/test_e2e_conversation.py::test_seq_numbers_monotonically_increase",
+        "tests/test_e2e_conversation.py::test_tool_name_in_step_content",
+        "tests/test_e2e_conversation.py::test_agent_run_success_is_written_to_audit_log",
+        "tests/test_e2e_conversation.py::test_high_risk_tool_sends_approval_required_message",
+        "tests/test_e2e_conversation.py::test_missing_input_sends_clarification_required_message",
+        "tests/test_e2e_conversation.py::test_timeout_logs_only_timed_out_runtime_event",
+        "tests/test_e2e_conversation.py::test_secret_values_are_redacted_in_streamed_messages",
+        "tests/test_e2e_conversation.py::test_resume_message_does_not_duplicate_user_turn",
+    ]
+    assert invocations[4][1] == [
+        "tests/test_e2e_conversation.py::TestE2EConversation::test_high_risk_tool_sends_approval_required_message",
+    ]
+
+
 def test_run_shard_files_returns_timeout_code_when_file_hangs(tmp_path: Path):
     files = ["tests/test_alpha.py", "tests/test_beta.py"]
 

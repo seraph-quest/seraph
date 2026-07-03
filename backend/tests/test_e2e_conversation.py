@@ -243,6 +243,7 @@ class TestE2EConversation:
                             assert msg["tool_name"] == "shell_execute"
                             assert msg["risk_level"] == "high"
                             assert "continue automatically" in msg["content"]
+                            ws.close()
                             break
                     else:
                         raise AssertionError("Expected approval_required message")
@@ -280,6 +281,7 @@ class TestE2EConversation:
                             assert msg["reason"] == "Weather depends on location."
                             assert msg["options"] == ["Wroclaw", "Warsaw"]
                             assert "Which city should I check?" in msg["content"]
+                            ws.close()
                             break
                     else:
                         raise AssertionError("Expected clarification_required message")

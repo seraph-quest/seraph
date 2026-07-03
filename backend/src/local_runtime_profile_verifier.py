@@ -14,6 +14,7 @@ import httpx
 
 from config.settings import settings
 from src.local_runtime_profiles import local_runtime_chat_payload, local_runtime_profile
+from src.vlm_runtime import effective_vlm_api_key, effective_vlm_chat_api_base
 
 
 PROFILE_VERIFIER_VERSION = "seraph.local_runtime_profiles.proof.v1"
@@ -29,13 +30,13 @@ async def verify_local_runtime_profiles(
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
     """Verify the live local gateway profile behavior and write a safe receipt."""
-    resolved_base_url = (base_url or settings.local_llm_api_base or settings.local_vlm_base_url).strip()
+    resolved_base_url = (base_url or effective_vlm_chat_api_base()).strip()
     if not resolved_base_url:
-        raise ValueError("local runtime verifier requires LOCAL_LLM_API_BASE or LOCAL_VLM_BASE_URL")
+        raise ValueError("local runtime verifier requires LOCAL_LLM_API_BASE or SERAPH_VLM_BASE_URL")
     resolved_model = (model or settings.local_model or settings.local_vlm_model or settings.default_model).strip()
     if not resolved_model:
         raise ValueError("local runtime verifier requires a model id")
-    resolved_api_key = api_key if api_key is not None else settings.local_llm_api_key or settings.local_vlm_api_key
+    resolved_api_key = api_key if api_key is not None else effective_vlm_api_key()
 
     started_at = datetime.now(timezone.utc)
     receipt: dict[str, Any] = {
@@ -452,13 +453,22 @@ def _safe_base_url(base_url: str) -> str:
 
 
 def _safe_url(url: str) -> str:
-    return _replace_non_empty(_replace_non_empty(url, settings.local_llm_api_key), settings.local_vlm_api_key)
+    return _replace_non_empty(
+        _replace_non_empty(
+            _replace_non_empty(url, settings.local_llm_api_key),
+            settings.local_vlm_api_key,
+        ),
+        settings.seraph_vlm_api_key,
+    )
 
 
 def _safe_error(exc: Exception) -> str:
     return _replace_non_empty(
-        _replace_non_empty(str(exc), settings.local_llm_api_key),
-        settings.local_vlm_api_key,
+        _replace_non_empty(
+            _replace_non_empty(str(exc), settings.local_llm_api_key),
+            settings.local_vlm_api_key,
+        ),
+        settings.seraph_vlm_api_key,
     )[:1000]
 
 

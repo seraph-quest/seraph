@@ -21,6 +21,7 @@ from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
+from src.vlm_runtime import effective_vlm_status
 from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -202,6 +203,7 @@ def create_app() -> FastAPI:
             "default_api_base": settings.llm_api_base.strip(),
             "provider_profiles": provider_profile_statuses(),
             "local_operators": local_operator_statuses(probe=False),
+            "vlm_runtime": effective_vlm_status(),
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     screen_derived_llm_allow_remote: bool = False
     screen_derived_llm_require_profile_proof: bool = True
     screen_analysis_provider: str = ""  # local-vlm enables semantic screenshot analysis
+    seraph_vlm_mode: str = ""  # gpu-server, mac-wrapper, or empty for legacy local VLM config
+    seraph_vlm_base_url: str = ""  # wrapper base URL, e.g. http://192.168.1.26:8001
+    seraph_vlm_backend_url: str = ""  # model backend behind the wrapper, e.g. http://192.168.1.26:8000/v1
+    seraph_vlm_api_key: str = ""
+    seraph_vlm_feeder_window: int = 2  # active + queued jobs Seraph may keep in the one-GPU wrapper
     local_vlm_base_url: str = ""
     local_vlm_model: str = ""
     local_vlm_api_key: str = ""

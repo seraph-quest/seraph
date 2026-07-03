@@ -22,6 +22,7 @@ from src.local_runtime_profile_verifier import (
     local_runtime_profile_receipt_dir,
 )
 from src.local_runtime_profiles import local_runtime_profile_statuses
+from src.vlm_runtime import effective_vlm_base_url, effective_vlm_chat_api_base, effective_vlm_status
 from src.observer.manager import context_manager
 from src.observer.screen_analysis_settings import (
     SCREENSHOT_FOLDER_ENV,
@@ -612,7 +613,7 @@ def _local_runtime_profile_proof_summary() -> dict[str, object]:
         return summary
 
     proof = latest_local_runtime_profile_proof(
-        expected_base_url=settings.local_llm_api_base or settings.local_vlm_base_url,
+        expected_base_url=effective_vlm_chat_api_base() or effective_vlm_base_url(),
         expected_model=settings.local_model or settings.local_vlm_model or settings.default_model,
     )
     summary.update(
@@ -842,6 +843,7 @@ async def get_artifact_storage_settings():
         }
     )
     screen_analysis = await get_screen_analysis_settings()
+    vlm_status = effective_vlm_status()
     return {
         "screen": {
             "analysis_enabled": screen_analysis["enabled"],
@@ -863,7 +865,8 @@ async def get_artifact_storage_settings():
             "analysis": {
                 "provider": effective_screen_analysis_provider() or "not_configured",
                 "model": effective_screen_analysis_model(),
-                "base_url_configured": bool(settings.local_vlm_base_url.strip()),
+                "base_url_configured": bool(effective_vlm_base_url()),
+                "runtime": vlm_status,
                 **screenshot_pipeline,
             },
             "auto_ingest_enabled": settings.screenshot_folder_ingest_enabled,
@@ -881,16 +884,17 @@ async def get_artifact_storage_settings():
         },
         "local_runtime": {
             "gateway_configured": bool(
-                settings.local_llm_api_base.strip() or settings.local_vlm_base_url.strip()
+                settings.local_llm_api_base.strip() or effective_vlm_base_url()
             ),
             "llm_base_url_configured": bool(settings.local_llm_api_base.strip()),
-            "vlm_base_url_configured": bool(settings.local_vlm_base_url.strip()),
+            "vlm_base_url_configured": bool(effective_vlm_base_url()),
+            "vlm_runtime": vlm_status,
             "model": settings.local_model or settings.local_vlm_model or "",
             "profiles": local_runtime_profile_statuses(),
             "profile_proof": local_runtime_proof,
             "proof_command": (
                 "PYTHONPATH=. uv run python ../scripts/verify_local_gemma_profiles.py "
-                "--base-url ${LOCAL_LLM_API_BASE:-$LOCAL_VLM_BASE_URL}"
+                "--base-url ${LOCAL_LLM_API_BASE:-${SERAPH_VLM_BASE_URL}/v1}"
             ),
         },
         "reports": {

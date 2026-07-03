@@ -13,15 +13,16 @@ developer setup:
 ```text
 Seraph frontend       http://127.0.0.1:3001
   -> Seraph backend   http://127.0.0.1:8004
-  -> Mac VLM wrapper  http://127.0.0.1:8000
+  -> GPU VLM wrapper  http://192.168.1.26:8001
   -> GPU model server http://192.168.1.26:8000/v1
 ```
 
-The Mac VLM wrapper is run through Docker from
-`/Users/bigcube/Desktop/repos/vlm-screenshot-server`. The GPU model server is a
-separate machine and may already be running. Seraph agents are responsible for
-Seraph and the VLM wrapper lifecycle; do not assume Docker is optional for the
-wrapper unless the user explicitly changes the operating mode.
+The VLM wrapper is run through Docker on the GPU server from
+`/home/pawel/repos/vlm-screenshot-server`. The GPU model server is a separate
+process on the same machine and may already be running. Seraph agents are
+responsible for Seraph and the VLM wrapper lifecycle; do not treat SSH tunnels as
+the product runtime path. Tunnels are diagnostic bridges only when the agent
+sandbox cannot open the private-LAN route.
 
 Two properties shape most Seraph decisions:
 
@@ -130,8 +131,9 @@ design:
 curl -sS http://127.0.0.1:8004/health
 curl -sS http://127.0.0.1:8004/api/runtime/status
 curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
-curl -sS http://127.0.0.1:8000/health
-curl -sS http://127.0.0.1:8000/health/backend
+curl -sS http://192.168.1.26:8001/health
+curl -sS http://192.168.1.26:8001/health/backend
+curl -sS http://192.168.1.26:8001/queue/status
 ```
 
 If sandboxed localhost checks fail but the app is supposed to be running on the

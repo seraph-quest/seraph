@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 
+interface VlmRuntimeStatus {
+  mode: string;
+  configured: boolean;
+  base_url: string;
+  backend_url: string;
+  chat_api_base: string;
+  queue_status_endpoint: string;
+  health_endpoint: string;
+  backend_health_endpoint: string;
+  api_key_configured: boolean;
+  feeder_window: number;
+}
+
 interface ArtifactStorageSettings {
   screen: {
     analysis_enabled: boolean;
@@ -22,6 +35,7 @@ interface ArtifactStorageSettings {
       provider: string;
       model: string;
       base_url_configured: boolean;
+      runtime?: VlmRuntimeStatus;
       observation_count: number;
       analysis_status: Record<string, number>;
       analysis_backlog: number;
@@ -58,6 +72,7 @@ interface ArtifactStorageSettings {
     gateway_configured: boolean;
     llm_base_url_configured: boolean;
     vlm_base_url_configured: boolean;
+    vlm_runtime?: VlmRuntimeStatus;
     model: string;
     profiles: Array<{
       id: string;
@@ -717,6 +732,18 @@ export function ArtifactStoragePanel() {
                       }
                       tone={screenshotFolderSource.analysis.provider === "not_configured" ? "warn" : "good"}
                     />
+                    {screenshotFolderSource.analysis.runtime && (
+                      <ArtifactRow
+                        label="Runtime"
+                        value={
+                          screenshotFolderSource.analysis.runtime.configured
+                            ? `${screenshotFolderSource.analysis.runtime.mode} · ${screenshotFolderSource.analysis.runtime.base_url}` +
+                              (screenshotFolderSource.analysis.runtime.backend_url ? ` -> ${screenshotFolderSource.analysis.runtime.backend_url}` : "")
+                            : "not configured"
+                        }
+                        tone={screenshotFolderSource.analysis.runtime.configured ? "good" : "warn"}
+                      />
+                    )}
                     <ArtifactRow
                       label="Ingested"
                       value={

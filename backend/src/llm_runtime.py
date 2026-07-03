@@ -25,6 +25,7 @@ from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
 from src.local_runtime_profiles import local_runtime_profile
 from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
+from src.vlm_runtime import effective_vlm_api_key, effective_vlm_chat_api_base
 
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
@@ -103,6 +104,8 @@ def _redact_text(value: str | None) -> str | None:
         settings.openai_api_key,
         settings.anthropic_api_key,
         settings.local_llm_api_key,
+        settings.local_vlm_api_key,
+        settings.seraph_vlm_api_key,
         settings.fallback_llm_api_key,
     ):
         if secret:
@@ -150,6 +153,8 @@ def _secret_value(env_name: str) -> str:
         return settings.llm_api_key or os.getenv(env_name, "")
     if env_name == "LOCAL_LLM_API_KEY":
         return settings.local_llm_api_key or os.getenv(env_name, "")
+    if env_name == "SERAPH_VLM_API_KEY":
+        return settings.seraph_vlm_api_key or settings.local_vlm_api_key or settings.local_llm_api_key or os.getenv(env_name, "")
     return os.getenv(env_name, "")
 
 
@@ -371,6 +376,7 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
         ),
     }
     if has_local_model_profile():
+        local_chat_api_base = effective_vlm_chat_api_base()
         profiles["local-ollama"] = ProviderProfile(
             id="local-ollama",
             provider_kind="ollama",
@@ -384,21 +390,21 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
             keyless=True,
             safety_notes="Local Ollama-compatible profile.",
         )
-        if settings.local_llm_api_base.strip():
+        if local_chat_api_base:
             for profile_id in ("screenshot_fast", "report_thinking", "chat_thinking", "strategist_fast"):
                 runtime_profile = local_runtime_profile(profile_id)
                 profiles[f"local-gemma-{profile_id.replace('_', '-')}"] = ProviderProfile(
                     id=f"local-gemma-{profile_id.replace('_', '-')}",
                     provider_kind="openai_compatible",
                     model=settings.local_model.strip(),
-                    api_base=settings.local_llm_api_base.strip(),
+                    api_base=local_chat_api_base,
                     capabilities=("local", "private", "reasoning_profile", runtime_profile.reasoning),
                     cost_tier="low",
                     latency_tier="low" if runtime_profile.priority != "background" else "medium",
                     task_class=runtime_profile.runtime_path,
                     budget_class="low",
-                    keyless=not bool(settings.local_llm_api_key.strip()),
-                    secret_env="LOCAL_LLM_API_KEY",
+                    keyless=not bool(effective_vlm_api_key()),
+                    secret_env="SERAPH_VLM_API_KEY",
                     options=_local_gemma_profile_options(profile_id),
                     safety_notes=(
                         "Local Gemma profile contract. Treat as unsafe for production "

@@ -29,6 +29,11 @@ from src.observer.screenshot_analysis_contract import (
     parse_screenshot_analysis_output,
     screenshot_analysis_prompt,
 )
+from src.vlm_runtime import (
+    effective_vlm_api_key,
+    effective_vlm_base_url,
+    effective_vlm_feeder_window,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,7 @@ def screenshot_semantic_analysis_enabled() -> bool:
     return (
         effective_screen_analysis_enabled()
         and effective_screen_analysis_provider().lower() == "local-vlm"
-        and bool(settings.local_vlm_base_url.strip())
+        and bool(effective_vlm_base_url())
     )
 
 
@@ -64,22 +69,18 @@ async def screenshot_semantic_analysis_ready(*, timeout_seconds: float = 2.0) ->
 
 async def screenshot_semantic_analysis_accepting_background_work(*, timeout_seconds: float = 2.0) -> bool:
     """Return true when the local VLM wrapper can accept one background image job."""
-    status = await _screenshot_semantic_analysis_health(timeout_seconds=timeout_seconds)
+    status = await _screenshot_semantic_analysis_queue_status(timeout_seconds=timeout_seconds)
     if status is None:
         return False
     if not await _screenshot_semantic_analysis_backend_ready(timeout_seconds=timeout_seconds):
         return False
-    queue = status.get("queue")
-    if not isinstance(queue, dict):
-        return True
     try:
-        active = int(queue.get("active", 0))
-        queued = int(queue.get("queued", 0))
-        workers = int(queue.get("workers", 1))
-        background_workers = int(queue.get("background_workers", 1))
+        active = int(status.get("active", 0))
+        queued = int(status.get("queued", 0))
+        workers = int(status.get("workers", 1))
     except (TypeError, ValueError):
         return False
-    capacity_window = max(workers + max(background_workers, 0), workers, 1)
+    capacity_window = max(min(effective_vlm_feeder_window(), workers + 1), 1)
     return active + queued < capacity_window
 
 
@@ -87,7 +88,23 @@ async def _screenshot_semantic_analysis_health(*, timeout_seconds: float = 2.0) 
     """Return the local VLM wrapper health payload when reachable."""
     if not screenshot_semantic_analysis_enabled():
         return None
-    endpoint = settings.local_vlm_base_url.rstrip("/") + "/health"
+    endpoint = effective_vlm_base_url() + "/health"
+    try:
+        async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
+            response = await client.get(endpoint)
+        if not (200 <= response.status_code < 500):
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+async def _screenshot_semantic_analysis_queue_status(*, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
+    """Return the VLM wrapper queue status payload when reachable."""
+    if not screenshot_semantic_analysis_enabled():
+        return None
+    endpoint = effective_vlm_base_url() + "/queue/status"
     try:
         async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
             response = await client.get(endpoint)
@@ -103,7 +120,7 @@ async def _screenshot_semantic_analysis_backend_ready(*, timeout_seconds: float 
     """Return true when the wrapper's configured GPU backend is reachable."""
     if not screenshot_semantic_analysis_enabled():
         return False
-    endpoint = settings.local_vlm_base_url.rstrip("/") + "/health/backend"
+    endpoint = effective_vlm_base_url() + "/health/backend"
     try:
         async with httpx.AsyncClient(timeout=max(timeout_seconds, 0.25)) as client:
             response = await client.get(endpoint)
@@ -273,7 +290,7 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
         "height": artifacts.get("height"),
     }
     prompt = screenshot_analysis_prompt(metadata)
-    endpoint = settings.local_vlm_base_url.rstrip("/") + "/v1/analyze-file"
+    endpoint = effective_vlm_base_url() + "/v1/analyze-file"
     data = {
         "prompt": prompt,
         **local_runtime_profile_form_fields("screenshot_fast"),
@@ -282,8 +299,9 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
     if model:
         data["model"] = model
     headers = local_runtime_profile_headers("screenshot_fast")
-    if settings.local_vlm_api_key.strip():
-        headers["Authorization"] = f"Bearer {settings.local_vlm_api_key.strip()}"
+    api_key = effective_vlm_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     try:
         image_bytes = await asyncio.to_thread(image_path.read_bytes)

@@ -686,7 +686,7 @@ def test_build_model_kwargs_routes_strategist_agent_to_local_profile():
         patch.object(
             settings,
             "runtime_profile_preferences",
-            "strategist_agent=local-gemma-chat-thinking",
+            "strategist_agent=local-gemma-strategist-fast",
         ),
     ):
         kwargs = build_model_kwargs(
@@ -696,7 +696,7 @@ def test_build_model_kwargs_routes_strategist_agent_to_local_profile():
         )
 
     assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
-    assert kwargs["runtime_profile"] == "local-gemma-chat-thinking"
+    assert kwargs["runtime_profile"] == "local-gemma-strategist-fast"
     assert kwargs["api_key"] == "not-needed"
     assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
 

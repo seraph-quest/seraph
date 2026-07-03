@@ -67,6 +67,22 @@ _LOCAL_RUNTIME_PROFILES: dict[str, LocalRuntimeProfile] = {
             "reasoning": True,
         },
     ),
+    "strategist_fast": LocalRuntimeProfile(
+        id="strategist_fast",
+        runtime_path="strategist_agent",
+        priority="high",
+        reasoning="off",
+        temperature=0.2,
+        max_tokens=512,
+        timeout_seconds=60,
+        summary="Bounded proactive strategist decision profile that returns one JSON object without tool-call looping.",
+        options={
+            "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning": False,
+            "reasoning_format": "none",
+            "response_shape": "json_object",
+        },
+    ),
 }
 
 

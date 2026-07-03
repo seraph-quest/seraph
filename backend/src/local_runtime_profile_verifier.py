@@ -17,7 +17,7 @@ from src.local_runtime_profiles import local_runtime_chat_payload, local_runtime
 
 
 PROFILE_VERIFIER_VERSION = "seraph.local_runtime_profiles.proof.v1"
-_PROFILES_TO_VERIFY = ("screenshot_fast", "report_thinking", "chat_thinking")
+_PROFILES_TO_VERIFY = ("screenshot_fast", "report_thinking", "chat_thinking", "strategist_fast")
 
 
 async def verify_local_runtime_profiles(
@@ -336,6 +336,8 @@ def _verification_prompt(profile_id: str) -> str:
         )
     if profile_id == "report_thinking":
         return "Use the report_thinking profile. Final answer must be exactly: REPORT_PROFILE_OK"
+    if profile_id == "strategist_fast":
+        return 'Return exactly this JSON object and nothing else: {"profile":"strategist_fast","ok":true}'
     return "Use the chat_thinking profile. Final answer must be exactly: CHAT_PROFILE_OK"
 
 

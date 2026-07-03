@@ -385,7 +385,7 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
             safety_notes="Local Ollama-compatible profile.",
         )
         if settings.local_llm_api_base.strip():
-            for profile_id in ("screenshot_fast", "report_thinking", "chat_thinking"):
+            for profile_id in ("screenshot_fast", "report_thinking", "chat_thinking", "strategist_fast"):
                 runtime_profile = local_runtime_profile(profile_id)
                 profiles[f"local-gemma-{profile_id.replace('_', '-')}"] = ProviderProfile(
                     id=f"local-gemma-{profile_id.replace('_', '-')}",

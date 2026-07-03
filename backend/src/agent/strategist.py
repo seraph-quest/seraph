@@ -10,7 +10,11 @@ from smolagents import ToolCallingAgent
 
 from config.settings import settings
 from src.guardian.state import GuardianState
-from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
+from src.llm_runtime import (
+    FallbackLiteLLMModel as LiteLLMModel,
+    build_model_kwargs,
+    completion_with_fallback,
+)
 from src.tools.audit import wrap_tools_for_audit
 from src.tools.soul_tool import view_soul
 from src.tools.goal_tools import get_goals, get_goal_progress
@@ -91,6 +95,40 @@ def create_strategist_agent(
         max_steps=5,
         instructions=instructions,
     )
+
+
+async def run_strategist_decision_completion(
+    context_block: str = "",
+    *,
+    guardian_state: GuardianState | None = None,
+) -> str:
+    """Run the strategist decision as a bounded JSON-only completion.
+
+    The strategist prompt asks for one JSON decision and does not require tool
+    calls. Keeping the scheduled path as a direct completion avoids local models
+    spending multiple agent steps trying to parse the JSON answer as a tool call.
+    """
+    if guardian_state is not None:
+        context_block = guardian_state.to_prompt_block()
+
+    prompt = STRATEGIST_INSTRUCTIONS.format(
+        proactivity_level=settings.proactivity_level,
+        context_block=context_block,
+    )
+    response = await completion_with_fallback(
+        messages=[
+            {
+                "role": "system",
+                "content": "You return only one valid JSON object. Do not call tools. Do not include markdown.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=512,
+        timeout=settings.agent_strategist_timeout,
+        runtime_path="strategist_agent",
+    )
+    return str(response.choices[0].message.content or "").strip()
 
 
 def parse_strategist_response(raw: str) -> StrategistDecision:

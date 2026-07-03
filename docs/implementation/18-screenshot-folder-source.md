@@ -249,8 +249,8 @@ LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
 LOCAL_LLM_API_BASE=http://127.0.0.1:8000/v1
 LOCAL_LLM_API_KEY=<same-local-token-as-wrapper-CHAT_PROXY_API_KEY>
 LOCAL_MODEL=openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF
-LOCAL_RUNTIME_PATHS=screenshot_observation_digest,end_of_day_goal_report,chat_agent,onboarding_agent,orchestrator_agent,session_consolidation
-RUNTIME_PROFILE_PREFERENCES="chat_agent=local-gemma-chat-thinking;onboarding_agent=local-gemma-chat-thinking;orchestrator_agent=local-gemma-chat-thinking;end_of_day_goal_report=local-gemma-report-thinking;screenshot_observation_digest=local-gemma-report-thinking"
+LOCAL_RUNTIME_PATHS=screenshot_observation_digest,end_of_day_goal_report,chat_agent,onboarding_agent,orchestrator_agent,strategist_agent,session_consolidation
+RUNTIME_PROFILE_PREFERENCES="chat_agent=local-gemma-chat-thinking;onboarding_agent=local-gemma-chat-thinking;orchestrator_agent=local-gemma-chat-thinking;strategist_agent=local-gemma-strategist-fast;end_of_day_goal_report=local-gemma-report-thinking;screenshot_observation_digest=local-gemma-report-thinking"
 SCREEN_DERIVED_LLM_ALLOW_REMOTE=false
 SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF=true
 ```
@@ -295,6 +295,7 @@ Seraph-side controls:
 - `LOCAL_MODEL` must be set alongside `LOCAL_LLM_API_BASE` for the built-in `local-gemma-*` runtime profiles to register. Use the LiteLLM `openai/` prefix for this value because Seraph talks to the Docker wrapper through an OpenAI-compatible API. Keep `LOCAL_VLM_MODEL` as the raw wrapper/backend model name. Without `LOCAL_MODEL`, `chat_agent=local-gemma-chat-thinking` cannot resolve and Seraph can fall back to the cloud default profile.
 - Fresh profiles use `onboarding_agent` before normal chat. Configure `onboarding_agent=local-gemma-chat-thinking` alongside `chat_agent=local-gemma-chat-thinking`, or the first "Hello" from a new operator can still route through the cloud default while the normal chat profile is correctly registered.
 - If delegation is enabled, chat uses `orchestrator_agent`, so `orchestrator_agent=local-gemma-chat-thinking` must also be configured. Otherwise the delegated chat surface can still route through the cloud default while the local chat profile is correctly registered.
+- Scheduled strategist/proactive checks use `strategist_agent`, so `strategist_agent=local-gemma-strategist-fast` must be configured with the other local chat-style paths. The strategist decision path is a bounded direct JSON completion, not a multi-step tool-calling agent loop, because local Gemma can otherwise keep retrying parse-wobbly JSON as malformed tool calls. The strategist profile disables thinking so the JSON lands in `message.content` instead of being consumed as hidden reasoning.
 - Lightweight onboarding and greeting-style local chat turns use a bounded direct completion path instead of the full `ToolCallingAgent` loop. The local Gemma backend is reliable for normal chat completions, but it is not safe to make every "Hello" exercise multi-step tool-call JSON parsing. Direct local chat is capped to 512 output tokens, uses local-only runtime routing, and leaves non-lightweight work on the normal agent/tool path.
 - The analysis job checks VLM queue capacity before taking work, avoiding needless queue churn during outages or while a chat/report job is already active or queued.
 - The analysis job uses an in-process lock so overlapping scheduler ticks cannot stampede the wrapper.
@@ -320,7 +321,7 @@ PYTHONPATH=. WORKSPACE_DIR=/tmp/seraph-dev-data \
   --timeout-seconds 120
 ```
 
-The harness verifies `screenshot_fast`, `report_thinking`, and `chat_thinking` against the live OpenAI-compatible gateway, writes a sanitized JSON receipt under `local-runtime-profile-receipts`, and reports whether one backend is safe for profile routing.
+The harness verifies `screenshot_fast`, `report_thinking`, `chat_thinking`, and `strategist_fast` against the live OpenAI-compatible gateway, writes a sanitized JSON receipt under `local-runtime-profile-receipts`, and reports whether one backend is safe for profile routing.
 
 Current verified receipt from 2026-07-01:
 

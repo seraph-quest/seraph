@@ -236,6 +236,23 @@ generic "tests pass" for the proof surface above.
 5. **Ready PRs only**: Pull requests must be opened ready for review unless the user explicitly requests a draft.
 6. **Batch scope**: Default PR scope is a complete milestone or substantial batch. Use issue checklists, child issues, and internal commits for slices, but keep the team working until the batch acceptance criteria are complete.
 
+### CI And Release Gates
+
+- Hosted CI is not the authoritative gate for ordinary feature/fix PRs. When
+  GitHub Actions is slow, flaky, or blocked by runner/dependency noise, do not
+  burn the batch trying to make CI perfect; run the required local validation
+  from the Validation Matrix and record the local receipts in the PR.
+- Do not ignore local failures. Focused local tests and relevant runtime probes
+  must pass before implementation is called complete or a merge is requested.
+- If hosted CI exposes a real product regression or deterministic test failure
+  in the changed scope, fix it in the current PR. If it is unrelated
+  infrastructure or stale test-suite behavior, document it as deferred
+  release-gate work instead of expanding the feature PR indefinitely.
+- CI failures become release blockers at the `develop` -> `main` boundary.
+  Before merging `develop` into `main` or cutting a new product release,
+  inspect current CI failures, fix real regressions or stale CI tests, and
+  rerun the affected local and hosted checks.
+
 ```text
 feat/my-feature  ->  develop  ->  main
 fix/my-bugfix    ->  develop  ->  main

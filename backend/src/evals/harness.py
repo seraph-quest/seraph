@@ -1740,7 +1740,7 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
                         approval_msg = msg
                         break
 
-            events = client.get("/api/audit/events").json()
+                events = client.get("/api/audit/events").json()
 
         if approval_msg is None:
             raise AssertionError("Expected approval_required WebSocket message")

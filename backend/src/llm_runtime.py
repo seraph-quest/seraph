@@ -1050,6 +1050,7 @@ def build_model_kwargs(
         "runtime_path": runtime_path,
     }
     kwargs.update(_profile_options(resolved_profile))
+    _apply_local_runtime_request_metadata(kwargs, resolved_profile)
     api_key = _profile_api_key(resolved_profile)
     if api_key:
         kwargs["api_key"] = api_key

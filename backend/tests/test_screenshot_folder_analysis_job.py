@@ -26,9 +26,10 @@ def test_screenshot_folder_analysis_job_timeout_scales_with_batches(monkeypatch)
 def test_screenshot_folder_analysis_scheduled_batch_is_limited_to_feeder_window():
     from src.scheduler.jobs.screenshot_folder_analysis import _scheduled_batch_limit
 
-    assert _scheduled_batch_limit(limit=100, concurrency=2) == 2
-    assert _scheduled_batch_limit(limit=1, concurrency=2) == 1
-    assert _scheduled_batch_limit(limit=100, concurrency=1) == 1
+    assert _scheduled_batch_limit(limit=100, concurrency=2, available_slots=2) == 2
+    assert _scheduled_batch_limit(limit=1, concurrency=2, available_slots=2) == 1
+    assert _scheduled_batch_limit(limit=100, concurrency=1, available_slots=2) == 1
+    assert _scheduled_batch_limit(limit=100, concurrency=2, available_slots=0) == 0
 
 
 def test_failed_screenshot_analysis_is_retried_after_cooldown():
@@ -177,8 +178,10 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
     calls = []
     events = []
 
-    async def fake_accepting_background_work():
-        return True
+    slots = [2, 1, 0]
+
+    async def fake_background_slots():
+        return slots.pop(0)
 
     async def fake_analyze_pending(*, limit, concurrency):
         calls.append({"limit": limit, "concurrency": concurrency})
@@ -188,8 +191,8 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
         events.append({"job_name": job_name, "outcome": outcome, "details": details})
 
     monkeypatch.setattr(
-        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
-        fake_accepting_background_work,
+        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_background_slots",
+        fake_background_slots,
     )
     monkeypatch.setattr(
         "src.scheduler.jobs.screenshot_folder_analysis.analyze_pending_screenshot_folder_observations",
@@ -212,13 +215,15 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
 
     await run_screenshot_folder_analysis()
 
-    assert calls == [{"limit": 2, "concurrency": 2}]
+    assert calls == [{"limit": 2, "concurrency": 2}, {"limit": 1, "concurrency": 1}]
     assert events[0]["job_name"] == "screenshot_folder_analysis"
     assert events[0]["outcome"] == "succeeded"
-    assert events[0]["details"]["scanned"] == 5
-    assert events[0]["details"]["analyzed"] == 5
+    assert events[0]["details"]["scanned"] == 10
+    assert events[0]["details"]["analyzed"] == 10
     assert events[0]["details"]["concurrency"] == 2
-    assert events[0]["details"]["batch_limit"] == 2
+    assert events[0]["details"]["batch_limit"] == 1
+    assert events[0]["details"]["feeder_iterations"] == 2
+    assert events[0]["details"]["stopped_reason"] == "local_vlm_no_background_capacity"
 
 
 @pytest.mark.asyncio
@@ -229,8 +234,8 @@ async def test_screenshot_folder_analysis_timeout_releases_scheduler_slot(monkey
     cancel_seen = asyncio.Event()
     release_cleanup = asyncio.Event()
 
-    async def fake_accepting_background_work():
-        return True
+    async def fake_background_slots():
+        return 1
 
     async def fake_analyze_pending(*, limit, concurrency):
         try:
@@ -244,8 +249,8 @@ async def test_screenshot_folder_analysis_timeout_releases_scheduler_slot(monkey
         events.append({"job_name": job_name, "outcome": outcome, "details": details})
 
     monkeypatch.setattr(
-        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
-        fake_accepting_background_work,
+        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_background_slots",
+        fake_background_slots,
     )
     monkeypatch.setattr(
         "src.scheduler.jobs.screenshot_folder_analysis.analyze_pending_screenshot_folder_observations",
@@ -274,8 +279,8 @@ async def test_screenshot_folder_analysis_job_skips_when_vlm_has_no_capacity(mon
 
     events = []
 
-    async def fake_accepting_background_work():
-        return False
+    async def fake_background_slots():
+        return 0
 
     async def fake_analyze_pending(*, limit, concurrency):
         raise AssertionError("analysis should not run when the VLM service is unhealthy")
@@ -284,8 +289,8 @@ async def test_screenshot_folder_analysis_job_skips_when_vlm_has_no_capacity(mon
         events.append({"job_name": job_name, "outcome": outcome, "details": details})
 
     monkeypatch.setattr(
-        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
-        fake_accepting_background_work,
+        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_background_slots",
+        fake_background_slots,
     )
     monkeypatch.setattr(
         "src.scheduler.jobs.screenshot_folder_analysis.analyze_pending_screenshot_folder_observations",
@@ -305,7 +310,14 @@ async def test_screenshot_folder_analysis_job_skips_when_vlm_has_no_capacity(mon
             "outcome": "skipped",
             "details": {
                 "duration_ms": events[0]["details"]["duration_ms"],
-                "reason": "local_vlm_no_background_capacity",
+                "scanned": 0,
+                "analyzed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "concurrency": 2,
+                "batch_limit": 0,
+                "feeder_iterations": 0,
+                "stopped_reason": "local_vlm_no_background_capacity",
             },
         }
     ]
@@ -340,8 +352,8 @@ async def test_screenshot_folder_analysis_job_reports_degraded_backlog(monkeypat
 
     events = []
 
-    async def fake_accepting_background_work():
-        return True
+    async def fake_background_slots():
+        return 1
 
     async def fake_analyze_pending(*, limit, concurrency):
         return ScreenshotFolderAnalysisResult(scanned=4, analyzed=3, failed=1, skipped=0)
@@ -350,8 +362,8 @@ async def test_screenshot_folder_analysis_job_reports_degraded_backlog(monkeypat
         events.append({"job_name": job_name, "outcome": outcome, "details": details})
 
     monkeypatch.setattr(
-        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
-        fake_accepting_background_work,
+        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_background_slots",
+        fake_background_slots,
     )
     monkeypatch.setattr(
         "src.scheduler.jobs.screenshot_folder_analysis.analyze_pending_screenshot_folder_observations",
@@ -379,8 +391,8 @@ async def test_screenshot_folder_analysis_job_times_out_stuck_analysis(monkeypat
 
     events = []
 
-    async def fake_accepting_background_work():
-        return True
+    async def fake_background_slots():
+        return 1
 
     async def fake_analyze_pending(*, limit, concurrency):
         await asyncio.sleep(1)
@@ -390,8 +402,8 @@ async def test_screenshot_folder_analysis_job_times_out_stuck_analysis(monkeypat
         events.append({"job_name": job_name, "outcome": outcome, "details": details})
 
     monkeypatch.setattr(
-        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
-        fake_accepting_background_work,
+        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_background_slots",
+        fake_background_slots,
     )
     monkeypatch.setattr(
         "src.scheduler.jobs.screenshot_folder_analysis.analyze_pending_screenshot_folder_observations",

@@ -159,7 +159,7 @@ The VLM wrapper runs through Docker Compose on the GPU server to avoid local Pyt
 ```bash
 ssh jupyter
 cd /home/pawel/repos/vlm-screenshot-server
-HOST_BIND=192.168.1.26 HOST_PORT=8001 PORT=8001 \
+HOST_BIND=0.0.0.0 HOST_PORT=8001 PORT=8001 \
   VLM_BASE_URL=http://192.168.1.26:8000/v1 \
   VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF \
   CHAT_PROXY_ENABLED=true \
@@ -169,6 +169,8 @@ HOST_BIND=192.168.1.26 HOST_PORT=8001 PORT=8001 \
 ```
 
 The container publishes `192.168.1.26:8001` and forwards to `http://192.168.1.26:8000/v1`. Docker Desktop on the Mac is not part of the healthy product path for the wrapper.
+
+SSH is only the admin channel for deploying, restarting, and inspecting the GPU-hosted wrapper. Seraph runtime traffic must stay on direct HTTP API calls to `SERAPH_VLM_BASE_URL=http://192.168.1.26:8001`; do not encode SSH forwards, SOCKS proxies, or tunnels into Seraph config or status receipts.
 
 Required readiness checks from the Mac:
 

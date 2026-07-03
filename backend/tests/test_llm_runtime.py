@@ -40,6 +40,8 @@ def clear_ambient_runtime_profile_preferences():
     with (
         patch.object(settings, "runtime_profile_preferences", ""),
         patch.object(settings, "local_runtime_paths", ""),
+        patch.object(settings, "seraph_vlm_api_key", ""),
+        patch.object(settings, "local_vlm_api_key", ""),
     ):
         yield
 
@@ -270,6 +272,14 @@ def test_built_in_local_gemma_profiles_resolve_with_runtime_options(monkeypatch)
     assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
     assert kwargs["chat_template_kwargs"] == {"enable_thinking": True}
     assert kwargs["reasoning"] is True
+    assert kwargs["metadata"] == {
+        "runtime_profile": "chat_thinking",
+        "runtime_path": "chat_agent",
+        "priority": "interactive",
+    }
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Profile"] == "chat_thinking"
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Path"] == "chat_agent"
+    assert kwargs["extra_headers"]["X-Seraph-Priority"] == "interactive"
     assert "api_key" not in kwargs
 
 
@@ -312,6 +322,14 @@ def test_delegated_orchestrator_can_route_to_local_gemma_chat_profile(monkeypatc
     assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
     assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
     assert kwargs["api_key"] == "local-secret"
+    assert kwargs["metadata"] == {
+        "runtime_profile": "chat_thinking",
+        "runtime_path": "chat_agent",
+        "priority": "interactive",
+    }
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Profile"] == "chat_thinking"
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Path"] == "chat_agent"
+    assert kwargs["extra_headers"]["X-Seraph-Priority"] == "interactive"
 
 
 def test_all_interactive_paths_can_route_to_local_gemma_chat_profile(monkeypatch):
@@ -344,6 +362,8 @@ def test_all_interactive_paths_can_route_to_local_gemma_chat_profile(monkeypatch
         assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
         assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
         assert kwargs["api_key"] == "local-secret"
+        assert kwargs["metadata"]["priority"] == "interactive"
+        assert kwargs["extra_headers"]["X-Seraph-Priority"] == "interactive"
 
 
 def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
@@ -364,6 +384,8 @@ def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
     assert kwargs["model_id"] == "anthropic/claude-sonnet-4-20250514"
     assert kwargs["runtime_profile"] == "claude-anthropic"
     assert kwargs["api_key"] == "anthropic-secret-key"
+    assert "metadata" not in kwargs
+    assert "extra_headers" not in kwargs
     resolved_model, provider, _, _ = get_llm_provider(model=kwargs["model_id"])
     assert resolved_model == "claude-sonnet-4-20250514"
     assert provider == "anthropic"

@@ -9,8 +9,11 @@ from time import perf_counter
 
 from config.settings import settings
 from src.audit.runtime import log_scheduler_job_event
-from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
-from src.observer.screenshot_semantic_analysis import screenshot_semantic_analysis_accepting_background_work
+from src.observer.screenshot_folder_source import (
+    ScreenshotFolderAnalysisResult,
+    analyze_pending_screenshot_folder_observations,
+)
+from src.observer.screenshot_semantic_analysis import screenshot_semantic_analysis_background_slots
 
 logger = logging.getLogger(__name__)
 _ANALYSIS_LOCK = asyncio.Lock()
@@ -44,8 +47,8 @@ def _analysis_job_timeout_seconds(*, limit: int, concurrency: int) -> float:
     return base_timeout_seconds * batches
 
 
-def _scheduled_batch_limit(*, limit: int, concurrency: int) -> int:
-    return max(1, min(limit, concurrency))
+def _scheduled_batch_limit(*, limit: int, concurrency: int, available_slots: int) -> int:
+    return max(0, min(limit, concurrency, max(available_slots, 0)))
 
 
 def _log_late_analysis_task_failure(task: asyncio.Task) -> None:
@@ -75,43 +78,64 @@ async def run_screenshot_folder_analysis() -> None:
             },
         )
         return
-    if not await screenshot_semantic_analysis_accepting_background_work():
-        logger.info("screenshot_folder_analysis: skipped; local VLM has no background capacity")
-        await log_scheduler_job_event(
-            job_name="screenshot_folder_analysis",
-            outcome="skipped",
-            details={
-                "duration_ms": int((perf_counter() - started_at) * 1000),
-                "reason": "local_vlm_no_background_capacity",
-            },
-        )
-        return
-
+    timeout_seconds = 0.0
     try:
         async with _ANALYSIS_LOCK:
             limit = _clamped_limit()
             concurrency = _clamped_concurrency()
-            batch_limit = _scheduled_batch_limit(limit=limit, concurrency=concurrency)
-            timeout_seconds = _analysis_job_timeout_seconds(limit=batch_limit, concurrency=concurrency)
-            logger.info(
-                "screenshot_folder_analysis: running limit=%d batch_limit=%d concurrency=%d timeout_seconds=%s",
-                limit,
-                batch_limit,
-                concurrency,
-                timeout_seconds,
-            )
-            analysis_task = asyncio.create_task(
-                analyze_pending_screenshot_folder_observations(
-                    limit=batch_limit,
+            remaining = limit
+            result = ScreenshotFolderAnalysisResult(scanned=0, analyzed=0, failed=0, skipped=0)
+            feeder_iterations = 0
+            last_batch_limit = 0
+            stopped_reason = "limit_reached"
+            while remaining > 0:
+                available_slots = await screenshot_semantic_analysis_background_slots()
+                if available_slots <= 0:
+                    stopped_reason = "local_vlm_no_background_capacity"
+                    break
+                batch_limit = _scheduled_batch_limit(
+                    limit=remaining,
                     concurrency=concurrency,
+                    available_slots=available_slots,
                 )
-            )
-            done, pending = await asyncio.wait({analysis_task}, timeout=timeout_seconds)
-            if pending:
-                analysis_task.cancel()
-                analysis_task.add_done_callback(_log_late_analysis_task_failure)
-                raise asyncio.TimeoutError
-            result = next(iter(done)).result()
+                batch_concurrency = min(concurrency, batch_limit)
+                timeout_seconds = _analysis_job_timeout_seconds(limit=batch_limit, concurrency=batch_concurrency)
+                logger.info(
+                    (
+                        "screenshot_folder_analysis: running limit=%d remaining=%d batch_limit=%d "
+                        "concurrency=%d available_slots=%d timeout_seconds=%s"
+                    ),
+                    limit,
+                    remaining,
+                    batch_limit,
+                    batch_concurrency,
+                    available_slots,
+                    timeout_seconds,
+                )
+                analysis_task = asyncio.create_task(
+                    analyze_pending_screenshot_folder_observations(
+                        limit=batch_limit,
+                        concurrency=batch_concurrency,
+                    )
+                )
+                done, pending = await asyncio.wait({analysis_task}, timeout=timeout_seconds)
+                if pending:
+                    analysis_task.cancel()
+                    analysis_task.add_done_callback(_log_late_analysis_task_failure)
+                    raise asyncio.TimeoutError
+                batch_result = next(iter(done)).result()
+                feeder_iterations += 1
+                last_batch_limit = batch_limit
+                result = ScreenshotFolderAnalysisResult(
+                    scanned=result.scanned + batch_result.scanned,
+                    analyzed=result.analyzed + batch_result.analyzed,
+                    failed=result.failed + batch_result.failed,
+                    skipped=result.skipped + batch_result.skipped,
+                )
+                remaining -= batch_limit
+                if batch_result.scanned == 0:
+                    stopped_reason = "backlog_empty"
+                    break
     except asyncio.TimeoutError:
         await log_scheduler_job_event(
             job_name="screenshot_folder_analysis",
@@ -121,10 +145,6 @@ async def run_screenshot_folder_analysis() -> None:
                 "error": "analysis job timed out",
                 "timeout_seconds": timeout_seconds,
                 "concurrency": _clamped_concurrency(),
-                "batch_limit": _scheduled_batch_limit(
-                    limit=_clamped_limit(),
-                    concurrency=_clamped_concurrency(),
-                ),
             },
         )
         logger.warning(
@@ -168,10 +188,9 @@ async def run_screenshot_folder_analysis() -> None:
             "failed": result.failed,
             "skipped": result.skipped,
             "concurrency": _clamped_concurrency(),
-            "batch_limit": _scheduled_batch_limit(
-                limit=_clamped_limit(),
-                concurrency=_clamped_concurrency(),
-            ),
+            "batch_limit": last_batch_limit,
+            "feeder_iterations": feeder_iterations,
+            "stopped_reason": stopped_reason,
         },
     )
     logger.info(

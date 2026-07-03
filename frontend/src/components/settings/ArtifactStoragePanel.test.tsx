@@ -659,12 +659,12 @@ describe("ArtifactStoragePanel", () => {
   });
 
   it("keeps analysis controls visible when artifact metadata is unavailable", async () => {
-    fetchMock
-      .mockRejectedValueOnce(new Error("artifact endpoint timed out"))
-      .mockRejectedValueOnce(new Error("artifact endpoint timed out"))
-      .mockRejectedValueOnce(new Error("artifact endpoint timed out"))
-      .mockResolvedValueOnce(
-        mockResponse({
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes("/api/settings/artifact-storage")) {
+        return Promise.reject(new Error("artifact endpoint timed out"));
+      }
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({
           enabled: true,
           provider: "local-vlm",
           model: "gemma-4-26b",
@@ -675,8 +675,10 @@ describe("ArtifactStoragePanel", () => {
           daemon_connected: true,
           artifact_count: 7,
           last_artifact_at: "2026-06-21T08:42:52Z",
-        }),
-      );
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
 
     render(<ArtifactStoragePanel />);
 
@@ -718,17 +720,15 @@ describe("ArtifactStoragePanel", () => {
 
   it("aborts hung artifact metadata and keeps analysis controls visible", async () => {
     let artifactSignal: AbortSignal | undefined;
-    fetchMock
-      .mockImplementationOnce((_url: string, init?: RequestInit) => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/api/settings/artifact-storage")) {
         artifactSignal = init?.signal ?? undefined;
         return new Promise((_resolve, reject) => {
           init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
         });
-      })
-      .mockRejectedValueOnce(new Error("artifact endpoint timed out"))
-      .mockRejectedValueOnce(new Error("artifact endpoint timed out"))
-      .mockResolvedValueOnce(
-        mockResponse({
+      }
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({
           enabled: true,
           provider: "local-vlm",
           model: "gemma-4-26b",
@@ -739,8 +739,10 @@ describe("ArtifactStoragePanel", () => {
           daemon_connected: true,
           artifact_count: 0,
           last_artifact_at: null,
-        }),
-      );
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
 
     render(<ArtifactStoragePanel />);
 

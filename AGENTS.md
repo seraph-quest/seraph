@@ -24,6 +24,23 @@ responsible for Seraph and the VLM wrapper lifecycle; do not treat SSH tunnels a
 the product runtime path. Tunnels are diagnostic bridges only when the agent
 sandbox cannot open the private-LAN route.
 
+Operator-shell reachability is authoritative for this topology. A normal
+Terminal-launched receipt on July 3, 2026 proved
+`ssh -o BatchMode=yes -o ConnectTimeout=5 jupyter true` exits `0` even though
+Codex/Desktop-launched direct SSH can report `No route to host` for the same
+alias. Seraph should not require the user to set up an SSH tunnel to reach the
+GPU VLM API. If Codex/Desktop commands report `No route to host` or connection
+failures for `192.168.1.26` while the operator shell can reach `jupyter`, treat
+that as a Codex/app network limitation until proven otherwise. Document it in
+the ticket receipt, but do not redesign the Seraph runtime around a tunnel.
+
+Codex GPU administration is a separate access path from Seraph runtime traffic.
+When direct Codex SSH is blocked, use the existing SOCKS-backed `ssh jupyter`
+route for inventory and maintenance. That path has confirmed host `jupyter`,
+user `pawel`, and `/home/pawel/repos/vlm-screenshot-server`. Do not translate
+this Codex admin route into a Seraph user requirement or a `.env.dev` runtime
+base URL.
+
 Two properties shape most Seraph decisions:
 
 - Runtime truth must be operator-visible. If chat, screenshots, reports, or
@@ -139,6 +156,17 @@ curl -sS http://192.168.1.26:8001/queue/status
 If sandboxed localhost checks fail but the app is supposed to be running on the
 host, rerun the same probe with the proper approval instead of assuming the
 service is down.
+
+If approved Codex/Desktop probes still fail against the GPU LAN address while
+the operator shell succeeds, ask for or use an operator-shell receipt from the
+same environment that launches Seraph. Do not count a local SSH forward as the
+product proof; use it only to inspect GPU-side state.
+
+For GPU-server inventory from Codex, the existing SOCKS-backed `ssh jupyter`
+route is acceptable. Use it to inspect `/home/pawel/repos/vlm-screenshot-server`,
+Docker Compose, running model processes, listeners, logs, and firewall state.
+Keep any output clearly labeled as Codex admin evidence, not direct Seraph
+runtime acceptance.
 
 ## Footprint Ladder For New Capability
 

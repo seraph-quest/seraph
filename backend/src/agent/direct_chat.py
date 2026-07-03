@@ -101,8 +101,14 @@ def should_use_direct_local_chat(message: str, *, runtime_path: str, is_onboardi
     normalized = _normalize_lightweight_chat_text(message)
     if len(normalized) > 160:
         return False
-    return normalized in _LIGHTWEIGHT_PREFIXES or normalized.startswith(
-        tuple(f"{prefix} " for prefix in _LIGHTWEIGHT_PREFIXES)
+    return any(
+        normalized == prefix
+        or normalized.startswith(f"{prefix} ")
+        or normalized.startswith(f"{prefix},")
+        or normalized.startswith(f"{prefix}.")
+        or normalized.startswith(f"{prefix}!")
+        or normalized.startswith(f"{prefix}?")
+        for prefix in _LIGHTWEIGHT_PREFIXES
     )
 
 

@@ -40,13 +40,8 @@ def test_failed_screenshot_analysis_is_retried_after_cooldown():
     updated = _replace_analysis_details(details, analysis=None, error_reason="schema validation")
     assert any(f'"attempts":2' in item for item in updated)
 
-    transient = _replace_analysis_details(
-        details,
-        analysis=None,
-        error_reason="502 Bad Gateway",
-        consume_attempt=False,
-    )
-    assert any(f'"attempts":1' in item for item in transient)
+    transient = _replace_analysis_details(details, analysis=None, error_reason="502 Bad Gateway")
+    assert any(f'"attempts":2' in item for item in transient)
 
     exhausted = [
         "capture_artifacts:{}",

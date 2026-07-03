@@ -690,9 +690,9 @@ describe("ArtifactStoragePanel", () => {
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
-    expect(screen.getByDisplayValue("local-vlm")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
     expect(await screen.findByText("Folder metadata is still loading; analysis controls are live.")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("local-vlm")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   });

@@ -194,7 +194,6 @@ async def analyze_pending_screenshot_folder_observations(
                 details,
                 analysis=None,
                 error_reason=str(exc),
-                consume_attempt=not _is_retryable_provider_failure(str(exc)),
             )
 
         details_json = json.dumps(details)
@@ -424,14 +423,13 @@ def _replace_analysis_details(
     *,
     analysis,
     error_reason: str | None,
-    consume_attempt: bool = True,
 ) -> list[str]:
     previous_status = semantic_analysis_status_from_details(details) or {}
     try:
         previous_attempts = int(previous_status.get("attempts") or 0)
     except (TypeError, ValueError):
         previous_attempts = 0
-    attempts = previous_attempts + 1 if consume_attempt else previous_attempts
+    attempts = previous_attempts + 1
     next_details = [
         item
         for item in details
@@ -449,22 +447,6 @@ def _replace_analysis_details(
         next_details.append(screenshot_analysis_error_detail(reason))
         next_details.append(screenshot_analysis_status_detail("failed", reason=reason, attempts=attempts))
     return next_details
-
-
-def _is_retryable_provider_failure(reason: str) -> bool:
-    normalized = reason.lower()
-    retryable_markers = (
-        "502",
-        "503",
-        "504",
-        "bad gateway",
-        "service unavailable",
-        "gateway timeout",
-        "connection refused",
-        "connect error",
-        "read timeout",
-    )
-    return any(marker in normalized for marker in retryable_markers)
 
 
 def _sha256_file(path: Path) -> str:

@@ -148,6 +148,7 @@ def stub_vlm_runtime_probe():
             "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
             "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
             "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
+            "chat_proxy": {"checked": False, "ok": False, "status_code": None, "error": ""},
         }
 
     with (

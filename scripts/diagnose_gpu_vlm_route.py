@@ -58,7 +58,18 @@ def _endpoint_result(response: httpx.Response) -> dict[str, Any]:
         "status_code": response.status_code,
     }
     if isinstance(payload, dict):
-        for key in ("status", "backend_status", "model", "queued", "active", "workers", "background_workers"):
+        for key in (
+            "status",
+            "backend_status",
+            "model",
+            "queued",
+            "active",
+            "workers",
+            "background_workers",
+            "enabled",
+            "auth_configured",
+            "auth_ok",
+        ):
             if key in payload:
                 result[key] = payload[key]
         queue = payload.get("queue")
@@ -83,43 +94,20 @@ def _get_json(client: httpx.Client, url: str) -> dict[str, Any]:
         return {"ok": False, "status_code": None, "error": "http_error"}
 
 
-def _post_chat(client: httpx.Client, base_url: str, model: str, api_key: str) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
+def _get_chat_health(client: httpx.Client, base_url: str, api_key: str) -> dict[str, Any]:
+    headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
-        response = client.post(
-            base_url.rstrip("/") + "/v1/chat/completions",
-            headers=headers,
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "Reply with exactly: GPU VLM OK"}],
-                "temperature": 0,
-                "max_tokens": 16,
-            },
-        )
+        result = _endpoint_result(client.get(base_url.rstrip("/") + "/health/chat", headers=headers))
     except httpx.TimeoutException:
         return {"ok": False, "status_code": None, "error": "timeout"}
     except httpx.ConnectError:
         return {"ok": False, "status_code": None, "error": "connect_error"}
     except httpx.HTTPError:
         return {"ok": False, "status_code": None, "error": "http_error"}
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    content = ""
-    if isinstance(payload, dict):
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            message = choices[0].get("message") if isinstance(choices[0], dict) else None
-            if isinstance(message, dict):
-                content = str(message.get("content") or "").strip()
-    return {
-        "ok": 200 <= response.status_code < 400 and content == "GPU VLM OK",
-        "status_code": response.status_code,
-        "content": content[:80],
-    }
+    result["ok"] = bool(result.get("ok") and result.get("enabled") and result.get("auth_configured") and result.get("auth_ok"))
+    return result
 
 
 def _post_analyze_file(client: httpx.Client, base_url: str, model: str, api_key: str, image_path: Path) -> dict[str, Any]:
@@ -169,7 +157,7 @@ def main() -> int:
         help="Optional wrapper API key; never printed, but env vars are preferred because CLI args can leak via shell history or process listings",
     )
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
-    parser.add_argument("--skip-chat", action="store_true", help="Only check wrapper health endpoints")
+    parser.add_argument("--skip-chat", action="store_true", help="Only check wrapper and backend health endpoints")
     parser.add_argument("--image", type=Path, default=None, help="Optional screenshot path for /v1/analyze-file")
     parser.add_argument(
         "--allow-non-direct-base-url",
@@ -182,7 +170,7 @@ def main() -> int:
     model = str(args.model or "").strip()
     if not base_url:
         raise SystemExit("missing --base-url or SERAPH_VLM_BASE_URL")
-    if not model and not args.skip_chat:
+    if not model and args.image is not None:
         raise SystemExit("missing --model or LOCAL_VLM_MODEL/LOCAL_MODEL")
     direct_route_candidate = _is_direct_route_candidate(base_url)
     if not direct_route_candidate and not args.allow_non_direct_base_url:
@@ -218,7 +206,7 @@ def main() -> int:
             and result["queue_status"].get("ok")
         )
         if not args.skip_chat:
-            result["chat"] = _post_chat(client, base_url, model, args.api_key)
+            result["chat"] = _get_chat_health(client, base_url, args.api_key)
         if args.image is not None:
             result["analyze_file"] = _post_analyze_file(client, base_url, model, args.api_key, args.image)
         result["validation_ok"] = bool(

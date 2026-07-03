@@ -7,6 +7,8 @@ interface VlmRuntimeStatus {
   base_url: string;
   backend_url: string;
   chat_api_base: string;
+  chat_completion_endpoint: string;
+  chat_health_endpoint: string;
   queue_status_endpoint: string;
   health_endpoint: string;
   backend_health_endpoint: string;
@@ -16,9 +18,10 @@ interface VlmRuntimeStatus {
     checked: boolean;
     reachable: boolean;
     reason?: string;
-    health: VlmProbeEndpoint;
-    backend_health: VlmProbeEndpoint;
-    queue_status: VlmProbeEndpoint;
+    health?: VlmProbeEndpoint;
+    backend_health?: VlmProbeEndpoint;
+    queue_status?: VlmProbeEndpoint;
+    chat_proxy?: VlmProbeEndpoint;
   };
 }
 
@@ -434,16 +437,21 @@ function vlmReachabilityLabel(runtime?: VlmRuntimeStatus): string {
   if (!probe?.checked) {
     return "not checked";
   }
-  if (probe.reachable) {
-    return "direct route ok";
-  }
-  const failing = [
+  const requiredEndpoints = [
     ["health", probe.health],
     ["backend", probe.backend_health],
     ["queue", probe.queue_status],
-  ].filter(([, endpoint]) => !(endpoint as VlmProbeEndpoint).ok);
+    ["chat", probe.chat_proxy],
+  ] as const;
+  if (probe.reachable && requiredEndpoints.every(([, endpoint]) => endpoint?.ok)) {
+    return "direct route ok";
+  }
+  const failing = requiredEndpoints.filter(([, endpoint]) => !endpoint?.ok);
   const reason = failing
-    .map(([label, endpoint]) => `${label}:${(endpoint as VlmProbeEndpoint).error || (endpoint as VlmProbeEndpoint).status_code || "failed"}`)
+    .map(([label, endpoint]) => {
+      const probeEndpoint = endpoint as VlmProbeEndpoint | undefined;
+      return `${label}:${probeEndpoint?.error || probeEndpoint?.status_code || "missing"}`;
+    })
     .join(" ");
   return reason ? `direct route failing · ${reason}` : "direct route failing";
 }
@@ -453,7 +461,13 @@ function vlmReachabilityTone(runtime?: VlmRuntimeStatus): "normal" | "good" | "w
   if (!runtime?.configured || !probe?.checked) {
     return "normal";
   }
-  return probe.reachable ? "good" : "warn";
+  return probe.reachable &&
+    probe.health?.ok &&
+    probe.backend_health?.ok &&
+    probe.queue_status?.ok &&
+    probe.chat_proxy?.ok
+    ? "good"
+    : "warn";
 }
 
 export function ArtifactStoragePanel() {

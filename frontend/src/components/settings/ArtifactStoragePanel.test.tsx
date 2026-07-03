@@ -355,6 +355,67 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getAllByText("Missing")).toHaveLength(3);
   });
 
+  it("does not mark VLM direct route healthy without chat readiness proof", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 1,
+      last_artifact_at: null,
+    });
+    (artifactStorage as any).local_runtime = {
+      gateway_configured: true,
+      llm_base_url_configured: true,
+      vlm_base_url_configured: true,
+      model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      profiles: [],
+      profile_proof: {
+        status: "safe",
+        per_request_reasoning_control: "passed",
+        safe_for_single_backend_profile_routing: true,
+        receipt_count: 1,
+        last_receipt_at: "2026-07-03T18:00:00Z",
+        last_receipt_sha256: "abc123",
+        notes: [],
+      },
+      proof_command: "PYTHONPATH=. uv run python ../scripts/verify_local_gemma_profiles.py",
+    };
+    (artifactStorage as any).local_runtime.vlm_runtime = {
+      mode: "gpu-server",
+      configured: true,
+      base_url: "http://192.168.1.26:8001",
+      backend_url: "http://192.168.1.26:8000/v1",
+      chat_api_base: "http://192.168.1.26:8001/v1",
+      chat_completion_endpoint: "http://192.168.1.26:8001/v1/chat/completions",
+      chat_health_endpoint: "http://192.168.1.26:8001/health/chat",
+      queue_status_endpoint: "http://192.168.1.26:8001/queue/status",
+      health_endpoint: "http://192.168.1.26:8001/health",
+      backend_health_endpoint: "http://192.168.1.26:8001/health/backend",
+      api_key_configured: true,
+      feeder_window: 2,
+      live_probe: {
+        checked: true,
+        reachable: true,
+        health: { checked: true, ok: true, status_code: 200, error: "" },
+        backend_health: { checked: true, ok: true, status_code: 200, error: "" },
+        queue_status: { checked: true, ok: true, status_code: 200, error: "" },
+      },
+    };
+    fetchMock.mockResolvedValueOnce(mockResponse(artifactStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText("Local Gemma runtime")).toBeInTheDocument();
+    expect(screen.getByText("direct route failing · chat:missing")).toBeInTheDocument();
+    expect(screen.queryByText("direct route ok")).not.toBeInTheDocument();
+  });
+
   it("runs manual report preview and shows safe receipt metadata", async () => {
     const artifactStorage = settingsFromScreenAnalysisFixture({
       enabled: true,

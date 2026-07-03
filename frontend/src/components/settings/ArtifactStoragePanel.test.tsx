@@ -466,7 +466,9 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Scan folder" }));
+    const scanButton = await screen.findByRole("button", { name: "Scan folder" });
+    await waitFor(() => expect(scanButton).not.toBeDisabled());
+    fireEvent.click(scanButton);
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

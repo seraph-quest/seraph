@@ -675,6 +675,32 @@ def test_build_model_kwargs_uses_runtime_profile_preferences_for_primary_target(
     assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+def test_build_model_kwargs_routes_strategist_agent_to_local_profile():
+    with (
+        patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
+        patch.object(settings, "llm_api_key", ""),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            "strategist_agent=local-gemma-chat-thinking",
+        ),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.4,
+            max_tokens=4096,
+            runtime_path="strategist_agent",
+        )
+
+    assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert kwargs["runtime_profile"] == "local-gemma-chat-thinking"
+    assert kwargs["api_key"] == "not-needed"
+    assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+
+
 def test_build_model_kwargs_uses_runtime_profile_preference_glob():
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),

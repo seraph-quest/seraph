@@ -7,6 +7,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 from smolagents import ToolCall, ActionStep, FinalAnswerStep
 from smolagents.monitoring import Timing
 from starlette.testclient import TestClient
@@ -18,6 +19,22 @@ from src.vault.repository import vault_repository
 from tests.test_websocket import _close_sync_client_with_db, _make_sync_client_with_db
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
+
+
+async def _receive_text_with_timeout(ws, timeout_seconds: float) -> str:
+    with anyio.fail_after(timeout_seconds):
+        message = await ws._send_rx.receive()
+    ws._raise_on_close(message)
+    return str(message["text"])
+
+
+def _receive_text(ws, *, timeout_seconds: float = 5.0) -> str:
+    try:
+        return ws.portal.call(_receive_text_with_timeout, ws, timeout_seconds)
+    except TimeoutError as exc:
+        raise AssertionError(
+            f"Timed out after {timeout_seconds:.1f}s waiting for websocket message"
+        ) from exc
 
 
 def _make_agent_steps():
@@ -46,11 +63,11 @@ class TestE2EConversation:
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
                     # Drain welcome message
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     # Skip onboarding first so we get the full agent
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()  # drain skip response
+                    _ = _receive_text(ws)  # drain skip response
 
                     # Send a real message
                     ws.send_text(json.dumps({
@@ -61,7 +78,7 @@ class TestE2EConversation:
 
                     messages = []
                     for _ in range(10):  # safety limit
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         messages.append(msg)
                         if msg["type"] == "final":
@@ -98,9 +115,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()  # welcome
+                    _ = _receive_text(ws)  # welcome
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -110,7 +127,7 @@ class TestE2EConversation:
 
                     seqs = []
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         if msg.get("seq") is not None:
                             seqs.append(msg["seq"])
@@ -133,9 +150,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -145,7 +162,7 @@ class TestE2EConversation:
 
                     steps = []
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         if msg["type"] == "step":
                             steps.append(msg)
@@ -167,9 +184,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -178,7 +195,7 @@ class TestE2EConversation:
                     }))
 
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         if msg["type"] == "final":
                             break
@@ -208,9 +225,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -219,7 +236,7 @@ class TestE2EConversation:
                     }))
 
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         if msg["type"] == "approval_required":
                             assert msg["approval_id"] == "approval-1"
@@ -245,9 +262,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -256,7 +273,7 @@ class TestE2EConversation:
                     }))
 
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         if msg["type"] == "clarification_required":
                             assert msg["question"] == "Which city should I check?"
@@ -284,9 +301,9 @@ class TestE2EConversation:
                 patch("src.memory.consolidator.consolidate_session"),
             ):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -295,7 +312,7 @@ class TestE2EConversation:
                     }))
 
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         if msg["type"] == "final":
                             assert "taking too long" in msg["content"]
@@ -341,9 +358,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -353,7 +370,7 @@ class TestE2EConversation:
 
                     received = []
                     for _ in range(10):
-                        raw = ws.receive_text()
+                        raw = _receive_text(ws)
                         msg = json.loads(raw)
                         received.append(msg)
                         if msg["type"] == "final":
@@ -376,9 +393,9 @@ class TestE2EConversation:
             with patch("src.api.ws._build_agent", return_value=(mock_agent, False, set())), \
                  patch("src.memory.consolidator.consolidate_session"):
                 with client.websocket_connect("/ws/chat") as ws:
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
                     ws.send_text(json.dumps({"type": "skip_onboarding"}))
-                    _ = ws.receive_text()
+                    _ = _receive_text(ws)
 
                     ws.send_text(json.dumps({
                         "type": "message",
@@ -387,7 +404,7 @@ class TestE2EConversation:
                     }))
 
                     for _ in range(10):
-                        msg = json.loads(ws.receive_text())
+                        msg = json.loads(_receive_text(ws))
                         if msg["type"] == "final":
                             break
 
@@ -398,7 +415,7 @@ class TestE2EConversation:
                     }))
 
                     for _ in range(10):
-                        msg = json.loads(ws.receive_text())
+                        msg = json.loads(_receive_text(ws))
                         if msg["type"] == "final":
                             break
 

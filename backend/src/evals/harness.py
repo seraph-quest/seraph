@@ -7,13 +7,11 @@ import asyncio
 import inspect
 import json
 import os
-import queue
 import shutil
 import socket
 import sys
 import time
 import tempfile
-import threading
 import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
@@ -23,6 +21,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import anyio
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -1409,26 +1408,19 @@ async def _aclose_sync_client_with_db(patches: list[Any], stack: ExitStack) -> N
             item.stop()
 
 
-def _receive_ws_json(ws: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-    def _reader() -> None:
-        try:
-            result_queue.put(("text", ws.receive_text()))
-        except Exception as exc:  # pragma: no cover - exercised via timeout/failure handling
-            result_queue.put(("error", exc))
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-
+async def _receive_ws_text_with_timeout(ws: Any, timeout_seconds: float) -> str:
     try:
-        kind, payload = result_queue.get(timeout=timeout_seconds)
-    except queue.Empty as exc:
+        with anyio.fail_after(timeout_seconds):
+            message = await ws._send_rx.receive()
+    except TimeoutError as exc:
         raise AssertionError(f"Timed out waiting for WebSocket message after {timeout_seconds}s") from exc
 
-    if kind == "error":
-        raise payload
-    return json.loads(payload)
+    ws._raise_on_close(message)
+    return str(message["text"])
+
+
+def _receive_ws_json(ws: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+    return json.loads(ws.portal.call(_receive_ws_text_with_timeout, ws, timeout_seconds))
 
 
 def _make_agent_steps(final_output: str = "It's sunny and 72°F today!") -> list[Any]:
@@ -10421,9 +10413,13 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             intervention_id=bundle_intervention.id,
             session_id="continuity-session",
         )
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.active_count = 1
 
         with (
             patch("src.api.observer.context_manager", mgr),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
             patch(
                 "src.api.observer._observer_imported_reach_payload",
                 return_value={

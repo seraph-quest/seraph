@@ -104,7 +104,73 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
+                (
+                    "test_run_runtime_evals_passes_group_1 "
+                    "and not source_report_action_workflow_behavior "
+                    "and not chat_model_wrapper_runtime_eval_details "
+                    "and not rest_chat_behavior_runtime_eval_details "
+                    "and not rest_chat_approval_contract_runtime_eval_details "
+                    "and not rest_chat_timeout_contract_runtime_eval_details "
+                    "and not websocket_chat_behavior_runtime_eval_details "
+                    "and not websocket_chat_approval_contract_runtime_eval_details "
+                    "and not websocket_chat_timeout_contract_runtime_eval_details"
+                ),
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_chat_model_wrapper_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_chat_model_wrapper_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_behavior_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_approval_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_approval_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_timeout_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_timeout_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_behavior_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_approval_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_approval_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_timeout_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_timeout_contract_runtime_eval_details",
             ],
         ),
         (
@@ -113,6 +179,14 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
                 "tests/test_eval_harness.py",
                 "-k",
                 "test_source_report_action_workflow_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_runtime_eval_scenarios_expose_expected_details",
             ],
         ),
         (
@@ -144,7 +218,21 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not (test_run_runtime_evals_passes_group_1 or test_source_report_action_workflow_behavior_runtime_eval_details or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
+                (
+                    "not (test_run_runtime_evals_passes_group_1 "
+                    "or test_chat_model_wrapper_runtime_eval_details "
+                    "or test_rest_chat_behavior_runtime_eval_details "
+                    "or test_rest_chat_approval_contract_runtime_eval_details "
+                    "or test_rest_chat_timeout_contract_runtime_eval_details "
+                    "or test_websocket_chat_behavior_runtime_eval_details "
+                    "or test_websocket_chat_approval_contract_runtime_eval_details "
+                    "or test_websocket_chat_timeout_contract_runtime_eval_details "
+                    "or test_source_report_action_workflow_behavior_runtime_eval_details "
+                    "or test_runtime_eval_scenarios_expose_expected_details "
+                    "or test_run_runtime_evals_passes_group_2 "
+                    "or test_run_runtime_evals_passes_group_3 "
+                    "or test_run_runtime_evals_passes_group_4)"
+                ),
             ],
         ),
     ],

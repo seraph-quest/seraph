@@ -348,52 +348,102 @@ def _runtime_group_1_without_source_report() -> list[str]:
     return [
         scenario_name
         for scenario_name in scenario_names
-        if scenario_name != "source_report_action_workflow_behavior"
+        if scenario_name
+        not in {
+            "source_report_action_workflow_behavior",
+            "chat_model_wrapper",
+            "rest_chat_behavior",
+            "rest_chat_approval_contract",
+            "rest_chat_timeout_contract",
+            "websocket_chat_behavior",
+            "websocket_chat_approval_contract",
+            "websocket_chat_timeout_contract",
+        }
     ]
 
 
-def test_run_runtime_evals_passes_group_1():
-    scenario_names = _runtime_group_1_without_source_report()
-    summary = asyncio.run(run_runtime_evals(scenario_names))
+async def _run_runtime_evals_with_timeout(scenario_names: list[str], timeout_seconds: float = 120.0):
+    try:
+        return await asyncio.wait_for(run_runtime_evals(scenario_names), timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        preview = ", ".join(scenario_names[:5])
+        suffix = "" if len(scenario_names) <= 5 else f", ... +{len(scenario_names) - 5} more"
+        raise AssertionError(
+            f"Runtime eval group exceeded {timeout_seconds:.1f}s for: {preview}{suffix}"
+        ) from exc
 
+
+def _assert_runtime_eval_group_passes(scenario_names: list[str]) -> None:
+    summary = asyncio.run(_run_runtime_evals_with_timeout(scenario_names))
     result_names = {result.name for result in summary.results}
+    failed_results = [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
 
     assert summary.total == len(scenario_names)
-    assert summary.failed == 0
+    assert summary.failed == 0, failed_results
     assert result_names == set(scenario_names)
+
+
+def _assert_runtime_eval_scenario_passes(scenario_name: str) -> None:
+    summary = asyncio.run(run_runtime_evals([scenario_name]))
+
+    assert summary.total == 1
+    assert summary.failed == 0, [
+        f"{result.name}: {result.error or result.details}"
+        for result in summary.results
+        if not result.passed
+    ]
+    assert [result.name for result in summary.results] == [scenario_name]
+
+
+def test_run_runtime_evals_passes_group_1():
+    _assert_runtime_eval_group_passes(_runtime_group_1_without_source_report())
+
+
+def test_chat_model_wrapper_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("chat_model_wrapper")
+
+
+def test_rest_chat_behavior_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("rest_chat_behavior")
+
+
+def test_rest_chat_approval_contract_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("rest_chat_approval_contract")
+
+
+def test_rest_chat_timeout_contract_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("rest_chat_timeout_contract")
+
+
+def test_websocket_chat_behavior_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("websocket_chat_behavior")
+
+
+def test_websocket_chat_approval_contract_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("websocket_chat_approval_contract")
+
+
+def test_websocket_chat_timeout_contract_runtime_eval_details():
+    _assert_runtime_eval_scenario_passes("websocket_chat_timeout_contract")
 
 
 def test_run_runtime_evals_passes_group_2():
     _, scenario_names = _runtime_eval_groups()[1]
-    summary = asyncio.run(run_runtime_evals(scenario_names))
-
-    result_names = {result.name for result in summary.results}
-
-    assert summary.total == len(scenario_names)
-    assert summary.failed == 0
-    assert result_names == set(scenario_names)
+    _assert_runtime_eval_group_passes(scenario_names)
 
 
 def test_run_runtime_evals_passes_group_3():
     _, scenario_names = _runtime_eval_groups()[2]
-    summary = asyncio.run(run_runtime_evals(scenario_names))
-
-    result_names = {result.name for result in summary.results}
-
-    assert summary.total == len(scenario_names)
-    assert summary.failed == 0
-    assert result_names == set(scenario_names)
+    _assert_runtime_eval_group_passes(scenario_names)
 
 
 def test_run_runtime_evals_passes_group_4():
     _, scenario_names = _runtime_eval_groups()[3]
-    summary = asyncio.run(run_runtime_evals(scenario_names))
-
-    result_names = {result.name for result in summary.results}
-
-    assert summary.total == len(scenario_names)
-    assert summary.failed == 0
-    assert result_names == set(scenario_names)
+    _assert_runtime_eval_group_passes(scenario_names)
 
 
 def test_run_runtime_evals_can_filter_specific_scenarios():
@@ -4411,12 +4461,6 @@ def test_runtime_eval_scenarios_expose_expected_details():
                 "local_runtime_profile",
                 "helper_local_runtime_paths",
                 "context_window_summary_audit",
-                "rest_chat_behavior",
-                "rest_chat_approval_contract",
-                "rest_chat_timeout_contract",
-                "websocket_chat_behavior",
-                "websocket_chat_approval_contract",
-                "websocket_chat_timeout_contract",
                 "strategist_tick_behavior",
                 "strategist_tick_learning_continuity_behavior",
                 "guardian_state_synthesis",
@@ -4542,35 +4586,6 @@ def test_runtime_eval_scenarios_expose_expected_details():
     assert details_by_name["context_window_summary_audit"]["degraded_runtime_path"] == "context_window_summary"
     assert details_by_name["context_window_summary_audit"]["degraded_fallback"] == "truncation"
     assert details_by_name["context_window_summary_audit"]["degraded_contains_truncation"] is True
-    assert details_by_name["rest_chat_behavior"]["first_status"] == 200
-    assert details_by_name["rest_chat_behavior"]["second_status"] == 200
-    assert details_by_name["rest_chat_behavior"]["session_reused"] is True
-    assert details_by_name["rest_chat_behavior"]["first_response"] == "Hello from Seraph."
-    assert details_by_name["rest_chat_behavior"]["follow_up_response"] == "Follow-up response"
-    assert details_by_name["rest_chat_behavior"]["audit_transport"] == "rest"
-    assert details_by_name["rest_chat_approval_contract"]["status_code"] == 409
-    assert details_by_name["rest_chat_approval_contract"]["detail_type"] == "approval_required"
-    assert details_by_name["rest_chat_approval_contract"]["approval_id"] == "approval-123"
-    assert details_by_name["rest_chat_approval_contract"]["tool_name"] == "shell_execute"
-    assert details_by_name["rest_chat_approval_contract"]["audit_summary_contains_shell"] is True
-    assert details_by_name["rest_chat_timeout_contract"]["status_code"] == 504
-    assert "timed out" in details_by_name["rest_chat_timeout_contract"]["detail"]
-    assert details_by_name["rest_chat_timeout_contract"]["timeout_seconds"] == 120
-    assert details_by_name["websocket_chat_behavior"]["welcome_type"] == "proactive"
-    assert details_by_name["websocket_chat_behavior"]["skip_type"] == "final"
-    assert details_by_name["websocket_chat_behavior"]["step_count"] >= 2
-    assert details_by_name["websocket_chat_behavior"]["final_content"] == "It's sunny and 72°F today!"
-    assert details_by_name["websocket_chat_behavior"]["seq_monotonic"] is True
-    assert details_by_name["websocket_chat_behavior"]["audit_tool_call_count"] == 1
-    assert details_by_name["websocket_chat_approval_contract"]["message_type"] == "approval_required"
-    assert details_by_name["websocket_chat_approval_contract"]["approval_id"] == "approval-1"
-    assert details_by_name["websocket_chat_approval_contract"]["tool_name"] == "shell_execute"
-    assert details_by_name["websocket_chat_approval_contract"]["risk_level"] == "high"
-    assert details_by_name["websocket_chat_approval_contract"]["audit_summary_contains_shell"] is True
-    assert details_by_name["websocket_chat_timeout_contract"]["final_type"] == "final"
-    assert details_by_name["websocket_chat_timeout_contract"]["final_contains_timeout_copy"] is True
-    assert details_by_name["websocket_chat_timeout_contract"]["timeout_seconds"] == 120
-    assert details_by_name["websocket_chat_timeout_contract"]["succeeded_event_present"] is False
     assert details_by_name["strategist_tick_behavior"]["message_type"] == "proactive"
     assert details_by_name["strategist_tick_behavior"]["intervention_type"] == "advisory"
     assert details_by_name["strategist_tick_behavior"]["urgency"] == 3

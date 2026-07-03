@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from config.settings import settings
+from src.agent.context_window import _count_tokens
+from src.agent.prompt_compaction import local_runtime_prompt_budget
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
@@ -266,6 +268,8 @@ def test_built_in_local_gemma_profiles_resolve_with_runtime_options(monkeypatch)
     assert "local-gemma-chat-thinking" in profiles
     assert profiles["local-gemma-screenshot-fast"]["task_class"] == "screenshot_image_analysis"
     assert profiles["local-gemma-screenshot-fast"]["options"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert profiles["local-gemma-screenshot-fast"]["context_window_tokens"] == settings.local_runtime_context_window_tokens
+    assert profiles["local-gemma-screenshot-fast"]["prompt_budget_tokens"] >= 0
     assert profiles["local-gemma-chat-thinking"]["options"]["chat_template_kwargs"] == {"enable_thinking": True}
     assert profiles["local-gemma-chat-thinking"]["keyless"] is True
     assert kwargs["model"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
@@ -721,6 +725,134 @@ def test_build_model_kwargs_routes_strategist_agent_to_local_profile():
     assert kwargs["runtime_profile"] == "local-gemma-strategist-fast"
     assert kwargs["api_key"] == "not-needed"
     assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert kwargs["max_tokens"] == 512
+
+
+def test_local_runtime_profiles_clamp_output_contracts_for_all_local_paths():
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            (
+                "chat_agent=local-gemma-chat-thinking;"
+                "onboarding_agent=local-gemma-chat-thinking;"
+                "orchestrator_agent=local-gemma-chat-thinking;"
+                "end_of_day_goal_report=local-gemma-report-thinking;"
+                "screenshot_image_analysis=local-gemma-screenshot-fast"
+            ),
+        ),
+    ):
+        interactive = {
+            path: build_model_kwargs(
+                temperature=0.2,
+                max_tokens=8192,
+                runtime_path=path,
+            )
+            for path in ("chat_agent", "onboarding_agent", "orchestrator_agent")
+        }
+        report = build_completion_kwargs(
+            messages=[{"role": "user", "content": "report"}],
+            temperature=0.2,
+            max_tokens=8192,
+            runtime_path="end_of_day_goal_report",
+        )
+        screenshot = build_completion_kwargs(
+            messages=[{"role": "user", "content": "analyze image"}],
+            temperature=0.0,
+            max_tokens=8192,
+            runtime_path="screenshot_image_analysis",
+        )
+
+    assert {kwargs["runtime_profile"] for kwargs in interactive.values()} == {
+        "local-gemma-chat-thinking"
+    }
+    assert {kwargs["max_tokens"] for kwargs in interactive.values()} == {settings.model_max_tokens}
+    assert report["max_tokens"] == 4096
+    assert screenshot["max_tokens"] == 1400
+
+
+def _oversized_messages() -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": "\n".join("system context " * 20 for _ in range(700))},
+        {"role": "user", "content": "\n".join("older user context " * 20 for _ in range(700))},
+        {"role": "assistant", "content": "\n".join("older assistant context " * 20 for _ in range(700))},
+        {"role": "user", "content": "Current request must survive compaction."},
+    ]
+
+
+def _formatted_message_tokens(messages: list[dict[str, str]]) -> int:
+    return _count_tokens(
+        "\n\n".join(f"{message['role'].capitalize()}: {message['content']}" for message in messages)
+    )
+
+
+def test_fallback_litellm_model_compacts_local_runtime_messages_before_generate():
+    success_response = MagicMock()
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "local_runtime_context_window_tokens", 4096),
+        patch.object(settings, "local_runtime_prompt_safety_ratio", 1.0),
+        patch.object(settings, "local_runtime_tool_reserve_tokens", 512),
+        patch.object(settings, "local_runtime_min_section_tokens", 64),
+        patch("src.agent.prompt_compaction.log_background_task_event_sync") as mock_receipt,
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            return_value=success_response,
+        ) as mock_generate,
+    ):
+        model = FallbackLiteLLMModel(**build_model_kwargs(
+            temperature=0.2,
+            max_tokens=512,
+            runtime_path="chat_agent",
+        ))
+        result = model.generate(_oversized_messages())
+
+    sent_messages = mock_generate.call_args.args[1]
+    assert result is success_response
+    assert _formatted_message_tokens(sent_messages) <= local_runtime_prompt_budget(
+        reserved_output_tokens=512
+    )
+    assert sent_messages[-1]["content"] == "Current request must survive compaction."
+    assert any("compacted for local model context budget" in item["content"] for item in sent_messages)
+    mock_receipt.assert_called_once()
+
+
+def test_completion_with_fallback_sync_compacts_local_runtime_messages_before_litellm():
+    success_response = MagicMock()
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "local_runtime_context_window_tokens", 4096),
+        patch.object(settings, "local_runtime_prompt_safety_ratio", 1.0),
+        patch.object(settings, "local_runtime_tool_reserve_tokens", 512),
+        patch.object(settings, "local_runtime_min_section_tokens", 64),
+        patch("src.agent.prompt_compaction.log_background_task_event_sync") as mock_receipt,
+        patch("litellm.completion", return_value=success_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=_oversized_messages(),
+            temperature=0.2,
+            max_tokens=512,
+            runtime_path="chat_agent",
+        )
+
+    sent_messages = mock_completion.call_args.kwargs["messages"]
+    assert result is success_response
+    assert _formatted_message_tokens(sent_messages) <= local_runtime_prompt_budget(
+        reserved_output_tokens=512
+    )
+    assert sent_messages[-1]["content"] == "Current request must survive compaction."
+    assert any("compacted for local model context budget" in item["content"] for item in sent_messages)
+    mock_receipt.assert_called_once()
 
 
 def test_build_model_kwargs_uses_runtime_profile_preference_glob():

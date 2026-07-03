@@ -261,6 +261,42 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
+    def test_websocket_direct_chat_error_close_does_not_record_interrupted_turn(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            raise RuntimeError("streaming endpoint failed")
+            yield "unreachable"
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.stream_direct_local_chat", _fake_stream),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+
+                received = []
+                for _ in range(5):
+                    msg = json.loads(ws.receive_text())
+                    received.append(msg)
+                    if msg["type"] == "error":
+                        ws.close()
+                        break
+
+            error = next(msg for msg in received if msg["type"] == "error")
+            assert "chat failed" in error["content"]
+            messages_response = client.get(f"/api/sessions/{error['session_id']}/messages")
+            assert messages_response.status_code == 200
+            messages = messages_response.json()
+            assert all("Response interrupted" not in message["content"] for message in messages)
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
 
 @pytest.mark.asyncio
 @patch("src.api.ws.create_onboarding_agent")

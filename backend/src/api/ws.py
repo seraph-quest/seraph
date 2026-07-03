@@ -230,6 +230,7 @@ async def websocket_chat(websocket: WebSocket):
                             "runtime": "codex-local",
                         },
                     )
+                    active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
@@ -254,6 +255,7 @@ async def websocket_chat(websocket: WebSocket):
                             "runtime": "codex-local",
                         },
                     )
+                    active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
@@ -378,6 +380,7 @@ async def websocket_chat(websocket: WebSocket):
                             "runtime": "direct-local-chat",
                         },
                     )
+                    active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
@@ -404,6 +407,7 @@ async def websocket_chat(websocket: WebSocket):
                             "runtime": "direct-local-chat",
                         },
                     )
+                    active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
@@ -568,6 +572,7 @@ async def websocket_chat(websocket: WebSocket):
                     policy_mode=get_current_tool_policy_mode(),
                     summary=exc.summary,
                 )
+                active_turn_completed = True
                 await websocket.send_text(
                     WSResponse(
                         type="approval_required",
@@ -641,6 +646,7 @@ async def websocket_chat(websocket: WebSocket):
                         "request_id": llm_request_id,
                     },
                 )
+                active_turn_completed = True
                 await websocket.send_text(
                     WSResponse(
                         type="error",

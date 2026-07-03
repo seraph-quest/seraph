@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -138,6 +140,34 @@ async def test_browser_provider_inventory_endpoint_lists_staged_remote_modes(cli
     assert extension_relay["provider_kind"] == "extension_relay"
     assert extension_relay["runtime_state"] == "requires_boundary_contract"
     assert extension_relay["execution_mode"] == "boundary_contract_required"
+
+
+@pytest.mark.asyncio
+async def test_browser_session_capture_does_not_block_api_event_loop(client):
+    def slow_capture(_url: str, action: str = "extract") -> str:
+        assert action == "extract"
+        time.sleep(0.05)
+        return "Slow page body"
+
+    with patch("src.api.browser.browse_webpage", side_effect=slow_capture):
+        request_task = asyncio.create_task(
+            client.post(
+                "/api/browser/sessions",
+                json={
+                    "owner_session_id": "session-slow",
+                    "url": "https://example.test/slow",
+                    "capture": "extract",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+
+        loop_tick = asyncio.create_task(asyncio.sleep(0))
+        await asyncio.wait_for(loop_tick, timeout=0.01)
+        response = await request_task
+
+    assert response.status_code == 200
+    assert response.json()["session"]["owner_session_id"] == "session-slow"
 
 
 @pytest.mark.asyncio

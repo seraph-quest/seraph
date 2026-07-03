@@ -60,7 +60,7 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
                     "endpoint": endpoint,
                     "data": data,
                     "file_name": file_name,
-                    "file_bytes": image_file.read(),
+                    "file_bytes": image_file,
                     "media_type": media_type,
                     "headers": headers,
                     "timeout": self.timeout,
@@ -227,9 +227,9 @@ async def test_local_vlm_analyzer_honors_persisted_disabled_toggle(tmp_path, mon
 
 async def test_local_vlm_background_capacity_requires_free_worker(monkeypatch):
     payloads = [
-        {"queue": {"active": 0, "queued": 0, "workers": 1}},
-        {"queue": {"active": 1, "queued": 0, "workers": 1}},
-        {"queue": {"active": 0, "queued": 1, "workers": 1}},
+        {"queue": {"active": 0, "queued": 0, "workers": 1, "background_workers": 1}},
+        {"queue": {"active": 1, "queued": 0, "workers": 1, "background_workers": 1}},
+        {"queue": {"active": 1, "queued": 1, "workers": 1, "background_workers": 1}},
     ]
     calls = []
 
@@ -263,7 +263,7 @@ async def test_local_vlm_background_capacity_requires_free_worker(monkeypatch):
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
 
     assert await screenshot_semantic_analysis_accepting_background_work() is True
-    assert await screenshot_semantic_analysis_accepting_background_work() is False
+    assert await screenshot_semantic_analysis_accepting_background_work() is True
     assert await screenshot_semantic_analysis_accepting_background_work() is False
     assert calls == [
         {"endpoint": "http://gpu:8088/health", "timeout": 2.0},

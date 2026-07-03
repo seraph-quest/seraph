@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     screenshot_folder_ingest_limit: int = 100
     screenshot_folder_analysis_interval_seconds: int = 1
     screenshot_folder_analysis_limit: int = 100
-    screenshot_folder_analysis_concurrency: int = 1
+    screenshot_folder_analysis_concurrency: int = 2
     screenshot_folder_analysis_job_timeout_seconds: int = 30
     screenshot_observation_digest_enabled: bool = True
     screenshot_observation_digest_interval_min: int = 15

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
@@ -4450,6 +4451,24 @@ def test_close_sync_client_with_db_closes_stack_before_caller_side_drain():
 
     drain.assert_awaited_once_with(timeout_seconds=5.0)
     assert events == ["stack_closed", "drained"]
+
+
+def test_eval_browser_helper_does_not_block_event_loop():
+    def slow_browser(_url: str, *, action: str = "extract") -> str:
+        assert action == "extract"
+        time.sleep(0.05)
+        return "slow browser result"
+
+    async def _run() -> str:
+        with patch("src.evals.harness.browse_webpage", side_effect=slow_browser):
+            request_task = asyncio.create_task(
+                harness._browse_webpage_async("https://example.test/slow", action="extract")
+            )
+            await asyncio.sleep(0)
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.01)
+            return await request_task
+
+    assert asyncio.run(_run()) == "slow browser result"
 
 
 def test_runtime_eval_scenarios_expose_expected_details():

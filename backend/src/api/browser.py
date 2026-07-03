@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -41,8 +42,8 @@ class BrowserComputerUseControlActionRequest(BrowserSessionControlRequest):
     session_id: str = Field(..., min_length=1)
 
 
-def _capture_or_raise(url: str, capture: str) -> str:
-    content = browse_webpage(url.strip(), action=capture)
+async def _capture_or_raise(url: str, capture: str) -> str:
+    content = await asyncio.to_thread(browse_webpage, url.strip(), action=capture)
     if str(content or "").startswith("Error:"):
         raise HTTPException(status_code=400, detail=content)
     return content
@@ -117,7 +118,7 @@ async def open_browser_session(request: BrowserSessionOpenRequest):
     provider_info, provider_error = _resolve_browser_provider(request.provider)
     if provider_error:
         raise HTTPException(status_code=400, detail=provider_error)
-    content = _capture_or_raise(request.url, request.capture)
+    content = await _capture_or_raise(request.url, request.capture)
     payload = browser_session_runtime.open_session(
         owner_session_id=request.owner_session_id,
         url=request.url.strip(),
@@ -143,7 +144,7 @@ async def snapshot_browser_session(session_id: str, request: BrowserSessionSnaps
     existing = browser_session_runtime.get_session(session_id, owner_session_id=request.owner_session_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="browser_session_not_found")
-    content = _capture_or_raise(str(existing["url"]), request.capture)
+    content = await _capture_or_raise(str(existing["url"]), request.capture)
     payload = browser_session_runtime.snapshot_session(
         owner_session_id=request.owner_session_id,
         session_id=session_id,
@@ -177,7 +178,7 @@ async def control_browser_session(session_id: str, request: BrowserSessionContro
             raise HTTPException(status_code=409, detail=replay_state)
         session = replay_state["session"]
         capture = str(session.get("latest_capture") or "extract")
-        content = _capture_or_raise(str(session["url"]), capture)
+        content = await _capture_or_raise(str(session["url"]), capture)
         payload = browser_session_runtime.snapshot_session(
             owner_session_id=request.owner_session_id,
             session_id=session_id,

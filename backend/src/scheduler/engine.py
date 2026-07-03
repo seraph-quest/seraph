@@ -14,22 +14,22 @@ _scheduler: AsyncIOScheduler | None = None
 _scheduler_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _async_job_wrapper(coro_func, loop: asyncio.AbstractEventLoop):
+def _async_job_wrapper(coro_func, _loop: asyncio.AbstractEventLoop):
     """Wrap an async job function so APScheduler 3.x can run it.
 
-    APScheduler 3.x runs jobs in a ThreadPoolExecutor, so we need to schedule
-    the coroutine back onto the main event loop captured at init time.
+    Keep the returned callable async so AsyncIOScheduler tracks the real
+    coroutine lifetime without blocking the app loop.
     """
-    def wrapper():
-        future = asyncio.run_coroutine_threadsafe(coro_func(), loop)
-
-        def _log_failure(done_future: asyncio.Future) -> None:
-            try:
-                done_future.result()
-            except Exception:
-                logger.exception("Scheduled job %s failed", getattr(coro_func, "__name__", repr(coro_func)))
-
-        future.add_done_callback(_log_failure)
+    async def wrapper():
+        try:
+            if asyncio.get_running_loop() is _loop:
+                await coro_func()
+            else:
+                future = asyncio.run_coroutine_threadsafe(coro_func(), _loop)
+                await asyncio.wrap_future(future)
+        except Exception:
+            logger.exception("Scheduled job %s failed", getattr(coro_func, "__name__", repr(coro_func)))
+            raise
     return wrapper
 
 
@@ -210,7 +210,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
     for job in jobs:
         try:
-            _scheduler.add_job(**job, replace_existing=True)
+            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
         except Exception:
             logger.exception("Failed to register job: %s", job["id"])
 

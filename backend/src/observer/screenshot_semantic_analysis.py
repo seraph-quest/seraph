@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -75,9 +76,11 @@ async def screenshot_semantic_analysis_accepting_background_work(*, timeout_seco
         active = int(queue.get("active", 0))
         queued = int(queue.get("queued", 0))
         workers = int(queue.get("workers", 1))
+        background_workers = int(queue.get("background_workers", 1))
     except (TypeError, ValueError):
         return False
-    return active + queued < max(workers, 1)
+    capacity_window = max(workers + max(background_workers, 0), workers, 1)
+    return active + queued < capacity_window
 
 
 async def _screenshot_semantic_analysis_health(*, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
@@ -283,14 +286,14 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
         headers["Authorization"] = f"Bearer {settings.local_vlm_api_key.strip()}"
 
     try:
+        image_bytes = await asyncio.to_thread(image_path.read_bytes)
         async with httpx.AsyncClient(timeout=max(settings.local_vlm_timeout_seconds, 1)) as client:
-            with image_path.open("rb") as image_file:
-                response = await client.post(
-                    endpoint,
-                    data=data,
-                    files={"file": (image_path.name, image_file, _image_media_type(image_path))},
-                    headers=headers,
-                )
+            response = await client.post(
+                endpoint,
+                data=data,
+                files={"file": (image_path.name, image_bytes, _image_media_type(image_path))},
+                headers=headers,
+            )
         response.raise_for_status()
         payload = response.json()
         return parse_screenshot_analysis_output(_provider_analysis_payload(payload))

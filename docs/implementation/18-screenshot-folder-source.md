@@ -150,38 +150,50 @@ The development topology is concrete and should be verified exactly before debug
 ```text
 Seraph frontend       http://127.0.0.1:3001
   -> Seraph backend   http://127.0.0.1:8004
-  -> Mac VLM wrapper  http://127.0.0.1:8000
+  -> GPU VLM wrapper  http://192.168.1.26:8001
   -> GPU model server http://192.168.1.26:8000/v1
 ```
 
-The Mac-side VLM wrapper runs through Docker Compose to avoid local Python/runtime drift:
+The VLM wrapper runs through Docker Compose on the GPU server to avoid local Python/runtime drift and to keep request admission next to the one GPU:
 
 ```bash
-cd /Users/bigcube/Desktop/repos/vlm-screenshot-server
-docker compose up -d --build
+ssh jupyter
+cd /home/pawel/repos/vlm-screenshot-server
+HOST_BIND=192.168.1.26 HOST_PORT=8001 PORT=8001 \
+  VLM_BASE_URL=http://192.168.1.26:8000/v1 \
+  VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF \
+  CHAT_PROXY_ENABLED=true \
+  CHAT_PROXY_API_KEY=<strong-token> \
+  QUEUE_MAX_SIZE=1000 QUEUE_WORKERS=1 QUEUE_BACKGROUND_WORKERS=1 \
+  docker compose up -d --build screenshot-vlm
 ```
 
-The container publishes `127.0.0.1:8000` on the Mac and forwards to `http://192.168.1.26:8000/v1`. Docker Desktop must be running on the Mac for this path. If Docker is absent or stopped, start Docker Desktop before declaring the VLM service unavailable.
+The container publishes `192.168.1.26:8001` and forwards to `http://192.168.1.26:8000/v1`. Docker Desktop on the Mac is not part of the healthy product path for the wrapper.
 
 Required readiness checks from the Mac:
 
 ```bash
-cd /Users/bigcube/Desktop/repos/vlm-screenshot-server
-docker compose ps
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/health/backend
-
 cd /Users/bigcube/Desktop/repos/seraph
 ./manage.sh -e dev local status
 curl http://127.0.0.1:8004/health
+curl http://192.168.1.26:8001/health
+curl http://192.168.1.26:8001/health/backend
+curl http://192.168.1.26:8001/queue/status
+set -a && source .env.dev && set +a
+PYTHONPATH=backend backend/.venv/bin/python scripts/diagnose_gpu_vlm_route.py
 ```
 
 Interpretation:
 
 - `127.0.0.1:8004/health` proves Seraph backend is running.
-- `docker compose ps` plus `127.0.0.1:8000/health` proves the Dockerized Mac VLM wrapper is running.
-- `127.0.0.1:8000/health/backend` proves the wrapper can reach the GPU model server at `192.168.1.26:8000/v1`.
+- `192.168.1.26:8001/health` proves the Dockerized GPU VLM wrapper is reachable from the Mac.
+- `192.168.1.26:8001/health/backend` proves the wrapper can reach the GPU model server at `192.168.1.26:8000/v1`.
+- `192.168.1.26:8001/queue/status` proves Seraph can observe admission pressure before feeding screenshot work.
 - A `502` from `/health/backend` means the wrapper is up but the GPU backend edge is broken.
+
+Seraph also probes these three wrapper endpoints from the running backend process and exposes the safe result in `/api/runtime/status` and `/api/settings/artifact-storage` as `vlm_runtime.live_probe`. The settings UI renders this as a `Reach` row for both screenshot analysis and the local Gemma runtime. This status distinguishes "configured for GPU wrapper" from "this Seraph process can actually reach the direct LAN route"; diagnostic SSH forwards are not a substitute for `live_probe.reachable=true` on the direct `SERAPH_VLM_BASE_URL`.
+
+`scripts/diagnose_gpu_vlm_route.py` is the operator-shell receipt command for the direct route. It reads `SERAPH_VLM_BASE_URL`, `SERAPH_VLM_API_KEY`, and `LOCAL_VLM_MODEL`/`LOCAL_MODEL`, prints sanitized JSON, and exits non-zero when the direct wrapper route, chat check, or requested image check fails. Loopback and localhost base URLs are rejected by default so a tunnel cannot accidentally pass as the direct-route receipt. Use `--allow-non-direct-base-url` only for explicitly labeled diagnostic bridge checks. Use `--image /path/to/screenshot.png` when the validation receipt also needs a wrapper-level `/v1/analyze-file` check.
 
 For an RTX 3090 Ti 24 GB server, the current preferred Gemma-first target is Unsloth's Gemma 4 26B-A4B quantized GGUF/Dynamic 4-bit path. Unsloth's Gemma 4 docs list practical 4-bit memory footprints for this card class, including the 26B-A4B family in the high-teens GB range.
 
@@ -237,17 +249,19 @@ Test the wrapper with a screenshot:
 
 ```bash
 curl -F "file=@/path/to/screenshot.png" \
-  http://GPU_SERVER_IP:8088/v1/analyze-file
+  http://192.168.1.26:8001/v1/analyze-file
 ```
 
 Seraph-side first-class `local-vlm` wiring is available behind explicit settings:
 
 ```env
 SCREEN_ANALYSIS_PROVIDER=local-vlm
-LOCAL_VLM_BASE_URL=http://127.0.0.1:8000
-LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
-LOCAL_LLM_API_BASE=http://127.0.0.1:8000/v1
-LOCAL_LLM_API_KEY=<same-local-token-as-wrapper-CHAT_PROXY_API_KEY>
+SERAPH_VLM_MODE=gpu-server
+SERAPH_VLM_BASE_URL=http://192.168.1.26:8001
+SERAPH_VLM_BACKEND_URL=http://192.168.1.26:8000/v1
+SERAPH_VLM_API_KEY=<same-token-as-wrapper-CHAT_PROXY_API_KEY>
+SERAPH_VLM_FEEDER_WINDOW=2
+LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF
 LOCAL_MODEL=openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF
 LOCAL_RUNTIME_PATHS=screenshot_observation_digest,end_of_day_goal_report,chat_agent,onboarding_agent,orchestrator_agent,strategist_agent,session_consolidation
 RUNTIME_PROFILE_PREFERENCES="chat_agent=local-gemma-chat-thinking;onboarding_agent=local-gemma-chat-thinking;orchestrator_agent=local-gemma-chat-thinking;strategist_agent=local-gemma-strategist-fast;end_of_day_goal_report=local-gemma-report-thinking;screenshot_observation_digest=local-gemma-report-thinking"
@@ -256,6 +270,16 @@ SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF=true
 ```
 
 Quote `RUNTIME_PROFILE_PREFERENCES` whenever it contains semicolons. The managed local launcher sources `.env.dev` as shell, so an unquoted value is split into partial shell assignments and Seraph can silently lose the `chat_agent` profile preference.
+
+The production-like local topology is direct private LAN, not an SSH tunnel:
+
+```text
+Seraph backend     http://127.0.0.1:8004
+  -> GPU VLM       http://192.168.1.26:8001
+  -> llama.cpp     http://192.168.1.26:8000/v1
+```
+
+SSH forwarding is acceptable only as a diagnostic bridge for an agent sandbox that cannot open the LAN route. It is not the operator runtime contract, and Seraph status must not require or imply a tunnel.
 
 When configured, `screenshot_folder_analysis` posts the screenshot image plus Seraph's strict analysis prompt to `/v1/analyze-file`, validates the returned JSON against `seraph.screenshot_analysis.v1`, and stores the privacy-safe semantic payload inside the existing Seraph `ScreenObservation`.
 If the provider is not configured or fails, Seraph still keeps the screenshot metadata observation and records a bounded analyzer status instead of retrying the same image as a new screenshot.
@@ -288,11 +312,12 @@ Seraph-side controls:
 - `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS` controls how often Seraph checks for the next background screenshot job.
 - `SCREENSHOT_FOLDER_ANALYSIS_LIMIT` caps the number of pending or retryable failed observations eligible for background analysis policy. The scheduled feeder clamps each live tick to the configured concurrency window, so a large backlog drains over repeated short ticks instead of one long scheduler-owned batch.
 - `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY` caps concurrent Seraph HTTP calls admitted into the wrapper feeder window, not concurrent GPU inference. In the one-GPU local topology the default is `2`, which means one active background request plus one queued background request. Priority is enforced at wrapper admission for the next job, never by interrupting the job already running on the GPU.
+- `SERAPH_VLM_FEEDER_WINDOW` bounds how much work Seraph may keep active or queued in the wrapper. The default is `2`: enough to avoid GPU idle time between short screenshot jobs, but small enough that newly arrived interactive chat becomes the next accepted high-priority job after the current GPU job finishes.
 - `SCREENSHOT_FOLDER_ANALYSIS_JOB_TIMEOUT_SECONDS` is the per-image base timeout. The scheduled job applies it to the small feeder batch selected for the current tick, preventing a locked SQLite write or hung wrapper call from leaving the scheduler permanently stuck.
 - `GUARDIAN_STATE_TIMEOUT_SECONDS` bounds chat context assembly. If guardian/operator context is slow or degraded, chat falls back to a minimal agent context instead of leaving the operator stuck at "responding" before the model request is dispatched.
 - `LOCAL_RUNTIME_CONTEXT_WINDOW_TOKENS` is Seraph's configured prompt budget for local Gemma-compatible chat backends. It must match the GPU server `--ctx-size` operationally; the current local target is `32768`.
 - `LOCAL_RUNTIME_PROMPT_SAFETY_RATIO`, `LOCAL_RUNTIME_TOOL_RESERVE_TOKENS`, and `LOCAL_RUNTIME_MIN_SECTION_TOKENS` control deterministic prompt compaction for local runtime profiles. Seraph compacts guardian state, observer context, memories, active skills, and conversation history before creating the `ToolCallingAgent`, while preserving the fixed Seraph identity instructions. This is the Seraph-side guardrail that prevents oversized system prompts from reaching the local backend as `exceed_context_size_error`.
-- `LOCAL_MODEL` must be set alongside `LOCAL_LLM_API_BASE` for the built-in `local-gemma-*` runtime profiles to register. Use the LiteLLM `openai/` prefix for this value because Seraph talks to the Docker wrapper through an OpenAI-compatible API. Keep `LOCAL_VLM_MODEL` as the raw wrapper/backend model name. Without `LOCAL_MODEL`, `chat_agent=local-gemma-chat-thinking` cannot resolve and Seraph can fall back to the cloud default profile.
+- `LOCAL_MODEL` must be set for the built-in `local-gemma-*` runtime profiles to register. Use the LiteLLM `openai/` prefix for this value because Seraph talks to the Docker wrapper through an OpenAI-compatible API. `SERAPH_VLM_BASE_URL` now supplies the OpenAI-compatible chat path as `${SERAPH_VLM_BASE_URL}/v1` when `LOCAL_LLM_API_BASE` is not set. Keep `LOCAL_VLM_MODEL` as the raw wrapper/backend model name. Without `LOCAL_MODEL`, `chat_agent=local-gemma-chat-thinking` cannot resolve and Seraph can fall back to the cloud default profile.
 - Fresh profiles use `onboarding_agent` before normal chat. Configure `onboarding_agent=local-gemma-chat-thinking` alongside `chat_agent=local-gemma-chat-thinking`, or the first "Hello" from a new operator can still route through the cloud default while the normal chat profile is correctly registered.
 - If delegation is enabled, chat uses `orchestrator_agent`, so `orchestrator_agent=local-gemma-chat-thinking` must also be configured. Otherwise the delegated chat surface can still route through the cloud default while the local chat profile is correctly registered.
 - Scheduled strategist/proactive checks use `strategist_agent`, so `strategist_agent=local-gemma-strategist-fast` must be configured with the other local chat-style paths. The strategist decision path is a bounded direct JSON completion, not a multi-step tool-calling agent loop, because local Gemma can otherwise keep retrying parse-wobbly JSON as malformed tool calls. The strategist profile disables thinking so the JSON lands in `message.content` instead of being consumed as hidden reasoning.
@@ -317,7 +342,7 @@ Seraph ships a proof harness for local Gemma profile behavior:
 ```bash
 PYTHONPATH=. WORKSPACE_DIR=/tmp/seraph-dev-data \
   uv run python ../scripts/verify_local_gemma_profiles.py \
-  --base-url http://127.0.0.1:8000/v1 \
+  --base-url http://192.168.1.26:8001/v1 \
   --timeout-seconds 120
 ```
 

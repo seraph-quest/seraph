@@ -69,6 +69,8 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
             return FakeResponse()
 
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_api_key", "")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_model", "gemma-4-test")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_api_key", "secret-token")
@@ -108,6 +110,51 @@ async def test_local_vlm_analyzer_posts_prompt_file_and_validates_response(tmp_p
         "X-Seraph-Runtime-Profile": "screenshot_fast",
     }
     assert calls[0]["timeout"] == 9
+
+
+async def test_gpu_vlm_runtime_overrides_legacy_local_vlm_base_url(tmp_path, monkeypatch):
+    image = tmp_path / "capture.png"
+    image.write_bytes(b"png bytes")
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "analysis": {
+                    "summary": "The GPU-hosted wrapper handled the screenshot.",
+                    "activity_type": "reviewing",
+                    "confidence": 0.8,
+                }
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, endpoint, *, data, files, headers):
+            calls.append({"endpoint": endpoint, "headers": headers})
+            return FakeResponse()
+
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://127.0.0.1:8000")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "http://192.168.1.26:8001")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_api_key", "gpu-token")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
+
+    analysis = await analyze_screenshot_image(image, {})
+
+    assert analysis is not None
+    assert calls[0]["endpoint"] == "http://192.168.1.26:8001/v1/analyze-file"
+    assert calls[0]["headers"]["Authorization"] == "Bearer gpu-token"
 
 
 async def test_local_vlm_analyzer_is_disabled_without_provider(tmp_path, monkeypatch):
@@ -161,6 +208,7 @@ async def test_local_vlm_analyzer_uses_persisted_screen_analysis_provider(tmp_pa
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "")
     monkeypatch.setattr("src.observer.screen_analysis_settings.settings.local_vlm_model", "")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_model", "")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
     write_screen_analysis_settings(
@@ -227,9 +275,9 @@ async def test_local_vlm_analyzer_honors_persisted_disabled_toggle(tmp_path, mon
 
 async def test_local_vlm_background_capacity_requires_free_worker(monkeypatch):
     payloads = [
-        {"queue": {"active": 0, "queued": 0, "workers": 1, "background_workers": 1}},
-        {"queue": {"active": 1, "queued": 0, "workers": 1, "background_workers": 1}},
-        {"queue": {"active": 1, "queued": 1, "workers": 1, "background_workers": 1}},
+        {"active": 0, "queued": 0, "workers": 1, "background_workers": 1},
+        {"active": 1, "queued": 0, "workers": 1, "background_workers": 1},
+        {"active": 1, "queued": 1, "workers": 1, "background_workers": 1},
     ]
     calls = []
 
@@ -259,18 +307,20 @@ async def test_local_vlm_background_capacity_requires_free_worker(monkeypatch):
             return FakeResponse(payloads.pop(0))
 
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_feeder_window", 2)
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
 
     assert await screenshot_semantic_analysis_accepting_background_work() is True
     assert await screenshot_semantic_analysis_accepting_background_work() is True
     assert await screenshot_semantic_analysis_accepting_background_work() is False
     assert calls == [
-        {"endpoint": "http://gpu:8088/health", "timeout": 2.0},
+        {"endpoint": "http://gpu:8088/queue/status", "timeout": 2.0},
         {"endpoint": "http://gpu:8088/health/backend", "timeout": 2.0},
-        {"endpoint": "http://gpu:8088/health", "timeout": 2.0},
+        {"endpoint": "http://gpu:8088/queue/status", "timeout": 2.0},
         {"endpoint": "http://gpu:8088/health/backend", "timeout": 2.0},
-        {"endpoint": "http://gpu:8088/health", "timeout": 2.0},
+        {"endpoint": "http://gpu:8088/queue/status", "timeout": 2.0},
         {"endpoint": "http://gpu:8088/health/backend", "timeout": 2.0},
     ]
 
@@ -303,8 +353,10 @@ async def test_local_vlm_background_capacity_requires_backend_health(monkeypatch
             return FakeResponse(200, {"queue": {"active": 0, "queued": 0, "workers": 1}})
 
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "")
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_feeder_window", 2)
     monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
 
     assert await screenshot_semantic_analysis_accepting_background_work() is False
-    assert calls == ["http://gpu:8088/health", "http://gpu:8088/health/backend"]
+    assert calls == ["http://gpu:8088/queue/status", "http://gpu:8088/health/backend"]

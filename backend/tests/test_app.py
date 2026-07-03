@@ -4,6 +4,16 @@ from unittest.mock import patch
 from config.settings import settings
 
 
+_STUBBED_VLM_PROBE = {
+    "checked": False,
+    "reachable": False,
+    "reason": "test_stub",
+    "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
+    "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
+    "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
+}
+
+
 @pytest.mark.asyncio
 async def test_cors_allows_loopback_dev_origin(client):
     response = await client.options(
@@ -76,6 +86,41 @@ async def test_runtime_status_reports_effective_local_gemma_chat_profile(client)
     assert payload["active_profile"] == "local-gemma-chat-thinking"
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == "openrouter/x-ai/grok-4.1-fast"
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_exposes_gpu_vlm_runtime_and_chat_profile(client):
+    with (
+        patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", ""),
+        patch.object(settings, "seraph_vlm_mode", "gpu-server"),
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "seraph_vlm_backend_url", "http://192.168.1.26:8000/v1"),
+        patch.object(settings, "seraph_vlm_api_key", "secret-token"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+    ):
+        response = await client.get("/api/runtime/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "local-gemma"
+    assert payload["api_base"] == "http://192.168.1.26:8001/v1"
+    assert payload["active_profile"] == "local-gemma-chat-thinking"
+    assert payload["vlm_runtime"] == {
+        "mode": "gpu-server",
+        "configured": True,
+        "base_url": "http://192.168.1.26:8001",
+        "backend_url": "http://192.168.1.26:8000/v1",
+        "chat_api_base": "http://192.168.1.26:8001/v1",
+        "queue_status_endpoint": "http://192.168.1.26:8001/queue/status",
+        "health_endpoint": "http://192.168.1.26:8001/health",
+        "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
+        "api_key_configured": True,
+        "feeder_window": 2,
+        "live_probe": _STUBBED_VLM_PROBE,
+    }
+    assert "secret-token" not in str(payload)
 
 
 @pytest.mark.asyncio

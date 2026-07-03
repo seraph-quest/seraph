@@ -139,6 +139,25 @@ def reset_llm_target_health():
 
 
 @pytest.fixture(autouse=True)
+def stub_vlm_runtime_probe():
+    async def _probe(*, timeout_seconds: float = 0.75):
+        return {
+            "checked": False,
+            "reachable": False,
+            "reason": "test_stub",
+            "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
+            "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
+            "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
+        }
+
+    with (
+        patch("src.app.probe_effective_vlm_runtime", _probe),
+        patch("src.api.settings.probe_effective_vlm_runtime", _probe),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def reset_bounded_snapshot_cache():
     _reset_bounded_guardian_snapshot_cache()
     yield

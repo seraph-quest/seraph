@@ -316,3 +316,60 @@ async def test_latest_local_runtime_profile_proof_rejects_config_mismatch(tmp_pa
     assert mismatched["safe_for_single_backend_profile_routing"] is False
     assert "base URL" in " ".join(mismatched["notes"])
     assert "model" in " ".join(mismatched["notes"])
+
+
+async def test_local_runtime_profile_verifier_uses_gpu_vlm_base_when_llm_base_missing(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        is_success = True
+
+        def __init__(self, payload):
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, *, headers):
+            calls.append({"method": "GET", "url": url, "headers": headers})
+            return FakeResponse({"status": "ok"})
+
+        async def post(self, url, *, headers, json):
+            calls.append({"method": "POST", "url": url, "headers": headers, "json": json})
+            profile = json["metadata"]["runtime_profile"]
+            if profile == "screenshot_fast":
+                message = {"content": '{"profile":"screenshot_fast","ok":true}'}
+            else:
+                message = {"content": "PROFILE_OK"}
+            return FakeResponse({"choices": [{"message": message}]})
+
+    monkeypatch.setattr("src.local_runtime_profile_verifier.settings.local_llm_api_base", "")
+    monkeypatch.setattr("src.local_runtime_profile_verifier.settings.seraph_vlm_base_url", "http://192.168.1.26:8001")
+    monkeypatch.setattr("src.local_runtime_profile_verifier.settings.seraph_vlm_api_key", "gpu-token")
+    monkeypatch.setattr("src.local_runtime_profile_verifier.settings.local_model", "openai/unsloth/gemma-test")
+    monkeypatch.setattr("src.local_runtime_profile_verifier.httpx.AsyncClient", FakeAsyncClient)
+
+    receipt = await verify_local_runtime_profiles(output_dir=tmp_path)
+
+    assert receipt["base_url"] == "http://192.168.1.26:8001/v1"
+    models_call = next(call for call in calls if call["url"].endswith("/models"))
+    assert models_call["url"] == "http://192.168.1.26:8001/v1/models"
+    assert models_call["headers"]["Authorization"] == "Bearer gpu-token"
+    completion_calls = [call for call in calls if call["method"] == "POST"]
+    assert completion_calls
+    assert all(call["url"] == "http://192.168.1.26:8001/v1/chat/completions" for call in completion_calls)

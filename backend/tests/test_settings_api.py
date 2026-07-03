@@ -122,6 +122,7 @@ async def test_artifact_storage_settings_exposes_safe_operator_posture(client, t
         patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
         patch.object(settings, "local_llm_api_base", ""),
         patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "seraph_vlm_base_url", ""),
         patch.object(settings, "screen_analysis_provider", ""),
     ):
         resp = await client.get("/api/settings/artifact-storage")
@@ -174,6 +175,40 @@ async def test_screen_analysis_settings_exposes_env_screenshot_folder_and_local_
     assert data["model"] == "gemma-local"
     assert data["screenshot_folder"] == str(screenshot_root.resolve())
     assert data["screenshot_folder_source"] == "SERAPH_SCREENSHOT_FOLDER"
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, tmp_path, monkeypatch):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", ""),
+        patch.object(settings, "seraph_vlm_mode", "gpu-server"),
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "seraph_vlm_backend_url", "http://192.168.1.26:8000/v1"),
+        patch.object(settings, "seraph_vlm_api_key", "secret-token"),
+    ):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    runtime = data["local_runtime"]["vlm_runtime"]
+    assert runtime["mode"] == "gpu-server"
+    assert runtime["base_url"] == "http://192.168.1.26:8001"
+    assert runtime["backend_url"] == "http://192.168.1.26:8000/v1"
+    assert runtime["chat_api_base"] == "http://192.168.1.26:8001/v1"
+    assert runtime["queue_status_endpoint"] == "http://192.168.1.26:8001/queue/status"
+    assert runtime["api_key_configured"] is True
+    assert runtime["live_probe"]["checked"] is False
+    assert runtime["live_probe"]["reason"] == "test_stub"
+    assert data["screenshot_folder"]["analysis"]["runtime"] == runtime
+    assert data["local_runtime"]["gateway_configured"] is True
+    assert data["local_runtime"]["vlm_base_url_configured"] is True
+    assert "secret-token" not in str(data)
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from config.settings import settings
 from src.llm_runtime import is_local_runtime_profile, resolve_runtime_profile
 from src.local_runtime_profile_verifier import latest_local_runtime_profile_proof
+from src.vlm_runtime import effective_vlm_chat_api_base
 
 
 _VERIFIED_SCREEN_DERIVED_PROFILES = {
@@ -69,7 +70,7 @@ def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDecision:
         )
 
     proof_status = latest_local_runtime_profile_proof(
-        expected_base_url=settings.local_llm_api_base or settings.local_vlm_base_url,
+        expected_base_url=effective_vlm_chat_api_base(),
         expected_model=settings.local_model or settings.local_vlm_model or settings.default_model,
     )
     if proof_status.get("safe_for_single_backend_profile_routing") is True:

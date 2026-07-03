@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -28,6 +29,11 @@ def _default_api_key() -> str:
         or os.getenv("LOCAL_LLM_API_KEY")
         or ""
     ).strip()
+
+
+def _is_direct_route_candidate(base_url: str) -> bool:
+    host = (urlparse(base_url).hostname or "").lower()
+    return host not in {"", "localhost", "127.0.0.1", "::1"}
 
 
 def _endpoint_result(response: httpx.Response) -> dict[str, Any]:
@@ -145,10 +151,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=_default_base_url(), help="VLM wrapper base URL, for example http://192.168.1.26:8001")
     parser.add_argument("--model", default=_default_model(), help="Raw wrapper/backend model id")
-    parser.add_argument("--api-key", default=_default_api_key(), help="Optional wrapper API key; never printed")
+    parser.add_argument(
+        "--api-key",
+        default=_default_api_key(),
+        help="Optional wrapper API key; never printed, but env vars are preferred because CLI args can leak via shell history or process listings",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     parser.add_argument("--skip-chat", action="store_true", help="Only check wrapper health endpoints")
     parser.add_argument("--image", type=Path, default=None, help="Optional screenshot path for /v1/analyze-file")
+    parser.add_argument(
+        "--allow-non-direct-base-url",
+        action="store_true",
+        help="Allow loopback or localhost base URLs for diagnostic bridge checks; receipts are marked non-direct",
+    )
     args = parser.parse_args()
 
     base_url = str(args.base_url or "").strip().rstrip("/")
@@ -157,10 +172,28 @@ def main() -> int:
         raise SystemExit("missing --base-url or SERAPH_VLM_BASE_URL")
     if not model and not args.skip_chat:
         raise SystemExit("missing --model or LOCAL_VLM_MODEL/LOCAL_MODEL")
+    direct_route_candidate = _is_direct_route_candidate(base_url)
+    if not direct_route_candidate and not args.allow_non_direct_base_url:
+        print(
+            json.dumps(
+                {
+                    "base_url": base_url,
+                    "direct_route_candidate": False,
+                    "reachable": False,
+                    "validation_ok": False,
+                    "error": "non_direct_base_url",
+                    "hint": "Use SERAPH_VLM_BASE_URL=http://192.168.1.26:8001 for direct-route receipts, or pass --allow-non-direct-base-url for diagnostic bridge checks.",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 3
 
     with httpx.Client(timeout=max(args.timeout_seconds, 0.25)) as client:
         result: dict[str, Any] = {
             "base_url": base_url,
+            "direct_route_candidate": direct_route_candidate,
             "model": model,
             "api_key_configured": bool(args.api_key),
             "health": _get_json(client, base_url + "/health"),
@@ -176,9 +209,15 @@ def main() -> int:
             result["chat"] = _post_chat(client, base_url, model, args.api_key)
         if args.image is not None:
             result["analyze_file"] = _post_analyze_file(client, base_url, model, args.api_key, args.image)
+        result["validation_ok"] = bool(
+            result["reachable"]
+            and result["direct_route_candidate"]
+            and (args.skip_chat or result.get("chat", {}).get("ok"))
+            and (args.image is None or result.get("analyze_file", {}).get("ok"))
+        )
 
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result.get("reachable") else 2
+    return 0 if result.get("validation_ok") else 2
 
 
 if __name__ == "__main__":

@@ -409,6 +409,15 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
         }
         status_counts["unknown"] = max(total_observations - sum(status_counts.values()), 0)
 
+        visual_run_result = await db.execute(
+            select(ScreenObservation.details_json)
+            .where(*base_filters)
+            .where(col(ScreenObservation.details_json).contains("screenshot_visual_run:"))
+        )
+        visual_runs = _screenshot_visual_run_summary(
+            [str(item or "") for item in visual_run_result.scalars().all()]
+        )
+
         latest_observation_result = await db.execute(
             select(ScreenObservation.timestamp)
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
@@ -464,6 +473,8 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
         "analysis_status": status_counts,
         "analysis_backlog": status_counts["pending"] + status_counts["needs_reanalysis"] + status_counts["unknown"],
         "analysis_failures": status_counts["failed"],
+        "visual_run_count": visual_runs["visual_run_count"],
+        "visual_suppressed_count": visual_runs["visual_suppressed_count"],
         "latest_observation_at": latest_observation_at,
         "latest_analyzed_at": latest_analyzed_at,
         "latest_failure": latest_failure,
@@ -484,11 +495,37 @@ def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = No
         },
         "analysis_backlog": 0,
         "analysis_failures": 0,
+        "visual_run_count": 0,
+        "visual_suppressed_count": 0,
         "latest_observation_at": None,
         "latest_analyzed_at": None,
         "latest_failure": latest_failure,
         "digest_count": 0,
         "latest_digest_at": None,
+    }
+
+
+def _screenshot_visual_run_summary(details_payloads: list[str]) -> dict[str, int]:
+    visual_run_count = 0
+    visual_suppressed_count = 0
+    for payload in details_payloads:
+        for item in _screen_observation_details(payload):
+            if not (isinstance(item, str) and item.startswith("screenshot_visual_run:")):
+                continue
+            try:
+                visual_run = json.loads(item.removeprefix("screenshot_visual_run:"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(visual_run, dict):
+                continue
+            visual_run_count += 1
+            try:
+                visual_suppressed_count += max(int(visual_run.get("suppressed_count") or 0), 0)
+            except (TypeError, ValueError):
+                continue
+    return {
+        "visual_run_count": visual_run_count,
+        "visual_suppressed_count": visual_suppressed_count,
     }
 
 

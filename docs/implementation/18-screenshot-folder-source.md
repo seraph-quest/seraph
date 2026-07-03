@@ -124,7 +124,7 @@ Semantic analysis is a second scheduler lane, controlled by `SCREENSHOT_FOLDER_A
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
-The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, analyzer status mix, backlog, failures, latest observation/analyzed timestamps, digest count, and latest digest timestamp. These metadata summaries are bounded with short degraded fallbacks so the Settings modal stays usable even when filesystem, DB, proof, or receipt metadata is slow. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed and rolled into report-ready digest windows.
+The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, analyzer status mix, backlog, failures, visual run count, visual suppression count, latest observation/analyzed timestamps, digest count, and latest digest timestamp. These metadata summaries are bounded with short degraded fallbacks so the Settings modal stays usable even when filesystem, DB, proof, or receipt metadata is slow. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed, compressed before VLM, and rolled into report-ready digest windows.
 
 The same surface exposes local Gemma runtime profile status: configured gateway state, active model, built-in profile contracts, latest profile-proof receipt, and whether single-backend profile routing is currently safe.
 
@@ -308,7 +308,7 @@ Observability receipts:
 - artifact-storage status exposes observation count, analyzer status mix, backlog, failures, and latest analyzed timestamp.
 - local Gemma profile proof receipts verify that profile-specific request controls are accepted by the shared backend.
 
-This means "GPU constantly working" is enforced as a joint contract: Seraph continuously feeds bounded pending work when the VLM is healthy, and the wrapper must keep GPU workers busy from its priority queue whenever accepted work exists.
+This means "GPU constantly working" is enforced as a joint contract: Seraph continuously feeds bounded pending representative work when the VLM is healthy, and the wrapper must keep GPU workers busy from its priority queue whenever accepted work exists. Seraph should not keep the GPU busy with visually duplicate screenshots when a cheap local comparison can preserve the elapsed time as one visual-state run.
 
 ## Local Gemma Profile Proof
 
@@ -344,6 +344,8 @@ Each screenshot observation carries Seraph-owned analysis status details:
 - `needs_reanalysis` when a stored semantic payload was produced by an older prompt, schema, or configured model
 
 Duplicate screenshot files are still suppressed by image SHA-256, so the same image cannot accidentally create a second semantic observation.
+
+Before VLM enqueue, Seraph also applies a conservative local visual-run dedupe gate against the current screenshot-folder representative. This gate computes a small grayscale fingerprint locally, compares only the new image against the current representative, and suppresses only extremely similar byte-different screenshots with matching dimensions and format. Suppression updates a `screenshot_visual_run` detail on the representative with `representative_path`, `first_seen`, `last_seen`, `suppressed_count`, `latest_suppressed_path`, and reason counts. The representative observation keeps the elapsed duration, so reports treat the interval as time spent in the same visual state rather than deleting it. A long unchanged run refreshes after the bounded dedupe window instead of suppressing forever, and manual reanalysis still targets the representative observation.
 Reanalysis is explicit and local-only through `POST /api/observer/screen-artifacts/{observation_id}/reanalyze`; callers must provide one of `prompt_version_changed`, `model_version_changed`, `provider_failure_retry`, or `manual_operator_request`.
 Reanalysis replaces the semantic analysis/status details on the existing observation and preserves the original screenshot hash and file mtime-derived capture timestamp.
 
@@ -389,7 +391,7 @@ Full screenshot intelligence loop receipt:
 - local screenshot image file is scanned from the configured folder
 - Seraph computes its own hash and mtime-derived capture timestamp
 - Seraph runs semantic analysis through its own analyzer boundary
-- duplicate image ingestion remains hash-based
+- duplicate image ingestion remains hash-based plus conservative current-representative visual-run suppression before VLM
 - rolling digest stores redacted text and source observation ids
 - end-of-day report consumes digest text and compares against active goals
 - settings status shows observation, analyzer, backlog, failure, and digest counts

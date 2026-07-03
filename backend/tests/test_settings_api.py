@@ -256,6 +256,18 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
                             sort_keys=True,
                             separators=(",", ":"),
                         ),
+                        "screenshot_visual_run:"
+                        + json.dumps(
+                            {
+                                "schema_version": "seraph.screenshot_visual_dedupe.v1",
+                                "representative_path": str(screenshot_root / "capture-1.png"),
+                                "first_seen": observed_at.isoformat(),
+                                "last_seen": datetime(2026, 6, 30, 9, 10, tzinfo=timezone.utc).isoformat(),
+                                "suppressed_count": 4,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                         "screenshot_analysis_status:"
                         + json.dumps(
                             {
@@ -298,6 +310,8 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["analysis"]["observation_count"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_failures"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_backlog"] == 0
+    assert data["screenshot_folder"]["analysis"]["visual_run_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["visual_suppressed_count"] == 4
     assert data["screenshot_folder"]["analysis"]["folder_image_count"] == 1
     assert data["screenshot_folder"]["analysis"]["ingested_count"] == 1
     assert data["screenshot_folder"]["analysis"]["remaining_to_ingest"] == 0

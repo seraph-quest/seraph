@@ -56,10 +56,15 @@ class ScreenshotFolderAnalysisResult:
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
+SCREENSHOT_VISUAL_RUN_PREFIX = "screenshot_visual_run:"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
 _SCAN_LOCK = asyncio.Lock()
 _MAX_ANALYSIS_ATTEMPTS = 3
 _FAILED_ANALYSIS_RETRY_AFTER = timedelta(minutes=2)
+_VISUAL_DEDUPE_VERSION = "seraph.screenshot_visual_dedupe.v1"
+_VISUAL_FINGERPRINT_SIZE = 8
+_VISUAL_DUPLICATE_MAX_DISTANCE = 2
+_VISUAL_DEDUPE_REFRESH_AFTER = timedelta(minutes=10)
 
 
 def resolve_screenshot_folder(configured: str | None = None) -> Path:
@@ -265,14 +270,44 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
     if not resolved.is_file():
         raise ScreenshotFolderImageError("image file not found")
 
-    image_sha256 = await asyncio.to_thread(_sha256_file, resolved)
-    if await _image_already_ingested(image_sha256):
-        return None
-
     stat = resolved.stat()
     metadata = await asyncio.to_thread(local_image_metadata, resolved)
     captured_at, captured_at_source = _capture_timestamp(resolved, root)
     relative_path = resolved.relative_to(root).as_posix()
+
+    image_sha256 = await asyncio.to_thread(_sha256_file, resolved)
+    existing_duplicate = await _image_already_ingested(image_sha256)
+    if existing_duplicate is not None:
+        duplicate_details = _observation_details(existing_duplicate)
+        duplicate_artifacts = _capture_artifacts_from_details(duplicate_details) or {}
+        duplicate_path = Path(str(duplicate_artifacts.get("image_path") or "")).expanduser().resolve()
+        if duplicate_path == resolved:
+            return None
+        await _extend_visual_run(
+            existing_duplicate,
+            suppressed_path=resolved,
+            suppressed_at=captured_at,
+            reason="exact_hash_duplicate",
+        )
+        return None
+
+    visual_fingerprint = await asyncio.to_thread(_visual_fingerprint, resolved)
+    visual_duplicate = await _current_visual_duplicate(
+        root=root,
+        captured_at=captured_at,
+        image_path=resolved,
+        metadata=metadata,
+        visual_fingerprint=visual_fingerprint,
+    )
+    if visual_duplicate is not None:
+        await _extend_visual_run(
+            visual_duplicate,
+            suppressed_path=resolved,
+            suppressed_at=captured_at,
+            reason="near_visual_duplicate",
+        )
+        return None
+
     capture_id = image_sha256[:16]
     artifacts = {
         "id": capture_id,
@@ -289,9 +324,25 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         "width": metadata.get("width"),
         "height": metadata.get("height"),
     }
+    if visual_fingerprint is not None:
+        artifacts["visual_fingerprint"] = visual_fingerprint
+        artifacts["visual_dedupe_version"] = _VISUAL_DEDUPE_VERSION
     details = [
         f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}",
         "capture_artifacts:" + json.dumps(artifacts, sort_keys=True, separators=(",", ":")),
+        SCREENSHOT_VISUAL_RUN_PREFIX
+        + json.dumps(
+            {
+                "schema_version": _VISUAL_DEDUPE_VERSION,
+                "representative_path": str(resolved),
+                "first_seen": captured_at.isoformat(),
+                "last_seen": captured_at.isoformat(),
+                "suppressed_count": 0,
+                "suppressed_reasons": {},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     ]
     if screenshot_semantic_analysis_enabled():
         details.append(screenshot_analysis_status_detail("pending", reason="queued_for_analysis"))
@@ -334,17 +385,121 @@ def _parse_capture_timestamp_token(token: str) -> datetime | None:
     return datetime.fromtimestamp(seconds + fractional / 1_000_000_000, timezone.utc)
 
 
-async def _image_already_ingested(image_sha256: str) -> bool:
+async def _image_already_ingested(image_sha256: str) -> ScreenObservation | None:
     marker = f"{SCREENSHOT_FOLDER_HASH_PREFIX}:{image_sha256}"
     async with get_session() as db:
         result = await db.execute(
             select(ScreenObservation)
             .where(col(ScreenObservation.details_json).contains(marker))
+            .order_by(col(ScreenObservation.timestamp).desc())
             .limit(1)
         )
-        if result.scalar_one_or_none() is not None:
-            return True
-    return False
+        return result.scalar_one_or_none()
+
+
+async def _current_visual_duplicate(
+    *,
+    root: Path,
+    captured_at: datetime,
+    image_path: Path,
+    metadata: dict[str, object],
+    visual_fingerprint: str | None,
+) -> ScreenObservation | None:
+    if visual_fingerprint is None:
+        return None
+    async with get_session() as db:
+        base_query = (
+            select(ScreenObservation)
+            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
+            .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
+        )
+        result = await db.execute(
+            base_query
+            .where(col(ScreenObservation.timestamp) <= captured_at)
+            .order_by(col(ScreenObservation.timestamp).desc())
+            .limit(1)
+        )
+        representative = result.scalar_one_or_none()
+        if representative is None:
+            result = await db.execute(
+                base_query
+                .where(col(ScreenObservation.timestamp) >= captured_at)
+                .order_by(col(ScreenObservation.timestamp).asc())
+                .limit(1)
+            )
+            representative = result.scalar_one_or_none()
+    if representative is None:
+        return None
+    details = _observation_details(representative)
+    artifacts = _capture_artifacts_from_details(details) or {}
+    if Path(str(artifacts.get("screenshot_folder") or "")).expanduser().resolve() != root:
+        return None
+    if Path(str(artifacts.get("image_path") or "")).expanduser().resolve() == image_path:
+        return None
+    if artifacts.get("file_format") != metadata.get("file_format"):
+        return None
+    if artifacts.get("width") != metadata.get("width") or artifacts.get("height") != metadata.get("height"):
+        return None
+    representative_fingerprint = str(artifacts.get("visual_fingerprint") or "").strip()
+    if not representative_fingerprint:
+        return None
+    run = _visual_run_from_details(details)
+    last_seen = _parse_status_recorded_at(run.get("last_seen")) if run else None
+    if last_seen is not None:
+        distance_from_run = abs((captured_at - last_seen).total_seconds())
+        if distance_from_run > _VISUAL_DEDUPE_REFRESH_AFTER.total_seconds():
+            return None
+    if _fingerprint_distance(visual_fingerprint, representative_fingerprint) > _VISUAL_DUPLICATE_MAX_DISTANCE:
+        return None
+    return representative
+
+
+async def _extend_visual_run(
+    representative: ScreenObservation,
+    *,
+    suppressed_path: Path,
+    suppressed_at: datetime,
+    reason: str,
+) -> None:
+    details = _observation_details(representative)
+    run = _visual_run_from_details(details) or {}
+    representative_path = str(run.get("representative_path") or "")
+    if not representative_path:
+        artifacts = _capture_artifacts_from_details(details) or {}
+        representative_path = str(artifacts.get("image_path") or representative.window_title or "")
+    first_seen = _min_iso_timestamp(run.get("first_seen"), suppressed_at)
+    last_seen = _max_iso_timestamp(run.get("last_seen"), suppressed_at)
+    try:
+        suppressed_count = int(run.get("suppressed_count") or 0) + 1
+    except (TypeError, ValueError):
+        suppressed_count = 1
+    reasons = run.get("suppressed_reasons")
+    reason_counts = dict(reasons) if isinstance(reasons, dict) else {}
+    reason_counts[reason] = int(reason_counts.get(reason) or 0) + 1
+    next_run = {
+        "schema_version": _VISUAL_DEDUPE_VERSION,
+        "representative_path": representative_path,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "suppressed_count": suppressed_count,
+        "latest_suppressed_path": str(suppressed_path),
+        "suppressed_reasons": reason_counts,
+    }
+    next_details = [
+        item for item in details if not item.startswith(SCREENSHOT_VISUAL_RUN_PREFIX)
+    ]
+    next_details.append(
+        SCREENSHOT_VISUAL_RUN_PREFIX + json.dumps(next_run, sort_keys=True, separators=(",", ":"))
+    )
+    duration_s = _duration_seconds(first_seen, last_seen)
+    async with get_session() as db:
+        await db.execute(
+            update(ScreenObservation)
+            .where(ScreenObservation.id == representative.id)
+            .values(details_json=json.dumps(next_details), duration_s=duration_s)
+        )
 
 
 def _observation_details(observation: ScreenObservation) -> list[str]:
@@ -368,6 +523,74 @@ def _capture_artifacts_from_details(details: list[str]) -> dict[str, object] | N
         if isinstance(payload, dict) and payload.get("provider") == SCREENSHOT_FOLDER_PROVIDER:
             return payload
     return None
+
+
+def _visual_run_from_details(details: list[str]) -> dict[str, object] | None:
+    for item in details:
+        if not item.startswith(SCREENSHOT_VISUAL_RUN_PREFIX):
+            continue
+        try:
+            payload = json.loads(item.removeprefix(SCREENSHOT_VISUAL_RUN_PREFIX))
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _visual_fingerprint(path: Path) -> str | None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            grayscale = image.convert("L").resize(
+                (_VISUAL_FINGERPRINT_SIZE, _VISUAL_FINGERPRINT_SIZE),
+                Image.Resampling.BILINEAR,
+            )
+            if hasattr(grayscale, "get_flattened_data"):
+                values = list(grayscale.get_flattened_data())
+            else:
+                values = list(grayscale.getdata())
+    except Exception:
+        return None
+    if not values:
+        return None
+    average = sum(int(value) for value in values) / len(values)
+    bits = "".join("1" if int(value) >= average else "0" for value in values)
+    return f"{int(round(average)):02x}:{int(bits, 2):016x}"
+
+
+def _fingerprint_distance(left: str, right: str) -> int:
+    try:
+        left_average, left_bits = left.split(":", 1)
+        right_average, right_bits = right.split(":", 1)
+        if abs(int(left_average, 16) - int(right_average, 16)) > 4:
+            return 65
+        return (int(left_bits, 16) ^ int(right_bits, 16)).bit_count()
+    except (ValueError, AttributeError):
+        return 65
+
+
+def _min_iso_timestamp(current: object, candidate: datetime) -> str:
+    parsed = _parse_status_recorded_at(current)
+    if parsed is None or candidate < parsed:
+        return candidate.isoformat()
+    return parsed.isoformat()
+
+
+def _max_iso_timestamp(current: object, candidate: datetime) -> str:
+    parsed = _parse_status_recorded_at(current)
+    if parsed is None or candidate > parsed:
+        return candidate.isoformat()
+    return parsed.isoformat()
+
+
+def _duration_seconds(first_seen: str, last_seen: str) -> int:
+    first = _parse_status_recorded_at(first_seen)
+    last = _parse_status_recorded_at(last_seen)
+    if first is None or last is None:
+        return 0
+    return max(int((last - first).total_seconds()), 0)
 
 
 def _analysis_candidate_ready(details: list[str], *, now: datetime | None = None) -> bool:

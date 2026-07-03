@@ -880,6 +880,127 @@ async def test_screenshot_folder_image_analysis_extracts_png_dimensions(async_db
 
 
 @pytest.mark.asyncio
+async def test_screenshot_folder_scan_suppresses_visually_identical_byte_variants(
+    async_db, client, tmp_path, monkeypatch
+):
+    root = tmp_path / "screenshots"
+    newest = _write_screenshot(
+        root,
+        name="1782833901-000000000.png",
+        data=_solid_png((20, 20, 20)),
+    )
+    oldest = _write_screenshot(
+        root,
+        name="1782833900-000000000.png",
+        data=_solid_png((20, 20, 20)) + b"\nseraph-byte-variant",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.screen_analysis_provider",
+        "local-vlm",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
+        "http://gpu:8088",
+    )
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["scanned"] == 2
+    assert resp.json()["ingested"] == 1
+    assert resp.json()["skipped_duplicates"] == 1
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    assert observation.window_title == newest.name
+    assert observation.duration_s == 1
+    details = json.loads(observation.details_json or "[]")
+    visual_runs = [
+        json.loads(item.removeprefix("screenshot_visual_run:"))
+        for item in details
+        if isinstance(item, str) and item.startswith("screenshot_visual_run:")
+    ]
+    assert visual_runs[0]["representative_path"] == str(newest.resolve())
+    assert visual_runs[0]["first_seen"] == datetime.fromtimestamp(1782833900, timezone.utc).isoformat()
+    assert visual_runs[0]["last_seen"] == datetime.fromtimestamp(1782833901, timezone.utc).isoformat()
+    assert visual_runs[0]["suppressed_count"] == 1
+    assert visual_runs[0]["latest_suppressed_path"] == str(oldest.resolve())
+    assert visual_runs[0]["suppressed_reasons"]["near_visual_duplicate"] == 1
+
+    from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
+
+    calls = []
+
+    async def fake_analyze_screenshot_image(image_path, artifacts):
+        calls.append((image_path, artifacts))
+        return None
+
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.analyze_screenshot_image",
+        fake_analyze_screenshot_image,
+    )
+
+    analysis = await analyze_pending_screenshot_folder_observations(limit=10)
+    assert analysis.scanned == 1
+    assert len(calls) == 1
+    assert calls[0][0] == newest.resolve()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_keeps_obvious_visual_changes(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="1782833901-000000000.png", data=_solid_png((250, 250, 250)))
+    _write_screenshot(root, name="1782833900-000000000.png", data=_solid_png((20, 20, 20)))
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ingested"] == 2
+    assert resp.json()["skipped_duplicates"] == 0
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observations = result.scalars().all()
+
+    assert len(observations) == 2
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_scan_does_not_suppress_across_intervening_change(async_db, client, tmp_path):
+    root = tmp_path / "screenshots"
+    _write_screenshot(root, name="1782833902-000000000.png", data=_solid_png((20, 20, 20)))
+    _write_screenshot(root, name="1782833901-000000000.png", data=_solid_png((250, 250, 250)))
+    _write_screenshot(
+        root,
+        name="1782833900-000000000.png",
+        data=_solid_png((20, 20, 20)) + b"\nseraph-byte-variant",
+    )
+
+    resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ingested"] == 3
+    assert resp.json()["skipped_duplicates"] == 0
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observations = result.scalars().all()
+
+    assert len(observations) == 3
+
+
+@pytest.mark.asyncio
 async def test_screenshot_folder_jpeg_artifact_uses_jpeg_media_type(async_db, client, tmp_path):
     root = tmp_path / "screenshots"
     _write_screenshot(root, name="capture.jpg")
@@ -918,6 +1039,19 @@ async def test_screenshot_folder_scan_skips_duplicate_hash(async_db, client, tmp
     assert second.status_code == 200
     assert second.json()["ingested"] == 0
     assert second.json()["skipped_duplicates"] == 1
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    details = json.loads(observation.details_json or "[]")
+    visual_runs = [
+        json.loads(item.removeprefix("screenshot_visual_run:"))
+        for item in details
+        if isinstance(item, str) and item.startswith("screenshot_visual_run:")
+    ]
+    assert visual_runs[0]["suppressed_count"] == 0
+    assert "latest_suppressed_path" not in visual_runs[0]
 
 
 def _write_screenshot(root: Path, *, name: str, data: bytes = b"png bytes") -> Path:
@@ -1003,3 +1137,14 @@ def _sample_png() -> bytes:
             0x82,
         ]
     )
+
+
+def _solid_png(color: tuple[int, int, int]) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    image = Image.new("RGB", (8, 8), color)
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()

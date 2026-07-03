@@ -2547,6 +2547,33 @@ body {
   box-shadow: 0 0 0 1px var(--cockpit-state-selected-shadow);
 }
 
+.cockpit-browser-workbench-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(110px, 0.5fr) minmax(100px, 0.4fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.cockpit-browser-workbench-controls .cockpit-input {
+  min-height: 32px;
+  padding: 7px 9px;
+  font-size: 11px;
+}
+
+.cockpit-browser-workbench-url {
+  min-width: 0;
+}
+
+.cockpit-browser-workbench-select {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .cockpit-browser-workbench-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
 .cockpit-m7-board {
   border: 1px solid rgba(141, 226, 255, 0.16);
   padding: 10px;

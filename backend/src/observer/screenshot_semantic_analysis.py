@@ -1,4 +1,4 @@
-"""Provider-backed semantic analysis for local screenshot images."""
+"""Provider-backed semantic analysis for screenshot-folder images."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class ScreenshotSemanticAnalysisError(RuntimeError):
 
 
 def screenshot_semantic_analysis_enabled() -> bool:
-    """Return true when Seraph should call the local VLM screenshot analyzer."""
+    """Return true when Seraph should call the configured VLM screenshot analyzer."""
     return (
         effective_screen_analysis_enabled()
         and effective_screen_analysis_provider().lower() == "local-vlm"
@@ -62,30 +62,46 @@ def screenshot_semantic_analysis_enabled() -> bool:
 
 
 async def screenshot_semantic_analysis_ready(*, timeout_seconds: float = 2.0) -> bool:
-    """Return true when the configured local VLM screenshot analyzer is reachable."""
+    """Return true when the configured VLM screenshot analyzer is reachable."""
     status = await _screenshot_semantic_analysis_health(timeout_seconds=timeout_seconds)
     return status is not None
 
 
 async def screenshot_semantic_analysis_accepting_background_work(*, timeout_seconds: float = 2.0) -> bool:
-    """Return true when the local VLM wrapper can accept one background image job."""
+    """Return true when the VLM wrapper can accept one background image job."""
+    return await screenshot_semantic_analysis_background_slots(timeout_seconds=timeout_seconds) > 0
+
+
+async def screenshot_semantic_analysis_background_slots(*, timeout_seconds: float = 2.0) -> int:
+    """Return the number of Seraph background image jobs the VLM wrapper can accept now."""
     status = await _screenshot_semantic_analysis_queue_status(timeout_seconds=timeout_seconds)
     if status is None:
-        return False
+        return 0
     if not await _screenshot_semantic_analysis_backend_ready(timeout_seconds=timeout_seconds):
-        return False
+        return 0
+    queue = _normalized_queue_status(status)
+    if queue is None:
+        return 0
+    active, queued, workers = queue
+    capacity_window = max(min(effective_vlm_feeder_window(), workers + 1), 1)
+    return max(capacity_window - active - queued, 0)
+
+
+def _normalized_queue_status(status: dict[str, Any]) -> tuple[int, int, int] | None:
+    queue_status = status.get("queue")
+    if isinstance(queue_status, dict):
+        status = queue_status
     try:
         active = int(status.get("active", 0))
         queued = int(status.get("queued", 0))
         workers = int(status.get("workers", 1))
     except (TypeError, ValueError):
-        return False
-    capacity_window = max(min(effective_vlm_feeder_window(), workers + 1), 1)
-    return active + queued < capacity_window
+        return None
+    return max(active, 0), max(queued, 0), max(workers, 1)
 
 
 async def _screenshot_semantic_analysis_health(*, timeout_seconds: float = 2.0) -> dict[str, Any] | None:
-    """Return the local VLM wrapper health payload when reachable."""
+    """Return the VLM wrapper health payload when reachable."""
     if not screenshot_semantic_analysis_enabled():
         return None
     endpoint = effective_vlm_base_url() + "/health"

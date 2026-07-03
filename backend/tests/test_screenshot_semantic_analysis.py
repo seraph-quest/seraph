@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.observer.screenshot_semantic_analysis import (
     analyze_screenshot_image,
     screenshot_semantic_analysis_accepting_background_work,
+    screenshot_semantic_analysis_background_slots,
 )
 
 
@@ -360,3 +361,47 @@ async def test_local_vlm_background_capacity_requires_backend_health(monkeypatch
 
     assert await screenshot_semantic_analysis_accepting_background_work() is False
     assert calls == ["http://gpu:8088/queue/status", "http://gpu:8088/health/backend"]
+
+
+async def test_local_vlm_background_capacity_normalizes_nested_queue_payload(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith("/health/backend"):
+                return FakeResponse({"status": "ok"})
+            return FakeResponse({"queue": {"active": 1, "queued": 0, "workers": 1}})
+
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.screen_analysis_provider", "local-vlm")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_base_url", "")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.local_vlm_base_url", "http://gpu:8088")
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.settings.seraph_vlm_feeder_window", 2)
+    monkeypatch.setattr("src.observer.screenshot_semantic_analysis.httpx.AsyncClient", FakeAsyncClient)
+
+    assert await screenshot_semantic_analysis_background_slots() == 1
+    assert await screenshot_semantic_analysis_accepting_background_work() is True
+    assert calls == [
+        "http://gpu:8088/queue/status",
+        "http://gpu:8088/health/backend",
+        "http://gpu:8088/queue/status",
+        "http://gpu:8088/health/backend",
+    ]

@@ -420,6 +420,41 @@ def _local_gemma_profile_options(profile_id: str) -> dict[str, Any]:
     return options
 
 
+def _local_gemma_runtime_profile_id(profile: str | None) -> str | None:
+    normalized = _normal_profile_id(profile)
+    prefix = "local-gemma-"
+    if not normalized.startswith(prefix):
+        return None
+    profile_id = normalized.removeprefix(prefix).replace("-", "_")
+    try:
+        local_runtime_profile(profile_id)
+    except ValueError:
+        return None
+    return profile_id
+
+
+def _apply_local_runtime_request_metadata(kwargs: dict[str, Any], profile: str | None) -> None:
+    profile_id = _local_gemma_runtime_profile_id(profile)
+    if not profile_id:
+        return
+    runtime_profile = local_runtime_profile(profile_id)
+    metadata = dict(kwargs.get("metadata") or {})
+    metadata.update(
+        {
+            "runtime_profile": runtime_profile.id,
+            "runtime_path": runtime_profile.runtime_path,
+            "priority": runtime_profile.priority,
+        }
+    )
+    kwargs["metadata"] = metadata
+    extra_headers = dict(kwargs.get("extra_headers") or {})
+    extra_headers.setdefault("X-Seraph-Runtime-Profile", runtime_profile.id)
+    extra_headers.setdefault("X-Seraph-Runtime-Path", runtime_profile.runtime_path)
+    extra_headers.setdefault("X-Seraph-Priority", runtime_profile.priority)
+    extra_headers.setdefault("X-Seraph-Reasoning", runtime_profile.reasoning)
+    kwargs["extra_headers"] = extra_headers
+
+
 def provider_profiles() -> dict[str, ProviderProfile]:
     profiles = _builtin_provider_profiles()
     profiles.update(_configured_provider_profiles())
@@ -1077,6 +1112,7 @@ def build_completion_kwargs(
             "max_tokens": max_tokens,
         }
         kwargs.update(_profile_options(resolved_profile))
+        _apply_local_runtime_request_metadata(kwargs, resolved_profile)
         api_key = _profile_api_key(resolved_profile)
         api_base = _profile_api_base(resolved_profile)
 

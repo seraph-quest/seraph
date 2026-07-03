@@ -179,6 +179,8 @@ curl http://127.0.0.1:8004/health
 curl http://192.168.1.26:8001/health
 curl http://192.168.1.26:8001/health/backend
 curl http://192.168.1.26:8001/queue/status
+set -a && source .env.dev && set +a
+PYTHONPATH=backend backend/.venv/bin/python scripts/diagnose_gpu_vlm_route.py
 ```
 
 Interpretation:
@@ -190,6 +192,8 @@ Interpretation:
 - A `502` from `/health/backend` means the wrapper is up but the GPU backend edge is broken.
 
 Seraph also probes these three wrapper endpoints from the running backend process and exposes the safe result in `/api/runtime/status` and `/api/settings/artifact-storage` as `vlm_runtime.live_probe`. The settings UI renders this as a `Reach` row for both screenshot analysis and the local Gemma runtime. This status distinguishes "configured for GPU wrapper" from "this Seraph process can actually reach the direct LAN route"; diagnostic SSH forwards are not a substitute for `live_probe.reachable=true` on the direct `SERAPH_VLM_BASE_URL`.
+
+`scripts/diagnose_gpu_vlm_route.py` is the operator-shell receipt command for the direct route. It reads `SERAPH_VLM_BASE_URL`, `SERAPH_VLM_API_KEY`, and `LOCAL_VLM_MODEL`/`LOCAL_MODEL`, prints sanitized JSON, and exits non-zero when the direct wrapper route is not reachable. Use `--image /path/to/screenshot.png` when the validation receipt also needs a wrapper-level `/v1/analyze-file` check.
 
 For an RTX 3090 Ti 24 GB server, the current preferred Gemma-first target is Unsloth's Gemma 4 26B-A4B quantized GGUF/Dynamic 4-bit path. Unsloth's Gemma 4 docs list practical 4-bit memory footprints for this card class, including the 26B-A4B family in the high-teens GB range.
 

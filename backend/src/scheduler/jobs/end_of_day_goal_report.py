@@ -372,6 +372,8 @@ def _observation_report_duration(
 ) -> int:
     if source != "screenshot_folder":
         return max(int(observation.duration_s or 0), 0)
+    if _has_screenshot_visual_run(observation) and observation.duration_s is not None and int(observation.duration_s) > 0:
+        return max(int(observation.duration_s), 0)
     if next_obs is None:
         return 0
     current_ts = _ensure_aware_utc(observation.timestamp)
@@ -380,6 +382,33 @@ def _observation_report_duration(
     if delta <= 0:
         return 0
     return min(delta, 5 * 60)
+
+
+def _has_screenshot_visual_run(observation: ScreenObservation) -> bool:
+    if not observation.details_json:
+        return False
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(details, list):
+        return False
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("screenshot_visual_run:")):
+            continue
+        try:
+            payload = json.loads(item.removeprefix("screenshot_visual_run:"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("schema_version") != "seraph.screenshot_visual_dedupe.v1":
+            continue
+        try:
+            suppressed_count = int(payload.get("suppressed_count") or 0)
+        except (TypeError, ValueError):
+            suppressed_count = 0
+        if suppressed_count > 0:
+            return True
+    return False
 
 
 def _ensure_aware_utc(value: datetime) -> datetime:

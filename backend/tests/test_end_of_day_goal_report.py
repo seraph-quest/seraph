@@ -280,7 +280,18 @@ async def test_build_report_caps_screenshot_folder_duration_from_timestamp_gaps(
                 "image_sha256": "abc123",
             },
             sort_keys=True,
-        )
+        ),
+        "screenshot_visual_run:"
+        + json.dumps(
+            {
+                "schema_version": "seraph.screenshot_visual_dedupe.v1",
+                "representative_path": "/tmp/screenshot-recorder/capture.png",
+                "first_seen": datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc).isoformat(),
+                "last_seen": datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc).isoformat(),
+                "suppressed_count": 0,
+            },
+            sort_keys=True,
+        ),
     ]
     async with async_db() as db:
         db.add(
@@ -323,6 +334,57 @@ async def test_build_report_caps_screenshot_folder_duration_from_timestamp_gaps(
     assert report["summary"]["total_tracked_minutes"] == 5
     assert report["summary"]["by_source"] == {"screenshot_folder": 310}
     assert report["body"] == "Duration LLM report"
+
+
+@pytest.mark.asyncio
+async def test_build_report_preserves_visual_run_duration(async_db):
+    from src.db.models import ScreenObservation
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    observed_at = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+    details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "screenshot_folder",
+                "image_path": "/tmp/screenshot-recorder/capture.png",
+                "image_sha256": "abc123",
+            },
+            sort_keys=True,
+        ),
+        "screenshot_visual_run:"
+        + json.dumps(
+            {
+                "schema_version": "seraph.screenshot_visual_dedupe.v1",
+                "representative_path": "/tmp/screenshot-recorder/capture.png",
+                "first_seen": observed_at.isoformat(),
+                "last_seen": datetime(2026, 6, 20, 12, 7, tzinfo=timezone.utc).isoformat(),
+                "suppressed_count": 41,
+            },
+            sort_keys=True,
+        ),
+    ]
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="capture.png",
+                activity_type="screen",
+                duration_s=7 * 60,
+                details_json=json.dumps(details),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch(
+        "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
+        new=AsyncMock(return_value=_llm_response("Visual run report")),
+    ):
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["summary"]["total_tracked_minutes"] == 7
+    assert report["summary"]["by_source"] == {"screenshot_folder": 420}
+    assert report["body"] == "Visual run report"
 
 
 @pytest.mark.asyncio

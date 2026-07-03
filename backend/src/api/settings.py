@@ -22,7 +22,12 @@ from src.local_runtime_profile_verifier import (
     local_runtime_profile_receipt_dir,
 )
 from src.local_runtime_profiles import local_runtime_profile_statuses
-from src.vlm_runtime import effective_vlm_base_url, effective_vlm_chat_api_base, effective_vlm_status
+from src.vlm_runtime import (
+    effective_vlm_base_url,
+    effective_vlm_chat_api_base,
+    effective_vlm_status,
+    probe_effective_vlm_runtime,
+)
 from src.observer.manager import context_manager
 from src.observer.screen_analysis_settings import (
     SCREENSHOT_FOLDER_ENV,
@@ -843,7 +848,7 @@ async def get_artifact_storage_settings():
         }
     )
     screen_analysis = await get_screen_analysis_settings()
-    vlm_status = effective_vlm_status()
+    vlm_status = effective_vlm_status(live_probe=await probe_effective_vlm_runtime())
     return {
         "screen": {
             "analysis_enabled": screen_analysis["enabled"],

@@ -12,6 +12,21 @@ interface VlmRuntimeStatus {
   backend_health_endpoint: string;
   api_key_configured: boolean;
   feeder_window: number;
+  live_probe?: {
+    checked: boolean;
+    reachable: boolean;
+    reason?: string;
+    health: VlmProbeEndpoint;
+    backend_health: VlmProbeEndpoint;
+    queue_status: VlmProbeEndpoint;
+  };
+}
+
+interface VlmProbeEndpoint {
+  checked: boolean;
+  ok: boolean;
+  status_code: number | null;
+  error: string;
 }
 
 interface ArtifactStorageSettings {
@@ -411,6 +426,36 @@ function screenshotFolderDisplayPath(path: string | null): string {
   return path && path.trim() ? path : "not set";
 }
 
+function vlmReachabilityLabel(runtime?: VlmRuntimeStatus): string {
+  const probe = runtime?.live_probe;
+  if (!runtime?.configured) {
+    return "not configured";
+  }
+  if (!probe?.checked) {
+    return "not checked";
+  }
+  if (probe.reachable) {
+    return "direct route ok";
+  }
+  const failing = [
+    ["health", probe.health],
+    ["backend", probe.backend_health],
+    ["queue", probe.queue_status],
+  ].filter(([, endpoint]) => !(endpoint as VlmProbeEndpoint).ok);
+  const reason = failing
+    .map(([label, endpoint]) => `${label}:${(endpoint as VlmProbeEndpoint).error || (endpoint as VlmProbeEndpoint).status_code || "failed"}`)
+    .join(" ");
+  return reason ? `direct route failing · ${reason}` : "direct route failing";
+}
+
+function vlmReachabilityTone(runtime?: VlmRuntimeStatus): "normal" | "good" | "warn" {
+  const probe = runtime?.live_probe;
+  if (!runtime?.configured || !probe?.checked) {
+    return "normal";
+  }
+  return probe.reachable ? "good" : "warn";
+}
+
 export function ArtifactStoragePanel() {
   const mountedRef = useRef(true);
   const fetchGenerationRef = useRef(0);
@@ -733,16 +778,23 @@ export function ArtifactStoragePanel() {
                       tone={screenshotFolderSource.analysis.provider === "not_configured" ? "warn" : "good"}
                     />
                     {screenshotFolderSource.analysis.runtime && (
-                      <ArtifactRow
-                        label="Runtime"
-                        value={
-                          screenshotFolderSource.analysis.runtime.configured
-                            ? `${screenshotFolderSource.analysis.runtime.mode} · ${screenshotFolderSource.analysis.runtime.base_url}` +
-                              (screenshotFolderSource.analysis.runtime.backend_url ? ` -> ${screenshotFolderSource.analysis.runtime.backend_url}` : "")
-                            : "not configured"
-                        }
-                        tone={screenshotFolderSource.analysis.runtime.configured ? "good" : "warn"}
-                      />
+                      <>
+                        <ArtifactRow
+                          label="Runtime"
+                          value={
+                            screenshotFolderSource.analysis.runtime.configured
+                              ? `${screenshotFolderSource.analysis.runtime.mode} · ${screenshotFolderSource.analysis.runtime.base_url}` +
+                                (screenshotFolderSource.analysis.runtime.backend_url ? ` -> ${screenshotFolderSource.analysis.runtime.backend_url}` : "")
+                              : "not configured"
+                          }
+                          tone={screenshotFolderSource.analysis.runtime.configured ? "good" : "warn"}
+                        />
+                        <ArtifactRow
+                          label="Reach"
+                          value={vlmReachabilityLabel(screenshotFolderSource.analysis.runtime)}
+                          tone={vlmReachabilityTone(screenshotFolderSource.analysis.runtime)}
+                        />
+                      </>
                     )}
                     <ArtifactRow
                       label="Ingested"
@@ -881,6 +933,11 @@ export function ArtifactStoragePanel() {
                   label="Model"
                   value={settings.local_runtime.model || "not configured"}
                   tone={settings.local_runtime.model ? "good" : "warn"}
+                />
+                <ArtifactRow
+                  label="Reach"
+                  value={vlmReachabilityLabel(settings.local_runtime.vlm_runtime)}
+                  tone={vlmReachabilityTone(settings.local_runtime.vlm_runtime)}
                 />
                 <ArtifactRow
                   label="Proof"

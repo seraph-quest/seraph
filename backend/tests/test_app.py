@@ -4,6 +4,16 @@ from unittest.mock import patch
 from config.settings import settings
 
 
+_STUBBED_VLM_PROBE = {
+    "checked": False,
+    "reachable": False,
+    "reason": "test_stub",
+    "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
+    "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
+    "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
+}
+
+
 @pytest.mark.asyncio
 async def test_cors_allows_loopback_dev_origin(client):
     response = await client.options(
@@ -108,6 +118,7 @@ async def test_runtime_status_exposes_gpu_vlm_runtime_and_chat_profile(client):
         "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
         "api_key_configured": True,
         "feeder_window": 2,
+        "live_probe": _STUBBED_VLM_PROBE,
     }
     assert "secret-token" not in str(payload)
 

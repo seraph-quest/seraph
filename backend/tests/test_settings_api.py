@@ -203,6 +203,8 @@ async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, t
     assert runtime["chat_api_base"] == "http://192.168.1.26:8001/v1"
     assert runtime["queue_status_endpoint"] == "http://192.168.1.26:8001/queue/status"
     assert runtime["api_key_configured"] is True
+    assert runtime["live_probe"]["checked"] is False
+    assert runtime["live_probe"]["reason"] == "test_stub"
     assert data["screenshot_folder"]["analysis"]["runtime"] == runtime
     assert data["local_runtime"]["gateway_configured"] is True
     assert data["local_runtime"]["vlm_base_url_configured"] is True

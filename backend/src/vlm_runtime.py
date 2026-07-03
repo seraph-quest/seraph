@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlparse
+
+import httpx
 
 from config.settings import settings
 
@@ -56,12 +59,12 @@ def effective_vlm_feeder_window() -> int:
     return max(configured, 1)
 
 
-def effective_vlm_status() -> dict[str, object]:
+def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict[str, object]:
     """Return operator-safe VLM runtime status metadata."""
     base_url = effective_vlm_base_url()
     backend_url = effective_vlm_backend_url()
     mode = effective_vlm_mode()
-    return {
+    status = {
         "mode": mode,
         "configured": bool(base_url),
         "base_url": base_url,
@@ -73,7 +76,88 @@ def effective_vlm_status() -> dict[str, object]:
         "api_key_configured": bool(effective_vlm_api_key()),
         "feeder_window": effective_vlm_feeder_window(),
     }
+    if live_probe is not None:
+        status["live_probe"] = live_probe
+    return status
+
+
+async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[str, object]:
+    """Probe the effective VLM wrapper route from this Seraph process."""
+    base_url = effective_vlm_base_url()
+    if not base_url:
+        return {
+            "checked": False,
+            "reachable": False,
+            "reason": "not_configured",
+            "health": _unprobed_endpoint(),
+            "backend_health": _unprobed_endpoint(),
+            "queue_status": _unprobed_endpoint(),
+        }
+
+    timeout = max(min(timeout_seconds, 5.0), 0.1)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        health, backend_health, queue_status = await asyncio.gather(
+            _probe_json_endpoint(client, base_url + "/health"),
+            _probe_json_endpoint(client, base_url + "/health/backend"),
+            _probe_json_endpoint(client, base_url + "/queue/status"),
+        )
+    reachable = bool(health.get("ok") and backend_health.get("ok") and queue_status.get("ok"))
+    return {
+        "checked": True,
+        "reachable": reachable,
+        "health": health,
+        "backend_health": backend_health,
+        "queue_status": queue_status,
+    }
 
 
 def _trim_url(value: str | None) -> str:
     return str(value or "").strip().rstrip("/")
+
+
+def _unprobed_endpoint() -> dict[str, object]:
+    return {"checked": False, "ok": False, "status_code": None, "error": ""}
+
+
+async def _probe_json_endpoint(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:
+    try:
+        response = await client.get(endpoint)
+    except httpx.TimeoutException:
+        return {"checked": True, "ok": False, "status_code": None, "error": "timeout"}
+    except httpx.ConnectError:
+        return {"checked": True, "ok": False, "status_code": None, "error": "connect_error"}
+    except httpx.HTTPError:
+        return {"checked": True, "ok": False, "status_code": None, "error": "http_error"}
+
+    payload: object
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    ok = 200 <= response.status_code < 400
+    result: dict[str, object] = {
+        "checked": True,
+        "ok": ok,
+        "status_code": response.status_code,
+        "error": "" if ok else "bad_status",
+    }
+    if isinstance(payload, dict):
+        queue = payload.get("queue")
+        if isinstance(queue, dict):
+            result["queue"] = {
+                "queued": queue.get("queued"),
+                "active": queue.get("active"),
+                "workers": queue.get("workers"),
+                "background_workers": queue.get("background_workers"),
+            }
+        elif any(key in payload for key in ("queued", "active", "workers", "background_workers")):
+            result["queue"] = {
+                "queued": payload.get("queued"),
+                "active": payload.get("active"),
+                "workers": payload.get("workers"),
+                "background_workers": payload.get("background_workers"),
+            }
+        for key in ("status", "backend_status", "model"):
+            if key in payload:
+                result[key] = payload[key]
+    return result

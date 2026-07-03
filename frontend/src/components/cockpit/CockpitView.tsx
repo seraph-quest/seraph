@@ -6798,10 +6798,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         window.clearTimeout(timeout);
       }
     };
-    const skippedFetchResult = () => Promise.resolve({ ok: false, payload: null });
     const fetchWithConcurrency = async (
       requests: Array<() => Promise<FetchResult>>,
-      concurrency = 1,
+      concurrency = 4,
     ): Promise<FetchResult[]> => {
       const results: FetchResult[] = new Array(requests.length);
       let nextIndex = 0;
@@ -6847,28 +6846,30 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ] = await fetchWithConcurrency([
       () => fetchJson(`${API_URL}/api/runtime/status`),
       () => fetchJson(`${API_URL}/api/observer/state`),
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
-      skippedFetchResult,
+      () => fetchJson(`${API_URL}/api/audit/events?limit=12`),
+      () => fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
+      () => fetchJson(`${API_URL}/api/observer/continuity`),
+      () => fetchJson(`${API_URL}/api/capabilities/overview`),
+      () => fetchJson(`${API_URL}/api/extensions`),
+      () => fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/control-plane`),
+      () => fetchJson(`${API_URL}/api/operator/benchmark-proof`),
+      () => fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
+      () => fetchJson(`${API_URL}/api/operator/background-sessions`),
+      () => fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
+      () => fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
+      () => fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
+      () => fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
+      () => fetchJson(`${API_URL}/api/browser/providers`),
+      () => sessionId
+        ? fetchJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`)
+        : Promise.resolve({ ok: true, payload: { sessions: [] } }),
       () => fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
       () => fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
       () => fetchJson(`${API_URL}/api/settings/approval-mode`),

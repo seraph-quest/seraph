@@ -446,18 +446,23 @@ describe("ArtifactStoragePanel", () => {
         image_count: 4,
       },
     };
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(artifactStorage))
-      .mockResolvedValueOnce(
-        mockResponse({
+    let scanRequested = false;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes("/api/observer/screenshot-folder/scan")) {
+        scanRequested = true;
+        return Promise.resolve(mockResponse({
           screenshot_folder: artifactStorage.screenshot_folder.path,
           scanned: 3,
           ingested: 1,
           skipped_duplicates: 2,
           rejected: [],
-        }),
-      )
-      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+        }));
+      }
+      if (url.includes("/api/settings/artifact-storage")) {
+        return Promise.resolve(mockResponse(scanRequested ? refreshedStorage : artifactStorage));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
 
     render(<ArtifactStoragePanel />);
 

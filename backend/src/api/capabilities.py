@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timezone
 import json
 import os
 import tempfile
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query
@@ -72,6 +74,11 @@ _BOOTSTRAP_ACTION_PRIORITY = {
     "set_mcp_policy": 5,
     "set_tool_policy": 6,
 }
+_CAPABILITY_OVERVIEW_CACHE_TTL_S = 15.0
+_CAPABILITY_OVERVIEW_WAIT_S = 0.75
+_CAPABILITY_OVERVIEW_CACHE: dict[str, Any] | None = None
+_CAPABILITY_OVERVIEW_CACHE_AT = 0.0
+_CAPABILITY_OVERVIEW_REFRESH_TASK: asyncio.Task[None] | None = None
 
 
 @router.get("/capabilities/source-surfaces")
@@ -1889,9 +1896,92 @@ def _build_capability_overview() -> dict[str, Any]:
     }
 
 
+def _fallback_capability_overview(*, metadata_status: str) -> dict[str, Any]:
+    return {
+        "tool_policy_mode": get_current_tool_policy_mode(),
+        "mcp_policy_mode": get_current_mcp_policy_mode(),
+        "approval_mode": context_manager.get_context().approval_mode,
+        "metadata_status": metadata_status,
+        "summary": {
+            "native_tools_ready": 0,
+            "native_tools_total": 0,
+            "skills_ready": 0,
+            "skills_total": 0,
+            "workflows_ready": 0,
+            "workflows_total": 0,
+            "starter_packs_ready": 0,
+            "starter_packs_total": 0,
+            "mcp_servers_ready": 0,
+            "mcp_servers_total": 0,
+            "source_adapters_ready": 0,
+            "source_adapters_total": 0,
+            "marketplace_flows_ready": 0,
+            "marketplace_flows_total": 0,
+            "capability_contracts_total": 0,
+            "capability_contract_families": {},
+            "capability_contract_enforcement": {},
+        },
+        "native_tools": [],
+        "skills": [],
+        "workflows": [],
+        "mcp_servers": [],
+        "source_adapters": [],
+        "source_adapter_rules": [],
+        "starter_packs": [],
+        "catalog_items": [],
+        "recommendations": [],
+        "runbooks": [],
+        "marketplace_flows": [],
+        "capability_contracts": [],
+    }
+
+
+async def _refresh_capability_overview_cache() -> None:
+    global _CAPABILITY_OVERVIEW_CACHE, _CAPABILITY_OVERVIEW_CACHE_AT
+    overview = await asyncio.to_thread(_build_capability_overview)
+    overview["metadata_status"] = "fresh"
+    _CAPABILITY_OVERVIEW_CACHE = overview
+    _CAPABILITY_OVERVIEW_CACHE_AT = monotonic()
+
+
+def _capability_overview_cache_enabled() -> bool:
+    return "PYTEST_CURRENT_TEST" not in os.environ or os.environ.get("SERAPH_CAPABILITIES_CACHE_IN_TESTS") == "1"
+
+
 @router.get("/capabilities/overview")
 async def get_capability_overview():
-    return await asyncio.to_thread(_build_capability_overview)
+    global _CAPABILITY_OVERVIEW_REFRESH_TASK
+    if not _capability_overview_cache_enabled():
+        return await asyncio.to_thread(_build_capability_overview)
+
+    now = monotonic()
+    if _CAPABILITY_OVERVIEW_CACHE is not None and now - _CAPABILITY_OVERVIEW_CACHE_AT <= _CAPABILITY_OVERVIEW_CACHE_TTL_S:
+        payload = copy.deepcopy(_CAPABILITY_OVERVIEW_CACHE)
+        payload["metadata_status"] = "cached"
+        return payload
+
+    if _CAPABILITY_OVERVIEW_REFRESH_TASK is None or _CAPABILITY_OVERVIEW_REFRESH_TASK.done():
+        _CAPABILITY_OVERVIEW_REFRESH_TASK = asyncio.create_task(_refresh_capability_overview_cache())
+    try:
+        await asyncio.wait_for(asyncio.shield(_CAPABILITY_OVERVIEW_REFRESH_TASK), timeout=_CAPABILITY_OVERVIEW_WAIT_S)
+    except asyncio.TimeoutError:
+        if _CAPABILITY_OVERVIEW_CACHE is not None:
+            payload = copy.deepcopy(_CAPABILITY_OVERVIEW_CACHE)
+            payload["metadata_status"] = "stale_refreshing"
+            return payload
+        return _fallback_capability_overview(metadata_status="loading")
+    except Exception:
+        if _CAPABILITY_OVERVIEW_CACHE is not None:
+            payload = copy.deepcopy(_CAPABILITY_OVERVIEW_CACHE)
+            payload["metadata_status"] = "stale_refresh_failed"
+            return payload
+        return _fallback_capability_overview(metadata_status="unavailable")
+
+    if _CAPABILITY_OVERVIEW_CACHE is None:
+        return _fallback_capability_overview(metadata_status="unavailable")
+    payload = copy.deepcopy(_CAPABILITY_OVERVIEW_CACHE)
+    payload["metadata_status"] = "fresh"
+    return payload
 
 
 def _capability_preflight_payload(

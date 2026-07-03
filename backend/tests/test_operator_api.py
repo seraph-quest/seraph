@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.cockpit.production_operator_control import (
     PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS,
@@ -7507,6 +7508,76 @@ async def test_operator_m8_guardian_brain_surface_reports_decisions_capabilities
         "live_external_outcome_study",
         "automatic_privilege_escalation_from_memory_or_preferences",
     ]
+
+
+@pytest.mark.asyncio
+async def test_operator_m8_guardian_brain_degrades_when_guardian_state_db_access_fails(client):
+    with patch(
+        "src.api.operator.build_guardian_state",
+        AsyncMock(side_effect=SQLAlchemyError("db unavailable")),
+    ):
+        resp = await client.get("/api/operator/m8-guardian-brain?session_id=session-1")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "m8_guardian_brain_degraded"
+    assert payload["summary"]["degraded"] is True
+    assert payload["summary"]["live_decision_count"] == 0
+    assert payload["summary"]["receipt_source"] == "deterministic_benchmark_only_live_guardian_state_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_operator_guardian_state_degrades_when_db_access_fails(client):
+    with patch(
+        "src.api.operator.build_guardian_state",
+        AsyncMock(side_effect=SQLAlchemyError("db unavailable")),
+    ):
+        resp = await client.get("/api/operator/guardian-state?session_id=session-1")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["overall_confidence"] == "degraded"
+    assert payload["summary"]["degraded"] is True
+    assert payload["summary"]["action_posture"] == "hold_until_state_recovers"
+    assert payload["observer"]["data_quality"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_operator_guardian_state_degrades_when_live_state_times_out(client):
+    async def slow_guardian_state(*, session_id=None):
+        await asyncio.sleep(1)
+        return SimpleNamespace()
+
+    with patch("src.api.operator.GUARDIAN_STATE_COCKPIT_TIMEOUT_SECONDS", 0.01), patch(
+        "src.api.operator.build_guardian_state",
+        slow_guardian_state,
+    ):
+        resp = await client.get("/api/operator/guardian-state?session_id=session-1")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["overall_confidence"] == "degraded"
+    assert payload["summary"]["degraded_reason"] == "Local guardian state timed out."
+    assert payload["observer"]["data_quality"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_operator_m8_guardian_brain_degrades_when_live_state_times_out(client):
+    async def slow_guardian_state(*, session_id=None):
+        await asyncio.sleep(1)
+        return SimpleNamespace()
+
+    with patch("src.api.operator.GUARDIAN_STATE_COCKPIT_TIMEOUT_SECONDS", 0.01), patch(
+        "src.api.operator.build_guardian_state",
+        slow_guardian_state,
+    ):
+        resp = await client.get("/api/operator/m8-guardian-brain?session_id=session-1")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["summary"]["operator_status"] == "m8_guardian_brain_degraded"
+    assert payload["summary"]["degraded"] is True
+    assert payload["summary"]["live_decision_count"] == 0
 
 
 @pytest.mark.asyncio

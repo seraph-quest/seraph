@@ -58,6 +58,9 @@ interface ArtifactStorageSettings {
       analysis_status: Record<string, number>;
       analysis_backlog: number;
       analysis_failures: number;
+      stale_count?: number;
+      source_missing_count?: number;
+      stale_root_count?: number;
       latest_observation_at: string | null;
       latest_analyzed_at: string | null;
       latest_failure: string | null;
@@ -280,7 +283,16 @@ async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: Requ
     const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
-      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      if (!response.ok) {
+        let detail = `Request failed: ${response.status}`;
+        try {
+          const payload = await response.json();
+          if (typeof payload?.detail === "string") {
+            detail = payload.detail;
+          }
+        } catch {}
+        throw new Error(detail);
+      }
       return await response.json();
     } catch (error) {
       lastError = error;
@@ -289,6 +301,12 @@ async function fetchJsonWithTimeout(path: string, timeoutMs = 3_000, init?: Requ
     }
   }
   throw lastError ?? new Error("Request failed.");
+}
+
+function screenshotFolderPickerError(error: unknown): string {
+  const detail = error instanceof Error ? error.message.trim() : "";
+  const fallback = "Folder picker failed or was cancelled.";
+  return `${detail || fallback} You can type a local folder path and Save instead.`;
 }
 
 function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactStorageSettings {
@@ -317,6 +335,9 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
         analysis_status: {},
         analysis_backlog: 0,
         analysis_failures: 0,
+        stale_count: 0,
+        source_missing_count: 0,
+        stale_root_count: 0,
         latest_observation_at: null,
         latest_analyzed_at: null,
         latest_failure: null,
@@ -489,6 +510,7 @@ export function ArtifactStoragePanel() {
   const [screenshotFolderScanResult, setScreenshotFolderScanResult] = useState<ScreenshotFolderScanResult | null>(null);
   const [screenshotFolderScanError, setScreenshotFolderScanError] = useState<string | null>(null);
   const [screenshotFolderPicking, setScreenshotFolderPicking] = useState(false);
+  const [screenshotFolderClearingStale, setScreenshotFolderClearingStale] = useState(false);
   const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
@@ -576,6 +598,7 @@ export function ArtifactStoragePanel() {
 
   const screenshotFolderSource = settings?.screenshot_folder ?? null;
   const screenshotFolderPath = screenshotFolderSource?.path ?? null;
+  const screenshotFolderStaleCount = screenshotFolderSource?.analysis?.stale_count ?? 0;
   const screenshotFolderPathSource = screenshotFolderSource?.path_source ?? "";
   const screenshotFolderLockedByEnv = screenshotFolderPathSource === "SERAPH_SCREENSHOT_FOLDER";
   const screenshotFolderMetadataLoaded = Boolean(
@@ -644,6 +667,24 @@ export function ArtifactStoragePanel() {
     }
   };
 
+  const clearStaleScreenshotFolderObservations = async () => {
+    if (screenshotFolderClearingStale || screenshotFolderSource === null || screenshotFolderStaleCount <= 0) return;
+    setScreenshotFolderClearingStale(true);
+    setScreenshotFolderScanResult(null);
+    setScreenshotFolderScanError(null);
+    try {
+      await fetchJsonWithTimeout("/api/settings/screen-analysis/screenshot-folder/clear-stale", 30_000, {
+        method: "POST",
+      });
+      if (!mountedRef.current) return;
+      await fetchSettings(() => !mountedRef.current);
+    } catch {
+      if (mountedRef.current) setScreenshotFolderScanError("Stale screenshot cleanup failed.");
+    } finally {
+      if (mountedRef.current) setScreenshotFolderClearingStale(false);
+    }
+  };
+
   useEffect(() => {
     if (screenshotFolderSource !== null) setScreenshotFolderDraft(screenshotFolderPath ?? "");
   }, [screenshotFolderPath, screenshotFolderSource]);
@@ -671,8 +712,8 @@ export function ArtifactStoragePanel() {
         setScreenshotFolderDraft(payload.screenshot_folder);
       }
       await fetchSettings(() => !mountedRef.current);
-    } catch {
-      if (mountedRef.current) setScreenshotFolderScanError("Folder picker failed or was cancelled.");
+    } catch (error) {
+      if (mountedRef.current) setScreenshotFolderScanError(screenshotFolderPickerError(error));
     } finally {
       if (mountedRef.current) setScreenshotFolderPicking(false);
     }
@@ -739,30 +780,46 @@ export function ArtifactStoragePanel() {
                     {screenshotFolderSource.status.replace(/_/g, " ")}
                   </div>
                 </div>
-                <div className="grid grid-cols-[92px_minmax(0,1fr)_auto] gap-2 text-[9px] items-center">
+                <div className="grid grid-cols-1 sm:grid-cols-[92px_minmax(0,1fr)] gap-2 text-[9px] items-center">
                   <div className="text-retro-text/30 uppercase tracking-wider">Folder</div>
-                  <input
-                    aria-label="Screenshot folder"
-                    value={screenshotFolderDraft}
-                    disabled={saving || screenshotFolderLockedByEnv || !screenshotFolderMetadataLoaded}
-                    onChange={(event) => setScreenshotFolderDraft(event.target.value)}
-                    placeholder={screenshotFolderMetadataLoaded ? "Choose a local folder" : "folder metadata not loaded"}
-                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
-                  />
-                  <button
-                    type="button"
-                    disabled={
-                      saving ||
-                      screenshotFolderLockedByEnv ||
-                      !screenshotFolderMetadataLoaded ||
-                      screenshotFolderDraft.trim() === (screenshotFolderPath ?? "")
-                    }
-                    onClick={() => void saveScreenshotFolder()}
-                    className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
-                  >
-                    Save
-                  </button>
+                  <div className="min-w-0 flex flex-wrap items-center gap-2">
+                    <input
+                      aria-label="Screenshot folder"
+                      value={screenshotFolderDraft}
+                      disabled={saving || screenshotFolderLockedByEnv || !screenshotFolderMetadataLoaded}
+                      onChange={(event) => setScreenshotFolderDraft(event.target.value)}
+                      placeholder={screenshotFolderMetadataLoaded ? "Choose a local folder" : "folder metadata not loaded"}
+                      className="min-w-0 basis-64 flex-1 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      disabled={saving || screenshotFolderLockedByEnv || screenshotFolderPicking || !screenshotFolderMetadataLoaded}
+                      onClick={() => void pickScreenshotFolder()}
+                      title={screenshotFolderLockedByEnv ? "Unset SERAPH_SCREENSHOT_FOLDER to choose from Settings." : undefined}
+                      className="shrink-0 border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                    >
+                      {screenshotFolderPicking ? "Choosing" : "Choose"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        saving ||
+                        screenshotFolderLockedByEnv ||
+                        !screenshotFolderMetadataLoaded ||
+                        screenshotFolderDraft.trim() === (screenshotFolderPath ?? "")
+                      }
+                      onClick={() => void saveScreenshotFolder()}
+                      className="shrink-0 border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                    >
+                      Save
+                    </button>
+                  </div>
                 </div>
+                {screenshotFolderLockedByEnv && (
+                  <div className="text-[9px] text-yellow-400">
+                    Folder is locked by SERAPH_SCREENSHOT_FOLDER; unset it to use the picker or saved Settings value.
+                  </div>
+                )}
                 <ArtifactRow label="Folder" value={screenshotFolderDisplayPath(screenshotFolderPath)} tone={screenshotFolderPath ? "normal" : "warn"} />
                 <ArtifactRow label="Source" value={sourceLabel(screenshotFolderPathSource)} />
                 <ArtifactRow
@@ -841,6 +898,17 @@ export function ArtifactStoragePanel() {
                       }
                       tone={screenshotAnalysisTone(screenshotFolderSource.analysis)}
                     />
+                    {screenshotFolderStaleCount > 0 && (
+                      <ArtifactRow
+                        label="Stale"
+                        value={
+                          `${screenshotFolderStaleCount} cleanup candidates · ` +
+                          `${screenshotFolderSource.analysis.source_missing_count ?? 0} missing · ` +
+                          `${screenshotFolderSource.analysis.stale_root_count ?? 0} old root`
+                        }
+                        tone="warn"
+                      />
+                    )}
                     {screenshotFolderSource.analysis.persistence && (
                       <ArtifactRow
                         label="DB locks"
@@ -882,11 +950,11 @@ export function ArtifactStoragePanel() {
                   </button>
                   <button
                     type="button"
-                    disabled={saving || screenshotFolderLockedByEnv || screenshotFolderPicking}
-                    onClick={() => void pickScreenshotFolder()}
+                    disabled={screenshotFolderClearingStale || screenshotFolderStaleCount <= 0}
+                    onClick={() => void clearStaleScreenshotFolderObservations()}
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
-                    {screenshotFolderPicking ? "Choosing" : "Choose folder"}
+                    {screenshotFolderClearingStale ? "Clearing" : "Clear stale"}
                   </button>
                   <div className="text-[9px] text-retro-text/40">
                     {screenshotFolderLockedByEnv ? "locked by env" : "local scan only"}

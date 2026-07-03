@@ -154,6 +154,102 @@ describe("CockpitView", () => {
     vi.restoreAllMocks();
   });
 
+  it("skips proof-grade cockpit calls during baseline refresh", async () => {
+    mockCockpitBaselineFetch(fetchMock, {});
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/runtime/status"), expect.any(Object));
+    });
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    const deniedBaselineEndpoints = [
+      "/api/operator/benchmark-proof",
+      "/api/operator/guardian-state",
+      "/api/operator/m8-guardian-brain",
+    ];
+    for (const endpoint of deniedBaselineEndpoints) {
+      expect(requestedUrls.some((url) => url.includes(endpoint))).toBe(false);
+    }
+  });
+
+  it("shows runtime offline instead of unknown when runtime status cannot load", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({ detail: "backend unavailable" }, false, 503));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/activity/ledger")) return Promise.resolve(mockResponse({ items: [], summary: {} }));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await screen.findByText(/RUNTIME OFFLINE/);
+    expect(screen.queryByText(/UNKNOWN · UNKNOWN/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the last known local runtime label through a transient runtime status failure", async () => {
+    vi.mocked(window.localStorage.getItem).mockReturnValueOnce(JSON.stringify({
+      version: "2026.4.11",
+      build_id: "SERAPH_PRIME_v2026.4.11",
+      provider: "local-gemma",
+      model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+      api_base: "http://127.0.0.1:8000/v1",
+    }));
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({ detail: "temporary runtime status failure" }, false, 503));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    await screen.findByText(/LOCAL GEMMA STALE · GEMMA 4 26B A4B IT QAT GGUF/);
+    expect(screen.queryByText(/RUNTIME OFFLINE/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/MODEL UNAVAILABLE/)).not.toBeInTheDocument();
+  });
+
   it("renders a governed marketplace extension row with action readiness", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       capabilities: emptyCapabilityOverview({
@@ -6838,8 +6934,11 @@ describe("CockpitView", () => {
     const operatorWindow = operatorTitle.closest(".cockpit-window") as HTMLElement;
 
     expect(within(guardianWindow).getByText("overall confidence")).toBeInTheDocument();
-    expect(within(guardianWindow).getAllByText("clarify first").length).toBeGreaterThan(0);
+    fireEvent.click(within(guardianWindow).getByRole("button", { name: "load proof" }));
+    fireEvent.click(within(operatorWindow).getByRole("button", { name: "load proof" }));
+
     await within(guardianWindow).findByText("Atlas release planning");
+    expect(within(guardianWindow).getAllByText("clarify first").length).toBeGreaterThan(0);
     await within(guardianWindow).findByText("Prefer clarification before interrupting.");
     expect(within(guardianWindow).getAllByText("partial").length).toBeGreaterThan(0);
     expect(within(guardianWindow).getByText(/Project-target proof:/)).toBeInTheDocument();

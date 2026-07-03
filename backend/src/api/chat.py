@@ -29,6 +29,7 @@ from src.operators.local_codex import (
 )
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
+from src.vlm_runtime import direct_local_chat_route_error
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -129,6 +130,23 @@ async def chat(request: ChatRequest):
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
         try:
+            route_error = await direct_local_chat_route_error()
+            if route_error:
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="rest",
+                    is_onboarding=is_onboarding,
+                    outcome="failed",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(request.message),
+                        "error": route_error,
+                        "request_id": llm_request_id,
+                        "runtime": "direct-local-chat",
+                    },
+                )
+                raise HTTPException(status_code=503, detail=route_error)
             response_text = await asyncio.wait_for(
                 run_direct_local_chat(
                     request.message,
@@ -156,6 +174,8 @@ async def chat(request: ChatRequest):
                 },
             )
             raise HTTPException(status_code=504, detail="Local chat timed out — try again")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("Direct local chat failed")
             safe_detail = await redact_secrets_in_text(f"Agent error: {e}")

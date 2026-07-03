@@ -65,6 +65,42 @@ interface RuntimeStatus {
   llm_logging_enabled?: boolean;
 }
 
+const RUNTIME_STATUS_STORAGE_KEY = "seraph.cockpit.runtimeStatus.lastGood.v1";
+
+function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const provider = typeof record.provider === "string" ? record.provider : "";
+  const model = typeof record.model === "string" ? record.model : "";
+  const modelLabel = typeof record.model_label === "string" ? record.model_label : model;
+  if (!provider || !modelLabel) return null;
+  return {
+    version: typeof record.version === "string" ? record.version : "",
+    build_id: typeof record.build_id === "string" ? record.build_id : SERAPH_BUILD_ID,
+    provider,
+    model,
+    model_label: modelLabel,
+    api_base: typeof record.api_base === "string" ? record.api_base : undefined,
+    timezone: typeof record.timezone === "string" ? record.timezone : undefined,
+    llm_logging_enabled: typeof record.llm_logging_enabled === "boolean" ? record.llm_logging_enabled : undefined,
+  };
+}
+
+function readStoredRuntimeStatus(): RuntimeStatus | null {
+  try {
+    return normalizeRuntimeStatus(JSON.parse(window.localStorage.getItem(RUNTIME_STATUS_STORAGE_KEY) ?? "null"));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredRuntimeStatus(status: RuntimeStatus): void {
+  try {
+    window.localStorage.setItem(RUNTIME_STATUS_STORAGE_KEY, JSON.stringify(status));
+  } catch {
+  }
+}
+
 interface OperatorControlPlaneRole {
   id: string;
   label: string;
@@ -2115,6 +2151,7 @@ interface CapabilityOverview {
   tool_policy_mode: ToolPolicyMode;
   mcp_policy_mode: McpPolicyMode;
   approval_mode: ApprovalMode;
+  metadata_status?: string;
   summary: {
     native_tools_ready: number;
     native_tools_total: number;
@@ -6580,7 +6617,8 @@ function normalizeBrowserSessions(payload: unknown): BrowserSessionControlInfo[]
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(() => readStoredRuntimeStatus());
+  const [runtimeStatusFailed, setRuntimeStatusFailed] = useState(false);
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -6616,7 +6654,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [activitySummary, setActivitySummary] = useState<ActivityLedgerSummary | null>(null);
   const [operatorControlPlane, setOperatorControlPlane] = useState<OperatorControlPlane | null>(null);
   const [operatorBenchmarkProof, setOperatorBenchmarkProof] = useState<OperatorBenchmarkProof | null>(null);
+  const [operatorBenchmarkProofLoading, setOperatorBenchmarkProofLoading] = useState(false);
   const [operatorGuardianState, setOperatorGuardianState] = useState<OperatorGuardianState | null>(null);
+  const [operatorGuardianProofLoading, setOperatorGuardianProofLoading] = useState(false);
   const [operatorWorkflowOrchestration, setOperatorWorkflowOrchestration] = useState<OperatorWorkflowOrchestration | null>(null);
   const [operatorBackgroundSessions, setOperatorBackgroundSessions] = useState<OperatorBackgroundSessions | null>(null);
   const [operatorM5OperatingLayer, setOperatorM5OperatingLayer] = useState<OperatorM5OperatingLayer | null>(null);
@@ -6777,8 +6817,28 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setPendingLifecycleApprovalId(null);
   }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
 
+  type FetchResult = { ok: boolean; payload: unknown | null };
+  const fetchCockpitJson = useCallback(async (url: string, timeoutMs = 5000): Promise<FetchResult> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        return { ok: false, payload: null };
+      }
+      const payload = await response.json().catch(() => null);
+      return { ok: true, payload };
+    } catch {
+      return { ok: false, payload: null };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
+
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
-    type FetchResult = { ok: boolean; payload: unknown | null };
+    const shouldFetchGuardianProof = false;
+    const shouldFetchBenchmarkProof = false;
+    const skippedFetch = () => Promise.resolve({ ok: false, payload: null });
     const fetchJson = async (url: string, timeoutMs = 5000) => {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -6853,15 +6913,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       () => fetchJson(`${API_URL}/api/extensions`),
       () => fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
       () => fetchJson(`${API_URL}/api/operator/control-plane`),
-      () => fetchJson(`${API_URL}/api/operator/benchmark-proof`),
-      () => fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => shouldFetchBenchmarkProof ? fetchJson(`${API_URL}/api/operator/benchmark-proof`, 10_000) : skippedFetch(),
+      () => shouldFetchGuardianProof ? fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`, 10_000) : skippedFetch(),
       () => fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
       () => fetchJson(`${API_URL}/api/operator/background-sessions`),
       () => fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
       () => fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
       () => fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
       () => fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => shouldFetchGuardianProof ? fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`, 10_000) : skippedFetch(),
       () => fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
       () => fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
       () => fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
@@ -6876,8 +6936,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ]);
 
     if (isCancelled()) return;
-    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
-      setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
+    const nextRuntimeStatus = normalizeRuntimeStatus(runtimeStatusResult.payload);
+    if (runtimeStatusResult.ok && nextRuntimeStatus) {
+      setRuntimeStatus(nextRuntimeStatus);
+      writeStoredRuntimeStatus(nextRuntimeStatus);
+      setRuntimeStatusFailed(false);
+    } else {
+      setRuntimeStatusFailed(true);
     }
     if (observerResult.ok) {
       setObserverState((observerResult.payload as ObserverState | null) ?? {});
@@ -6905,37 +6970,63 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
-      setWorkflows(Array.isArray(capabilityPayload.workflows) ? capabilityPayload.workflows : []);
-      setSkills(Array.isArray(capabilityPayload.skills) ? capabilityPayload.skills : []);
-      setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
-      setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
-      setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
-      setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
-      setCapabilityRecommendations(
-        Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
-      );
-      setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
-      setMarketplaceFlows(
-        Array.isArray(capabilityPayload.marketplace_flows) ? capabilityPayload.marketplace_flows : [],
-      );
+      if (capabilityPayload.metadata_status !== "loading") {
+        setWorkflows(Array.isArray(capabilityPayload.workflows) ? capabilityPayload.workflows : []);
+        setSkills(Array.isArray(capabilityPayload.skills) ? capabilityPayload.skills : []);
+        setMcpServers(Array.isArray(capabilityPayload.mcp_servers) ? capabilityPayload.mcp_servers : []);
+        setTools(Array.isArray(capabilityPayload.native_tools) ? capabilityPayload.native_tools : []);
+        setStarterPacks(Array.isArray(capabilityPayload.starter_packs) ? capabilityPayload.starter_packs : []);
+        setCatalogItems(Array.isArray(capabilityPayload.catalog_items) ? capabilityPayload.catalog_items : []);
+        setCapabilityRecommendations(
+          Array.isArray(capabilityPayload.recommendations) ? capabilityPayload.recommendations : [],
+        );
+        setRunbooks(Array.isArray(capabilityPayload.runbooks) ? capabilityPayload.runbooks : []);
+        setMarketplaceFlows(
+          Array.isArray(capabilityPayload.marketplace_flows) ? capabilityPayload.marketplace_flows : [],
+        );
+      }
     }
     if (extensionsResult.ok) {
       setExtensionPackages(normalizeExtensionPackagesPayload(extensionsResult.payload));
     } else {
       setExtensionPackages([]);
     }
-    setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
-    setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
-    setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
-    setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
-    setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
-    setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
-    setGuardianMemoryLiveControl(normalizeGuardianMemoryLiveControl(guardianMemoryLiveControlResult.payload));
-    setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
-    setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
-    setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
-    setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
-    setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
+    if (controlPlaneResult.ok) {
+      setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    }
+    if (shouldFetchBenchmarkProof) {
+      setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
+    }
+    if (shouldFetchGuardianProof) {
+      setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
+    }
+    if (workflowOrchestrationResult.ok) {
+      setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
+    }
+    if (backgroundSessionsResult.ok) {
+      setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
+    }
+    if (m5OperatingLayerResult.ok) {
+      setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
+    }
+    if (guardianMemoryLiveControlResult.ok) {
+      setGuardianMemoryLiveControl(normalizeGuardianMemoryLiveControl(guardianMemoryLiveControlResult.payload));
+    }
+    if (m6MemorySuperiorityResult.ok) {
+      setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
+    }
+    if (m7CockpitResult.ok) {
+      setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
+    }
+    if (shouldFetchGuardianProof) {
+      setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
+    }
+    if (engineeringMemoryResult.ok) {
+      setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
+    }
+    if (continuityGraphResult.ok) {
+      setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
+    }
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
@@ -6993,6 +7084,61 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (approvalModeResult.ok && approvalModeResult.payload && typeof approvalModeResult.payload === "object") {
       setApprovalMode(((approvalModeResult.payload as { mode?: string }).mode ?? "unknown") as ApprovalMode | "unknown");
     }
+  }, [fetchCockpitJson, sessionId]);
+
+  const loadGuardianProof = useCallback(async () => {
+    if (operatorGuardianProofLoading) return;
+    setOperatorGuardianProofLoading(true);
+    setOperatorStatus("Loading guardian proof...");
+    const sessionQuery = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    try {
+      const [guardianStateResult, m8GuardianBrainResult] = await Promise.all([
+        fetchCockpitJson(`${API_URL}/api/operator/guardian-state${sessionQuery}`, 10_000),
+        fetchCockpitJson(`${API_URL}/api/operator/m8-guardian-brain${sessionQuery}`, 10_000),
+      ]);
+      if (guardianStateResult.ok) {
+        setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
+      } else {
+        setOperatorGuardianState(null);
+      }
+      if (m8GuardianBrainResult.ok) {
+        setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
+      } else {
+        setOperatorM8GuardianBrain(null);
+      }
+      if (guardianStateResult.ok && m8GuardianBrainResult.ok) {
+        setOperatorStatus("Guardian proof loaded");
+      } else if (guardianStateResult.ok || m8GuardianBrainResult.ok) {
+        setOperatorStatus("Guardian proof partially loaded");
+      } else {
+        setOperatorStatus("Guardian proof unavailable");
+      }
+    } finally {
+      setOperatorGuardianProofLoading(false);
+    }
+  }, [fetchCockpitJson, operatorGuardianProofLoading, sessionId]);
+
+  const loadBenchmarkProof = useCallback(async () => {
+    if (operatorBenchmarkProofLoading) return;
+    setOperatorBenchmarkProofLoading(true);
+    setOperatorStatus("Loading benchmark proof...");
+    try {
+      const benchmarkProofResult = await fetchCockpitJson(`${API_URL}/api/operator/benchmark-proof`, 10_000);
+      if (benchmarkProofResult.ok) {
+        setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
+        setOperatorStatus("Benchmark proof loaded");
+      } else {
+        setOperatorBenchmarkProof(null);
+        setOperatorStatus("Benchmark proof unavailable");
+      }
+    } finally {
+      setOperatorBenchmarkProofLoading(false);
+    }
+  }, [fetchCockpitJson, operatorBenchmarkProofLoading]);
+
+  useEffect(() => {
+    setOperatorGuardianState(null);
+    setOperatorM8GuardianBrain(null);
   }, [sessionId]);
 
   useEffect(() => {
@@ -8040,8 +8186,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const connectionLabel = effectiveConnectionStatus === "connected"
     ? "live"
     : effectiveConnectionStatus;
-  const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
-  const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
+  const runtimeStatusIsStale = runtimeStatus !== null && runtimeStatusFailed;
+  const runtimeProviderLabel = (
+    runtimeStatus?.provider
+      ? `${runtimeStatus.provider.replace(/[_.-]+/g, " ").toUpperCase()}${runtimeStatusIsStale ? " STALE" : ""}`
+      : runtimeStatusFailed
+        ? "RUNTIME OFFLINE"
+        : "RUNTIME LOADING"
+  );
+  const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? (runtimeStatusFailed ? "model unavailable" : "model loading"))
     .replace(/^openrouter\//, "")
     .replace(/^anthropic\//, "")
     .replace(/[_/-]+/g, " ")
@@ -13530,6 +13683,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
+              <div className="cockpit-operator-row">
+                <span className="cockpit-key">proof load</span>
+                <button
+                  type="button"
+                  className="cockpit-operator-button"
+                  disabled={operatorGuardianProofLoading}
+                  onClick={() => void loadGuardianProof()}
+                >
+                  {operatorGuardianProofLoading ? "loading proof" : "load proof"}
+                </button>
+              </div>
               <div className="cockpit-state-grid">
                 <div>
                   <div className="cockpit-key">overall confidence</div>
@@ -15359,6 +15523,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">benchmark proof</span>
                       <span className="cockpit-operator-link">{benchmarkProofSummary ?? "summary unavailable"}</span>
+                      <button
+                        type="button"
+                        className="cockpit-operator-button"
+                        disabled={operatorBenchmarkProofLoading}
+                        onClick={() => void loadBenchmarkProof()}
+                      >
+                        {operatorBenchmarkProofLoading ? "loading proof" : "load proof"}
+                      </button>
                     </div>
                     {operatorBenchmarkProof ? (
                       <>

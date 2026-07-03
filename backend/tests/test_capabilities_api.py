@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +10,19 @@ from src.api.capabilities import _explicit_runbook_entries, _runbook_labels_by_s
 from src.app import create_app
 from src.observer.context import CurrentContext
 from src.extensions.registry import bundled_manifest_root, default_manifest_roots_for_workspace
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_overview_cache():
+    from src.api import capabilities
+
+    capabilities._CAPABILITY_OVERVIEW_CACHE = None
+    capabilities._CAPABILITY_OVERVIEW_CACHE_AT = 0.0
+    capabilities._CAPABILITY_OVERVIEW_REFRESH_TASK = None
+    yield
+    capabilities._CAPABILITY_OVERVIEW_CACHE = None
+    capabilities._CAPABILITY_OVERVIEW_CACHE_AT = 0.0
+    capabilities._CAPABILITY_OVERVIEW_REFRESH_TASK = None
 
 
 @pytest.fixture
@@ -79,6 +93,41 @@ def _setup_manifest_pack_and_runbook_managers(tmp_path):
     runbook_manager._runbooks_dir = ""
     runbook_manager._manifest_roots = []
     runbook_manager._registry = None
+
+
+@pytest.mark.asyncio
+async def test_capability_overview_returns_loading_payload_when_inventory_build_is_slow(client, monkeypatch):
+    from src.api import capabilities
+
+    monkeypatch.setenv("SERAPH_CAPABILITIES_CACHE_IN_TESTS", "1")
+    monkeypatch.setattr(capabilities, "_CAPABILITY_OVERVIEW_WAIT_S", 0.001)
+
+    def _slow_overview():
+        time.sleep(0.05)
+        return {
+            "summary": {"skills_total": 1},
+            "native_tools": [],
+            "skills": [{"name": "slow-skill"}],
+            "workflows": [],
+            "mcp_servers": [],
+            "source_adapters": [],
+            "source_adapter_rules": [],
+            "starter_packs": [],
+            "catalog_items": [],
+            "recommendations": [],
+            "runbooks": [],
+            "marketplace_flows": [],
+            "capability_contracts": [],
+        }
+
+    with patch("src.api.capabilities._build_capability_overview", side_effect=_slow_overview):
+        response = await client.get("/api/capabilities/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["metadata_status"] == "loading"
+    assert payload["summary"]["skills_total"] == 0
+    assert payload["skills"] == []
 
 
 @pytest.fixture

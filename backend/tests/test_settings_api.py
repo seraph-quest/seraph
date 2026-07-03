@@ -16,6 +16,15 @@ from src.db.models import UserProfile
 from src.observer.context import CurrentContext
 
 
+@pytest.fixture(autouse=True)
+def _clear_settings_summary_cache():
+    from src.api import settings as settings_api
+
+    settings_api._SUMMARY_CACHE.clear()
+    yield
+    settings_api._SUMMARY_CACHE.clear()
+
+
 @pytest.mark.asyncio
 async def test_get_interruption_mode(client):
     # Reset context_manager to a fresh default so the test is time-independent
@@ -205,12 +214,37 @@ async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, t
     assert runtime["chat_health_endpoint"] == "http://192.168.1.26:8001/health/chat"
     assert runtime["queue_status_endpoint"] == "http://192.168.1.26:8001/queue/status"
     assert runtime["api_key_configured"] is True
-    assert runtime["live_probe"]["checked"] is False
-    assert runtime["live_probe"]["reason"] == "test_stub"
+    assert "live_probe" not in runtime
     assert data["screenshot_folder"]["analysis"]["runtime"] == runtime
     assert data["local_runtime"]["gateway_configured"] is True
     assert data["local_runtime"]["vlm_base_url_configured"] is True
     assert "secret-token" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_does_not_wait_for_live_vlm_probe(client, tmp_path, monkeypatch):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+
+    async def _blocked_probe(*, timeout_seconds: float = 0.75):
+        raise AssertionError("artifact storage metadata must not run live VLM probes inline")
+
+    with (
+        patch("src.api.settings.probe_effective_vlm_runtime", _blocked_probe),
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch.object(settings, "seraph_vlm_mode", "gpu-server"),
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "seraph_vlm_backend_url", "http://192.168.1.26:8000/v1"),
+    ):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["screenshot_folder"]["path"] == str(screenshot_root)
+    assert data["screenshot_folder"]["analysis"]["runtime"]["configured"] is True
+    assert "live_probe" not in data["screenshot_folder"]["analysis"]["runtime"]
 
 
 @pytest.mark.asyncio
@@ -228,7 +262,7 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
     monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "db_lock_retries", 7)
     monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "selection_db_lock_failures", 2)
 
-    async def slow_pipeline_summary():
+    async def slow_pipeline_summary(root=None):
         await asyncio.sleep(2)
         return {}
 
@@ -251,6 +285,76 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
     assert data["screenshot_folder"]["analysis"]["latest_failure"] == "analysis metadata timed out"
     assert data["screenshot_folder"]["analysis"]["persistence"]["db_lock_retries"] == 7
     assert data["screenshot_folder"]["analysis"]["persistence"]["selection_db_lock_failures"] == 2
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_summary_singleflights_slow_refresh(tmp_path, monkeypatch):
+    from src.api import settings as settings_api
+
+    screenshot_root = tmp_path / "screenshots"
+    screenshot_root.mkdir()
+    calls = 0
+
+    def slow_summary(root):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.15)
+        return {
+            "status": "ready",
+            "image_count": 9,
+            "last_image_at": "2026-07-03T20:00:00+00:00",
+            "last_image_at_source": "file_mtime",
+            "exists": True,
+            "readable": True,
+        }
+
+    monkeypatch.setattr(settings_api, "_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(settings_api, "_screenshot_folder_summary", slow_summary)
+
+    started_at = time.monotonic()
+    first, second = await asyncio.gather(
+        settings_api._screenshot_folder_summary_fast(screenshot_root),
+        settings_api._screenshot_folder_summary_fast(screenshot_root),
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.1
+    assert calls == 1
+    assert first["status"] == "summary_timeout"
+    assert second["status"] == "summary_timeout"
+
+    await asyncio.sleep(0.2)
+    cached = await settings_api._screenshot_folder_summary_fast(screenshot_root)
+    assert cached["status"] == "ready"
+    assert cached["image_count"] == 9
+    assert calls == 1
+
+
+def test_screenshot_folder_analysis_candidate_ignores_stale_folder_root(tmp_path):
+    from src.observer.screenshot_folder_source import _analysis_candidate_ready
+
+    current_root = tmp_path / "screenshots"
+    old_root = tmp_path / "screenshots" / "captures"
+    details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "screenshot_folder",
+                "screenshot_folder": str(old_root),
+                "image_path": str(old_root / "old.png"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "screenshot_analysis_status:"
+        + json.dumps(
+            {"status": "pending"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    ]
+
+    assert _analysis_candidate_ready(details, current_root=current_root.resolve()) is False
 
 
 @pytest.mark.asyncio
@@ -330,6 +434,73 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
                 ),
             )
         )
+        old_root = screenshot_root / "captures"
+        db.add(
+            ScreenObservation(
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="old-root.png",
+                activity_type="screen",
+                summary="Old root screenshot.",
+                details_json=json.dumps(
+                    [
+                        "capture_artifacts:"
+                        + json.dumps(
+                            {
+                                "provider": "screenshot_folder",
+                                "screenshot_folder": str(old_root),
+                                "image_path": str(old_root / "old-root.png"),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "screenshot_analysis_status:"
+                        + json.dumps(
+                            {
+                                "status": "pending",
+                                "reason": "queued_for_analysis",
+                                "recorded_at": observed_at.isoformat(),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ]
+                ),
+            )
+        )
+        db.add(
+            ScreenObservation(
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="missing.png",
+                activity_type="screen",
+                summary="Missing screenshot.",
+                details_json=json.dumps(
+                    [
+                        "capture_artifacts:"
+                        + json.dumps(
+                            {
+                                "provider": "screenshot_folder",
+                                "screenshot_folder": str(screenshot_root),
+                                "image_path": str(screenshot_root / "missing.png"),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "screenshot_analysis_status:"
+                        + json.dumps(
+                            {
+                                "status": "source_missing",
+                                "reason": "image file not found",
+                                "recorded_at": observed_at.isoformat(),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ]
+                ),
+            )
+        )
         db.add(
             MemoryEpisode(
                 episode_type=MemoryEpisodeType.observer,
@@ -354,8 +525,12 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["last_image_at_source"] == "file_mtime"
     assert data["screenshot_folder"]["stored_artifacts"] == ["image"]
     assert data["screenshot_folder"]["analysis"]["observation_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["total_observation_count"] == 3
     assert data["screenshot_folder"]["analysis"]["analysis_failures"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_backlog"] == 0
+    assert data["screenshot_folder"]["analysis"]["stale_count"] == 2
+    assert data["screenshot_folder"]["analysis"]["source_missing_count"] == 1
+    assert data["screenshot_folder"]["analysis"]["stale_root_count"] == 1
     assert data["screenshot_folder"]["analysis"]["visual_run_count"] == 1
     assert data["screenshot_folder"]["analysis"]["visual_suppressed_count"] == 4
     assert data["screenshot_folder"]["analysis"]["persistence"]["db_lock_retries"] == 3
@@ -364,9 +539,11 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["analysis"]["ingested_count"] == 1
     assert data["screenshot_folder"]["analysis"]["remaining_to_ingest"] == 0
     assert data["screenshot_folder"]["analysis"]["processed_count"] == 0
-    assert data["screenshot_folder"]["analysis"]["remaining_to_analyze"] == 1
+    assert data["screenshot_folder"]["analysis"]["remaining_to_analyze"] == 0
     assert data["screenshot_folder"]["analysis"]["folder_remaining_to_analyze"] == 1
     assert data["screenshot_folder"]["analysis"]["analysis_status"]["failed"] == 1
+    assert data["screenshot_folder"]["analysis"]["analysis_status"]["source_missing"] == 1
+    assert data["screenshot_folder"]["analysis"]["analysis_status"]["stale_root"] == 1
     assert data["screenshot_folder"]["analysis"]["latest_failure"] == "provider unavailable"
     assert data["screenshot_folder"]["analysis"]["digest_count"] == 1
     assert data["screenshot_folder"]["analysis"]["latest_digest_at"] == "2026-06-30T09:30:00+00:00"
@@ -379,6 +556,92 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["readable"] is True
     assert data["screenshot_folder"]["scan_endpoint"] == "/api/observer/screenshot-folder/scan"
     assert "ingest_endpoint" not in data["screenshot_folder"]
+
+
+@pytest.mark.asyncio
+async def test_clear_stale_screenshot_folder_archives_only_incomplete_rows(client, async_db, tmp_path, monkeypatch):
+    from sqlmodel import select
+
+    from src.db.models import ScreenObservation
+
+    screenshot_root = tmp_path / "screenshots"
+    screenshot_root.mkdir()
+    analyzed_image = screenshot_root / "analyzed.png"
+    analyzed_image.write_bytes(b"png bytes")
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    observed_at = datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc)
+
+    def details(root: str, image_path: str, status: str) -> str:
+        return json.dumps(
+            [
+                "capture_artifacts:"
+                + json.dumps(
+                    {
+                        "provider": "screenshot_folder",
+                        "screenshot_folder": root,
+                        "image_path": image_path,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "screenshot_analysis_status:"
+                + json.dumps(
+                    {
+                        "status": status,
+                        "reason": "image file not found" if status == "source_missing" else "test",
+                        "recorded_at": observed_at.isoformat(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                id="succeeded-row",
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="analyzed.png",
+                activity_type="screen",
+                summary="Analyzed.",
+                details_json=details(str(screenshot_root), str(screenshot_root / "deleted-after-analysis.png"), "succeeded"),
+            )
+        )
+        db.add(
+            ScreenObservation(
+                id="missing-row",
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="missing.png",
+                activity_type="screen",
+                summary="Missing.",
+                details_json=details(str(screenshot_root), str(screenshot_root / "missing.png"), "source_missing"),
+            )
+        )
+        db.add(
+            ScreenObservation(
+                id="old-root-row",
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="old-root.png",
+                activity_type="screen",
+                summary="Old root.",
+                details_json=details(str(screenshot_root / "captures"), str(screenshot_root / "captures" / "old-root.png"), "pending"),
+            )
+        )
+
+    resp = await client.post("/api/settings/screen-analysis/screenshot-folder/clear-stale")
+
+    assert resp.status_code == 200
+    assert resp.json()["archived"] == 2
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation).order_by(ScreenObservation.id))
+        rows = {row.id: row for row in result.scalars().all()}
+    assert rows["succeeded-row"].blocked is False
+    assert rows["missing-row"].blocked is True
+    assert rows["old-root-row"].blocked is True
 
 
 @pytest.mark.asyncio

@@ -82,6 +82,9 @@ function settingsFromScreenAnalysisFixture(screen: {
         analysis_status: {},
         analysis_backlog: 0,
         analysis_failures: 0,
+        stale_count: 0,
+        source_missing_count: 0,
+        stale_root_count: 0,
         latest_observation_at: null,
         latest_analyzed_at: null,
         latest_failure: null,
@@ -218,6 +221,9 @@ describe("ArtifactStoragePanel", () => {
             },
             analysis_backlog: 2,
             analysis_failures: 1,
+            stale_count: 0,
+            source_missing_count: 0,
+            stale_root_count: 0,
             latest_observation_at: "2026-06-20T18:41:00Z",
             latest_analyzed_at: "2026-06-20T18:42:00Z",
             latest_failure: "provider unavailable",
@@ -544,6 +550,11 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
+    expect(
+      await screen.findByText(/Folder is locked by SERAPH_SCREENSHOT_FOLDER/),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Choose" })).toBeDisabled();
+
     const scanButton = await screen.findByRole("button", { name: "Scan folder" });
     await waitFor(() => expect(scanButton).not.toBeDisabled());
     fireEvent.click(scanButton);
@@ -562,6 +573,87 @@ describe("ArtifactStoragePanel", () => {
     );
     expect(await screen.findByText(/scanned 3 · added 1/)).toBeInTheDocument();
     expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
+  });
+
+  it("clears stale screenshot folder observations from the settings panel", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+    });
+    artifactStorage.screenshot_folder = {
+      ...artifactStorage.screenshot_folder,
+      path: "/Users/test/Pictures/Screenshots",
+      path_source: "screen-analysis-settings",
+      image_count: 3,
+      status: "ready",
+      exists: true,
+      readable: true,
+      analysis: {
+        ...artifactStorage.screenshot_folder.analysis,
+        observation_count: 2,
+        analysis_status: {
+          succeeded: 2,
+          failed: 0,
+          pending: 0,
+          needs_reanalysis: 0,
+          unknown: 0,
+          source_missing: 1,
+          stale_root: 1,
+        },
+        analysis_backlog: 0,
+        analysis_failures: 0,
+        stale_count: 2,
+        source_missing_count: 1,
+        stale_root_count: 1,
+      },
+    };
+    const refreshedStorage = {
+      ...artifactStorage,
+      screenshot_folder: {
+        ...artifactStorage.screenshot_folder,
+        analysis: {
+          ...artifactStorage.screenshot_folder.analysis,
+          stale_count: 0,
+          source_missing_count: 0,
+          stale_root_count: 0,
+        },
+      },
+    };
+    let cleanupRequested = false;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes("/api/settings/screen-analysis/screenshot-folder/clear-stale")) {
+        cleanupRequested = true;
+        return Promise.resolve(mockResponse({ archived: 2, source_missing: 1, stale_root: 1 }));
+      }
+      if (url.includes("/api/settings/artifact-storage")) {
+        return Promise.resolve(mockResponse(cleanupRequested ? refreshedStorage : artifactStorage));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText(/2 cleanup candidates/)).toBeInTheDocument();
+    const clearButton = await screen.findByRole("button", { name: "Clear stale" });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/screen-analysis/screenshot-folder/clear-stale"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    await waitFor(() => expect(screen.queryByText(/2 cleanup candidates/)).not.toBeInTheDocument());
   });
 
   it("saves a configured screenshot folder", async () => {
@@ -625,7 +717,7 @@ describe("ArtifactStoragePanel", () => {
       last_artifact_at: null,
       screenshot_folder: "/Users/test/Pictures/Screenshots",
     });
-    const pickedRoot = "/Users/test/Desktop/screenshots/captures";
+    const pickedRoot = "/Users/test/Desktop/screenshots";
     const refreshedStorage = {
       ...artifactStorage,
       screenshot_folder: {
@@ -646,7 +738,7 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Choose folder" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -655,6 +747,35 @@ describe("ArtifactStoragePanel", () => {
       ),
     );
     expect(await screen.findByDisplayValue(pickedRoot)).toBeInTheDocument();
+  });
+
+  it("shows typed-path fallback guidance when the native folder picker fails", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+    });
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValue(mockResponse(
+        { detail: "Screenshot folder picker timed out" },
+        false,
+      ));
+
+    render(<ArtifactStoragePanel />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Choose" }));
+
+    expect(await screen.findByText(/Screenshot folder picker timed out/)).toBeInTheDocument();
+    expect(screen.getByText(/type a local folder path and Save instead/)).toBeInTheDocument();
   });
 
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {

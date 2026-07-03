@@ -39,8 +39,8 @@ async def test_runtime_status_exposes_release_and_model(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == "2026.4.11"
-    assert payload["build_id"] == "SERAPH_PRIME_v2026.4.11"
+    assert payload["version"] == "2026.7.4"
+    assert payload["build_id"] == "SERAPH_PRIME_v2026.7.4"
     assert payload["provider"] == "openrouter"
     assert payload["model"] == settings.default_model
     assert payload["model_label"] == settings.default_model.split("/")[-1]
@@ -121,9 +121,25 @@ async def test_runtime_status_exposes_gpu_vlm_runtime_and_chat_profile(client):
         "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
         "api_key_configured": True,
         "feeder_window": 2,
-        "live_probe": _STUBBED_VLM_PROBE,
     }
     assert "secret-token" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_does_not_wait_for_live_vlm_probe(client):
+    async def _blocked_probe(*, timeout_seconds: float = 0.75):
+        raise AssertionError("runtime status must not run live VLM probes inline")
+
+    with (
+        patch("src.app.probe_effective_vlm_runtime", _blocked_probe),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+    ):
+        response = await client.get("/api/runtime/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "local-gemma"
+    assert "live_probe" not in payload["vlm_runtime"]
 
 
 @pytest.mark.asyncio

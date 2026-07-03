@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from config.settings import settings
-from src.vlm_runtime import effective_vlm_status, probe_effective_vlm_runtime
+from src.vlm_runtime import direct_local_chat_route_error, effective_vlm_status, probe_effective_vlm_runtime
 
 
 @pytest.mark.asyncio
@@ -227,3 +227,98 @@ async def test_probe_effective_vlm_runtime_marks_chat_auth_mismatch_unreachable(
     assert probe["chat_proxy"]["error"] == "auth_failed"
     assert probe["reachable"] is False
     assert "wrong-secret" not in str(probe)
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_uses_chat_probe_without_queue_status():
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, headers=None):
+            calls.append(url)
+            if url.endswith("/queue/status"):
+                raise AssertionError("chat preflight should not probe queue status")
+            if url.endswith("/health/chat"):
+                return FakeResponse(
+                    200,
+                    {
+                        "status": "ok",
+                        "enabled": True,
+                        "auth_configured": True,
+                        "auth_ok": True,
+                    },
+                )
+            return FakeResponse(200, {"status": "ok", "backend_status": 200})
+
+    with (
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "seraph_vlm_api_key", "secret-token"),
+        patch("src.vlm_runtime.httpx.AsyncClient", FakeAsyncClient),
+    ):
+        error = await direct_local_chat_route_error()
+
+    assert error is None
+    assert "http://192.168.1.26:8001/queue/status" not in calls
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_names_chat_health_failure():
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, headers=None):
+            if url.endswith("/health/chat"):
+                return FakeResponse(
+                    200,
+                    {
+                        "status": "auth_failed",
+                        "enabled": True,
+                        "auth_configured": True,
+                        "auth_ok": False,
+                    },
+                )
+            return FakeResponse(200, {"status": "ok", "backend_status": 200})
+
+    with (
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "seraph_vlm_api_key", "wrong-secret"),
+        patch("src.vlm_runtime.httpx.AsyncClient", FakeAsyncClient),
+    ):
+        error = await direct_local_chat_route_error()
+
+    assert error is not None
+    assert "Local chat runtime is unreachable" in error
+    assert "http://192.168.1.26:8001/health/chat (auth_failed)" in error
+    assert "wrong-secret" not in error

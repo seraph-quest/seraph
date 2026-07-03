@@ -17,8 +17,9 @@ engine = create_async_engine(
     echo=settings.database_echo,
     connect_args={"check_same_thread": False},
     pool_size=20,
-    max_overflow=20,
-    pool_timeout=5,
+    max_overflow=0,
+    pool_timeout=3,
+    pool_pre_ping=True,
 )
 
 

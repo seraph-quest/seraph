@@ -745,6 +745,63 @@ async def test_screenshot_folder_analysis_marks_old_prompt_version_for_reanalysi
 
 
 @pytest.mark.asyncio
+async def test_screenshot_folder_analysis_marks_missing_file_source_missing(async_db, tmp_path, monkeypatch):
+    from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
+
+    root = tmp_path / "screenshots"
+    root.mkdir()
+    missing = root / "missing.png"
+    observed_at = datetime(2026, 7, 3, 21, 0, tzinfo=timezone.utc)
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                app_name="Screenshot Folder",
+                window_title=missing.name,
+                activity_type="screen",
+                summary="Missing screenshot.",
+                timestamp=observed_at,
+                details_json=json.dumps(
+                    [
+                        "capture_artifacts:"
+                        + json.dumps(
+                            {
+                                "provider": "screenshot_folder",
+                                "screenshot_folder": str(root),
+                                "image_path": str(missing),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "screenshot_analysis_status:"
+                        + json.dumps(
+                            {"status": "pending", "recorded_at": observed_at.isoformat()},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ]
+                ),
+            )
+        )
+
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(root))
+    monkeypatch.setattr("src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled", lambda: True)
+    result = await analyze_pending_screenshot_folder_observations(limit=5)
+
+    assert result.failed == 1
+    async with async_db() as db:
+        query = await db.execute(select(ScreenObservation))
+        observation = query.scalar_one()
+    details = json.loads(observation.details_json)
+    status = next(
+        json.loads(item.removeprefix("screenshot_analysis_status:"))
+        for item in details
+        if item.startswith("screenshot_analysis_status:")
+    )
+    assert status["status"] == "source_missing"
+    assert status["reason"] == "image file not found"
+
+
+@pytest.mark.asyncio
 async def test_screenshot_folder_scan_ignores_non_images(async_db, client, tmp_path):
     root = tmp_path / "screenshots"
     root.mkdir()

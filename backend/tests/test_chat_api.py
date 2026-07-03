@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -41,12 +41,14 @@ class TestChatAPI:
         )
 
     @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
+    @patch("src.api.chat.direct_local_chat_route_error", new_callable=AsyncMock, return_value=None)
     @patch("src.api.chat.run_direct_local_chat", return_value="Hello. What should I call you?")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_onboarding_hello_can_use_direct_local_path(
         self,
         mock_onboarding,
         mock_direct_chat,
+        mock_route_error,
         mock_should_use_direct,
         client,
     ):
@@ -55,6 +57,7 @@ class TestChatAPI:
         assert response.status_code == 200
         assert response.json()["response"] == "Hello. What should I call you?"
         mock_should_use_direct.assert_called_once()
+        mock_route_error.assert_awaited_once()
         mock_direct_chat.assert_awaited_once()
         mock_onboarding.assert_not_called()
 
@@ -63,6 +66,38 @@ class TestChatAPI:
             event["event_type"] == "agent_run_succeeded"
             and event["tool_name"] == "onboarding_agent"
             and event["details"]["runtime"] == "direct-local-chat"
+            for event in events
+        )
+
+    @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
+    @patch(
+        "src.api.chat.direct_local_chat_route_error",
+        new_callable=AsyncMock,
+        return_value="Local chat runtime is unreachable from the Seraph backend at http://192.168.1.26:8001.",
+    )
+    @patch("src.api.chat.run_direct_local_chat")
+    async def test_chat_direct_local_route_failure_is_bounded(
+        self,
+        mock_direct_chat,
+        mock_route_error,
+        mock_should_use_direct,
+        client,
+    ):
+        response = await client.post("/api/chat", json={"message": "Hello"})
+
+        assert response.status_code == 503
+        assert "Local chat runtime is unreachable" in response.json()["detail"]
+        assert "LiteLLM" not in response.json()["detail"]
+        mock_should_use_direct.assert_called_once()
+        mock_route_error.assert_awaited_once()
+        mock_direct_chat.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_failed"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["runtime"] == "direct-local-chat"
+            and "Local chat runtime is unreachable" in event["details"]["error"]
             for event in events
         )
 

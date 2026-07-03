@@ -168,7 +168,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.4.11",
+        version="2026.7.4",
         debug=settings.debug,
         lifespan=lifespan,
     )
@@ -193,7 +193,6 @@ def create_app() -> FastAPI:
     async def runtime_status():
         runtime = _active_chat_runtime_status()
         default_model = settings.default_model.strip()
-        vlm_probe = await probe_effective_vlm_runtime()
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
@@ -204,7 +203,7 @@ def create_app() -> FastAPI:
             "default_api_base": settings.llm_api_base.strip(),
             "provider_profiles": provider_profile_statuses(),
             "local_operators": local_operator_statuses(probe=False),
-            "vlm_runtime": effective_vlm_status(live_probe=vlm_probe),
+            "vlm_runtime": effective_vlm_status(),
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

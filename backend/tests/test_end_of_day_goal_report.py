@@ -446,6 +446,93 @@ async def test_build_report_passes_llm_digest_text_to_report_llm(async_db):
 
 
 @pytest.mark.asyncio
+async def test_build_report_excludes_incomplete_screenshot_rows_and_stale_digest_ids(async_db):
+    from src.db.models import MemoryEpisode, MemoryEpisodeType, ScreenObservation
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    observed_at = datetime(2026, 6, 20, 10, 0, tzinfo=timezone.utc)
+
+    def screenshot_details(status: str) -> str:
+        return json.dumps(
+            [
+                "capture_artifacts:"
+                + json.dumps(
+                    {
+                        "provider": "screenshot_folder",
+                        "screenshot_folder": "/tmp/screenshots",
+                        "image_path": f"/tmp/screenshots/{status}.png",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "screenshot_analysis_status:"
+                + json.dumps(
+                    {
+                        "status": status,
+                        "recorded_at": observed_at.isoformat(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ]
+        )
+
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                id="obs-succeeded",
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="succeeded.png",
+                activity_type="screen",
+                summary="Analyzed screenshot.",
+                details_json=screenshot_details("succeeded"),
+            )
+        )
+        db.add(
+            ScreenObservation(
+                id="obs-source-missing",
+                timestamp=observed_at,
+                app_name="Screenshot Folder",
+                window_title="missing.png",
+                activity_type="screen",
+                summary="Missing screenshot.",
+                details_json=screenshot_details("source_missing"),
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Mixed stale digest",
+                content="This stale digest should not reach the report prompt.",
+                metadata_json=json.dumps(
+                    {
+                        "artifact_schema": "seraph.screenshot_observation_digest.v1",
+                        "window_start": "2026-06-20T10:00:00+00:00",
+                        "window_end": "2026-06-20T10:30:00+00:00",
+                        "observation_count": 2,
+                        "observation_ids": ["obs-succeeded", "obs-source-missing"],
+                    },
+                    sort_keys=True,
+                ),
+                observed_at=datetime(2026, 6, 20, 10, 30, tzinfo=timezone.utc),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch(
+        "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
+        new=AsyncMock(return_value=_llm_response("Filtered report")),
+    ) as completion:
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["summary"]["total_observations"] == 1
+    assert report["screenshot_digests"]["count"] == 0
+    prompt = completion.await_args.kwargs["messages"][0]["content"]
+    assert "This stale digest should not reach the report prompt." not in prompt
+
+
+@pytest.mark.asyncio
 async def test_build_report_leaves_goal_judgment_to_llm(async_db):
     from src.db.models import Goal, MemoryEpisode, MemoryEpisodeType
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report

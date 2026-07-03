@@ -183,7 +183,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
         {
             "func": _async_job_wrapper(run_screenshot_folder_analysis, loop),
             "trigger": IntervalTrigger(
-                seconds=_settings_int("screenshot_folder_analysis_interval_seconds", 1, minimum=1, maximum=300)
+                seconds=_settings_int("screenshot_folder_analysis_interval_seconds", 5, minimum=1, maximum=300)
             ),
             "id": "screenshot_folder_analysis",
             "name": "Screenshot folder semantic analysis",

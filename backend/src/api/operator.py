@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from config.settings import settings
 from src.agent.session import session_manager
@@ -156,6 +157,7 @@ from src.workflows.post_dx_live_durable_orchestration import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+GUARDIAN_STATE_COCKPIT_TIMEOUT_SECONDS = 4.0
 
 
 class MemoryOperatorControlRequest(BaseModel):
@@ -2832,6 +2834,83 @@ def _operator_guardian_state_payload(state: Any, *, session_id: str | None) -> d
     }
 
 
+def _operator_guardian_state_degraded_payload(
+    *,
+    session_id: str | None,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "summary": {
+            "session_id": session_id,
+            "overall_confidence": "degraded",
+            "observer_confidence": "unknown",
+            "world_model_confidence": "unknown",
+            "memory_confidence": "unknown",
+            "current_session_confidence": "unknown",
+            "recent_sessions_confidence": "unknown",
+            "intent_uncertainty_level": "unknown",
+            "intent_resolution": "degraded",
+            "action_posture": "hold_until_state_recovers",
+            "current_focus": "Guardian state unavailable",
+            "focus_source": "operator_api_degraded",
+            "focus_alignment": "unknown",
+            "intervention_receptivity": "unknown",
+            "dominant_thread": "No dominant thread",
+            "user_model_confidence": "unknown",
+            "degraded": True,
+            "degraded_reason": reason,
+        },
+        "explanation": {
+            "judgment_proof_lines": [],
+            "intent_uncertainty_diagnostics": [reason],
+            "judgment_risks": ["Guardian state could not read local state; Seraph should avoid confident action."],
+            "corroboration_sources": [],
+            "preference_inference_diagnostics": [],
+            "learning_diagnostics": [],
+            "memory_benchmark_diagnostics": [],
+            "memory_provider_diagnostics": [reason],
+            "memory_reconciliation_diagnostics": [],
+            "memory_decision_receipt": {},
+            "restraint_reasons": ["Local guardian state is degraded."],
+            "user_model_benchmark_diagnostics": [],
+        },
+        "user_model": {
+            "confidence": "unknown",
+            "restraint_posture": "hold_until_state_recovers",
+            "continuity_strategy": "preserve_current_context",
+            "clarification_watchpoints": [],
+            "restraint_reasons": ["Local guardian state is degraded."],
+            "evidence_store": [],
+            "facets": [],
+        },
+        "operator_guidance": {
+            "active_projects": [],
+            "active_commitments": [],
+            "active_blockers": [reason],
+            "next_up": ["Restore local state access, then refresh guardian state."],
+            "learning_guidance": "Do not infer preferences while guardian state is degraded.",
+            "recent_execution_summary": reason,
+        },
+        "observer": {
+            "user_state": None,
+            "interruption_mode": None,
+            "active_window": None,
+            "active_project": None,
+            "active_goals_summary": None,
+            "screen_context": None,
+            "data_quality": "degraded",
+            "is_working_hours": None,
+        },
+    }
+
+
+async def _build_guardian_state_for_cockpit(*, session_id: str | None) -> Any:
+    return await asyncio.wait_for(
+        build_guardian_state(session_id=session_id),
+        timeout=GUARDIAN_STATE_COCKPIT_TIMEOUT_SECONDS,
+    )
+
+
 def _m8_guardian_state_text(value: Any, *, limit: int = 160) -> str:
     text = " ".join(str(value or "").split())
     return text[:limit]
@@ -2994,7 +3073,7 @@ def _operator_m8_guardian_brain_payload(state: Any | None, *, session_id: str | 
     })
     return {
         "summary": {
-            "operator_status": "m8_guardian_brain_visible",
+            "operator_status": "m8_guardian_brain_visible" if live_receipt else "m8_guardian_brain_degraded",
             "session_id": session_id,
             "decision_count": len(receipts),
             "live_decision_count": 1 if live_receipt else 0,
@@ -3007,7 +3086,8 @@ def _operator_m8_guardian_brain_payload(state: Any | None, *, session_id: str | 
             "guardian_action_posture": getattr(state, "action_posture", "unknown") if state else "unknown",
             "intent_resolution": getattr(state, "intent_resolution", "unknown") if state else "unknown",
             "claim_boundary": "live_guardian_state_receipt_plus_deterministic_benchmark_receipts_not_superiority_claim",
-            "receipt_source": "live_guardian_state_plus_deterministic_benchmark",
+            "receipt_source": "live_guardian_state_plus_deterministic_benchmark" if live_receipt else "deterministic_benchmark_only_live_guardian_state_unavailable",
+            "degraded": live_receipt is None,
         },
         "decision_receipts": receipts,
         "live_decision_receipt": live_receipt,
@@ -3516,7 +3596,17 @@ async def get_operator_m7_cockpit(
 async def get_operator_m8_guardian_brain(
     session_id: str | None = Query(default=None),
 ):
-    state = await build_guardian_state(session_id=session_id)
+    try:
+        state = await _build_guardian_state_for_cockpit(session_id=session_id)
+    except TimeoutError:
+        logger.warning(
+            "M8 guardian brain degraded because guardian state timed out after %.1fs",
+            GUARDIAN_STATE_COCKPIT_TIMEOUT_SECONDS,
+        )
+        state = None
+    except SQLAlchemyError as exc:
+        logger.warning("M8 guardian brain degraded because guardian state DB access failed: %s", exc)
+        state = None
     return _operator_m8_guardian_brain_payload(state, session_id=session_id)
 
 
@@ -4612,7 +4702,21 @@ async def get_operator_governed_improvement_benchmark():
 async def get_operator_guardian_state(
     session_id: str | None = Query(default=None),
 ):
-    state = await build_guardian_state(session_id=session_id)
+    try:
+        state = await _build_guardian_state_for_cockpit(session_id=session_id)
+    except TimeoutError:
+        reason = "Local guardian state timed out."
+        logger.warning(
+            "%s session_id=%s timeout=%.1fs",
+            reason,
+            session_id,
+            GUARDIAN_STATE_COCKPIT_TIMEOUT_SECONDS,
+        )
+        return _operator_guardian_state_degraded_payload(session_id=session_id, reason=reason)
+    except SQLAlchemyError as exc:
+        reason = "Local guardian state database access failed."
+        logger.warning("%s session_id=%s error=%s", reason, session_id, exc)
+        return _operator_guardian_state_degraded_payload(session_id=session_id, reason=reason)
     return _operator_guardian_state_payload(state, session_id=session_id)
 
 

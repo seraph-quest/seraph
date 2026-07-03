@@ -63,6 +63,8 @@ SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
 SCREENSHOT_VISUAL_RUN_PREFIX = "screenshot_visual_run:"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
+SCREENSHOT_ANALYSIS_SOURCE_MISSING = "source_missing"
+SCREENSHOT_ANALYSIS_STALE_ROOT = "stale_root"
 _SCAN_LOCK = asyncio.Lock()
 _MAX_ANALYSIS_ATTEMPTS = 3
 _FAILED_ANALYSIS_RETRY_AFTER = timedelta(minutes=2)
@@ -166,11 +168,12 @@ async def analyze_pending_screenshot_folder_observations(
     if not screenshot_semantic_analysis_enabled():
         return ScreenshotFolderAnalysisResult(scanned=0, analyzed=0, failed=0, skipped=0)
 
+    current_root = resolve_screenshot_folder()
     candidates = await _select_analysis_candidates_with_retry(limit=analysis_limit * 20)
     observations = [
         observation
         for observation in candidates
-        if _analysis_candidate_ready(_observation_details(observation))
+        if _analysis_candidate_ready(_observation_details(observation), current_root=current_root)
     ][:analysis_limit]
     logger.info(
         "screenshot_folder_analysis: selected %d pending observations (limit=%d concurrency=%d)",
@@ -205,10 +208,16 @@ async def analyze_pending_screenshot_folder_observations(
         except (OSError, ScreenshotFolderImageError, ScreenshotSemanticAnalysisError) as exc:
             failed_reason = str(exc)
             logger.warning("screenshot_folder_analysis: failed %s: %s", image_path.name, failed_reason)
+            status = (
+                SCREENSHOT_ANALYSIS_SOURCE_MISSING
+                if isinstance(exc, ScreenshotFolderImageError) and failed_reason == "image file not found"
+                else "failed"
+            )
             details = _replace_analysis_details(
                 details,
                 analysis=None,
                 error_reason=str(exc),
+                status=status,
             )
 
         try:
@@ -667,7 +676,20 @@ def _duration_seconds(first_seen: str, last_seen: str) -> int:
     return max(int((last - first).total_seconds()), 0)
 
 
-def _analysis_candidate_ready(details: list[str], *, now: datetime | None = None) -> bool:
+def _analysis_candidate_ready(
+    details: list[str],
+    *,
+    current_root: Path | None = None,
+    now: datetime | None = None,
+) -> bool:
+    if current_root is not None:
+        artifacts = _capture_artifacts_from_details(details) or {}
+        try:
+            artifact_root = Path(str(artifacts.get("screenshot_folder") or "")).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return False
+        if artifact_root != current_root:
+            return False
     status = semantic_analysis_status_from_details(details) or {}
     state = str(status.get("status") or "").strip().lower()
     if state in {"", "pending", "needs_reanalysis"}:
@@ -720,6 +742,7 @@ def _replace_analysis_details(
     *,
     analysis,
     error_reason: str | None,
+    status: str = "failed",
 ) -> list[str]:
     previous_status = semantic_analysis_status_from_details(details) or {}
     try:
@@ -742,7 +765,7 @@ def _replace_analysis_details(
     else:
         reason = error_reason or "unknown"
         next_details.append(screenshot_analysis_error_detail(reason))
-        next_details.append(screenshot_analysis_status_detail("failed", reason=reason, attempts=attempts))
+        next_details.append(screenshot_analysis_status_detail(status, reason=reason, attempts=attempts))
     return next_details
 
 

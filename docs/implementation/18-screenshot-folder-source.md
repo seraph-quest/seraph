@@ -42,6 +42,14 @@ Seraph resolves the screenshot folder in this order:
 
 The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume screenshots from another app, configure Seraph with that app's screenshot folder explicitly.
 
+The configured folder is the exact root Seraph scans. Seraph does not append a
+producer-specific subdirectory such as `captures/`; if screenshots are now
+written directly to `/Users/bigcube/Desktop/screenshots`, configure that path
+directly. When `SERAPH_SCREENSHOT_FOLDER` is set, it intentionally locks the
+Settings picker and saved `screenshot_folder` value because env is the
+authoritative runtime source. Leave `SERAPH_SCREENSHOT_FOLDER` unset when the
+operator should choose the folder from Settings.
+
 Seraph does not migrate or resolve producer-specific screenshot keys. API requests, stored settings, and environment configuration use only `screenshot_folder` or `SERAPH_SCREENSHOT_FOLDER`. `artifact_root` and producer-specific key names are not part of the current contract.
 
 ## Folder Scan
@@ -120,11 +128,11 @@ The Seraph settings UI describes this as a local screenshot folder, not as Serap
 
 The settings panel saves `screenshot_folder` through `/api/settings/screen-analysis`. The manual scan action calls Seraph's local `/api/observer/screenshot-folder/scan` endpoint. Seraph can also run its own `screenshot_folder_ingest` scheduler job, controlled by `SCREENSHOT_FOLDER_INGEST_ENABLED`, `SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN`, and `SCREENSHOT_FOLDER_INGEST_LIMIT`. The local default is enabled, every 1 minute, up to 100 images per tick so a newly mounted backlog is ingested quickly enough for the VLM lane to stay busy.
 
-Semantic analysis is a second scheduler lane, controlled by `SCREENSHOT_FOLDER_ANALYSIS_LIMIT`, `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY`, and `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS`. In the one-GPU local topology, Seraph feeds a tiny analysis window on each scheduler tick: one active GPU request plus one queued background request by default. The VLM wrapper still runs GPU inference serially and owns priority ordering for the next accepted job; Seraph does not cancel an already-running GPU request. The analysis job starts only when screenshot-folder ingestion is enabled and the local VLM service answers `/health` with free queue capacity, then records `succeeded`, `failed`, or `skipped` scheduler receipts. A transient failed analysis is retried after a short cooldown up to a bounded attempt count, so one bad VLM response does not strand the item while repeated bad rows remain visible as failed. Candidate selection and result persistence use short DB sessions with bounded retry/backoff for SQLite lock errors. If a lock is exhausted, Seraph records the batch as degraded or failed and leaves pending work available for a later scheduler pass instead of holding the scheduler lane forever. This keeps folder scanning cheap, avoids long scheduler-owned batches, and lets the VLM queue stay fed without blocking the producer or duplicating observations.
+Semantic analysis is a second scheduler lane, controlled by `SCREENSHOT_FOLDER_ANALYSIS_LIMIT`, `SCREENSHOT_FOLDER_ANALYSIS_CONCURRENCY`, and `SCREENSHOT_FOLDER_ANALYSIS_INTERVAL_SECONDS` (local default: 5 seconds). In the one-GPU local topology, Seraph feeds a tiny analysis window on each scheduler tick: one active GPU request plus one queued background request by default. The VLM wrapper still runs GPU inference serially and owns priority ordering for the next accepted job; Seraph does not cancel an already-running GPU request. The 5-second tick avoids one-second max-instance scheduler churn while each batch can run for longer; the batch limit and wrapper feeder window keep sustained backlog moving. The analysis job starts only when screenshot-folder ingestion is enabled and the local VLM service answers `/health` with free queue capacity, then records `succeeded`, `failed`, or `skipped` scheduler receipts. A transient failed analysis is retried after a short cooldown up to a bounded attempt count, so one bad VLM response does not strand the item while repeated bad rows remain visible as failed. If the source image disappears before analysis, Seraph records `source_missing`; if a pending row belongs to a previous configured folder root, Settings treats it as `stale_root`. `source_missing` and `stale_root` rows are cleanup candidates, not active backlog. Candidate selection and result persistence use short DB sessions with bounded retry/backoff for SQLite lock errors. If a lock is exhausted, Seraph records the batch as degraded or failed and leaves pending work available for a later scheduler pass instead of holding the scheduler lane forever. This keeps folder scanning cheap, avoids long scheduler-owned batches, and lets the VLM queue stay fed without blocking the producer or duplicating observations.
 
 Both paths only read local image files from the configured folder. They do not start, connect to, or query any screenshot producer.
 
-The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: observation count, analyzer status mix, backlog, failures, visual run count, visual suppression count, DB lock retry/failure counters, latest observation/analyzed timestamps, digest count, and latest digest timestamp. These metadata summaries are bounded with short degraded fallbacks so the Settings modal stays usable even when filesystem, DB, proof, or receipt metadata is slow. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed, compressed before VLM, blocked by local persistence contention, and rolled into report-ready digest windows.
+The artifact-storage settings API also exposes Seraph-owned screenshot analysis status for the configured folder: current-folder observation count, total stored observation count, analyzer status mix, active backlog, active failures, stale/source-missing counts, visual run count, visual suppression count, DB lock retry/failure counters, latest observation/analyzed timestamps, digest count, and latest digest timestamp. These metadata summaries are bounded with short degraded fallbacks so the Settings modal stays usable even when filesystem, DB, proof, or receipt metadata is slow. The UI shows these fields beside the local folder path and scan controls so the operator can see whether screenshots are being analyzed, compressed before VLM, blocked by local persistence contention, and rolled into report-ready digest windows. Operators can clear stale incomplete rows from active status; cleanup archives those rows with `blocked=true` and does not delete successfully analyzed observations.
 
 The same surface exposes local Gemma runtime profile status: configured gateway state, active model, built-in profile contracts, latest profile-proof receipt, and whether single-backend profile routing is currently safe.
 
@@ -154,23 +162,30 @@ Seraph frontend       http://127.0.0.1:3001
   -> GPU model server http://192.168.1.26:8000/v1
 ```
 
-The VLM wrapper runs through Docker Compose on the GPU server to avoid local Python/runtime drift and to keep request admission next to the one GPU:
+The VLM wrapper runs through Docker Compose on the GPU server from
+`/home/pawel/repos/vlm-screenshot-server`. It keeps Seraph insulated from
+model-server drift while forwarding serial, priority-aware work to the one GPU
+model server:
 
 ```bash
-ssh jupyter
 cd /home/pawel/repos/vlm-screenshot-server
-HOST_BIND=0.0.0.0 HOST_PORT=8001 PORT=8001 \
+HOST=0.0.0.0 PORT=8001 HOST_BIND=0.0.0.0 HOST_PORT=8001 \
   VLM_BASE_URL=http://192.168.1.26:8000/v1 \
   VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF \
   CHAT_PROXY_ENABLED=true \
-  CHAT_PROXY_API_KEY=<strong-token> \
+  CHAT_PROXY_API_KEY=change-me-local-vlm-secret \
   QUEUE_MAX_SIZE=1000 QUEUE_WORKERS=1 QUEUE_BACKGROUND_WORKERS=1 \
   docker compose up -d --build screenshot-vlm
 ```
 
-The container publishes `192.168.1.26:8001` and forwards to `http://192.168.1.26:8000/v1`. Docker Desktop on the Mac is not part of the healthy product path for the wrapper.
+The container publishes `192.168.1.26:8001` on the GPU host and forwards to
+`http://192.168.1.26:8000/v1`. The GPU model server remains a separate process
+on the same machine and may already be running.
 
-SSH is only the admin channel for deploying, restarting, and inspecting the GPU-hosted wrapper. Seraph runtime traffic must stay on direct HTTP API calls to `SERAPH_VLM_BASE_URL=http://192.168.1.26:8001`; do not encode SSH forwards, SOCKS proxies, or tunnels into Seraph config or status receipts.
+SSH is only the admin channel for the GPU host. Seraph runtime traffic must stay
+on direct HTTP API calls to the GPU wrapper at
+`SERAPH_VLM_BASE_URL=http://192.168.1.26:8001`; do not encode SSH forwards,
+SOCKS proxies, or tunnels into Seraph config or status receipts.
 
 Required readiness checks from the Mac:
 
@@ -190,7 +205,7 @@ PYTHONPATH=backend backend/.venv/bin/python scripts/diagnose_gpu_vlm_route.py
 Interpretation:
 
 - `127.0.0.1:8004/health` proves Seraph backend is running.
-- `192.168.1.26:8001/health` proves the Dockerized GPU VLM wrapper is reachable from the Mac.
+- `192.168.1.26:8001/health` proves the Dockerized GPU VLM wrapper is reachable from Seraph.
 - `192.168.1.26:8001/health/backend` proves the wrapper can reach the GPU model server at `192.168.1.26:8000/v1`.
 - `192.168.1.26:8001/queue/status` proves Seraph can observe admission pressure before feeding screenshot work.
 - `192.168.1.26:8001/health/chat` proves the chat proxy is enabled and accepts Seraph's configured bearer key without running inference or adding GPU queue work.
@@ -204,8 +219,8 @@ July 3, 2026 proved `ssh -o BatchMode=yes -o ConnectTimeout=5 jupyter true`
 exits `0` for this GPU host, even though Codex/Desktop-launched direct SSH can
 report `No route to host` for the same alias. If Codex reports `No route to
 host` or connection failures for `192.168.1.26` while the operator shell can
-reach `jupyter`, record the Codex result as an agent-network limitation, not as
-evidence that the product topology requires a tunnel.
+reach `jupyter`, record the Codex result as an agent-network limitation. Do not
+turn that admin route into a Seraph runtime tunnel.
 
 Codex maintenance access is allowed to use `ssh jupyter` for GPU-host
 administration. That route has confirmed host `jupyter`, user `pawel`, and the
@@ -214,7 +229,7 @@ inventory, Docker Compose checks, process inspection, listener checks, and log
 reads. Do not use it as a Seraph runtime base URL or a passing direct-route
 acceptance receipt.
 
-Seraph also probes wrapper health, backend health, queue status, and authenticated `/health/chat` readiness from the running backend process and exposes the safe result in `/api/runtime/status` and `/api/settings/artifact-storage` as `vlm_runtime.live_probe`. The settings UI renders this as a `Reach` row for both screenshot analysis and the local Gemma runtime. This status distinguishes "configured for GPU wrapper" from "this Seraph process can actually reach the direct LAN route and use its chat endpoint"; diagnostic SSH forwards are not a substitute for `live_probe.reachable=true` on the direct `SERAPH_VLM_BASE_URL`.
+`/api/runtime/status` and `/api/settings/artifact-storage` return configured/effective VLM routing metadata without running live wrapper/GPU probes inline. They are fast UI metadata paths and should not block folder controls, cockpit headers, or settings rendering on a health check. Live reachability receipts come from the wrapper health endpoints (`/health`, `/health/backend`, `/queue/status`, and `/health/chat`) and from `scripts/diagnose_gpu_vlm_route.py`. This separates "configured for local wrapper" from "this Seraph process can actually reach the wrapper and its GPU backend" without making settings metadata wait on the GPU route.
 
 `scripts/diagnose_gpu_vlm_route.py` is the operator-shell receipt command for the direct route. It reads `SERAPH_VLM_BASE_URL`, `SERAPH_VLM_API_KEY`, and `LOCAL_VLM_MODEL`/`LOCAL_MODEL`, prints sanitized JSON, and exits non-zero when the direct wrapper route, chat check, or requested image check fails. Loopback and localhost base URLs are rejected by default so a tunnel cannot accidentally pass as the direct-route receipt. Use `--allow-non-direct-base-url` only for explicitly labeled diagnostic bridge checks. Use `--image /path/to/screenshot.png` when the validation receipt also needs a wrapper-level `/v1/analyze-file` check.
 
@@ -242,13 +257,11 @@ The GPU model backend exposes an OpenAI-compatible API on the GPU host at:
 http://192.168.1.26:8000/v1
 ```
 
-Run the screenshot-analysis wrapper on the GPU server with Docker Compose. The
-repo on the GPU host is `/home/pawel/repos/vlm-screenshot-server`; the wrapper
-publishes `http://192.168.1.26:8001` and forwards to the local GPU model
-backend above.
+Run the screenshot-analysis wrapper on the GPU host with Docker Compose. The
+wrapper repo is `/home/pawel/repos/vlm-screenshot-server`; the wrapper publishes
+`http://192.168.1.26:8001` and forwards to the GPU model backend above.
 
 ```bash
-ssh jupyter
 cd /home/pawel/repos/vlm-screenshot-server
 cp .env.example .env
 ```
@@ -267,6 +280,8 @@ VLM_TIMEOUT_SECONDS=180
 VLM_MAX_TOKENS=700
 VLM_TEMPERATURE=0
 REDACT_VISIBLE_TEXT=true
+CHAT_PROXY_ENABLED=true
+CHAT_PROXY_API_KEY=change-me-local-vlm-secret
 QUEUE_MAX_SIZE=1000
 QUEUE_WORKERS=1
 QUEUE_BACKGROUND_WORKERS=1
@@ -285,6 +300,8 @@ API calls:
 curl http://192.168.1.26:8001/health
 curl http://192.168.1.26:8001/health/backend
 curl http://192.168.1.26:8001/queue/status
+curl http://192.168.1.26:8001/health/chat \
+  -H "Authorization: Bearer $SERAPH_VLM_API_KEY"
 curl -F "file=@/path/to/screenshot.png" \
   http://192.168.1.26:8001/v1/analyze-file
 ```
@@ -296,7 +313,7 @@ SCREEN_ANALYSIS_PROVIDER=local-vlm
 SERAPH_VLM_MODE=gpu-server
 SERAPH_VLM_BASE_URL=http://192.168.1.26:8001
 SERAPH_VLM_BACKEND_URL=http://192.168.1.26:8000/v1
-SERAPH_VLM_API_KEY=<same-token-as-wrapper-CHAT_PROXY_API_KEY>
+SERAPH_VLM_API_KEY=change-me-local-vlm-secret
 SERAPH_VLM_FEEDER_WINDOW=2
 LOCAL_VLM_MODEL=unsloth/gemma-4-26B-A4B-it-qat-GGUF
 LOCAL_MODEL=openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF
@@ -308,7 +325,7 @@ SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF=true
 
 Quote `RUNTIME_PROFILE_PREFERENCES` whenever it contains semicolons. The managed local launcher sources `.env.dev` as shell, so an unquoted value is split into partial shell assignments and Seraph can silently lose the `chat_agent` profile preference.
 
-The production-like local topology is direct private LAN, not an SSH tunnel:
+The production-like local topology is direct HTTP, not an SSH tunnel:
 
 ```text
 Seraph backend     http://127.0.0.1:8004
@@ -318,7 +335,7 @@ Seraph backend     http://127.0.0.1:8004
 
 SSH forwarding is acceptable only as a diagnostic bridge for an agent sandbox that cannot open the LAN route. It is not the operator runtime contract, and Seraph status must not require or imply a tunnel.
 
-The user should not have to set up tunnels to access Seraph's GPU VLM API. If a
+The user should not have to set up tunnels to access Seraph's VLM API. If a
 tunnel is needed for a Codex diagnostic session, keep it out of `.env.dev`, do
 not use it as a passing acceptance receipt, and prefer an operator-shell
 `scripts/diagnose_gpu_vlm_route.py` receipt against
@@ -434,7 +451,7 @@ Default settings:
 
 Each digest stores a `MemoryEpisode` with source tool `screenshot_observation_digest` and schema `seraph.screenshot_observation_digest.v1`. Digest metadata includes the digest key, window start/end, source screenshot observation ids, observation count, content character count, and payload SHA-256.
 
-The digest is intentionally text-only and privacy-bounded. It never embeds raw screenshots, image hashes, full visible text, or provider transcripts. It is generated by the configured LLM from stored LLM screenshot analyses and carries the source observation ids needed for traceability.
+The digest is intentionally text-only and privacy-bounded. It never embeds raw screenshots, image hashes, full visible text, or provider transcripts. It is generated by the configured LLM from stored LLM screenshot analyses and carries the source observation ids needed for traceability. Successfully analyzed observations remain digest/report eligible even if the original image file later moves or is deleted; pending, source-missing, stale-root, and otherwise incomplete screenshot-folder rows are excluded from digest and end-of-day report inputs.
 
 Digest writes are idempotent per window and schema. If a window has not changed, Seraph keeps the existing episode. If new observations appear in the same window, Seraph updates the same episode instead of creating duplicates.
 

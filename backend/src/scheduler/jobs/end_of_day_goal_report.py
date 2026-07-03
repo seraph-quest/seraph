@@ -257,9 +257,14 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
     details: list[str] = []
     screenshot_samples: list[str] = []
     total_seconds = 0
-    for index, obs in enumerate(observations):
+    report_observations = [
+        obs
+        for obs in observations
+        if not _stale_incomplete_screenshot_observation(obs)
+    ]
+    for index, obs in enumerate(report_observations):
         source = _observation_source(obs)
-        next_obs = observations[index + 1] if index + 1 < len(observations) else None
+        next_obs = report_observations[index + 1] if index + 1 < len(report_observations) else None
         duration = _observation_report_duration(obs, next_obs=next_obs, source=source)
         total_seconds += duration
         by_activity[obs.activity_type] = by_activity.get(obs.activity_type, 0) + duration
@@ -277,9 +282,9 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
     return {
         "date": report_day.isoformat(),
         "timezone": str(tz),
-        "total_observations": len(observations),
+        "total_observations": len(report_observations),
         "total_tracked_minutes": total_seconds // 60,
-        "switch_count": len(observations),
+        "switch_count": len(report_observations),
         "by_activity": dict(sorted(by_activity.items(), key=lambda item: -item[1])),
         "by_project": dict(sorted(by_project.items(), key=lambda item: -item[1])),
         "by_app": dict(sorted(by_app.items(), key=lambda item: -item[1])),
@@ -314,11 +319,20 @@ async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> d
     digests: list[dict[str, Any]] = []
     observation_ids: list[str] = []
     text_chunks: list[str] = []
+    episode_records: list[tuple[MemoryEpisode, dict[str, Any], list[str]]] = []
     for episode in episodes:
         metadata = _episode_metadata(episode)
         if metadata.get("artifact_schema") != _SCREENSHOT_DIGEST_SCHEMA_VERSION:
             continue
         ids = [str(item) for item in metadata.get("observation_ids", []) if item]
+        episode_records.append((episode, metadata, ids))
+        observation_ids.extend(ids)
+
+    valid_observation_ids = await _valid_screenshot_observation_ids(_unique_values(observation_ids))
+    observation_ids = []
+    for episode, metadata, ids in episode_records:
+        if ids and any(item not in valid_observation_ids for item in ids):
+            continue
         observation_ids.extend(ids)
         content = str(episode.content or "")[:1400]
         digests.append(
@@ -342,6 +356,26 @@ async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> d
     }
 
 
+async def _valid_screenshot_observation_ids(observation_ids: list[str]) -> set[str]:
+    if not observation_ids:
+        return set()
+    from sqlmodel import col, select
+    from src.db.engine import get_session
+
+    async with get_session() as db:
+        result = await db.execute(
+            select(ScreenObservation)
+            .where(col(ScreenObservation.id).in_(observation_ids))
+            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+        )
+        observations = list(result.scalars().all())
+    return {
+        observation.id
+        for observation in observations
+        if not _stale_incomplete_screenshot_observation(observation)
+    }
+
+
 def _observation_source(observation: ScreenObservation) -> str:
     if observation.details_json:
         try:
@@ -362,6 +396,34 @@ def _observation_source(observation: ScreenObservation) -> str:
     if observation.app_name == "Screenshot Folder":
         return "screenshot_folder"
     return "observer_daemon"
+
+
+def _observation_details(observation: ScreenObservation) -> list[Any]:
+    try:
+        payload = json.loads(observation.details_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _stale_incomplete_screenshot_observation(observation: ScreenObservation) -> bool:
+    if _observation_source(observation) != "screenshot_folder":
+        return False
+    details = _observation_details(observation)
+    state = ""
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("screenshot_analysis_status:")):
+            continue
+        try:
+            status = json.loads(item.removeprefix("screenshot_analysis_status:"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(status, dict):
+            state = str(status.get("status") or "").strip().lower()
+            break
+    if state == "succeeded":
+        return False
+    return True
 
 
 def _observation_report_duration(

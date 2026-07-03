@@ -225,7 +225,18 @@ async def _screenshot_observations(start: datetime, end: datetime) -> list[Scree
             )
             .order_by(col(ScreenObservation.timestamp))
         )
-        return list(result.scalars().all())
+        return [
+            observation
+            for observation in result.scalars().all()
+            if not _stale_incomplete_screenshot_observation(observation)
+        ]
+
+
+def _stale_incomplete_screenshot_observation(observation: ScreenObservation) -> bool:
+    details = _details(observation)
+    status = semantic_analysis_status_from_details(details) or {}
+    state = str(status.get("status") or "").strip().lower()
+    return state != "succeeded"
 
 
 def _digest_payload(

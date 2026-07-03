@@ -100,6 +100,55 @@ async def test_screenshot_digest_groups_window_and_links_evidence(async_db):
 
 
 @pytest.mark.asyncio
+async def test_screenshot_digest_excludes_incomplete_screenshot_observations(async_db):
+    from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
+
+    start = datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 30, 9, 30, tzinfo=timezone.utc)
+    async with async_db() as db:
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc),
+                image_sha256="hash-succeeded",
+                summary="Analyzed screenshot",
+                status="succeeded",
+            )
+        )
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 10, tzinfo=timezone.utc),
+                image_sha256="hash-source-missing",
+                summary="Missing screenshot",
+                status="source_missing",
+            )
+        )
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 15, tzinfo=timezone.utc),
+                image_sha256="hash-pending",
+                summary="Pending screenshot",
+                status="pending",
+            )
+        )
+
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="Only analyzed screenshot"))]
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=AsyncMock(return_value=response),
+    ):
+        result = await build_screenshot_observation_digest(window_start=start, window_end=end)
+
+    assert result.status == "created"
+    assert result.observation_count == 1
+    async with async_db() as db:
+        episode = (await db.execute(select(MemoryEpisode))).scalar_one()
+    metadata = json.loads(episode.metadata_json or "{}")
+    assert len(metadata["observation_ids"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_screenshot_digest_blocks_without_local_profile_or_remote_opt_in(async_db):
     from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
 
@@ -260,6 +309,7 @@ def _observation(
     image_sha256: str,
     summary: str,
     analysis: dict | None = None,
+    status: str = "succeeded",
 ) -> ScreenObservation:
     analysis_payload = {
         "schema_version": "seraph.screenshot_analysis.v1",
@@ -309,7 +359,7 @@ def _observation(
         "screenshot_analysis_status:"
         + json.dumps(
             {
-                "status": "succeeded",
+                "status": status,
                 "provider": "local-vlm",
                 "model": "gemma",
                 "schema_version": "seraph.screenshot_analysis.v1",

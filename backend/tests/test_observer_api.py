@@ -7,6 +7,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.observer import _observer_presence_surface_payload
 from src.audit.repository import audit_repository
@@ -516,6 +517,23 @@ class TestObserverAPI:
         assert live_route["selected_transport"] == "native_notification"
 
         await native_notification_queue.clear()
+
+    @pytest.mark.asyncio
+    async def test_observer_continuity_degrades_when_queue_db_read_fails(self, client):
+        await native_notification_queue.clear()
+        with patch(
+            "src.observer.insight_queue.insight_queue.peek_all",
+            AsyncMock(side_effect=SQLAlchemyError("db unavailable")),
+        ):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["summary"]["continuity_health"] == "degraded"
+        assert payload["summary"]["primary_surface"] == "local_state"
+        assert payload["summary"]["recommended_focus"] == "local state database recovery"
+        assert payload["queued_insights"] == []
+        assert payload["queued_insight_count"] == 0
 
     @pytest.mark.asyncio
     async def test_observer_continuity_recovers_queued_thread_from_intervention_outside_recent_window(self, async_db, client):

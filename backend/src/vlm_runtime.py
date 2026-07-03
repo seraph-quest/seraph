@@ -9,6 +9,8 @@ import httpx
 
 from config.settings import settings
 
+_LOCAL_CHAT_ROUTE_TIMEOUT_SECONDS = 0.75
+
 
 def effective_vlm_base_url() -> str:
     """Return the configured Seraph VLM wrapper base URL without a trailing slash."""
@@ -123,12 +125,99 @@ async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[
     }
 
 
+async def probe_effective_vlm_chat_runtime(*, timeout_seconds: float = 0.75) -> dict[str, object]:
+    """Probe only the endpoints required before starting a local chat turn."""
+    base_url = effective_vlm_base_url()
+    if not base_url:
+        return {
+            "checked": False,
+            "reachable": False,
+            "reason": "not_configured",
+            "health": _unprobed_endpoint(),
+            "backend_health": _unprobed_endpoint(),
+            "chat_proxy": _unprobed_endpoint(),
+        }
+
+    timeout = max(min(timeout_seconds, 5.0), 0.1)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        health, backend_health, chat_proxy = await asyncio.gather(
+            _probe_json_endpoint(client, base_url + "/health"),
+            _probe_json_endpoint(client, base_url + "/health/backend"),
+            _probe_chat_health(client, base_url + "/health/chat"),
+        )
+    reachable = bool(
+        health.get("ok")
+        and backend_health.get("ok")
+        and chat_proxy.get("ok")
+    )
+    return {
+        "checked": True,
+        "reachable": reachable,
+        "health": health,
+        "backend_health": backend_health,
+        "chat_proxy": chat_proxy,
+    }
+
+
+async def direct_local_chat_route_error(*, timeout_seconds: float = _LOCAL_CHAT_ROUTE_TIMEOUT_SECONDS) -> str | None:
+    """Return an operator-safe error when local chat cannot reach the VLM wrapper."""
+    probe = await probe_effective_vlm_chat_runtime(timeout_seconds=timeout_seconds)
+    runtime = effective_vlm_status(live_probe=probe)
+    if not runtime.get("configured"):
+        return "Local chat runtime is not configured. Set SERAPH_VLM_BASE_URL before using local Gemma chat."
+
+    required_ok = (
+        _probe_endpoint_ok(probe, "health")
+        and _probe_endpoint_ok(probe, "backend_health")
+        and _probe_endpoint_ok(probe, "chat_proxy")
+    )
+    if required_ok:
+        return None
+
+    failures = [
+        failure
+        for failure in (
+            _probe_endpoint_failure(probe, "health", str(runtime.get("health_endpoint") or "VLM wrapper health")),
+            _probe_endpoint_failure(
+                probe,
+                "backend_health",
+                str(runtime.get("backend_health_endpoint") or "VLM backend health"),
+            ),
+            _probe_endpoint_failure(
+                probe,
+                "chat_proxy",
+                str(runtime.get("chat_health_endpoint") or "VLM chat health"),
+            ),
+        )
+        if failure
+    ]
+    details = "; ".join(failures[:3]) if failures else str(probe.get("reason") or "route not reachable")
+    base_url = str(runtime.get("base_url") or "configured VLM wrapper")
+    return f"Local chat runtime is unreachable from the Seraph backend at {base_url}: {details}."
+
+
 def _trim_url(value: str | None) -> str:
     return str(value or "").strip().rstrip("/")
 
 
 def _unprobed_endpoint() -> dict[str, object]:
     return {"checked": False, "ok": False, "status_code": None, "error": ""}
+
+
+def _probe_endpoint_ok(probe: dict[str, object], key: str) -> bool:
+    endpoint = probe.get(key)
+    return isinstance(endpoint, dict) and endpoint.get("ok") is True
+
+
+def _probe_endpoint_failure(probe: dict[str, object], key: str, endpoint_url: str) -> str | None:
+    endpoint = probe.get(key)
+    if not isinstance(endpoint, dict) or endpoint.get("ok") is True:
+        return None
+    reason = str(endpoint.get("error") or "unreachable")
+    status_code = endpoint.get("status_code")
+    if status_code and reason == "bad_status":
+        reason = f"{reason}:{status_code}"
+    return f"{endpoint_url} ({reason})"
 
 
 async def _probe_json_endpoint(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:

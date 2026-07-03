@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -2138,13 +2139,29 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
     from src.observer.insight_queue import insight_queue
 
     notifications = [_notification_payload(item) for item in await native_notification_queue.list()]
-    queued_insights = await insight_queue.peek_all()
-    recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
-    session_titles = {
-        str(session["id"]): str(session.get("title") or "Untitled session")
-        for session in await session_manager.list_sessions()
-        if isinstance(session, dict) and session.get("id")
-    }
+    degraded_inputs: list[str] = []
+    try:
+        queued_insights = await insight_queue.peek_all()
+    except SQLAlchemyError as exc:
+        logger.warning("Observer continuity degraded: queued insights unavailable: %s", exc)
+        queued_insights = []
+        degraded_inputs.append("queued_insights")
+    try:
+        recent_interventions = await guardian_feedback_repository.list_recent(limit=8)
+    except SQLAlchemyError as exc:
+        logger.warning("Observer continuity degraded: recent interventions unavailable: %s", exc)
+        recent_interventions = []
+        degraded_inputs.append("recent_interventions")
+    try:
+        session_titles = {
+            str(session["id"]): str(session.get("title") or "Untitled session")
+            for session in await session_manager.list_sessions()
+            if isinstance(session, dict) and session.get("id")
+        }
+    except SQLAlchemyError as exc:
+        logger.warning("Observer continuity degraded: session titles unavailable: %s", exc)
+        session_titles = {}
+        degraded_inputs.append("session_titles")
     intervention_thread_map: dict[str, tuple[str | None, str | None]] = {}
     for item in recent_interventions:
         thread_id = getattr(item, "session_id", None)
@@ -2160,7 +2177,16 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
         and str(item.intervention_id) not in intervention_thread_map
     }
     for intervention_id in missing_intervention_ids:
-        fallback_intervention = await guardian_feedback_repository.get(intervention_id)
+        try:
+            fallback_intervention = await guardian_feedback_repository.get(intervention_id)
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "Observer continuity degraded: intervention fallback unavailable for %s: %s",
+                intervention_id,
+                exc,
+            )
+            degraded_inputs.append("intervention_fallback")
+            continue
         fallback_session_id = getattr(fallback_intervention, "session_id", None) if fallback_intervention else None
         if fallback_intervention is None or not fallback_session_id:
             continue
@@ -2290,6 +2316,13 @@ async def build_observer_continuity_snapshot() -> dict[str, Any]:
         presence_surfaces=presence_surface_payload,
         threads=thread_payload,
     )
+    if degraded_inputs:
+        summary_payload = {
+            **summary_payload,
+            "continuity_health": "degraded",
+            "primary_surface": "local_state",
+            "recommended_focus": "local state database recovery",
+        }
 
     return {
         "daemon": await _daemon_status_payload(),

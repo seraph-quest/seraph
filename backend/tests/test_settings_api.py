@@ -3,6 +3,7 @@
 import asyncio
 import json
 import stat
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -196,9 +197,12 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
         patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
         patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
     ):
+        started_at = time.monotonic()
         resp = await client.get("/api/settings/artifact-storage")
+        elapsed = time.monotonic() - started_at
 
     assert resp.status_code == 200
+    assert elapsed < 0.5
     data = resp.json()
     assert data["screenshot_folder"]["path"] == str(screenshot_root.resolve())
     assert data["screenshot_folder"]["path_source"] == "SERAPH_SCREENSHOT_FOLDER"

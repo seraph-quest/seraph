@@ -22,6 +22,14 @@ def test_screenshot_folder_analysis_job_timeout_scales_with_batches(monkeypatch)
     assert _analysis_job_timeout_seconds(limit=1, concurrency=2) == 30
 
 
+def test_screenshot_folder_analysis_scheduled_batch_is_limited_to_feeder_window():
+    from src.scheduler.jobs.screenshot_folder_analysis import _scheduled_batch_limit
+
+    assert _scheduled_batch_limit(limit=100, concurrency=2) == 2
+    assert _scheduled_batch_limit(limit=1, concurrency=2) == 1
+    assert _scheduled_batch_limit(limit=100, concurrency=1) == 1
+
+
 def test_failed_screenshot_analysis_is_retried_after_cooldown():
     from src.observer.screenshot_folder_source import (
         _MAX_ANALYSIS_ATTEMPTS,
@@ -56,7 +64,6 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
 
     calls = []
     events = []
-    wait_for_calls = []
 
     async def fake_accepting_background_work():
         return True
@@ -67,10 +74,6 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
 
     async def fake_log_scheduler_job_event(*, job_name, outcome, details):
         events.append({"job_name": job_name, "outcome": outcome, "details": details})
-
-    async def fake_wait_for(awaitable, *, timeout):
-        wait_for_calls.append(timeout)
-        return await awaitable
 
     monkeypatch.setattr(
         "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
@@ -84,7 +87,6 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
         "src.scheduler.jobs.screenshot_folder_analysis.log_scheduler_job_event",
         fake_log_scheduler_job_event,
     )
-    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_analysis.asyncio.wait_for", fake_wait_for)
     monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_analysis.settings.screenshot_folder_ingest_enabled", True)
     monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_analysis.settings.screenshot_folder_analysis_limit", 999)
     monkeypatch.setattr(
@@ -98,13 +100,60 @@ async def test_screenshot_folder_analysis_job_drains_pending_backlog_with_bounde
 
     await run_screenshot_folder_analysis()
 
-    assert calls == [{"limit": 100, "concurrency": 1}]
-    assert wait_for_calls == [3000]
+    assert calls == [{"limit": 2, "concurrency": 2}]
     assert events[0]["job_name"] == "screenshot_folder_analysis"
     assert events[0]["outcome"] == "succeeded"
     assert events[0]["details"]["scanned"] == 5
     assert events[0]["details"]["analyzed"] == 5
-    assert events[0]["details"]["concurrency"] == 1
+    assert events[0]["details"]["concurrency"] == 2
+    assert events[0]["details"]["batch_limit"] == 2
+
+
+@pytest.mark.asyncio
+async def test_screenshot_folder_analysis_timeout_releases_scheduler_slot(monkeypatch):
+    from src.scheduler.jobs.screenshot_folder_analysis import run_screenshot_folder_analysis
+
+    events = []
+    cancel_seen = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def fake_accepting_background_work():
+        return True
+
+    async def fake_analyze_pending(*, limit, concurrency):
+        try:
+            await release_cleanup.wait()
+        except asyncio.CancelledError:
+            cancel_seen.set()
+            await release_cleanup.wait()
+            raise
+
+    async def fake_log_scheduler_job_event(*, job_name, outcome, details):
+        events.append({"job_name": job_name, "outcome": outcome, "details": details})
+
+    monkeypatch.setattr(
+        "src.scheduler.jobs.screenshot_folder_analysis.screenshot_semantic_analysis_accepting_background_work",
+        fake_accepting_background_work,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.jobs.screenshot_folder_analysis.analyze_pending_screenshot_folder_observations",
+        fake_analyze_pending,
+    )
+    monkeypatch.setattr(
+        "src.scheduler.jobs.screenshot_folder_analysis.log_scheduler_job_event",
+        fake_log_scheduler_job_event,
+    )
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_analysis._analysis_job_timeout_seconds", lambda **_: 0.01)
+    monkeypatch.setattr("src.scheduler.jobs.screenshot_folder_analysis.settings.screenshot_folder_ingest_enabled", True)
+
+    await asyncio.wait_for(run_screenshot_folder_analysis(), timeout=0.2)
+    await asyncio.wait_for(cancel_seen.wait(), timeout=0.2)
+    release_cleanup.set()
+    await asyncio.sleep(0)
+
+    assert events[0]["job_name"] == "screenshot_folder_analysis"
+    assert events[0]["outcome"] == "failed"
+    assert events[0]["details"]["error"] == "analysis job timed out"
 
 
 @pytest.mark.asyncio

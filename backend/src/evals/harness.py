@@ -1002,6 +1002,11 @@ Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
 
+
+async def _browse_webpage_async(url: str, *, action: str = "extract") -> str:
+    return await asyncio.to_thread(browse_webpage, url, action=action)
+
+
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.db.engine.get_session",
     "src.agent.session.get_session",
@@ -5964,25 +5969,9 @@ async def _eval_web_search_empty_result_audit() -> dict[str, Any]:
 
 
 async def _eval_browser_runtime_audit() -> dict[str, Any]:
-    class _ImmediateFuture:
-        def result(self):
-            raise TimeoutError("Timed out")
-
-    class _ImmediateExecutor:
-        def __enter__(self) -> "_ImmediateExecutor":
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-        def submit(self, _fn, *args, **kwargs) -> _ImmediateFuture:
-            return _ImmediateFuture()
-
-    with (
-        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
-        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
-    ):
-        result = browse_webpage("https://example.com/slow", action="extract")
+    with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+        with patch("src.tools.browser_tool._run_browse_sync", side_effect=TimeoutError("Timed out")):
+            result = await _browse_webpage_async("https://example.com/slow", action="extract")
         await asyncio.sleep(0)
 
     assert "timed out after" in result.lower()
@@ -6002,28 +5991,13 @@ async def _eval_browser_runtime_audit() -> dict[str, Any]:
 async def _eval_browser_execution_task_replay_behavior() -> dict[str, Any]:
     from src.security.site_policy import SiteAccessDecision
 
-    class _ImmediateFuture:
-        def __init__(self, value: str) -> None:
-            self._value = value
-
-        def result(self) -> str:
-            return self._value
-
-    class _ImmediateExecutor:
-        def __enter__(self) -> "_ImmediateExecutor":
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-        def submit(self, _fn, url: str, action: str) -> _ImmediateFuture:
-            del url
-            outputs = {
-                "extract": "Atlas launch checklist\nOpen blockers\nOwner: Seraph",
-                "html": "<html><body><button>Ship</button></body></html>",
-                "screenshot": "Screenshot captured (32 bytes). Base64 data: QUJDREVGR0g=",
-            }
-            return _ImmediateFuture(outputs[action])
+    def _fake_browse_sync(_url: str, action: str) -> str:
+        outputs = {
+            "extract": "Atlas launch checklist\nOpen blockers\nOwner: Seraph",
+            "html": "<html><body><button>Ship</button></body></html>",
+            "screenshot": "Screenshot captured (32 bytes). Base64 data: QUJDREVGR0g=",
+        }
+        return outputs[action]
 
     decision = SiteAccessDecision(
         allowed=True,
@@ -6032,14 +6006,14 @@ async def _eval_browser_execution_task_replay_behavior() -> dict[str, Any]:
         allowlist_active=True,
     )
 
-    with (
-        patch("src.tools.browser_tool.evaluate_site_access", return_value=decision),
-        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
-        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
-    ):
-        extract_result = browse_webpage("https://example.com/task", action="extract")
-        html_result = browse_webpage("https://example.com/task", action="html")
-        screenshot_result = browse_webpage("https://example.com/task", action="screenshot")
+    with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+        with (
+            patch("src.tools.browser_tool.evaluate_site_access", return_value=decision),
+            patch("src.tools.browser_tool._run_browse_sync", side_effect=_fake_browse_sync),
+        ):
+            extract_result = await _browse_webpage_async("https://example.com/task", action="extract")
+            html_result = await _browse_webpage_async("https://example.com/task", action="html")
+            screenshot_result = await _browse_webpage_async("https://example.com/task", action="screenshot")
         await asyncio.sleep(0)
 
     succeeded_calls = [
@@ -6170,7 +6144,7 @@ async def _eval_execution_security_gauntlet_behavior() -> dict[str, Any]:
     shell_meta = run_command(command="python3;cat", args_json="[]")
     arg_newline = run_command(command="python3", args_json=json.dumps(["script.py\n--escape"]))
     inline_python = start_process(command="python3", args_json=json.dumps(["-c", "print('escape')"]))
-    localhost_browser = browse_webpage("http://127.0.0.1/admin", action="extract")
+    localhost_browser = await _browse_webpage_async("http://127.0.0.1/admin", action="extract")
 
     underdeclared_profile = {
         "missing_network": True,

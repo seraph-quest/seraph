@@ -15,7 +15,7 @@ from src.observer.screenshot_semantic_analysis import screenshot_semantic_analys
 logger = logging.getLogger(__name__)
 _ANALYSIS_LOCK = asyncio.Lock()
 _MAX_SCHEDULED_ANALYSIS_LIMIT = 100
-_MAX_SCHEDULED_ANALYSIS_CONCURRENCY = 1
+_MAX_SCHEDULED_ANALYSIS_CONCURRENCY = 2
 
 
 def _clamped_limit() -> int:
@@ -42,6 +42,19 @@ def _analysis_job_timeout_seconds(*, limit: int, concurrency: int) -> float:
     base_timeout_seconds = max(base_timeout_seconds, 1.0)
     batches = max(1, math.ceil(max(limit, 1) / max(concurrency, 1)))
     return base_timeout_seconds * batches
+
+
+def _scheduled_batch_limit(*, limit: int, concurrency: int) -> int:
+    return max(1, min(limit, concurrency))
+
+
+def _log_late_analysis_task_failure(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        logger.exception("screenshot_folder_analysis timed-out task failed during cancellation cleanup")
 
 
 async def run_screenshot_folder_analysis() -> None:
@@ -78,20 +91,27 @@ async def run_screenshot_folder_analysis() -> None:
         async with _ANALYSIS_LOCK:
             limit = _clamped_limit()
             concurrency = _clamped_concurrency()
-            timeout_seconds = _analysis_job_timeout_seconds(limit=limit, concurrency=concurrency)
+            batch_limit = _scheduled_batch_limit(limit=limit, concurrency=concurrency)
+            timeout_seconds = _analysis_job_timeout_seconds(limit=batch_limit, concurrency=concurrency)
             logger.info(
-                "screenshot_folder_analysis: running limit=%d concurrency=%d timeout_seconds=%s",
+                "screenshot_folder_analysis: running limit=%d batch_limit=%d concurrency=%d timeout_seconds=%s",
                 limit,
+                batch_limit,
                 concurrency,
                 timeout_seconds,
             )
-            result = await asyncio.wait_for(
+            analysis_task = asyncio.create_task(
                 analyze_pending_screenshot_folder_observations(
-                    limit=limit,
+                    limit=batch_limit,
                     concurrency=concurrency,
-                ),
-                timeout=timeout_seconds,
+                )
             )
+            done, pending = await asyncio.wait({analysis_task}, timeout=timeout_seconds)
+            if pending:
+                analysis_task.cancel()
+                analysis_task.add_done_callback(_log_late_analysis_task_failure)
+                raise asyncio.TimeoutError
+            result = next(iter(done)).result()
     except asyncio.TimeoutError:
         await log_scheduler_job_event(
             job_name="screenshot_folder_analysis",
@@ -101,6 +121,10 @@ async def run_screenshot_folder_analysis() -> None:
                 "error": "analysis job timed out",
                 "timeout_seconds": timeout_seconds,
                 "concurrency": _clamped_concurrency(),
+                "batch_limit": _scheduled_batch_limit(
+                    limit=_clamped_limit(),
+                    concurrency=_clamped_concurrency(),
+                ),
             },
         )
         logger.warning(
@@ -144,6 +168,10 @@ async def run_screenshot_folder_analysis() -> None:
             "failed": result.failed,
             "skipped": result.skipped,
             "concurrency": _clamped_concurrency(),
+            "batch_limit": _scheduled_batch_limit(
+                limit=_clamped_limit(),
+                concurrency=_clamped_concurrency(),
+            ),
         },
     )
     logger.info(

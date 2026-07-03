@@ -182,6 +182,8 @@ curl http://192.168.1.26:8001/health
 curl http://192.168.1.26:8001/health/backend
 curl http://192.168.1.26:8001/queue/status
 set -a && source .env.dev && set +a
+curl http://192.168.1.26:8001/health/chat \
+  -H "Authorization: Bearer $SERAPH_VLM_API_KEY"
 PYTHONPATH=backend backend/.venv/bin/python scripts/diagnose_gpu_vlm_route.py
 ```
 
@@ -191,7 +193,10 @@ Interpretation:
 - `192.168.1.26:8001/health` proves the Dockerized GPU VLM wrapper is reachable from the Mac.
 - `192.168.1.26:8001/health/backend` proves the wrapper can reach the GPU model server at `192.168.1.26:8000/v1`.
 - `192.168.1.26:8001/queue/status` proves Seraph can observe admission pressure before feeding screenshot work.
+- `192.168.1.26:8001/health/chat` proves the chat proxy is enabled and accepts Seraph's configured bearer key without running inference or adding GPU queue work.
+- The direct-route diagnostic also checks authenticated chat readiness. This catches `CHAT_PROXY_ENABLED=false`, missing `CHAT_PROXY_API_KEY`, and Seraph/wrapper key mismatches that ordinary health checks cannot see.
 - A `502` from `/health/backend` means the wrapper is up but the GPU backend edge is broken.
+- A `disabled`, `auth_not_configured`, or `auth_failed` result from `/health/chat` means screenshot analysis may still work but Seraph chat is not ready.
 
 Run the direct-route receipt from the normal operator shell that starts Seraph
 when Codex/Desktop reports a LAN failure. A normal Terminal-launched receipt on
@@ -209,7 +214,7 @@ inventory, Docker Compose checks, process inspection, listener checks, and log
 reads. Do not use it as a Seraph runtime base URL or a passing direct-route
 acceptance receipt.
 
-Seraph also probes these three wrapper endpoints from the running backend process and exposes the safe result in `/api/runtime/status` and `/api/settings/artifact-storage` as `vlm_runtime.live_probe`. The settings UI renders this as a `Reach` row for both screenshot analysis and the local Gemma runtime. This status distinguishes "configured for GPU wrapper" from "this Seraph process can actually reach the direct LAN route"; diagnostic SSH forwards are not a substitute for `live_probe.reachable=true` on the direct `SERAPH_VLM_BASE_URL`.
+Seraph also probes wrapper health, backend health, queue status, and authenticated `/health/chat` readiness from the running backend process and exposes the safe result in `/api/runtime/status` and `/api/settings/artifact-storage` as `vlm_runtime.live_probe`. The settings UI renders this as a `Reach` row for both screenshot analysis and the local Gemma runtime. This status distinguishes "configured for GPU wrapper" from "this Seraph process can actually reach the direct LAN route and use its chat endpoint"; diagnostic SSH forwards are not a substitute for `live_probe.reachable=true` on the direct `SERAPH_VLM_BASE_URL`.
 
 `scripts/diagnose_gpu_vlm_route.py` is the operator-shell receipt command for the direct route. It reads `SERAPH_VLM_BASE_URL`, `SERAPH_VLM_API_KEY`, and `LOCAL_VLM_MODEL`/`LOCAL_MODEL`, prints sanitized JSON, and exits non-zero when the direct wrapper route, chat check, or requested image check fails. Loopback and localhost base URLs are rejected by default so a tunnel cannot accidentally pass as the direct-route receipt. Use `--allow-non-direct-base-url` only for explicitly labeled diagnostic bridge checks. Use `--image /path/to/screenshot.png` when the validation receipt also needs a wrapper-level `/v1/analyze-file` check.
 

@@ -70,6 +70,10 @@ def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict
         "base_url": base_url,
         "backend_url": backend_url,
         "chat_api_base": effective_vlm_chat_api_base(),
+        "chat_completion_endpoint": f"{effective_vlm_chat_api_base()}/chat/completions"
+        if effective_vlm_chat_api_base()
+        else "",
+        "chat_health_endpoint": f"{base_url}/health/chat" if base_url else "",
         "queue_status_endpoint": f"{base_url}/queue/status" if base_url else "",
         "health_endpoint": f"{base_url}/health" if base_url else "",
         "backend_health_endpoint": f"{base_url}/health/backend" if base_url else "",
@@ -92,22 +96,30 @@ async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[
             "health": _unprobed_endpoint(),
             "backend_health": _unprobed_endpoint(),
             "queue_status": _unprobed_endpoint(),
+            "chat_proxy": _unprobed_endpoint(),
         }
 
     timeout = max(min(timeout_seconds, 5.0), 0.1)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        health, backend_health, queue_status = await asyncio.gather(
+        health, backend_health, queue_status, chat_proxy = await asyncio.gather(
             _probe_json_endpoint(client, base_url + "/health"),
             _probe_json_endpoint(client, base_url + "/health/backend"),
             _probe_json_endpoint(client, base_url + "/queue/status"),
+            _probe_chat_health(client, base_url + "/health/chat"),
         )
-    reachable = bool(health.get("ok") and backend_health.get("ok") and queue_status.get("ok"))
+    reachable = bool(
+        health.get("ok")
+        and backend_health.get("ok")
+        and queue_status.get("ok")
+        and chat_proxy.get("ok")
+    )
     return {
         "checked": True,
         "reachable": reachable,
         "health": health,
         "backend_health": backend_health,
         "queue_status": queue_status,
+        "chat_proxy": chat_proxy,
     }
 
 
@@ -161,3 +173,79 @@ async def _probe_json_endpoint(client: httpx.AsyncClient, endpoint: str) -> dict
             if key in payload:
                 result[key] = payload[key]
     return result
+
+
+async def _probe_chat_health(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:
+    headers = {}
+    api_key = effective_vlm_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = await client.get(endpoint, headers=headers)
+    except httpx.TimeoutException:
+        return {"checked": True, "ok": False, "status_code": None, "error": "timeout"}
+    except httpx.ConnectError:
+        return {"checked": True, "ok": False, "status_code": None, "error": "connect_error"}
+    except httpx.HTTPError:
+        return {"checked": True, "ok": False, "status_code": None, "error": "http_error"}
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    status = ""
+    enabled = False
+    auth_configured = False
+    auth_ok = False
+    model = ""
+    if isinstance(payload, dict):
+        status = _safe_probe_detail(str(payload.get("status") or ""))
+        enabled = payload.get("enabled") is True
+        auth_configured = payload.get("auth_configured") is True
+        auth_ok = payload.get("auth_ok") is True
+        model_value = payload.get("model")
+        if isinstance(model_value, str):
+            model = _safe_probe_detail(model_value)
+    ok = 200 <= response.status_code < 400 and enabled and auth_configured and auth_ok
+    result: dict[str, object] = {
+        "checked": True,
+        "ok": ok,
+        "status_code": response.status_code,
+        "error": "" if ok else _chat_health_error(response, status, enabled, auth_configured, auth_ok),
+        "enabled": enabled,
+        "auth_configured": auth_configured,
+        "auth_ok": auth_ok,
+    }
+    if status:
+        result["status"] = status
+    if model:
+        result["model"] = model
+    return result
+
+
+def _chat_health_error(
+    response: httpx.Response,
+    status: str,
+    enabled: bool,
+    auth_configured: bool,
+    auth_ok: bool,
+) -> str:
+    if not 200 <= response.status_code < 400:
+        return "bad_status"
+    if status:
+        return _safe_probe_detail(status.strip().lower().replace(" ", "_"))
+    if not enabled:
+        return "disabled"
+    if not auth_configured:
+        return "auth_not_configured"
+    if not auth_ok:
+        return "auth_failed"
+    return "bad_status"
+
+
+def _safe_probe_detail(value: str) -> str:
+    safe = value.strip()
+    for secret in (settings.seraph_vlm_api_key, settings.local_vlm_api_key, settings.local_llm_api_key):
+        if secret:
+            safe = safe.replace(secret, "[redacted]")
+    return safe[:160]

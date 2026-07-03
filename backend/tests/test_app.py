@@ -11,6 +11,7 @@ _STUBBED_VLM_PROBE = {
     "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
     "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
     "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
+    "chat_proxy": {"checked": False, "ok": False, "status_code": None, "error": ""},
 }
 
 
@@ -113,6 +114,8 @@ async def test_runtime_status_exposes_gpu_vlm_runtime_and_chat_profile(client):
         "base_url": "http://192.168.1.26:8001",
         "backend_url": "http://192.168.1.26:8000/v1",
         "chat_api_base": "http://192.168.1.26:8001/v1",
+        "chat_completion_endpoint": "http://192.168.1.26:8001/v1/chat/completions",
+        "chat_health_endpoint": "http://192.168.1.26:8001/health/chat",
         "queue_status_endpoint": "http://192.168.1.26:8001/queue/status",
         "health_endpoint": "http://192.168.1.26:8001/health",
         "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",

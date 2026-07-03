@@ -87,6 +87,14 @@ function settingsFromScreenAnalysisFixture(screen: {
         latest_failure: null,
         digest_count: 0,
         latest_digest_at: null,
+        persistence: {
+          db_lock_retries: 0,
+          db_lock_failures: 0,
+          selection_db_lock_retries: 0,
+          selection_db_lock_failures: 0,
+          persistence_db_lock_retries: 0,
+          persistence_db_lock_failures: 0,
+        },
       },
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
@@ -221,6 +229,14 @@ describe("ArtifactStoragePanel", () => {
             processed_count: 9,
             remaining_to_analyze: 3,
             folder_remaining_to_analyze: 6,
+            persistence: {
+              db_lock_retries: 4,
+              db_lock_failures: 1,
+              selection_db_lock_retries: 1,
+              selection_db_lock_failures: 0,
+              persistence_db_lock_retries: 3,
+              persistence_db_lock_failures: 1,
+            },
           },
           auto_ingest_enabled: true,
           auto_ingest_interval_min: 5,
@@ -319,6 +335,7 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("12 / 15 · remaining 3")).toBeInTheDocument();
     expect(screen.getByText("9 analyzed · 3 queued")).toBeInTheDocument();
     expect(screen.getByText("12 observations · 2 backlog · 1 failed")).toBeInTheDocument();
+    expect(screen.getByText("4 retries · 1 failed · 3 writes")).toBeInTheDocument();
     expect(screen.getByText("3 windows · latest 2026-06-20T18:30:00Z")).toBeInTheDocument();
     expect(screen.getByText("provider unavailable")).toBeInTheDocument();
     expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();

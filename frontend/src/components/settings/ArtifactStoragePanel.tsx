@@ -37,6 +37,14 @@ interface ArtifactStorageSettings {
       processed_count?: number;
       remaining_to_analyze?: number;
       folder_remaining_to_analyze?: number;
+      persistence?: {
+        db_lock_retries: number;
+        db_lock_failures: number;
+        selection_db_lock_retries: number;
+        selection_db_lock_failures: number;
+        persistence_db_lock_retries: number;
+        persistence_db_lock_failures: number;
+      };
     };
     auto_ingest_enabled: boolean;
     auto_ingest_interval_min: number;
@@ -287,6 +295,14 @@ function settingsFromScreenAnalysis(screen: ScreenAnalysisSettings): ArtifactSto
         processed_count: 0,
         remaining_to_analyze: 0,
         folder_remaining_to_analyze: 0,
+        persistence: {
+          db_lock_retries: 0,
+          db_lock_failures: 0,
+          selection_db_lock_retries: 0,
+          selection_db_lock_failures: 0,
+          persistence_db_lock_retries: 0,
+          persistence_db_lock_failures: 0,
+        },
       },
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
@@ -732,6 +748,17 @@ export function ArtifactStoragePanel() {
                       }
                       tone={screenshotAnalysisTone(screenshotFolderSource.analysis)}
                     />
+                    {screenshotFolderSource.analysis.persistence && (
+                      <ArtifactRow
+                        label="DB locks"
+                        value={
+                          `${screenshotFolderSource.analysis.persistence.db_lock_retries} retries · ` +
+                          `${screenshotFolderSource.analysis.persistence.db_lock_failures} failed · ` +
+                          `${screenshotFolderSource.analysis.persistence.persistence_db_lock_retries} writes`
+                        }
+                        tone={screenshotFolderSource.analysis.persistence.db_lock_failures > 0 ? "warn" : "good"}
+                      />
+                    )}
                     <ArtifactRow
                       label="Latest"
                       value={screenshotFolderSource.analysis.latest_analyzed_at ?? screenshotFolderSource.analysis.latest_observation_at ?? "none"}

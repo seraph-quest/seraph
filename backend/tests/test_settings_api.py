@@ -182,10 +182,14 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
     tmp_path,
     monkeypatch,
 ):
+    from src.observer import screenshot_folder_source
+
     screenshot_root = tmp_path / "captures"
     screenshot_root.mkdir()
     (screenshot_root / "capture.png").write_bytes(b"png bytes")
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "db_lock_retries", 7)
+    monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "selection_db_lock_failures", 2)
 
     async def slow_pipeline_summary():
         await asyncio.sleep(2)
@@ -208,6 +212,8 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
     assert data["screenshot_folder"]["path_source"] == "SERAPH_SCREENSHOT_FOLDER"
     assert data["screenshot_folder"]["image_count"] == 1
     assert data["screenshot_folder"]["analysis"]["latest_failure"] == "analysis metadata timed out"
+    assert data["screenshot_folder"]["analysis"]["persistence"]["db_lock_retries"] == 7
+    assert data["screenshot_folder"]["analysis"]["persistence"]["selection_db_lock_failures"] == 2
 
 
 @pytest.mark.asyncio
@@ -231,11 +237,14 @@ async def test_artifact_storage_prefers_seraph_screen_archive_env(client, tmp_pa
 @pytest.mark.asyncio
 async def test_artifact_storage_exposes_screenshot_folder_status(client, async_db, tmp_path, monkeypatch):
     from src.db.models import MemoryEpisode, MemoryEpisodeType, ScreenObservation
+    from src.observer import screenshot_folder_source
 
     screenshot_root = tmp_path / "screenshots"
     screenshot_root.mkdir()
     (screenshot_root / "capture-1.png").write_bytes(b"png bytes")
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "db_lock_retries", 3)
+    monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "persistence_db_lock_failures", 1)
     observed_at = datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc)
     async with async_db() as db:
         db.add(
@@ -312,6 +321,8 @@ async def test_artifact_storage_exposes_screenshot_folder_status(client, async_d
     assert data["screenshot_folder"]["analysis"]["analysis_backlog"] == 0
     assert data["screenshot_folder"]["analysis"]["visual_run_count"] == 1
     assert data["screenshot_folder"]["analysis"]["visual_suppressed_count"] == 4
+    assert data["screenshot_folder"]["analysis"]["persistence"]["db_lock_retries"] == 3
+    assert data["screenshot_folder"]["analysis"]["persistence"]["persistence_db_lock_failures"] == 1
     assert data["screenshot_folder"]["analysis"]["folder_image_count"] == 1
     assert data["screenshot_folder"]["analysis"]["ingested_count"] == 1
     assert data["screenshot_folder"]["analysis"]["remaining_to_ingest"] == 0

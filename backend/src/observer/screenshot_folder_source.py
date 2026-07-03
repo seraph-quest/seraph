@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import or_, update
+from sqlalchemy.exc import OperationalError
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 class ScreenshotFolderImageError(ValueError):
     """Raised when a screenshot-folder image is unsafe or unsupported."""
+
+
+class ScreenshotFolderPersistenceError(RuntimeError):
+    """Raised when Seraph cannot persist screenshot-folder analysis state."""
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,16 @@ _VISUAL_DEDUPE_VERSION = "seraph.screenshot_visual_dedupe.v1"
 _VISUAL_FINGERPRINT_SIZE = 8
 _VISUAL_DUPLICATE_MAX_DISTANCE = 2
 _VISUAL_DEDUPE_REFRESH_AFTER = timedelta(minutes=10)
+_DB_LOCK_RETRY_ATTEMPTS = 3
+_DB_LOCK_RETRY_BASE_DELAY_SECONDS = 0.05
+_PERSISTENCE_STATS = {
+    "db_lock_retries": 0,
+    "db_lock_failures": 0,
+    "selection_db_lock_retries": 0,
+    "selection_db_lock_failures": 0,
+    "persistence_db_lock_retries": 0,
+    "persistence_db_lock_failures": 0,
+}
 
 
 def resolve_screenshot_folder(configured: str | None = None) -> Path:
@@ -85,6 +100,11 @@ def resolve_screenshot_folder(configured: str | None = None) -> Path:
             if settings_root:
                 return Path(settings_root).expanduser().resolve()
     return Path(settings.workspace_dir).expanduser().resolve() / "artifacts" / "screenshot-folder"
+
+
+def screenshot_folder_persistence_status() -> dict[str, int]:
+    """Return process-local DB lock/backoff counters for operator-visible status."""
+    return dict(_PERSISTENCE_STATS)
 
 
 async def scan_screenshot_folder(root: Path, *, limit: int = 100) -> ScreenshotFolderScanResult:
@@ -146,17 +166,7 @@ async def analyze_pending_screenshot_folder_observations(
     if not screenshot_semantic_analysis_enabled():
         return ScreenshotFolderAnalysisResult(scanned=0, analyzed=0, failed=0, skipped=0)
 
-    async with get_session() as db:
-        result = await db.execute(
-            select(ScreenObservation)
-            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
-            .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
-            .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
-            .where(_analysis_candidate_status_filter())
-            .order_by(col(ScreenObservation.timestamp).asc())
-            .limit(analysis_limit * 20)
-        )
-        candidates = list(result.scalars().all())
+    candidates = await _select_analysis_candidates_with_retry(limit=analysis_limit * 20)
     observations = [
         observation
         for observation in candidates
@@ -201,13 +211,15 @@ async def analyze_pending_screenshot_folder_observations(
                 error_reason=str(exc),
             )
 
-        details_json = json.dumps(details)
-        async with get_session() as db:
-            await db.execute(
-                update(ScreenObservation)
-                .where(ScreenObservation.id == observation.id)
-                .values(details_json=details_json)
+        try:
+            await _persist_analysis_details_with_retry(observation.id, details)
+        except ScreenshotFolderPersistenceError as exc:
+            logger.warning(
+                "screenshot_folder_analysis: failed to persist %s: %s",
+                image_path.name,
+                exc,
             )
+            return False, True, False
         if analysis is not None:
             return True, False, False
         if failed_reason is not None:
@@ -220,6 +232,68 @@ async def analyze_pending_screenshot_folder_observations(
     skipped = sum(1 for item in results if item[2])
 
     return ScreenshotFolderAnalysisResult(scanned=len(observations), analyzed=analyzed, failed=failed, skipped=skipped)
+
+
+async def _select_analysis_candidates_with_retry(*, limit: int) -> list[ScreenObservation]:
+    for attempt in range(_DB_LOCK_RETRY_ATTEMPTS):
+        try:
+            async with get_session() as db:
+                result = await db.execute(
+                    select(ScreenObservation)
+                    .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+                    .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
+                    .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
+                    .where(_analysis_candidate_status_filter())
+                    .order_by(col(ScreenObservation.timestamp).asc())
+                    .limit(limit)
+                )
+                return list(result.scalars().all())
+        except OperationalError as exc:
+            if not _is_database_locked(exc):
+                raise
+            await _record_db_lock_retry(
+                attempt=attempt,
+                retry_key="selection_db_lock_retries",
+                failure_key="selection_db_lock_failures",
+            )
+    raise ScreenshotFolderPersistenceError("database is locked while selecting pending screenshot analysis")
+
+
+async def _persist_analysis_details_with_retry(observation_id: str, details: list[str]) -> None:
+    details_json = json.dumps(details)
+    for attempt in range(_DB_LOCK_RETRY_ATTEMPTS):
+        try:
+            async with get_session() as db:
+                await db.execute(
+                    update(ScreenObservation)
+                    .where(ScreenObservation.id == observation_id)
+                    .values(details_json=details_json)
+                )
+            return
+        except OperationalError as exc:
+            if not _is_database_locked(exc):
+                raise
+            await _record_db_lock_retry(
+                attempt=attempt,
+                retry_key="persistence_db_lock_retries",
+                failure_key="persistence_db_lock_failures",
+            )
+    raise ScreenshotFolderPersistenceError("database is locked while saving screenshot analysis")
+
+
+async def _record_db_lock_retry(*, attempt: int, retry_key: str, failure_key: str) -> None:
+    _PERSISTENCE_STATS["db_lock_retries"] += 1
+    _PERSISTENCE_STATS[retry_key] += 1
+    if attempt >= _DB_LOCK_RETRY_ATTEMPTS - 1:
+        _PERSISTENCE_STATS["db_lock_failures"] += 1
+        _PERSISTENCE_STATS[failure_key] += 1
+        return
+    await asyncio.sleep(_DB_LOCK_RETRY_BASE_DELAY_SECONDS * (2**attempt))
+
+
+def _is_database_locked(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
 
 
 def validate_screenshot_folder_root(root: Path) -> None:

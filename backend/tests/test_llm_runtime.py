@@ -294,6 +294,58 @@ def test_built_in_local_gemma_profile_uses_local_key_from_settings(monkeypatch):
     assert profiles["local-gemma-chat-thinking"]["secret_configured"] is True
 
 
+def test_delegated_orchestrator_can_route_to_local_gemma_chat_profile(monkeypatch):
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "orchestrator_agent=local-gemma-chat-thinking"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="orchestrator_agent",
+        )
+
+    assert kwargs["runtime_profile"] == "local-gemma-chat-thinking"
+    assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert kwargs["api_key"] == "local-secret"
+
+
+def test_all_interactive_paths_can_route_to_local_gemma_chat_profile(monkeypatch):
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            (
+                "chat_agent=local-gemma-chat-thinking;"
+                "onboarding_agent=local-gemma-chat-thinking;"
+                "orchestrator_agent=local-gemma-chat-thinking"
+            ),
+        ),
+    ):
+        routed = {
+            runtime_path: build_model_kwargs(
+                temperature=0.2,
+                max_tokens=256,
+                runtime_path=runtime_path,
+            )
+            for runtime_path in ("chat_agent", "onboarding_agent", "orchestrator_agent")
+        }
+
+    for kwargs in routed.values():
+        assert kwargs["runtime_profile"] == "local-gemma-chat-thinking"
+        assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+        assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+        assert kwargs["api_key"] == "local-secret"
+
+
 def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
     from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 

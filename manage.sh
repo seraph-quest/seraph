@@ -704,6 +704,10 @@ if [ ! -f "$ENV_FILE" ]; then
     error_exit "$ENV_FILE not found. Please create it by copying from $SCRIPT_DIR/env.$ENV.example and filling in the values."
 fi
 
+if grep -E "^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[^\"'][^#]*;" "$ENV_FILE" >/dev/null 2>&1; then
+    error_exit "Env values containing semicolons must be quoted in $ENV_FILE because manage.sh sources the env file."
+fi
+
 # Source env file for daemon config without leaking values when bash xtrace is enabled.
 TRACE_WAS_ENABLED=false
 case "$-" in
@@ -732,7 +736,7 @@ if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
 fi
 LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-/tmp/seraph-dev-logs}"
 LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-/tmp/uv-cache}"
-LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-codex-local}"
+LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-codex-local}}"
 SCREEN_CAPTURE_ARCHIVE_DIR="${SCREEN_CAPTURE_ARCHIVE_DIR:-$LOCAL_WORKSPACE_DIR/artifacts/screen-captures}"
 SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR="${SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR:-$SCREEN_CAPTURE_ARCHIVE_DIR}"
 SERAPH_DAEMON_STATUS_FILE="${SERAPH_DAEMON_STATUS_FILE:-$LOCAL_WORKSPACE_DIR/daemon-status.json}"

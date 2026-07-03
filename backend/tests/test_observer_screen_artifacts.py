@@ -364,15 +364,14 @@ async def test_screenshot_folder_scan_serializes_concurrent_duplicate_checks(
 ):
     root = tmp_path / "screenshots"
     _write_screenshot(root, name="1782833900-000000000.png")
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def slow_analysis(_image_path: Path, _artifacts: dict[str, object]):
-        started.set()
-        await release.wait()
-        return None
-
-    monkeypatch.setattr("src.observer.screenshot_folder_source.analyze_screenshot_image", slow_analysis)
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.screen_analysis_provider",
+        "local-vlm",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
+        "http://gpu:8088",
+    )
 
     first = asyncio.create_task(
         client.post(
@@ -380,14 +379,12 @@ async def test_screenshot_folder_scan_serializes_concurrent_duplicate_checks(
             json={"screenshot_folder": str(root), "limit": 1},
         )
     )
-    await started.wait()
     second = asyncio.create_task(
         client.post(
             "/api/observer/screenshot-folder/scan",
             json={"screenshot_folder": str(root), "limit": 1},
         )
     )
-    release.set()
     first_resp, second_resp = await asyncio.gather(first, second)
 
     assert first_resp.status_code == 200
@@ -442,14 +439,28 @@ async def test_screenshot_folder_scan_persists_local_vlm_semantic_analysis(
         "src.observer.screenshot_folder_source.analyze_screenshot_image",
         fake_analyze_screenshot_image,
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.screen_analysis_provider",
+        "local-vlm",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
+        "http://gpu:8088",
+    )
 
-    resp = await client.post(
+    scan_resp = await client.post(
         "/api/observer/screenshot-folder/scan",
         json={"screenshot_folder": str(root), "limit": 10},
     )
 
-    assert resp.status_code == 200
-    assert resp.json()["ingested"] == 1
+    assert scan_resp.status_code == 200
+    assert scan_resp.json()["ingested"] == 1
+    assert calls == []
+
+    from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
+
+    result = await analyze_pending_screenshot_folder_observations(limit=10)
+    assert result.analyzed == 1
     assert calls
     assert calls[0][0] == image.resolve()
     assert calls[0][1]["image_sha256"] == image_sha256
@@ -494,6 +505,14 @@ async def test_screenshot_folder_scan_keeps_metadata_when_local_vlm_fails(
         "src.observer.screenshot_folder_source.analyze_screenshot_image",
         failing_analyze_screenshot_image,
     )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.screen_analysis_provider",
+        "local-vlm",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
+        "http://gpu:8088",
+    )
 
     first = await client.post(
         "/api/observer/screenshot-folder/scan",
@@ -510,6 +529,11 @@ async def test_screenshot_folder_scan_keeps_metadata_when_local_vlm_fails(
     assert second.status_code == 200
     assert second.json()["ingested"] == 0
     assert second.json()["skipped_duplicates"] == 1
+
+    from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
+
+    result = await analyze_pending_screenshot_folder_observations(limit=10)
+    assert result.failed == 1
 
     async with async_db() as db:
         result = await db.execute(select(ScreenObservation))
@@ -607,6 +631,10 @@ async def test_screenshot_folder_reanalysis_replaces_failed_status_without_dupli
         json={"screenshot_folder": str(root), "limit": 10},
     )
     assert scan.status_code == 200
+    from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
+
+    analysis_result = await analyze_pending_screenshot_folder_observations(limit=10)
+    assert analysis_result.failed == 1
     async with async_db() as db:
         result = await db.execute(select(ScreenObservation))
         observation = result.scalar_one()

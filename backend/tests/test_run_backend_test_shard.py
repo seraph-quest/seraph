@@ -86,16 +86,96 @@ def test_timeout_for_file_uses_runtime_heavy_override():
     assert timeout_for_file("tests/test_alpha.py", 900) == 900
 
 
-def test_pytest_invocations_for_target_splits_eval_harness_contract():
-    invocations = pytest_invocations_for_target("tests/test_eval_harness.py")
-
-    assert invocations == [
+def _expected_eval_harness_invocations():
+    runtime_group_1_filter = (
+        "test_run_runtime_evals_passes_group_1 "
+        "and not source_report_action_workflow_behavior "
+        "and not chat_model_wrapper_runtime_eval_details "
+        "and not rest_chat_behavior_runtime_eval_details "
+        "and not rest_chat_approval_contract_runtime_eval_details "
+        "and not rest_chat_timeout_contract_runtime_eval_details "
+        "and not websocket_chat_behavior_runtime_eval_details "
+        "and not websocket_chat_approval_contract_runtime_eval_details "
+        "and not websocket_chat_timeout_contract_runtime_eval_details"
+    )
+    remaining_filter = (
+        "not (test_run_runtime_evals_passes_group_1 "
+        "or test_chat_model_wrapper_runtime_eval_details "
+        "or test_rest_chat_behavior_runtime_eval_details "
+        "or test_rest_chat_approval_contract_runtime_eval_details "
+        "or test_rest_chat_timeout_contract_runtime_eval_details "
+        "or test_websocket_chat_behavior_runtime_eval_details "
+        "or test_websocket_chat_approval_contract_runtime_eval_details "
+        "or test_websocket_chat_timeout_contract_runtime_eval_details "
+        "or test_source_report_action_workflow_behavior_runtime_eval_details "
+        "or test_runtime_eval_scenarios_expose_expected_details "
+        "or test_run_runtime_evals_passes_group_2 "
+        "or test_run_runtime_evals_passes_group_3 "
+        "or test_run_runtime_evals_passes_group_4)"
+    )
+    return [
         (
             "tests/test_eval_harness.py::runtime_group_1",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
+                runtime_group_1_filter,
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_chat_model_wrapper_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_chat_model_wrapper_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_behavior_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_approval_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_approval_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_timeout_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_timeout_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_behavior_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_approval_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_approval_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_timeout_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_timeout_contract_runtime_eval_details",
             ],
         ),
         (
@@ -104,6 +184,14 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
                 "tests/test_eval_harness.py",
                 "-k",
                 "test_source_report_action_workflow_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_runtime_eval_scenarios_expose_expected_details",
             ],
         ),
         (
@@ -135,9 +223,34 @@ def test_pytest_invocations_for_target_splits_eval_harness_contract():
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not (test_run_runtime_evals_passes_group_1 or test_source_report_action_workflow_behavior_runtime_eval_details or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
+                remaining_filter,
             ],
         ),
+    ]
+
+
+def test_pytest_invocations_for_target_splits_eval_harness_contract():
+    invocations = pytest_invocations_for_target("tests/test_eval_harness.py")
+
+    assert invocations == _expected_eval_harness_invocations()
+
+
+def test_pytest_invocations_for_target_splits_e2e_conversation_contract():
+    invocations = pytest_invocations_for_target("tests/test_e2e_conversation.py")
+
+    assert [label for label, _ in invocations] == [
+        "tests/test_e2e_conversation.py::test_full_message_flow",
+        "tests/test_e2e_conversation.py::test_seq_numbers_monotonically_increase",
+        "tests/test_e2e_conversation.py::test_tool_name_in_step_content",
+        "tests/test_e2e_conversation.py::test_agent_run_success_is_written_to_audit_log",
+        "tests/test_e2e_conversation.py::test_high_risk_tool_sends_approval_required_message",
+        "tests/test_e2e_conversation.py::test_missing_input_sends_clarification_required_message",
+        "tests/test_e2e_conversation.py::test_timeout_logs_only_timed_out_runtime_event",
+        "tests/test_e2e_conversation.py::test_secret_values_are_redacted_in_streamed_messages",
+        "tests/test_e2e_conversation.py::test_resume_message_does_not_duplicate_user_turn",
+    ]
+    assert invocations[4][1] == [
+        "tests/test_e2e_conversation.py::TestE2EConversation::test_high_risk_tool_sends_approval_required_message",
     ]
 
 
@@ -167,57 +280,18 @@ def test_run_shard_files_uses_heavy_file_timeout_override(tmp_path: Path):
 
 def test_run_shard_files_executes_specialized_eval_targets_in_order(tmp_path: Path):
     files = ["tests/test_eval_harness.py"]
+    expected_invocations = _expected_eval_harness_invocations()
 
     with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
-        mock_run.side_effect = [
-            CompletedProcess(args=["pytest"], returncode=0),
-            CompletedProcess(args=["pytest"], returncode=0),
-            CompletedProcess(args=["pytest"], returncode=0),
-            CompletedProcess(args=["pytest"], returncode=0),
-            CompletedProcess(args=["pytest"], returncode=0),
-            CompletedProcess(args=["pytest"], returncode=0),
-        ]
+        mock_run.side_effect = [CompletedProcess(args=["pytest"], returncode=0)] * len(expected_invocations)
 
         result = run_shard_files(tmp_path, files, file_timeout_seconds=900)
 
     assert result == 0
-    assert mock_run.call_count == 6
-    first_command = mock_run.call_args_list[0].args[0]
-    second_command = mock_run.call_args_list[1].args[0]
-    third_command = mock_run.call_args_list[2].args[0]
-    fourth_command = mock_run.call_args_list[3].args[0]
-    fifth_command = mock_run.call_args_list[4].args[0]
-    sixth_command = mock_run.call_args_list[5].args[0]
-    assert first_command[4:7] == [
-        "tests/test_eval_harness.py",
-        "-k",
-        "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
-    ]
-    assert second_command[4:7] == [
-        "tests/test_eval_harness.py",
-        "-k",
-        "test_source_report_action_workflow_behavior_runtime_eval_details",
-    ]
-    assert third_command[4:7] == [
-        "tests/test_eval_harness.py",
-        "-k",
-        "test_run_runtime_evals_passes_group_2",
-    ]
-    assert fourth_command[4:7] == [
-        "tests/test_eval_harness.py",
-        "-k",
-        "test_run_runtime_evals_passes_group_3",
-    ]
-    assert fifth_command[4:7] == [
-        "tests/test_eval_harness.py",
-        "-k",
-        "test_run_runtime_evals_passes_group_4",
-    ]
-    assert sixth_command[4:7] == [
-        "tests/test_eval_harness.py",
-        "-k",
-        "not (test_run_runtime_evals_passes_group_1 or test_source_report_action_workflow_behavior_runtime_eval_details or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
-    ]
+    assert mock_run.call_count == len(expected_invocations)
+    actual_filters = [call.args[0][4:7] for call in mock_run.call_args_list]
+    expected_filters = [invocation for _, invocation in expected_invocations]
+    assert actual_filters == expected_filters
     assert mock_run.call_args_list[0].kwargs["timeout"] == 1_500
 
 

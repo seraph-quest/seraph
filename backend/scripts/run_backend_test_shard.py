@@ -98,13 +98,135 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             ],
         ),
     ],
+    "tests/test_e2e_conversation.py": [
+        (
+            "tests/test_e2e_conversation.py::test_full_message_flow",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_full_message_flow",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_seq_numbers_monotonically_increase",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_seq_numbers_monotonically_increase",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_tool_name_in_step_content",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_tool_name_in_step_content",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_agent_run_success_is_written_to_audit_log",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_agent_run_success_is_written_to_audit_log",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_high_risk_tool_sends_approval_required_message",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_high_risk_tool_sends_approval_required_message",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_missing_input_sends_clarification_required_message",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_missing_input_sends_clarification_required_message",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_timeout_logs_only_timed_out_runtime_event",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_timeout_logs_only_timed_out_runtime_event",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_secret_values_are_redacted_in_streamed_messages",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_secret_values_are_redacted_in_streamed_messages",
+            ],
+        ),
+        (
+            "tests/test_e2e_conversation.py::test_resume_message_does_not_duplicate_user_turn",
+            [
+                "tests/test_e2e_conversation.py::TestE2EConversation::test_resume_message_does_not_duplicate_user_turn",
+            ],
+        ),
+    ],
     "tests/test_eval_harness.py": [
         (
             "tests/test_eval_harness.py::runtime_group_1",
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "test_run_runtime_evals_passes_group_1 and not source_report_action_workflow_behavior",
+                (
+                    "test_run_runtime_evals_passes_group_1 "
+                    "and not source_report_action_workflow_behavior "
+                    "and not chat_model_wrapper_runtime_eval_details "
+                    "and not rest_chat_behavior_runtime_eval_details "
+                    "and not rest_chat_approval_contract_runtime_eval_details "
+                    "and not rest_chat_timeout_contract_runtime_eval_details "
+                    "and not websocket_chat_behavior_runtime_eval_details "
+                    "and not websocket_chat_approval_contract_runtime_eval_details "
+                    "and not websocket_chat_timeout_contract_runtime_eval_details"
+                ),
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_chat_model_wrapper_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_chat_model_wrapper_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_behavior_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_approval_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_approval_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_rest_chat_timeout_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_rest_chat_timeout_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_behavior_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_approval_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_approval_contract_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_websocket_chat_timeout_contract_runtime_eval_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_websocket_chat_timeout_contract_runtime_eval_details",
             ],
         ),
         (
@@ -113,6 +235,14 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
                 "tests/test_eval_harness.py",
                 "-k",
                 "test_source_report_action_workflow_behavior_runtime_eval_details",
+            ],
+        ),
+        (
+            "tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details",
+            [
+                "tests/test_eval_harness.py",
+                "-k",
+                "test_runtime_eval_scenarios_expose_expected_details",
             ],
         ),
         (
@@ -144,7 +274,21 @@ SPECIALIZED_TEST_INVOCATIONS: dict[str, list[tuple[str, list[str]]]] = {
             [
                 "tests/test_eval_harness.py",
                 "-k",
-                "not (test_run_runtime_evals_passes_group_1 or test_source_report_action_workflow_behavior_runtime_eval_details or test_run_runtime_evals_passes_group_2 or test_run_runtime_evals_passes_group_3 or test_run_runtime_evals_passes_group_4)",
+                (
+                    "not (test_run_runtime_evals_passes_group_1 "
+                    "or test_chat_model_wrapper_runtime_eval_details "
+                    "or test_rest_chat_behavior_runtime_eval_details "
+                    "or test_rest_chat_approval_contract_runtime_eval_details "
+                    "or test_rest_chat_timeout_contract_runtime_eval_details "
+                    "or test_websocket_chat_behavior_runtime_eval_details "
+                    "or test_websocket_chat_approval_contract_runtime_eval_details "
+                    "or test_websocket_chat_timeout_contract_runtime_eval_details "
+                    "or test_source_report_action_workflow_behavior_runtime_eval_details "
+                    "or test_runtime_eval_scenarios_expose_expected_details "
+                    "or test_run_runtime_evals_passes_group_2 "
+                    "or test_run_runtime_evals_passes_group_3 "
+                    "or test_run_runtime_evals_passes_group_4)"
+                ),
             ],
         ),
     ],
@@ -363,6 +507,8 @@ def run_shard_files(
         return 0
 
     extra_args = list(pytest_args or [])
+    if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
+        extra_args.append("--no-cov")
     for path in files:
         for label, invocation_args in pytest_invocations_for_target(path):
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args]

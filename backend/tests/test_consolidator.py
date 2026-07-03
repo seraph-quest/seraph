@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from config.settings import settings
 from src.audit.repository import audit_repository
 from src.db.models import MemoryKind, MemorySnapshotKind
 from src.agent.session import SessionManager
@@ -700,13 +701,38 @@ class TestConsolidateSession:
             "soul_updates": {},
         })
 
-        with patch(
+        with patch.object(settings, "local_runtime_paths", ""), patch(
             "src.memory.consolidator.completion_with_fallback",
             AsyncMock(return_value=mock_resp),
         ) as mock_completion, patch("src.memory.consolidator.add_memory"):
             await consolidate_session("s1")
 
         assert mock_completion.await_args.kwargs["runtime_path"] == "session_consolidation"
+        assert mock_completion.await_args.kwargs["local_runtime_only"] is False
+
+    async def test_extracts_facts_requires_local_runtime_when_configured(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "My name is Alice and I work at ACME Corp as a software engineer.")
+        await sm.add_message("s1", "assistant", "Nice to meet you, Alice! That sounds like a great position at ACME Corp.")
+
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = json.dumps({
+            "facts": [],
+            "patterns": [],
+            "goals": [],
+            "reflections": [],
+            "soul_updates": {},
+        })
+
+        with patch.object(settings, "local_runtime_paths", "session_consolidation"), patch(
+            "src.memory.consolidator.completion_with_fallback",
+            AsyncMock(return_value=mock_resp),
+        ) as mock_completion, patch("src.memory.consolidator.add_memory"):
+            await consolidate_session("s1")
+
+        assert mock_completion.await_args.kwargs["runtime_path"] == "session_consolidation"
+        assert mock_completion.await_args.kwargs["local_runtime_only"] is True
 
     async def test_applies_soul_updates(self, async_db, sm):
         await sm.get_or_create("s1")

@@ -1,6 +1,8 @@
 """Tests for agent execution timeouts (Phase 3.5.6)."""
 
 import time
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,6 +54,34 @@ class TestRestChatTimeout:
             assert "timed out" in response.json()["detail"]
         finally:
             settings.agent_chat_timeout = original
+
+    @patch("src.api.chat.get_current_tool_policy_mode", return_value="safe")
+    @patch("src.api.chat.log_agent_run_event", new_callable=AsyncMock)
+    @patch("src.api.chat.get_or_create_profile", new_callable=AsyncMock)
+    @patch("src.api.chat.build_guardian_state", new_callable=AsyncMock)
+    @patch("src.api.chat.build_agent")
+    @patch("src.api.chat.should_use_direct_local_chat", return_value=False)
+    async def test_guardian_state_timeout_falls_back_to_minimal_agent(
+        self,
+        mock_should_use_direct,
+        mock_build_agent,
+        mock_build_guardian_state,
+        mock_profile,
+        mock_log_agent_run_event,
+        mock_policy,
+        client,
+    ):
+        mock_profile.return_value = SimpleNamespace(onboarding_completed=True)
+        mock_build_guardian_state.side_effect = asyncio.TimeoutError
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = MagicMock(output="hello back")
+        mock_build_agent.return_value = mock_agent
+
+        response = await client.post("/api/chat", json={"message": "Hello"})
+
+        assert response.status_code == 200
+        assert response.json()["response"] == "hello back"
+        mock_build_agent.assert_called_once_with()
 
 
 @pytest.mark.asyncio

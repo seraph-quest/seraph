@@ -20,7 +20,11 @@ async def test_cors_allows_loopback_dev_origin(client):
 
 @pytest.mark.asyncio
 async def test_runtime_status_exposes_release_and_model(client):
-    response = await client.get("/api/runtime/status")
+    with (
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "local_runtime_paths", ""),
+    ):
+        response = await client.get("/api/runtime/status")
 
     assert response.status_code == 200
     payload = response.json()
@@ -30,6 +34,8 @@ async def test_runtime_status_exposes_release_and_model(client):
     assert payload["model"] == settings.default_model
     assert payload["model_label"] == settings.default_model.split("/")[-1]
     assert payload["active_profile"] == "default"
+    assert payload["default_provider"] == "openrouter"
+    assert payload["default_model"] == settings.default_model
     assert isinstance(payload["provider_profiles"], list)
     assert isinstance(payload["local_operators"], list)
     assert any(item["id"] == "openrouter" for item in payload["provider_profiles"])
@@ -48,6 +54,28 @@ async def test_runtime_status_reports_local_codex_when_selected(client):
     assert payload["model"] == "codex-local"
     assert payload["model_label"] == "gpt-5.5"
     assert payload["active_profile"] == "codex-local"
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_reports_effective_local_gemma_chat_profile(client):
+    with (
+        patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+    ):
+        response = await client.get("/api/runtime/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "local-gemma"
+    assert payload["model"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert payload["model_label"] == "gemma-4-26B-A4B-it-qat-GGUF"
+    assert payload["api_base"] == "http://127.0.0.1:8000/v1"
+    assert payload["active_profile"] == "local-gemma-chat-thinking"
+    assert payload["default_provider"] == "openrouter"
+    assert payload["default_model"] == "openrouter/x-ai/grok-4.1-fast"
 
 
 @pytest.mark.asyncio

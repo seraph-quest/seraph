@@ -26,6 +26,8 @@
 - [ ] targeted validation was run at the same level as the change
 - [ ] outputs or receipts were inspected directly, not assumed
 - [ ] runtime/UI behavior was verified when relevant
+- [ ] hosted CI was inspected; changed-scope deterministic failures are fixed or no such failures remain
+- [ ] unrelated CI infrastructure/stale-suite failures are named here and deferred as release-gate work
 - [ ] any skipped validation is explained below
 
 ## Review And Critic Disposition

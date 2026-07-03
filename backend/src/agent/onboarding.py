@@ -13,6 +13,7 @@ from src.tools.audit import wrap_tools_for_audit
 
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+_BARE_DOMAIN_PATTERN = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>()]*)?\b", re.IGNORECASE)
 
 
 def _normalize_explicit_url(url: str) -> str:
@@ -70,6 +71,15 @@ def _extract_explicit_web_urls(user_message: str | None) -> list[str]:
     seen: set[str] = set()
     for match in _URL_PATTERN.findall(user_message):
         normalized = _normalize_explicit_url(match)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    for match in _BARE_DOMAIN_PATTERN.findall(user_message):
+        normalized_domain = _normalize_explicit_url(match)
+        if normalized_domain.startswith(("http://", "https://")):
+            continue
+        normalized = f"https://{normalized_domain}"
         if normalized in seen:
             continue
         seen.add(normalized)

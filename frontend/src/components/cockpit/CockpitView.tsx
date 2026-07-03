@@ -7012,7 +7012,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     void refresh();
     const interval = window.setInterval(() => {
       void refresh();
-    }, 12_000);
+    }, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);

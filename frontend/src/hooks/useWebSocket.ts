@@ -12,6 +12,84 @@ function makeId(): string {
 
 const WS_BACKOFF_MAX_MS = 30_000;
 export const WS_RESPONSE_TIMEOUT_MS = 130_000;
+export const REST_RESPONSE_TIMEOUT_MS = 130_000;
+const ACTIVE_RESPONSE_TYPES = new Set([
+  "status",
+  "step",
+  "delta",
+  "final",
+  "error",
+  "approval_required",
+  "clarification_required",
+]);
+
+export function shouldAcceptActiveResponseSession(
+  currentSessionId: string | null,
+  responseSessionId: string | null | undefined,
+  responseType: WSResponse["type"],
+  isAgentBusy: boolean,
+): boolean {
+  if (!responseSessionId || !currentSessionId || currentSessionId === responseSessionId) {
+    return true;
+  }
+  return isAgentBusy && ACTIVE_RESPONSE_TYPES.has(responseType);
+}
+
+export type StreamingMessageState = { id: string; sessionId: string | null; content: string } | null;
+
+export function reduceAssistantDelta(
+  messages: ChatMessage[],
+  current: StreamingMessageState,
+  data: Pick<WSResponse, "content" | "session_id">,
+  id: string,
+  timestamp: number,
+): { messages: ChatMessage[]; streaming: NonNullable<StreamingMessageState> } {
+  const sessionId = data.session_id || null;
+  if (!current || current.sessionId !== sessionId) {
+    return {
+      streaming: { id, sessionId, content: data.content },
+      messages: [
+        ...messages,
+        {
+          id,
+          role: "agent",
+          content: data.content,
+          timestamp,
+          sessionId,
+        },
+      ],
+    };
+  }
+
+  const nextContent = current.content + data.content;
+  return {
+    streaming: { ...current, content: nextContent },
+    messages: messages.map((message) =>
+      message.id === current.id
+        ? { ...message, content: nextContent, timestamp }
+        : message,
+    ),
+  };
+}
+
+export function reconcileStreamedFinalAnswer(
+  messages: ChatMessage[],
+  current: StreamingMessageState,
+  data: Pick<WSResponse, "content" | "session_id">,
+  timestamp: number,
+): { messages: ChatMessage[]; reconciled: boolean } {
+  if (!current || current.sessionId !== (data.session_id || null)) {
+    return { messages, reconciled: false };
+  }
+  return {
+    reconciled: true,
+    messages: messages.map((message) =>
+      message.id === current.id
+        ? { ...message, content: data.content, timestamp, sessionId: data.session_id }
+        : message,
+    ),
+  };
+}
 
 type ClarificationPayload = {
   content?: string;
@@ -52,6 +130,7 @@ export function useWebSocket() {
   const responseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(WS_RECONNECT_DELAY_MS);
   const pendingResumeRef = useRef<{ sessionId: string | null; message: string } | null>(null);
+  const streamingMessageRef = useRef<StreamingMessageState>(null);
 
   const addMessage = useCallback((message: ChatMessage) => {
     useChatStore.getState().addMessage(message);
@@ -126,6 +205,37 @@ export function useWebSocket() {
     }
   }, []);
 
+  const clearStreamingMessage = useCallback(() => {
+    streamingMessageRef.current = null;
+  }, []);
+
+  const appendAssistantDelta = useCallback((data: WSResponse) => {
+    const next = reduceAssistantDelta(
+      useChatStore.getState().messages,
+      streamingMessageRef.current,
+      data,
+      makeId(),
+      Date.now(),
+    );
+    streamingMessageRef.current = next.streaming;
+    useChatStore.getState().setMessages(next.messages);
+  }, []);
+
+  const reconcileFinalAnswer = useCallback((data: WSResponse): boolean => {
+    const next = reconcileStreamedFinalAnswer(
+      useChatStore.getState().messages,
+      streamingMessageRef.current,
+      data,
+      Date.now(),
+    );
+    if (!next.reconciled) {
+      return false;
+    }
+    useChatStore.getState().setMessages(next.messages);
+    streamingMessageRef.current = null;
+    return true;
+  }, []);
+
   const sendSocketMessage = useCallback(
     (
       message: string,
@@ -181,11 +291,14 @@ export function useWebSocket() {
     setAgentBusy(true);
     onThinking();
     addMessage(buildUserMessage(message));
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REST_RESPONSE_TIMEOUT_MS);
 
     try {
       const response = await fetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           message,
           session_id: sessionId,
@@ -256,10 +369,15 @@ export function useWebSocket() {
       }
 
       return true;
-    } catch {
-      addMessage(buildErrorMessage("Message delivery failed."));
+    } catch (error) {
+      const messageText =
+        error instanceof DOMException && error.name === "AbortError"
+          ? "Seraph did not return a response in time. The direct chat request was cancelled; send again when the backend is ready."
+          : "Message delivery failed.";
+      addMessage(buildErrorMessage(messageText));
       return false;
     } finally {
+      clearTimeout(timeoutId);
       setAgentBusy(false);
     }
   }, [addMessage, buildErrorMessage, buildUserMessage, onThinking, setAgentBusy, setSessionId]);
@@ -322,13 +440,32 @@ export function useWebSocket() {
           if (!current) {
             setSessionId(data.session_id);
           } else if (current !== data.session_id) {
-            markSessionContinuity(data.session_id, "new_activity");
-            void useChatStore.getState().loadSessions();
-            return;
+            if (shouldAcceptActiveResponseSession(
+              current,
+              data.session_id,
+              data.type,
+              useChatStore.getState().isAgentBusy,
+            )) {
+              setSessionId(data.session_id);
+            } else {
+              markSessionContinuity(data.session_id, "new_activity");
+              void useChatStore.getState().loadSessions();
+              return;
+            }
           }
         }
 
-        if (data.type === "step") {
+        if (data.type === "status") {
+          onToolDetectedRef.current("status", data.content);
+          const statusMsg: ChatMessage = {
+            id: makeId(),
+            role: "status",
+            content: data.content,
+            timestamp: Date.now(),
+            sessionId: data.session_id,
+          };
+          addMessage(statusMsg);
+        } else if (data.type === "step") {
           const tool = detectToolFromStep(data.content);
           if (tool) {
             onToolDetectedRef.current(tool, data.content);
@@ -344,19 +481,23 @@ export function useWebSocket() {
             toolUsed: tool ?? undefined,
           };
           addMessage(stepMsg);
+        } else if (data.type === "delta") {
+          appendAssistantDelta(data);
         } else if (data.type === "final") {
           clearResponseTimeout();
           setAgentBusy(false);
           onFinalAnswerRef.current(data.content);
 
-          const agentMsg: ChatMessage = {
-            id: makeId(),
-            role: "agent",
-            content: data.content,
-            timestamp: Date.now(),
-            sessionId: data.session_id,
-          };
-          addMessage(agentMsg);
+          if (!reconcileFinalAnswer(data)) {
+            const agentMsg: ChatMessage = {
+              id: makeId(),
+              role: "agent",
+              content: data.content,
+              timestamp: Date.now(),
+              sessionId: data.session_id,
+            };
+            addMessage(agentMsg);
+          }
 
           // Refresh session list and profile after a conversation turn
           useChatStore.getState().fetchProfile();
@@ -373,6 +514,7 @@ export function useWebSocket() {
         } else if (data.type === "error") {
           clearResponseTimeout();
           setAgentBusy(false);
+          clearStreamingMessage();
 
           const errorMsg: ChatMessage = {
             id: makeId(),
@@ -385,6 +527,7 @@ export function useWebSocket() {
         } else if (data.type === "approval_required") {
           clearResponseTimeout();
           setAgentBusy(false);
+          clearStreamingMessage();
 
           const approvalMsg: ChatMessage = {
             id: makeId(),
@@ -401,6 +544,7 @@ export function useWebSocket() {
         } else if (data.type === "clarification_required") {
           clearResponseTimeout();
           setAgentBusy(false);
+          clearStreamingMessage();
 
           addMessage(buildClarificationMessage(data, data.session_id));
         } else if (data.type === "proactive") {
@@ -438,6 +582,7 @@ export function useWebSocket() {
     ws.onclose = () => {
       if (wsRef.current !== ws) return;
       clearResponseTimeout();
+      clearStreamingMessage();
       setAgentBusy(false);
       if (connectTimeoutRef.current) {
         clearTimeout(connectTimeoutRef.current);
@@ -456,6 +601,7 @@ export function useWebSocket() {
     ws.onerror = () => {
       if (wsRef.current !== ws) return;
       clearResponseTimeout();
+      clearStreamingMessage();
       setAgentBusy(false);
       if (connectTimeoutRef.current) {
         clearTimeout(connectTimeoutRef.current);
@@ -467,7 +613,7 @@ export function useWebSocket() {
       setConnectionStatus("error");
       ws.close();
     };
-  }, [addMessage, clearResponseTimeout, markSessionContinuity, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
+  }, [addMessage, appendAssistantDelta, clearResponseTimeout, clearStreamingMessage, markSessionContinuity, reconcileFinalAnswer, setSessionId, setConnectionStatus, setAgentBusy, setAmbientState, setChatPanelOpen]);
 
   const skipOnboarding = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;

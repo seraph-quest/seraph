@@ -43,7 +43,7 @@ These control which model/profile a specific runtime path uses, plus how that pa
 | `LOCAL_MODEL` | (empty) | Model id for the local runtime profile |
 | `LOCAL_LLM_API_BASE` | (empty) | API base for the local runtime profile |
 | `LOCAL_RUNTIME_PATHS` | (empty) | Comma-separated runtime paths or glob patterns that should prefer the local profile |
-| `RUNTIME_PROFILE_PREFERENCES` | (empty) | Semicolon-separated `runtime_path=profile_a|profile_b` preference chains; `runtime_path` may be exact or a glob |
+| `RUNTIME_PROFILE_PREFERENCES` | (empty) | Semicolon-separated `runtime_path=profile_a|profile_b` preference chains; `runtime_path` may be exact or a glob. Quote this value in `.env.*` files because `manage.sh` sources them as shell |
 | `RUNTIME_POLICY_INTENTS` | (empty) | Semicolon-separated `runtime_path=intent_a|intent_b` policy intents such as `local_first`, `fast`, `cheap`, `reasoning`, or `tool_use`; `runtime_path` may be exact or a glob |
 | `RUNTIME_POLICY_SCORES` | (empty) | Semicolon-separated `runtime_path=intent_a:weight|intent_b:weight` entries that weight matched policy intents when ranking fallback and alternate targets |
 | `RUNTIME_MODEL_OVERRIDES` | (empty) | Comma-separated `runtime_path=model` or `runtime_path=profile:model` entries; `runtime_path` may be exact or a glob |
@@ -57,23 +57,23 @@ Examples:
 
 ```bash
 LOCAL_RUNTIME_PATHS=chat_agent,session_consolidation,daily_briefing
-RUNTIME_PROFILE_PREFERENCES=chat_agent=local|default;session_consolidation=local|default
-RUNTIME_POLICY_INTENTS=chat_agent=local_first|reasoning|tool_use;session_title_generation=fast|cheap
-RUNTIME_POLICY_SCORES=chat_agent=reasoning:5|tool_use:4;session_title_generation=fast:5|cheap:3
+RUNTIME_PROFILE_PREFERENCES="chat_agent=local|default;session_consolidation=local|default"
+RUNTIME_POLICY_INTENTS="chat_agent=local_first|reasoning|tool_use;session_title_generation=fast|cheap"
+RUNTIME_POLICY_SCORES="chat_agent=reasoning:5|tool_use:4;session_title_generation=fast:5|cheap:3"
 RUNTIME_MODEL_OVERRIDES=chat_agent=default:openai/gpt-4.1-mini,session_consolidation=default:openai/gpt-4o-mini
-RUNTIME_FALLBACK_OVERRIDES=chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-mini
-PROVIDER_CAPABILITY_OVERRIDES=openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;openai/gpt-4o-mini=fast|cheap;openai/gpt-4.1-mini=reasoning|tool_use
+RUNTIME_FALLBACK_OVERRIDES="chat_agent=openai/gpt-4.1-mini|openai/gpt-4.1-nano;session_title_generation=openai/gpt-4o-mini|openai/gpt-4.1-mini"
+PROVIDER_CAPABILITY_OVERRIDES="openrouter/anthropic/claude-sonnet-4=reasoning|tool_use;openai/gpt-4o-mini=fast|cheap;openai/gpt-4.1-mini=reasoning|tool_use"
 ```
 
 Pattern-based examples for dynamic runtime paths:
 
 ```bash
 LOCAL_RUNTIME_PATHS=mcp_*
-RUNTIME_PROFILE_PREFERENCES=mcp_*=local|default
+RUNTIME_PROFILE_PREFERENCES="mcp_*=local|default"
 RUNTIME_POLICY_INTENTS=mcp_*=local_first|tool_use
 RUNTIME_POLICY_SCORES=mcp_*=tool_use:5
 RUNTIME_MODEL_OVERRIDES=mcp_*=openai/gpt-4.1-mini,mcp_github_actions=local:ollama/coder
-RUNTIME_FALLBACK_OVERRIDES=mcp_*=openai/gpt-4.1-mini|openai/gpt-4.1-nano;mcp_github_actions=openai/gpt-4o-mini|openai/gpt-4.1-mini
+RUNTIME_FALLBACK_OVERRIDES="mcp_*=openai/gpt-4.1-mini|openai/gpt-4.1-nano;mcp_github_actions=openai/gpt-4o-mini|openai/gpt-4.1-mini"
 PROVIDER_CAPABILITY_OVERRIDES=openai/gpt-4.1-mini=reasoning|tool_use;openai/gpt-4o-mini=fast|cheap
 ```
 
@@ -177,6 +177,58 @@ Useful local commands:
 ./manage.sh -e dev local logs frontend
 ./manage.sh -e dev local down
 ```
+
+For live observation from a managed Codex/Desktop shell, use foreground mode and keep the session open:
+
+```bash
+./manage.sh -e dev local run
+```
+
+Managed command sessions can clean up background children after the command returns. In that environment, `local up` may briefly print successful backend/frontend PIDs and then leave no running services, no PID files, `local status` reporting stopped, and immediate `curl` failures on `127.0.0.1:8004` or `127.0.0.1:3001`. Use `local run` when chatting with Seraph or watching live behavior because it keeps the stack attached while tailing backend, frontend, and daemon logs.
+
+Before declaring the app ready for a live chat test, verify all three:
+
+```bash
+./manage.sh -e dev local status
+curl -sS http://127.0.0.1:8004/health
+curl -sS -I http://127.0.0.1:3001/
+```
+
+When finished, stop through the same lifecycle entry point:
+
+```bash
+./manage.sh -e dev local down
+```
+
+Local VLM/GPU topology for screenshot analysis and local Gemma routing:
+
+```text
+Seraph frontend       http://127.0.0.1:3001
+  -> Seraph backend   http://127.0.0.1:8004
+  -> Mac VLM wrapper  http://127.0.0.1:8000
+  -> GPU model server http://192.168.1.26:8000/v1
+```
+
+The Mac VLM wrapper runs through Docker Compose from `/Users/bigcube/Desktop/repos/vlm-screenshot-server`; do not run the native Python wrapper for normal operation:
+
+```bash
+cd /Users/bigcube/Desktop/repos/vlm-screenshot-server
+docker compose up -d --build
+```
+
+Verify both local services and the GPU edge before declaring the system ready:
+
+```bash
+cd /Users/bigcube/Desktop/repos/vlm-screenshot-server
+docker compose ps
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health/backend
+
+cd /Users/bigcube/Desktop/repos/seraph
+curl http://127.0.0.1:8004/health
+```
+
+Docker Desktop must be running on the Mac for this path. If `/health/backend` returns `502`, Seraph and the wrapper can be up while the wrapper still cannot reach the GPU model server at `192.168.1.26:8000/v1`.
 
 Defaults for the local direct stack:
 
@@ -500,6 +552,7 @@ localStorage.clear()
 | Problem | Cause | Fix |
 |---|---|---|
 | `curl: (7) Failed to connect to localhost:8004` | Backend not running | `./manage.sh -e dev up -d` and check `./manage.sh -e dev logs -f backend-dev` |
+| `local up` reports started, then `local status` says stopped and `pids/` is empty | Managed Codex/Desktop command session cleaned up background children after the command returned | Use `./manage.sh -e dev local run` for live observation, keep it open, verify health with `curl -sS http://127.0.0.1:8004/health`, and stop with `./manage.sh -e dev local down` |
 | `OPENROUTER_API_KEY` error in logs | Missing or invalid API key | Set `OPENROUTER_API_KEY` in `.env.dev` and rebuild: `./manage.sh -e dev up -d` |
 | Daemon: "No window title" / title is always None | Accessibility permission not granted | Grant in **System Settings > Privacy & Security > Accessibility** |
 | Daemon: "Backend not reachable" | Backend not running or wrong URL | Start backend first; check `--url` flag |

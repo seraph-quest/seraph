@@ -23,6 +23,18 @@ ActivityType = Literal[
     "idle",
     "unknown",
 ]
+ACTIVITY_TYPES = {
+    "coding",
+    "reviewing",
+    "researching",
+    "writing",
+    "communication",
+    "browsing",
+    "planning",
+    "system_admin",
+    "idle",
+    "unknown",
+}
 
 GoalAlignmentStatus = Literal["aligned", "partial", "drifted", "blocked", "unclear", "unknown"]
 NeedleMovement = Literal["pushed", "maintained", "blocked", "drifted", "unclear", "unknown"]
@@ -188,10 +200,93 @@ def parse_screenshot_analysis_output(raw_output: str | dict[str, Any]) -> Screen
         payload = raw_output
     if not isinstance(payload, dict):
         raise ScreenshotAnalysisContractError("screenshot analysis output must be a JSON object")
+    payload = _normalize_screenshot_payload(_coerce_legacy_screenshot_payload(payload))
     try:
         return ScreenshotAnalysis.model_validate(payload)
     except ValidationError as exc:
         raise ScreenshotAnalysisContractError("screenshot analysis output failed schema validation") from exc
+
+
+def _coerce_legacy_screenshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Coerce older/simple VLM JSON into the current Seraph-owned schema."""
+    if "schema_version" in payload or "activity_type" in payload:
+        return payload
+    if "summary" not in payload or not any(key in payload for key in {"activity", "app_guess", "visible_text", "sensitive"}):
+        return payload
+
+    activity = str(payload.get("activity") or "unknown").strip().lower()
+    if activity not in ACTIVITY_TYPES:
+        activity = "unknown"
+
+    applications: list[str] = []
+    app_guess = payload.get("app_guess")
+    if isinstance(app_guess, str) and app_guess.strip():
+        applications = [part.strip() for part in re.split(r"\s*(?:,| and )\s*", app_guess) if part.strip()]
+    elif isinstance(app_guess, list):
+        applications = [str(item).strip() for item in app_guess if str(item).strip()]
+
+    visible_text = payload.get("visible_text")
+    if isinstance(visible_text, list):
+        key_visible_text = [str(item) for item in visible_text]
+    elif isinstance(visible_text, str) and visible_text.strip():
+        key_visible_text = [visible_text]
+    else:
+        key_visible_text = []
+
+    sensitive = bool(payload.get("sensitive") or payload.get("sensitive_content_seen"))
+    return {
+        "schema_version": SCREENSHOT_ANALYSIS_SCHEMA_VERSION,
+        "prompt_version": SCREENSHOT_ANALYSIS_PROMPT_VERSION,
+        "summary": str(payload.get("summary") or "Screenshot activity is unclear."),
+        "detailed_observations": [],
+        "activity_type": activity,
+        "project": payload.get("project") if isinstance(payload.get("project"), str) else None,
+        "applications": applications,
+        "visible_artifacts": [],
+        "key_visible_text": key_visible_text,
+        "user_intent": str(payload.get("user_intent") or "unknown"),
+        "goal_alignment": {
+            "status": "unknown",
+            "goal_refs": [],
+            "evidence": [],
+            "needle_movement": "unknown",
+        },
+        "confidence": payload.get("confidence", 0.0),
+        "sensitive_content_seen": sensitive,
+        "privacy_notes": ["Legacy/simple VLM output was coerced into Seraph's current screenshot schema."]
+        if not sensitive
+        else ["Sensitive-looking screen content was visible and redacted."],
+        "report_tags": ["screenshot", activity],
+    }
+
+
+def _normalize_screenshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    for key in (
+        "detailed_observations",
+        "applications",
+        "visible_artifacts",
+        "key_visible_text",
+        "privacy_notes",
+        "report_tags",
+    ):
+        normalized[key] = _coerce_string_list(normalized.get(key))
+    goal_alignment = normalized.get("goal_alignment")
+    if isinstance(goal_alignment, dict):
+        normalized["goal_alignment"] = {
+            **goal_alignment,
+            "goal_refs": _coerce_string_list(goal_alignment.get("goal_refs")),
+            "evidence": _coerce_string_list(goal_alignment.get("evidence")),
+        }
+    return normalized
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
 
 
 def _strip_json_fence(value: str) -> str:

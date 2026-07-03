@@ -168,6 +168,20 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 - live-provider eval dependence for every reliability check
 - claiming remote OpenAI API profiles, local Codex, Claude/Anthropic, OpenRouter, local Ollama, or generic OpenAI-compatible endpoints are behaviorally equivalent just because they can be configured behind Seraph controls
 
+## Local Chat Streaming Contract
+
+Direct local Gemma chat over `/ws/chat` streams assistant text with `delta` frames before the final answer. The expected lightweight chat frame order is:
+
+```text
+status -> status -> delta... -> final
+```
+
+The frontend reconciles those deltas into one in-progress assistant message and updates that same message when the `final` frame arrives, so the operator sees text appear progressively without duplicate final bubbles.
+
+The Docker VLM wrapper now forwards authenticated OpenAI-compatible `stream: true` chat requests as `text/event-stream` responses while keeping the request inside the same priority queue worker until the stream completes. Wrapper repo `/Users/bigcube/Desktop/repos/vlm-screenshot-server` commit `48eb4e3` implements that SSE forwarding. Live verification on 2026-07-02 showed Seraph receiving `delta` frames before `final` through the local Docker wrapper and GPU backend; the final focused probe received 8 deltas, first delta at 2143 ms, and final at 2209 ms. Seraph still keeps a defensive non-stream fallback if the wrapper or backend rejects streaming, but that fallback is no longer the expected healthy path.
+
+This token streaming contract currently applies to the direct local chat path used for lightweight conversational turns. Tool-capable smolagents runs still stream operator-visible `step` frames plus `final`; they do not expose raw model token deltas yet because the agent runtime only yields structured steps at this boundary. That remaining deeper token-tap work is tracked separately from VLM queue scheduling and GPU utilization.
+
 ## Acceptance Checklist
 
 - [x] provider failure with configured fallbacks does not collapse the entire chat path

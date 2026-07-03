@@ -26,12 +26,12 @@ _LOCAL_RUNTIME_PROFILES: dict[str, LocalRuntimeProfile] = {
     "screenshot_fast": LocalRuntimeProfile(
         id="screenshot_fast",
         runtime_path="screenshot_image_analysis",
-        priority="background",
+        priority="normal",
         reasoning="off",
         temperature=0.0,
         max_tokens=1400,
         timeout_seconds=120,
-        summary="Low-priority bounded screenshot analysis. Must not starve chat.",
+        summary="Bounded screenshot analysis that uses the VLM worker pool while interactive chat remains higher priority.",
         options={
             "chat_template_kwargs": {"enable_thinking": False},
             "reasoning": False,

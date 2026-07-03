@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 import os
@@ -1890,7 +1891,7 @@ def _build_capability_overview() -> dict[str, Any]:
 
 @router.get("/capabilities/overview")
 async def get_capability_overview():
-    return _build_capability_overview()
+    return await asyncio.to_thread(_build_capability_overview)
 
 
 def _capability_preflight_payload(

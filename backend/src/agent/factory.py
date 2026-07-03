@@ -4,7 +4,12 @@ from smolagents import ToolCallingAgent
 
 from config.settings import settings
 from src.guardian.state import GuardianState
-from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
+from src.agent.prompt_compaction import PromptSection, compact_prompt_sections
+from src.llm_runtime import (
+    FallbackLiteLLMModel as LiteLLMModel,
+    build_model_kwargs,
+    is_local_runtime_profile,
+)
 from src.native_tools.loader import discover_tools
 from src.skills.manager import skill_manager
 from src.tools.approval import wrap_tools_for_approval, wrap_tools_with_forced_approval
@@ -22,6 +27,33 @@ def get_model(*, runtime_path: str = "chat_agent") -> LiteLLMModel:
         max_tokens=settings.model_max_tokens,
         runtime_path=runtime_path,
     ))
+
+
+def _active_skill_instructions(tool_names: list[str]) -> str:
+    active_skills = skill_manager.get_active_skills(tool_names)
+    if not active_skills:
+        return ""
+    skill_lines = []
+    for skill in active_skills:
+        invocable = " [user-invocable]" if skill.user_invocable else ""
+        skill_lines.append(f"### Skill: {skill.name}{invocable}\n{skill.instructions}")
+    return "## Available Skills\n\n" + "\n\n".join(skill_lines)
+
+
+def _finalize_agent_instructions(
+    *,
+    model: LiteLLMModel,
+    runtime_path: str,
+    sections: list[PromptSection],
+) -> str:
+    if is_local_runtime_profile(getattr(model, "_runtime_profile", None)):
+        return compact_prompt_sections(
+            sections,
+            runtime_path=runtime_path,
+            runtime_profile=getattr(model, "_runtime_profile", "default"),
+            reserved_output_tokens=settings.model_max_tokens,
+        ).text
+    return "\n\n".join(section.content.strip() for section in sections if section.content.strip())
 
 
 def get_base_tools_and_active_skills() -> tuple[list, list[str], str]:
@@ -120,37 +152,67 @@ def create_agent(
     tools = get_tools()
     tool_names = [t.name for t in tools]
 
-    instructions = (
+    base_instructions = (
         "You are Seraph, a proactive guardian intelligence operating a dense human workspace. "
         "Observe carefully, think ahead, and act to help your human counterpart maintain "
         "clarity, follow-through, and sound judgment across productivity, performance, health, "
         "influence, and growth. Treat relationship or collaboration priorities as influence unless "
         "another supported domain fits better. Be concise, exact, strategic, and useful."
     )
+    sections = [
+        PromptSection("base_instructions", base_instructions, shrinkable=False),
+    ]
     if guardian_state is not None:
         soul_context = guardian_state.soul_context
         memory_context = guardian_state.memory_context
         additional_context = guardian_state.current_session_history or additional_context
-        instructions += f"\n\n--- GUARDIAN STATE ---\n{guardian_state.to_prompt_block()}"
+        sections.append(
+            PromptSection(
+                "guardian_state",
+                f"--- GUARDIAN STATE ---\n{guardian_state.to_prompt_block()}",
+                min_tokens=1200,
+            )
+        )
     elif observer_context:
-        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
+        sections.append(
+            PromptSection(
+                "observer_context",
+                f"--- CURRENT CONTEXT ---\n{observer_context}",
+                min_tokens=500,
+            )
+        )
 
     if soul_context:
-        instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
+        sections.append(
+            PromptSection("user_identity", f"--- USER IDENTITY ---\n{soul_context}", min_tokens=700)
+        )
     if memory_context:
-        instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
+        sections.append(
+            PromptSection(
+                "relevant_memories",
+                f"--- RELEVANT MEMORIES ---\n{memory_context}",
+                min_tokens=700,
+            )
+        )
 
-    # Inject active skills into instructions
-    active_skills = skill_manager.get_active_skills(tool_names)
-    if active_skills:
-        skill_lines = []
-        for s in active_skills:
-            invocable = " [user-invocable]" if s.user_invocable else ""
-            skill_lines.append(f"### Skill: {s.name}{invocable}\n{s.instructions}")
-        instructions += "\n\n## Available Skills\n\n" + "\n\n".join(skill_lines)
+    skill_instructions = _active_skill_instructions(tool_names)
+    if skill_instructions:
+        sections.append(PromptSection("active_skills", skill_instructions, min_tokens=1000))
 
     if additional_context:
-        instructions += f"\n\n--- CONVERSATION HISTORY ---\n{additional_context}"
+        sections.append(
+            PromptSection(
+                "conversation_history",
+                f"--- CONVERSATION HISTORY ---\n{additional_context}",
+                min_tokens=1200,
+            )
+        )
+
+    instructions = _finalize_agent_instructions(
+        model=model,
+        runtime_path="chat_agent",
+        sections=sections,
+    )
 
     agent = ToolCallingAgent(
         tools=tools,
@@ -184,7 +246,7 @@ def create_orchestrator(
     for specialist in specialists:
         all_tool_names.extend(t.name for t in specialist.tools)
 
-    instructions = (
+    base_instructions = (
         "You are Seraph, a proactive guardian intelligence operating a dense human workspace. "
         "Observe carefully, think ahead, and act to help your human counterpart maintain "
         "clarity, follow-through, and sound judgment across productivity, performance, health, "
@@ -199,30 +261,60 @@ def create_orchestrator(
         "- Give clear, specific task descriptions when delegating.\n"
         "- Synthesize specialist results into a natural response."
     )
+    sections = [
+        PromptSection("base_instructions", base_instructions, shrinkable=False),
+    ]
     if guardian_state is not None:
         soul_context = guardian_state.soul_context
         memory_context = guardian_state.memory_context
         additional_context = guardian_state.current_session_history or additional_context
-        instructions += f"\n\n--- GUARDIAN STATE ---\n{guardian_state.to_prompt_block()}"
+        sections.append(
+            PromptSection(
+                "guardian_state",
+                f"--- GUARDIAN STATE ---\n{guardian_state.to_prompt_block()}",
+                min_tokens=1200,
+            )
+        )
     elif observer_context:
-        instructions += f"\n\n--- CURRENT CONTEXT ---\n{observer_context}"
+        sections.append(
+            PromptSection(
+                "observer_context",
+                f"--- CURRENT CONTEXT ---\n{observer_context}",
+                min_tokens=500,
+            )
+        )
 
     if soul_context:
-        instructions += f"\n\n--- USER IDENTITY ---\n{soul_context}"
+        sections.append(
+            PromptSection("user_identity", f"--- USER IDENTITY ---\n{soul_context}", min_tokens=700)
+        )
     if memory_context:
-        instructions += f"\n\n--- RELEVANT MEMORIES ---\n{memory_context}"
+        sections.append(
+            PromptSection(
+                "relevant_memories",
+                f"--- RELEVANT MEMORIES ---\n{memory_context}",
+                min_tokens=700,
+            )
+        )
 
-    # Inject active skills into instructions
-    active_skills = skill_manager.get_active_skills(all_tool_names)
-    if active_skills:
-        skill_lines = []
-        for s in active_skills:
-            invocable = " [user-invocable]" if s.user_invocable else ""
-            skill_lines.append(f"### Skill: {s.name}{invocable}\n{s.instructions}")
-        instructions += "\n\n## Available Skills\n\n" + "\n\n".join(skill_lines)
+    skill_instructions = _active_skill_instructions(all_tool_names)
+    if skill_instructions:
+        sections.append(PromptSection("active_skills", skill_instructions, min_tokens=1000))
 
     if additional_context:
-        instructions += f"\n\n--- CONVERSATION HISTORY ---\n{additional_context}"
+        sections.append(
+            PromptSection(
+                "conversation_history",
+                f"--- CONVERSATION HISTORY ---\n{additional_context}",
+                min_tokens=1200,
+            )
+        )
+
+    instructions = _finalize_agent_instructions(
+        model=model,
+        runtime_path="orchestrator_agent",
+        sections=sections,
+    )
 
     agent = ToolCallingAgent(
         tools=[],

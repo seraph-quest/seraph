@@ -45,6 +45,10 @@ _TOOL_INTENT_TERMS = (
     "link",
     "goals",
 )
+_TOOL_INTENT_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(term) for term in _TOOL_INTENT_TERMS) + r")\b",
+    re.IGNORECASE,
+)
 _LIGHTWEIGHT_EDGE_PUNCTUATION_RE = re.compile(r"^[\s,.;:!?]+|[\s,.;:!?]+$")
 
 
@@ -77,11 +81,12 @@ def _uses_local_gemma_profile(runtime_path: str) -> bool:
     return is_local_runtime_profile(resolve_runtime_profile(runtime_path=runtime_path))
 
 
-def _looks_like_tool_or_web_request(message: str) -> bool:
+def looks_like_tool_or_web_request(message: str) -> bool:
+    """Return whether a turn needs the agent/tool path instead of direct chat."""
     normalized = " ".join((message or "").strip().lower().split())
     if _EXPLICIT_URL_RE.search(normalized) or _BARE_DOMAIN_RE.search(normalized):
         return True
-    return any(term in normalized for term in _TOOL_INTENT_TERMS)
+    return bool(_TOOL_INTENT_RE.search(normalized))
 
 
 def _normalize_lightweight_chat_text(message: str) -> str:
@@ -93,7 +98,7 @@ def should_use_direct_local_chat(message: str, *, runtime_path: str, is_onboardi
     """Return whether this turn should bypass tool orchestration on the local GPU."""
     if not _uses_local_gemma_profile(runtime_path):
         return False
-    if _looks_like_tool_or_web_request(message):
+    if looks_like_tool_or_web_request(message):
         return False
     if is_onboarding:
         return True

@@ -2,7 +2,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from config.settings import settings
 from src.agent.exceptions import ClarificationRequired
+from src.agent.direct_chat import should_use_direct_local_chat
 from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
@@ -39,6 +41,65 @@ class TestChatAPI:
             and event["details"]["transport"] == "rest"
             for event in events
         )
+
+    @patch("src.api.chat.run_direct_local_chat")
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_onboarding_bare_domain_uses_agent_path(
+        self,
+        mock_onboarding,
+        mock_search,
+        mock_direct_chat,
+        monkeypatch,
+        client,
+    ):
+        monkeypatch.setattr("src.api.chat.should_use_direct_local_chat", should_use_direct_local_chat)
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = "I reviewed your site and saved the relevant priorities."
+        mock_onboarding.return_value = mock_agent
+
+        with (
+            patch.object(settings, "local_model", "openai/local-gemma"),
+            patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+            patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
+        ):
+            response = await client.post("/api/chat", json={"message": "natgurlain.com"})
+
+        assert response.status_code == 200
+        mock_onboarding.assert_called_once_with("natgurlain.com")
+        mock_agent.run.assert_called_once_with("natgurlain.com")
+        mock_direct_chat.assert_not_called()
+
+    @patch("src.api.chat.run_direct_local_chat")
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_onboarding_website_intent_uses_agent_path(
+        self,
+        mock_onboarding,
+        mock_search,
+        mock_direct_chat,
+        monkeypatch,
+        client,
+    ):
+        monkeypatch.setattr("src.api.chat.should_use_direct_local_chat", should_use_direct_local_chat)
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = "Which exact page should I inspect?"
+        mock_onboarding.return_value = mock_agent
+
+        with (
+            patch.object(settings, "local_model", "openai/local-gemma"),
+            patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+            patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
+        ):
+            response = await client.post(
+                "/api/chat",
+                json={"message": "Check the website and get the goals from it"},
+            )
+
+        assert response.status_code == 200
+        mock_onboarding.assert_called_once_with("Check the website and get the goals from it")
+        mock_agent.run.assert_called_once_with("Check the website and get the goals from it")
+        mock_direct_chat.assert_not_called()
 
     @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
     @patch("src.api.chat.run_direct_local_chat", return_value="Hello. What should I call you?")

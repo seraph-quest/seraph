@@ -110,6 +110,7 @@ async def list_browser_sessions(owner_session_id: str = Query(..., min_length=1)
     return {
         "owner_session_id": owner_session_id,
         "sessions": browser_session_runtime.list_sessions(owner_session_id=owner_session_id),
+        "journal": browser_session_runtime.list_journal(owner_session_id=owner_session_id),
     }
 
 
@@ -141,10 +142,13 @@ async def get_browser_session(session_id: str, owner_session_id: str = Query(...
 
 @router.post("/browser/sessions/{session_id}/snapshot")
 async def snapshot_browser_session(session_id: str, request: BrowserSessionSnapshotRequest):
-    existing = browser_session_runtime.get_session(session_id, owner_session_id=request.owner_session_id)
-    if existing is None:
+    capture_url = browser_session_runtime.get_session_capture_url(
+        session_id,
+        owner_session_id=request.owner_session_id,
+    )
+    if capture_url is None:
         raise HTTPException(status_code=404, detail="browser_session_not_found")
-    content = await _capture_or_raise(str(existing["url"]), request.capture)
+    content = await _capture_or_raise(capture_url, request.capture)
     payload = browser_session_runtime.snapshot_session(
         owner_session_id=request.owner_session_id,
         session_id=session_id,
@@ -153,7 +157,24 @@ async def snapshot_browser_session(session_id: str, request: BrowserSessionSnaps
     )
     if isinstance(payload, dict) and payload.get("error") == "session_quarantined":
         raise HTTPException(status_code=409, detail=payload)
-    return {"session": payload}
+    return {"session": _metadata_only_session_payload(payload)}
+
+
+@router.get("/browser/sessions/{session_id}/journal")
+async def get_browser_session_journal(
+    session_id: str,
+    owner_session_id: str = Query(..., min_length=1),
+):
+    if browser_session_runtime.get_session(session_id, owner_session_id=owner_session_id) is None:
+        raise HTTPException(status_code=404, detail="browser_session_not_found")
+    return {
+        "owner_session_id": owner_session_id,
+        "session_id": session_id,
+        "journal": browser_session_runtime.list_journal(
+            owner_session_id=owner_session_id,
+            session_id=session_id,
+        ),
+    }
 
 
 @router.get("/browser/refs/{ref:path}")
@@ -178,7 +199,13 @@ async def control_browser_session(session_id: str, request: BrowserSessionContro
             raise HTTPException(status_code=409, detail=replay_state)
         session = replay_state["session"]
         capture = str(session.get("latest_capture") or "extract")
-        content = await _capture_or_raise(str(session["url"]), capture)
+        capture_url = browser_session_runtime.get_session_capture_url(
+            session_id,
+            owner_session_id=request.owner_session_id,
+        )
+        if capture_url is None:
+            raise HTTPException(status_code=404, detail="browser_session_not_found")
+        content = await _capture_or_raise(capture_url, capture)
         payload = browser_session_runtime.snapshot_session(
             owner_session_id=request.owner_session_id,
             session_id=session_id,
@@ -234,6 +261,7 @@ async def browser_computer_use_control(owner_session_id: str = Query(..., min_le
         "owner_session_id": owner_session_id,
         "providers": provider_payload["providers"],
         "sessions": browser_session_runtime.list_sessions(owner_session_id=owner_session_id),
+        "journal": browser_session_runtime.list_journal(owner_session_id=owner_session_id),
         "blocked_claims": [
             "safe_browser_automation",
             "safe_autonomous_computer_use",

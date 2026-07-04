@@ -272,6 +272,8 @@ describe("CockpitView", () => {
               silent_fallback_allowed: false,
             },
             snapshot_count: 1,
+            journal_entry_count: 2,
+            journal_schema: "seraph.browser_session_journal.v1",
             latest_ref: "bs-live-1:1",
             latest_capture: "extract",
             latest_summary: "Example page body",
@@ -284,17 +286,70 @@ describe("CockpitView", () => {
             updated_at: "2026-06-18T12:00:00Z",
           },
         ],
+        journal: [
+          {
+            entry_id: "browser-journal:bs-live-1:open",
+            recorded_at: "2026-06-18T12:00:00Z",
+            action: "open",
+            status: "recorded",
+            session: { session_id: "bs-live-1", owner_session_id: "session-1" },
+            redaction: {
+              metadata_only: true,
+              raw_dom_stored: false,
+              screenshot_stored: false,
+              secret_values_stored: false,
+              credential_values_stored: false,
+              private_page_content_stored: false,
+            },
+          },
+        ],
       },
     });
 
     render(<CockpitView onSend={() => {}} />);
 
     const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
-    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 degraded · no quarantine/i);
+    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i);
     expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
     expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
     expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);
+    expect(browserControls).toHaveTextContent(/2 journal/i);
+    expect(browserControls).toHaveTextContent(/journal: open recorded metadata only/i);
     expect(browserControls).toHaveTextContent(/seraph:\/\/browser-sessions\/bs-live-1/i);
+
+    fireEvent.change(within(browserControls).getByLabelText("Browser workbench URL"), {
+      target: { value: "https://example.test/new" },
+    });
+    fireEvent.change(within(browserControls).getByLabelText("Browser workbench capture mode"), {
+      target: { value: "html" },
+    });
+    fireEvent.click(within(browserControls).getByRole("button", { name: "open" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/browser/sessions"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"url":"https://example.test/new"'),
+        }),
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/browser/sessions"),
+      expect.objectContaining({
+        body: expect.stringContaining('"capture":"html"'),
+      }),
+    );
+
+    fireEvent.click(within(browserControls).getByRole("button", { name: "snapshot" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/browser/sessions/bs-live-1/snapshot"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"owner_session_id":"session-1"'),
+        }),
+      ),
+    );
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(within(browserControls).getByRole("button", { name: "replay" }));

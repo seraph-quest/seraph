@@ -65,6 +65,13 @@ interface RuntimeStatus {
   llm_logging_enabled?: boolean;
 }
 
+type RuntimeReceiptSource = "runtime_status" | "operator_posture" | "retained";
+
+interface RuntimeReceipt {
+  status: RuntimeStatus;
+  source: RuntimeReceiptSource;
+}
+
 interface OperatorControlPlaneRole {
   id: string;
   label: string;
@@ -6621,10 +6628,52 @@ function normalizeBrowserJournal(payload: unknown): BrowserSessionJournalEntry[]
   });
 }
 
+const RUNTIME_RECEIPT_STORAGE_KEY = "seraph.cockpit.runtimeReceipt.v1";
+
+function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+  const model = typeof record.model === "string" ? record.model.trim() : "";
+  const modelLabel = typeof record.model_label === "string" ? record.model_label.trim() : "";
+  if (!provider || (!model && !modelLabel)) return null;
+  return {
+    version: typeof record.version === "string" ? record.version : "",
+    build_id: typeof record.build_id === "string" ? record.build_id : SERAPH_BUILD_ID,
+    provider,
+    model: model || modelLabel,
+    model_label: modelLabel || model,
+    api_base: typeof record.api_base === "string" ? record.api_base : undefined,
+    timezone: typeof record.timezone === "string" ? record.timezone : undefined,
+    llm_logging_enabled: typeof record.llm_logging_enabled === "boolean" ? record.llm_logging_enabled : undefined,
+  };
+}
+
+function loadStoredRuntimeReceipt(): RuntimeReceipt | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(RUNTIME_RECEIPT_STORAGE_KEY);
+    if (!value) return null;
+    const status = normalizeRuntimeStatus(JSON.parse(value));
+    return status ? { status, source: "retained" } : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeRuntimeReceipt(status: RuntimeStatus) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(RUNTIME_RECEIPT_STORAGE_KEY, JSON.stringify(status));
+  } catch {
+    // Best-effort retention only; cockpit runtime truth still comes from live APIs.
+  }
+}
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeReceipt, setRuntimeReceipt] = useState<RuntimeReceipt | null>(() => loadStoredRuntimeReceipt());
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -6924,8 +6973,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ]);
 
     if (isCancelled()) return;
-    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
-      setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
+    const nextOperatorControlPlane = normalizeOperatorControlPlane(controlPlaneResult.payload);
+    const runtimeStatusPayload = runtimeStatusResult.ok
+      ? normalizeRuntimeStatus(runtimeStatusResult.payload)
+      : null;
+    const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
+    const nextRuntimeReceipt: RuntimeReceipt | null = runtimeStatusPayload
+      ? { status: runtimeStatusPayload, source: "runtime_status" }
+      : operatorPostureRuntime
+        ? { status: operatorPostureRuntime, source: "operator_posture" }
+        : null;
+    if (nextRuntimeReceipt) {
+      storeRuntimeReceipt(nextRuntimeReceipt.status);
+      setRuntimeReceipt(nextRuntimeReceipt);
+    } else {
+      setRuntimeReceipt((current) => (current ? { ...current, source: "retained" } : null));
     }
     if (observerResult.ok) {
       setObserverState((observerResult.payload as ObserverState | null) ?? {});
@@ -6972,7 +7034,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } else {
       setExtensionPackages([]);
     }
-    setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    setOperatorControlPlane(nextOperatorControlPlane);
     setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
     setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
@@ -8158,7 +8220,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => starterPacks.filter((pack) => pack.availability === "ready"),
     [starterPacks],
   );
-  const runtimeAvailable = runtimeStatus !== null;
+  const runtimeStatus = runtimeReceipt?.status ?? null;
+  const runtimeAvailable = runtimeReceipt !== null;
   const effectiveConnectionStatus: ConnectionStatus = connectionStatus === "connected"
     ? "connected"
     : connectionStatus === "connecting" || connectionStatus === "error"
@@ -8167,7 +8230,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const connectionLabel = effectiveConnectionStatus === "connected"
     ? "live"
     : effectiveConnectionStatus;
-  const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeProviderBaseLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeProviderLabel = runtimeReceipt?.source === "retained"
+    ? `${runtimeProviderBaseLabel} STALE`
+    : runtimeProviderBaseLabel;
   const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
     .replace(/^openrouter\//, "")
     .replace(/^anthropic\//, "")

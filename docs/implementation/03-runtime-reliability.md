@@ -22,6 +22,7 @@
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with degrade-open behavior when no compliant target exists
 - [x] richer provider planning and route comparison now score candidate routes before execution, make budget steering explicit, carry per-target live feedback plus production-readiness and capability-gap state into route-comparison metadata around selection, and expose planning-winner versus retained-primary tradeoffs, alternate-route margins, and route-comparison summaries across runtime audit, operator timeline, and activity-ledger surfaces
 - [x] operator control-plane surfaces now also synthesize runtime posture, extension health, continuity summaries, and review receipts alongside usage rollups, so deployment and governance legibility does not require reconstructing team state from raw runtime or audit rows
+- [x] cockpit runtime telemetry now resolves labels from live `/api/runtime/status`, then fresh operator control-plane runtime posture, then retained last-known metadata marked as `STALE`; transient status-poll failures no longer erase local Gemma runtime truth or render `UNKNOWN` when another usable runtime receipt exists
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists

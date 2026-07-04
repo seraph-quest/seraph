@@ -10642,6 +10642,64 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
   }
 
+  async function inspectExtensionDiagnostics(extensionPackage: ExtensionPackageInfo) {
+    const label = extensionPackage.display_name;
+    setOperatorStatus(`Loading diagnostics for ${label}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/extensions/${encodeURIComponent(extensionPackage.id)}/diagnostics`);
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload || typeof payload !== "object") {
+        setOperatorStatus(`Failed to load diagnostics for ${label}`);
+        appendOperatorFeed(`Failed to load diagnostics for ${label}`, "failed");
+        return;
+      }
+      const record = payload as Record<string, unknown>;
+      const extensionRecord = record.extension && typeof record.extension === "object"
+        ? record.extension as Record<string, unknown>
+        : {};
+      const recommendedActions = Array.isArray(record.recommended_actions)
+        ? record.recommended_actions
+        : [];
+      const rollbackRecord = record.lifecycle && typeof record.lifecycle === "object"
+        ? (record.lifecycle as Record<string, unknown>).rollback
+        : null;
+      const rollbackAvailable = rollbackRecord && typeof rollbackRecord === "object"
+        ? Boolean((rollbackRecord as Record<string, unknown>).available)
+        : false;
+      setSelectedInspector({
+        kind: "operator",
+        entity: {
+          entityType: "extension_manifest",
+          name: label,
+          meta: [
+            typeof extensionRecord.status === "string" ? extensionRecord.status : extensionPackage.status,
+            typeof extensionRecord.version_line === "string" ? extensionRecord.version_line : extensionPackage.version_line,
+            rollbackAvailable ? "rollback available" : null,
+          ].filter(Boolean).join(" · "),
+          summary: recommendedActions.length
+            ? `Diagnostics ready: ${recommendedActions.map((item) => {
+              if (item && typeof item === "object" && typeof (item as Record<string, unknown>).label === "string") {
+                return (item as Record<string, unknown>).label;
+              }
+              return "operator action";
+            }).slice(0, 3).join(", ")}`
+            : "Diagnostics ready",
+          details: {
+            diagnostics: record,
+            claim_boundary: record.claim_boundary,
+            blocked_claims: record.blocked_claims,
+            operator_recommended_actions: recommendedActions,
+          },
+        },
+      });
+      setOperatorStatus(`${label} diagnostics loaded`);
+      appendOperatorFeed(`${label} diagnostics loaded`, "info");
+    } catch {
+      setOperatorStatus(`Failed to load diagnostics for ${label}`);
+      appendOperatorFeed(`Failed to load diagnostics for ${label}`, "failed");
+    }
+  }
+
   function saveRunbookMacro(runbook: RunbookInfo) {
     setSavedRunbooks((current) => {
       if (current.some((item) => item.id === runbook.id)) return current;
@@ -15099,6 +15157,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               )}
                             >
                               studio
+                            </button>
+                          ) : null}
+                          {row.extensionPackage ? (
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              onClick={() => void inspectExtensionDiagnostics(row.extensionPackage as ExtensionPackageInfo)}
+                            >
+                              diagnostics
                             </button>
                           ) : null}
                           {row.extensionPackage?.disable_supported && !extensionPackageRevoked(row.extensionPackage) ? (

@@ -873,6 +873,122 @@ async def test_extensions_diagnostics_endpoint_summarizes_package_health(client,
 
 
 @pytest.mark.asyncio
+async def test_extension_diagnostics_drilldown_is_actionable_and_metadata_only(client, extension_runtime, tmp_path):
+    package_dir = _write_installable_extension(tmp_path)
+    updated_package_dir = _write_installable_extension(
+        tmp_path,
+        package_name="installable-pack-update",
+        version="2026.4.01",
+        workflow_description="Updated local installable workflow",
+        workflow_content="Updated private workflow body should not leak through diagnostics.\n",
+    )
+
+    with (
+        patch(
+            "src.extensions.lifecycle.get_base_tools_and_active_skills",
+            return_value=([SimpleNamespace(name="read_file")], [], "approval"),
+        ),
+        patch("src.api.extensions.log_integration_event", AsyncMock()),
+    ):
+        install_response = await client.post("/api/extensions/install", json={"path": str(package_dir)})
+        assert install_response.status_code == 201
+        update_response = await client.post("/api/extensions/update", json={"path": str(updated_package_dir)})
+        assert update_response.status_code == 200
+
+        response = await client.get("/api/extensions/seraph.test-installable/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["extension"]["id"] == "seraph.test-installable"
+    assert payload["redaction"]["metadata_only"] is True
+    assert payload["redaction"]["private_paths_exposed"] is False
+    assert payload["claim_boundary"] == "metadata_only_extension_diagnostics_no_source_secret_config_or_private_paths"
+    assert "production_secure_marketplace" in payload["blocked_claims"]
+    assert payload["lifecycle"]["rollback"]["available"] is True
+    snapshot = payload["lifecycle"]["rollback"]["snapshots"][0]
+    assert snapshot["version"] == "2026.3.21"
+    assert "path" not in snapshot
+    assert isinstance(snapshot["path_digest"], str)
+    assert any(action["type"] == "rollback" for action in payload["recommended_actions"])
+    rendered = str(payload)
+    assert str(package_dir) not in rendered
+    assert str(updated_package_dir) not in rendered
+    assert "Updated private workflow body" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_extension_diagnostics_drilldown_returns_404_for_unknown_extension(client):
+    response = await client.get("/api/extensions/seraph.missing/diagnostics")
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_extension_diagnostics_drilldown_redacts_path_and_secret_fields(client):
+    with (
+        patch(
+            "src.api.extensions.get_extension",
+            return_value={
+                "id": "seraph.test-installable",
+                "display_name": "Test Installable",
+                "status": "degraded",
+                "version": "2026.4.01",
+                "version_line": "2026.4",
+                "kind": "capability-pack",
+                "location": "workspace",
+                "source": "manifest",
+                "trust": "local",
+                "publisher": {"name": "Seraph"},
+                "compatibility": {"compatible": True},
+                "permission_summary": {"ok": True},
+                "approval_profile": {},
+                "connector_summary": {},
+                "diagnostics_summary": {
+                    "issue_count": 1,
+                    "load_error_count": 1,
+                    "highlighted_messages": ["review package metadata"],
+                    "manifest_path": "/private/tmp/seraph-extension/manifest.yaml",
+                },
+                "issues": [
+                    {"message": "missing field in /private/tmp/seraph-extension/manifest.yaml"},
+                    {"path": "/private/tmp/seraph-extension/manifest.yaml"},
+                ],
+                "load_errors": [{"secret_token": "super-secret-token", "config": "raw-hidden-config"}],
+            },
+        ),
+        patch(
+            "src.api.extensions.extension_lifecycle_status",
+            return_value={
+                "lifecycle": {"last_event": "install"},
+                "rollback": {"available": False, "snapshots": []},
+                "quarantine": {
+                    "active": False,
+                    "state": "clear",
+                    "review_path": "/private/tmp/seraph-extension/quarantine-review.json",
+                },
+                "diagnostics": {"root_path": "/private/tmp/seraph-extension"},
+            },
+        ),
+    ):
+        response = await client.get("/api/extensions/seraph.test-installable/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    rendered = str(payload)
+    assert "/private/tmp/seraph-extension" not in rendered
+    assert "super-secret-token" not in rendered
+    assert "raw-hidden-config" not in rendered
+    assert payload["issues"][0]["message"]["redacted"] is True
+    assert payload["issues"][1]["path"]["redacted"] is True
+    assert payload["load_errors"][0]["secret_token"]["redacted"] is True
+    assert payload["load_errors"][0]["config"]["redacted"] is True
+    assert payload["extension"]["diagnostics_summary"]["manifest_path"]["redacted"] is True
+    assert payload["lifecycle"]["diagnostics"]["root_path"]["redacted"] is True
+    assert payload["lifecycle"]["quarantine"]["review_path"]["redacted"] is True
+
+
+@pytest.mark.asyncio
 async def test_scaffold_extension_package_creates_workspace_skill_pack(client, extension_runtime):
     with patch("src.api.extensions.log_integration_event", AsyncMock()) as log_event:
         response = await client.post(

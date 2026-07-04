@@ -73,6 +73,22 @@ _BUILTIN_CHANNEL_ADAPTERS = (
 )
 _REDACTED_CONFIG_SENTINEL = "__SERAPH_STORED_SECRET__"
 _NEW_SECRET_CONFIG_SENTINEL = "__SERAPH_NEW_SECRET_VALUE__"
+_SENSITIVE_DIAGNOSTIC_KEY_TOKENS = (
+    "auth",
+    "config",
+    "credential",
+    "header",
+    "password",
+    "secret",
+    "token",
+)
+_PRIVATE_PATH_PATTERN = re.compile(
+    r"(^|[\s'\"=:])("
+    r"/(?:Users|private|tmp|var|home|etc|Volumes|opt|run|srv)/[^\s'\",;)]*"
+    r"|~/?[^\s'\",;)]*"
+    r"|[A-Za-z]:\\[^\s'\",;)]*"
+    r")"
+)
 
 
 def _content_hash(value: str) -> str:
@@ -267,6 +283,177 @@ def _extension_load_error_count(preview: dict[str, Any] | None) -> int:
         return 0
     load_errors = preview.get("load_errors")
     return len(load_errors) if isinstance(load_errors, list) else 0
+
+
+def _extension_recommended_diagnostic_actions(
+    extension: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    diagnostics = extension.get("diagnostics_summary")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    permission_summary = extension.get("permission_summary")
+    permission_summary = permission_summary if isinstance(permission_summary, dict) else {}
+    compatibility = extension.get("compatibility")
+    compatibility = compatibility if isinstance(compatibility, dict) else {}
+    rollback = lifecycle.get("rollback")
+    rollback = rollback if isinstance(rollback, dict) else {}
+    quarantine = lifecycle.get("quarantine")
+    quarantine = quarantine if isinstance(quarantine, dict) else {}
+
+    if diagnostics.get("issue_count") or diagnostics.get("load_error_count"):
+        actions.append({
+            "type": "review",
+            "label": "Review package diagnostics",
+            "reason": "Doctor issues or load errors require operator review before lifecycle changes.",
+            "endpoint": f"/api/extensions/{extension['id']}/review",
+        })
+    if diagnostics.get("degraded_connector_count"):
+        actions.append({
+            "type": "open_studio",
+            "label": "Inspect connector configuration",
+            "reason": "At least one connector is degraded or needs configuration.",
+        })
+    if compatibility.get("compatible") is False:
+        actions.append({
+            "type": "block_lifecycle",
+            "label": "Resolve compatibility before update",
+            "reason": "The package compatibility check is failing for this Seraph build.",
+        })
+    if permission_summary.get("ok") is False:
+        actions.append({
+            "type": "review_permissions",
+            "label": "Review missing permissions",
+            "reason": "Required tools, boundaries, or data access are not currently granted.",
+        })
+    if quarantine.get("active"):
+        actions.append({
+            "type": "reentry",
+            "label": "Run re-entry review",
+            "reason": "The package is quarantined and cannot be enabled until review clears it.",
+            "endpoint": f"/api/extensions/{extension['id']}/reentry",
+        })
+    elif rollback.get("available"):
+        actions.append({
+            "type": "rollback",
+            "label": "Rollback to previous snapshot",
+            "reason": "A rollback snapshot is available if diagnostics indicate a bad update.",
+            "endpoint": f"/api/extensions/{extension['id']}/rollback",
+        })
+    if not actions:
+        actions.append({
+            "type": "review",
+            "label": "Record lifecycle review",
+            "reason": "No blocking diagnostics are present; record an operator review before privileged changes if needed.",
+            "endpoint": f"/api/extensions/{extension['id']}/review",
+        })
+    return actions
+
+
+def _sanitize_extension_diagnostic_value(value: Any, *, key: str | None = None) -> Any:
+    key_text = (key or "").lower()
+    if isinstance(value, dict):
+        return {
+            str(item_key): _sanitize_extension_diagnostic_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_extension_diagnostic_value(item) for item in value]
+    if isinstance(value, str):
+        if key_text == "path" or key_text.endswith("_path") or key_text in {"package_path", "manifest_path", "root_path"}:
+            return {"redacted": True, "digest": _content_hash(value)}
+        if any(token in key_text for token in _SENSITIVE_DIAGNOSTIC_KEY_TOKENS):
+            return {"redacted": True, "digest": _content_hash(value)}
+        if _PRIVATE_PATH_PATTERN.search(value):
+            return {"redacted": True, "digest": _content_hash(value)}
+    return value
+
+
+def _safe_extension_diagnostics_payload(extension_id: str) -> dict[str, Any]:
+    extension = get_extension(extension_id)
+    lifecycle = extension_lifecycle_status(extension_id)
+    lifecycle_state = lifecycle.get("lifecycle")
+    lifecycle_state = lifecycle_state if isinstance(lifecycle_state, dict) else {}
+    rollback = lifecycle.get("rollback")
+    rollback = rollback if isinstance(rollback, dict) else {}
+    quarantine = lifecycle.get("quarantine")
+    quarantine = quarantine if isinstance(quarantine, dict) else {"active": False, "state": "clear"}
+    snapshots = rollback.get("snapshots")
+    safe_snapshots = [
+        {
+            "id": item.get("id"),
+            "version": item.get("version"),
+            "digest": item.get("digest"),
+            "reason": item.get("reason"),
+            "created_by": item.get("created_by"),
+            "created_at": item.get("created_at"),
+            "path_digest": _content_hash(str(item.get("path") or "")),
+        }
+        for item in snapshots
+        if isinstance(item, dict)
+    ] if isinstance(snapshots, list) else []
+    issues = extension.get("issues")
+    load_errors = extension.get("load_errors")
+    diagnostics_summary = extension.get("diagnostics_summary")
+    diagnostics_summary = diagnostics_summary if isinstance(diagnostics_summary, dict) else {}
+    highlighted_messages = diagnostics_summary.get("highlighted_messages")
+    safe_issues = _sanitize_extension_diagnostic_value(issues) if isinstance(issues, list) else []
+    safe_load_errors = _sanitize_extension_diagnostic_value(load_errors) if isinstance(load_errors, list) else []
+    safe_diagnostics_summary = _sanitize_extension_diagnostic_value(diagnostics_summary)
+    safe_lifecycle_diagnostics = _sanitize_extension_diagnostic_value(lifecycle.get("diagnostics"))
+    return {
+        "extension": {
+            "id": extension.get("id"),
+            "display_name": extension.get("display_name"),
+            "version": extension.get("version"),
+            "version_line": extension.get("version_line"),
+            "kind": extension.get("kind"),
+            "location": extension.get("location"),
+            "status": extension.get("status"),
+            "trust": extension.get("trust"),
+            "source": extension.get("source"),
+            "publisher": extension.get("publisher"),
+            "compatibility": extension.get("compatibility"),
+            "permission_summary": extension.get("permission_summary"),
+            "approval_profile": extension.get("approval_profile"),
+            "connector_summary": extension.get("connector_summary"),
+            "diagnostics_summary": safe_diagnostics_summary,
+            "issue_count": len(issues) if isinstance(issues, list) else 0,
+            "load_error_count": len(load_errors) if isinstance(load_errors, list) else 0,
+        },
+        "issues": safe_issues,
+        "load_errors": safe_load_errors,
+        "highlighted_messages": _sanitize_extension_diagnostic_value(highlighted_messages)
+        if isinstance(highlighted_messages, list)
+        else [],
+        "lifecycle": {
+            "last_event": lifecycle_state.get("last_event"),
+            "rollback": {
+                "available": bool(rollback.get("available")),
+                "snapshots": safe_snapshots,
+            },
+            "quarantine": _sanitize_extension_diagnostic_value(quarantine),
+            "diagnostics": safe_lifecycle_diagnostics,
+        },
+        "recommended_actions": _extension_recommended_diagnostic_actions(extension, lifecycle),
+        "claim_boundary": "metadata_only_extension_diagnostics_no_source_secret_config_or_private_paths",
+        "redaction": {
+            "metadata_only": True,
+            "raw_source_content_exposed": False,
+            "secret_values_exposed": False,
+            "credential_values_exposed": False,
+            "config_values_exposed": False,
+            "private_paths_exposed": False,
+        },
+        "blocked_claims": [
+            "production_secure_marketplace",
+            "solved_third_party_package_security",
+            "marketplace_superiority",
+            "full_parity",
+            "production_readiness",
+            "reference_system_exceedance",
+        ],
+    }
 
 
 async def _log_extension_lifecycle_event(
@@ -887,6 +1074,14 @@ async def get_extension_diagnostics():
             if isinstance(item, dict)
         ],
     }
+
+
+@router.get("/extensions/{extension_id}/diagnostics")
+async def get_extension_package_diagnostics(extension_id: str):
+    try:
+        return _safe_extension_diagnostics_payload(extension_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Extension '{extension_id}' not found") from exc
 
 
 @router.get("/extensions/channel-routing")

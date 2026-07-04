@@ -1893,7 +1893,25 @@ interface BrowserSessionControlInfo {
   latest_summary?: string | null;
   latest_artifact_provenance?: BrowserSessionArtifactProvenance | null;
   control_events: Array<Record<string, unknown>>;
+  journal_entry_count: number;
+  journal_schema?: string | null;
   updated_at: string;
+}
+
+interface BrowserSessionJournalEntry {
+  entry_id: string;
+  recorded_at: string;
+  action: string;
+  status: string;
+  session_id: string;
+  redaction: {
+    metadata_only?: boolean;
+    raw_dom_stored?: boolean;
+    screenshot_stored?: boolean;
+    secret_values_stored?: boolean;
+    credential_values_stored?: boolean;
+    private_page_content_stored?: boolean;
+  };
 }
 
 interface ExtensionConnectorSummary {
@@ -6572,7 +6590,33 @@ function normalizeBrowserSessions(payload: unknown): BrowserSessionControlInfo[]
       control_events: Array.isArray(record.control_events)
         ? record.control_events.filter((item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item))
         : [],
+      journal_entry_count: typeof record.journal_entry_count === "number" ? record.journal_entry_count : 0,
+      journal_schema: typeof record.journal_schema === "string" ? record.journal_schema : null,
       updated_at: typeof record.updated_at === "string" ? record.updated_at : "",
+    }];
+  });
+}
+
+function normalizeBrowserJournal(payload: unknown): BrowserSessionJournalEntry[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const journalValue = (payload as Record<string, unknown>).journal;
+  if (!Array.isArray(journalValue)) return [];
+  return journalValue.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const session = record.session && typeof record.session === "object" && !Array.isArray(record.session)
+      ? record.session as Record<string, unknown>
+      : {};
+    const redaction = record.redaction && typeof record.redaction === "object" && !Array.isArray(record.redaction)
+      ? record.redaction as BrowserSessionJournalEntry["redaction"]
+      : {};
+    return [{
+      entry_id: typeof record.entry_id === "string" ? record.entry_id : `${String(session.session_id ?? "browser")}:${String(record.recorded_at ?? "")}`,
+      recorded_at: typeof record.recorded_at === "string" ? record.recorded_at : "",
+      action: typeof record.action === "string" ? record.action : "unknown",
+      status: typeof record.status === "string" ? record.status : "unknown",
+      session_id: typeof session.session_id === "string" ? session.session_id : "",
+      redaction,
     }];
   });
 }
@@ -6628,6 +6672,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [browserProviders, setBrowserProviders] = useState<BrowserProviderControlInfo[]>([]);
   const [browserSessions, setBrowserSessions] = useState<BrowserSessionControlInfo[]>([]);
+  const [browserJournal, setBrowserJournal] = useState<BrowserSessionJournalEntry[]>([]);
+  const [browserWorkbenchUrl, setBrowserWorkbenchUrl] = useState("");
+  const [browserWorkbenchProvider, setBrowserWorkbenchProvider] = useState("");
+  const [browserWorkbenchCapture, setBrowserWorkbenchCapture] = useState<"extract" | "html" | "screenshot">("extract");
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
   const cockpitRefreshInFlightRef = useRef(false);
@@ -6938,6 +6986,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
+    setBrowserJournal(normalizeBrowserJournal(browserSessionsResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
@@ -7084,6 +7133,81 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     syncCockpitPaneStack(paneVisibility);
   }, [paneVisibility, syncCockpitPaneStack]);
 
+  const openBrowserWorkbenchSession = useCallback(async () => {
+    if (!sessionId) {
+      setOperatorStatus("Browser workbench unavailable: no active session");
+      return;
+    }
+    const url = browserWorkbenchUrl.trim();
+    if (!url) {
+      setOperatorStatus("Browser workbench needs a URL");
+      return;
+    }
+    const fallbackProvider = browserProviders.find((providerInfo) => providerInfo.selected) ?? browserProviders[0] ?? null;
+    const provider = browserWorkbenchProvider || fallbackProvider?.name || "";
+    try {
+      const response = await fetch(`${API_URL}/api/browser/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          url,
+          provider,
+          capture: browserWorkbenchCapture,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        setOperatorStatus(`Browser workbench open refused: ${String(detail ?? response.status)}`);
+        await refreshCockpit();
+        return;
+      }
+      setOperatorStatus(`Browser workbench opened ${url}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Browser workbench open failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [
+    browserWorkbenchCapture,
+    browserWorkbenchProvider,
+    browserWorkbenchUrl,
+    browserProviders,
+    refreshCockpit,
+    sessionId,
+  ]);
+
+  const snapshotBrowserWorkbenchSession = useCallback(async (session: BrowserSessionControlInfo) => {
+    if (!sessionId) {
+      setOperatorStatus("Browser snapshot unavailable: no active session");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/browser/sessions/${encodeURIComponent(session.session_id)}/snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          capture: browserWorkbenchCapture,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        const reason = detail && typeof detail === "object"
+          ? String((detail as Record<string, unknown>).error ?? "refused")
+          : String(detail ?? response.status);
+        setOperatorStatus(`Browser snapshot refused ${session.session_id}: ${reason}`);
+        await refreshCockpit();
+        return;
+      }
+      setOperatorStatus(`Browser snapshot recorded ${session.session_id}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Browser snapshot failed ${session.session_id}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [browserWorkbenchCapture, refreshCockpit, sessionId]);
+
   const runBrowserSessionControl = useCallback(async (
     session: BrowserSessionControlInfo,
     action: "quarantine" | "recover" | "reset_partition" | "replay_snapshot" | "close",
@@ -7189,9 +7313,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     (provider) => provider.runtime_state.includes("fallback") || provider.runtime_state.includes("degraded"),
   ).length;
   const quarantinedBrowserSessionCount = browserSessions.filter((session) => session.status === "quarantined").length;
+  const browserJournalCount = browserJournal.length;
+  const recentBrowserJournal = browserJournal.slice(0, 3);
   const browserControlSummary = [
     `${browserProviders.length} providers`,
     `${browserSessions.length} sessions`,
+    `${browserJournalCount} journaled`,
     degradedBrowserProviderCount ? `${degradedBrowserProviderCount} degraded` : "no degraded fallback",
     quarantinedBrowserSessionCount ? `${quarantinedBrowserSessionCount} quarantined` : "no quarantine",
   ].join(" · ");
@@ -15148,6 +15275,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     ) : (
                       <div className="cockpit-sublist-item">No browser provider inventory loaded.</div>
                     )}
+                    <div className="cockpit-operator-row cockpit-operator-row--entry">
+                      <div className="cockpit-operator-details">
+                        <div className="cockpit-value">Workbench session</div>
+                        <div className="cockpit-operator-note">
+                          metadata-first journal · owner scoped · raw page bodies stay out of summaries
+                        </div>
+                        <div className="cockpit-operator-note cockpit-browser-workbench-controls">
+                          <input
+                            aria-label="Browser workbench URL"
+                            className="cockpit-input cockpit-browser-workbench-url"
+                            placeholder="https://example.com"
+                            value={browserWorkbenchUrl}
+                            onChange={(event) => setBrowserWorkbenchUrl(event.currentTarget.value)}
+                          />
+                          <select
+                            aria-label="Browser workbench provider"
+                            className="cockpit-input cockpit-browser-workbench-select"
+                            value={browserWorkbenchProvider}
+                            onChange={(event) => setBrowserWorkbenchProvider(event.currentTarget.value)}
+                          >
+                            <option value="">selected provider</option>
+                            {browserProviders.map((provider) => (
+                              <option key={provider.name} value={provider.name}>
+                                {provider.name}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            aria-label="Browser workbench capture mode"
+                            className="cockpit-input cockpit-browser-workbench-select"
+                            value={browserWorkbenchCapture}
+                            onChange={(event) => setBrowserWorkbenchCapture(event.currentTarget.value as "extract" | "html" | "screenshot")}
+                          >
+                            <option value="extract">extract</option>
+                            <option value="html">html</option>
+                            <option value="screenshot">screenshot</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="cockpit-operator-actions">
+                        <button
+                          type="button"
+                          className="cockpit-operator-button"
+                          disabled={!sessionId || !browserWorkbenchUrl.trim()}
+                          onClick={() => void openBrowserWorkbenchSession()}
+                        >
+                          open
+                        </button>
+                      </div>
+                    </div>
+                    {recentBrowserJournal.length > 0 ? (
+                      <div className="cockpit-sublist-item">
+                        journal: {recentBrowserJournal.map((entry) => [
+                          entry.action.replace(/_/g, " "),
+                          entry.status.replace(/_/g, " "),
+                          entry.redaction.metadata_only ? "metadata only" : "redaction unknown",
+                        ].join(" ")).join(" · ")}
+                      </div>
+                    ) : (
+                      <div className="cockpit-sublist-item">Journal is empty for this thread.</div>
+                    )}
                     {browserSessions.slice(0, 4).map((browserSession) => {
                       const boundaryNames = Object.entries(browserSession.boundary_decisions)
                         .filter(([, decision]) => decision.operator_visible)
@@ -15201,6 +15389,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 browserSession.recovery_state.replace(/_/g, " "),
                                 `partition r${browserSession.partition_revision}`,
                                 `${browserSession.snapshot_count} snapshots`,
+                                `${browserSession.journal_entry_count} journal`,
                               ].join(" · ")}
                             </div>
                             <div className="cockpit-operator-note">
@@ -15234,6 +15423,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               onClick={() => void runBrowserSessionControl(browserSession, "recover")}
                             >
                               recover
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={quarantined}
+                              onClick={() => void snapshotBrowserWorkbenchSession(browserSession)}
+                            >
+                              snapshot
                             </button>
                             <button
                               type="button"

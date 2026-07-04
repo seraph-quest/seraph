@@ -14,9 +14,9 @@ from src.tools.browser_session_tool import browser_session
 
 @pytest.fixture(autouse=True)
 def reset_browser_sessions():
-    browser_session_runtime.reset_for_tests()
+    browser_session_runtime.reset_for_tests(delete_journal=True)
     yield
-    browser_session_runtime.reset_for_tests()
+    browser_session_runtime.reset_for_tests(delete_journal=True)
 
 
 @pytest.fixture

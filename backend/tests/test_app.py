@@ -4,10 +4,10 @@ from unittest.mock import patch
 from config.settings import settings
 
 
-_STUBBED_VLM_PROBE = {
+_DEFERRED_VLM_PROBE = {
     "checked": False,
     "reachable": False,
-    "reason": "test_stub",
+    "reason": "deferred_fast_metadata",
     "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
     "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
     "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
@@ -121,9 +121,24 @@ async def test_runtime_status_exposes_gpu_vlm_runtime_and_chat_profile(client):
         "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
         "api_key_configured": True,
         "feeder_window": 2,
-        "live_probe": _STUBBED_VLM_PROBE,
+        "live_probe": _DEFERRED_VLM_PROBE,
     }
     assert "secret-token" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_does_not_wait_for_live_vlm_probe(client):
+    with (
+        patch.object(settings, "seraph_vlm_mode", "gpu-server"),
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch("src.vlm_runtime.probe_effective_vlm_runtime", side_effect=AssertionError("live probe should not run")),
+    ):
+        response = await client.get("/api/runtime/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["vlm_runtime"]["live_probe"]["checked"] is False
+    assert payload["vlm_runtime"]["live_probe"]["reason"] == "deferred_fast_metadata"
 
 
 @pytest.mark.asyncio

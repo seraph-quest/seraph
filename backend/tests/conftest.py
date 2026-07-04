@@ -151,10 +151,7 @@ def stub_vlm_runtime_probe():
             "chat_proxy": {"checked": False, "ok": False, "status_code": None, "error": ""},
         }
 
-    with (
-        patch("src.app.probe_effective_vlm_runtime", _probe),
-        patch("src.api.settings.probe_effective_vlm_runtime", _probe),
-    ):
+    with patch("src.vlm_runtime.probe_effective_vlm_runtime", _probe):
         yield
 
 

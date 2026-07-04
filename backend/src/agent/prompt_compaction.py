@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import math
+from typing import Any
 
 from config.settings import settings
 from src.agent.context_window import _count_tokens
@@ -34,6 +35,28 @@ class PromptCompactionResult:
     budget_tokens: int
     section_tokens: dict[str, int]
     compacted_sections: tuple[str, ...]
+
+
+def _message_role(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("role") or "message")
+    return str(getattr(message, "role", "message") or "message")
+
+
+def _message_content(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("content") or "")
+    return str(getattr(message, "content", "") or "")
+
+
+def _with_message_content(message: Any, content: str) -> Any:
+    if isinstance(message, dict):
+        return {**message, "content": content}
+    return message
+
+
+def _format_message(role: str, content: str) -> str:
+    return f"{role.capitalize()}: {content}".strip()
 
 
 def _safe_ratio() -> float:
@@ -217,6 +240,12 @@ def compact_prompt_sections(
         "context_window_tokens": settings.local_runtime_context_window_tokens,
         "tool_reserve_tokens": settings.local_runtime_tool_reserve_tokens,
         "compacted_sections": compacted_sections,
+        "summarized_sections": compacted_sections,
+        "preserved_sections": [
+            section.name
+            for section in sections
+            if section.content.strip() and not section.shrinkable
+        ],
         "section_tokens": section_tokens,
     }
     logger.info("Compacted local runtime prompt: %s", details)
@@ -231,6 +260,183 @@ def compact_prompt_sections(
         logger.debug("Failed to record local runtime prompt compaction receipt", exc_info=True)
 
     return PromptCompactionResult(
+        text=compacted_text,
+        compacted=True,
+        original_tokens=original_tokens,
+        compacted_tokens=compacted_tokens,
+        budget_tokens=budget,
+        section_tokens=section_tokens,
+        compacted_sections=tuple(compacted_sections),
+    )
+
+
+def compact_messages_for_local_runtime(
+    messages: list[Any],
+    *,
+    runtime_path: str,
+    runtime_profile: str,
+    reserved_output_tokens: int,
+    session_id: str | None = None,
+) -> tuple[list[Any], PromptCompactionResult]:
+    """Compact local-runtime chat messages while preserving the current turn.
+
+    This is a last-mile guard for direct LiteLLM calls. Agent construction can
+    still perform richer section-aware compaction before this point.
+    """
+    message_rows: list[dict[str, Any]] = []
+    last_user_index: int | None = None
+    for index, message in enumerate(messages):
+        role = _message_role(message)
+        content = _message_content(message)
+        if role.lower() == "user" and content.strip():
+            last_user_index = index
+        message_rows.append(
+            {
+                "index": index,
+                "role": role,
+                "content": content,
+                "name": f"{role.lower() or 'message'}_{index}",
+            }
+        )
+
+    original_text = "\n\n".join(
+        _format_message(row["role"], row["content"])
+        for row in message_rows
+        if row["content"].strip()
+    )
+    original_tokens = _count_tokens(original_text)
+    budget = local_runtime_prompt_budget(reserved_output_tokens=reserved_output_tokens)
+    section_tokens = {
+        row["name"]: _count_tokens(row["content"])
+        for row in message_rows
+        if row["content"].strip()
+    }
+
+    if original_tokens <= budget:
+        return messages, PromptCompactionResult(
+            text=original_text,
+            compacted=False,
+            original_tokens=original_tokens,
+            compacted_tokens=original_tokens,
+            budget_tokens=budget,
+            section_tokens=section_tokens,
+            compacted_sections=(),
+        )
+
+    preserve_indices = {
+        index
+        for index in (last_user_index, len(messages) - 1)
+        if index is not None and index >= 0
+    }
+    # Keep the current user turn and final pending message intact first. Older
+    # tail content may still be bulky enough to overflow a small local ctx.
+
+    shrinkable_rows = [
+        row
+        for row in message_rows
+        if row["content"].strip() and row["index"] not in preserve_indices
+    ]
+    fixed_tokens = sum(
+        _count_tokens(row["content"])
+        for row in message_rows
+        if row["content"].strip() and row["index"] in preserve_indices
+    )
+    shrinkable_tokens = sum(_count_tokens(row["content"]) for row in shrinkable_rows)
+    min_section_tokens = max(int(settings.local_runtime_min_section_tokens), 1)
+    available_for_shrinkable = max(
+        budget - fixed_tokens,
+        len(shrinkable_rows) * min_section_tokens,
+    )
+
+    compacted_contents = [_message_content(message) for message in messages]
+    compacted_sections: list[str] = []
+    preserved_sections: list[str] = []
+    for row in message_rows:
+        content = row["content"]
+        if not content.strip():
+            continue
+        if row["index"] in preserve_indices or shrinkable_tokens <= 0:
+            preserved_sections.append(row["name"])
+            continue
+        original_section_tokens = _count_tokens(content)
+        proportional_budget = int(
+            available_for_shrinkable * (original_section_tokens / shrinkable_tokens)
+        )
+        section_budget = max(min_section_tokens, proportional_budget)
+        compacted = _truncate_to_token_budget(content, section_budget)
+        if compacted != content:
+            compacted_sections.append(row["name"])
+        compacted_contents[row["index"]] = compacted
+
+    def _current_text() -> str:
+        return "\n\n".join(
+            _format_message(row["role"], compacted_contents[row["index"]])
+            for row in message_rows
+            if str(compacted_contents[row["index"]]).strip()
+        )
+
+    compacted_text = _current_text()
+    while _count_tokens(compacted_text) > budget and message_rows:
+        candidates = [
+            row for row in message_rows if str(compacted_contents[row["index"]]).strip()
+        ]
+        if not candidates:
+            break
+        shrinkable_candidates = [
+            row for row in candidates if row["index"] not in preserve_indices
+        ] or candidates
+        largest = max(
+            shrinkable_candidates,
+            key=lambda row: _count_tokens(compacted_contents[row["index"]]),
+        )
+        current_content = str(compacted_contents[largest["index"]])
+        current_tokens = _count_tokens(current_content)
+        next_budget = max(min_section_tokens, int(current_tokens * 0.7))
+        compacted = _truncate_to_token_budget(current_content, next_budget)
+        if compacted == current_content:
+            compacted = _hard_truncate_to_token_budget(current_content, next_budget)
+        if _count_tokens(compacted) >= current_tokens:
+            next_budget = max(1, current_tokens - 1)
+            compacted = _hard_truncate_to_token_budget(current_content, next_budget)
+        if _count_tokens(compacted) >= current_tokens:
+            break
+        compacted_contents[largest["index"]] = compacted
+        if largest["name"] not in compacted_sections:
+            compacted_sections.append(largest["name"])
+        compacted_text = _current_text()
+
+    compacted_tokens = _count_tokens(compacted_text)
+    new_messages = [
+        _with_message_content(message, compacted_contents[index])
+        for index, message in enumerate(messages)
+    ]
+    details = {
+        "runtime_path": runtime_path,
+        "runtime_profile": runtime_profile,
+        "original_tokens": original_tokens,
+        "compacted_tokens": compacted_tokens,
+        "budget_tokens": budget,
+        "reserved_output_tokens": reserved_output_tokens,
+        "context_window_tokens": settings.local_runtime_context_window_tokens,
+        "tool_reserve_tokens": settings.local_runtime_tool_reserve_tokens,
+        "compacted_sections": compacted_sections,
+        "summarized_sections": compacted_sections,
+        "preserved_sections": preserved_sections,
+        "section_tokens": section_tokens,
+        "message_count": len(messages),
+    }
+    logger.info("Compacted local runtime messages: %s", details)
+    try:
+        log_background_task_event_sync(
+            task_name="local_runtime_prompt_compaction",
+            session_id=session_id,
+            outcome="succeeded" if compacted_tokens <= budget else "degraded",
+            details=details,
+        )
+    except Exception:
+        logger.debug("Failed to record local runtime message compaction receipt", exc_info=True)
+
+    return new_messages, PromptCompactionResult(
         text=compacted_text,
         compacted=True,
         original_tokens=original_tokens,

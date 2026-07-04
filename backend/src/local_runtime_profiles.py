@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Any
 
 from config.settings import settings
@@ -113,6 +114,10 @@ def local_runtime_profile_statuses() -> list[dict[str, Any]]:
             "temperature": _profile_temperature(profile),
             "max_tokens": _profile_max_tokens(profile),
             "timeout_seconds": _profile_timeout_seconds(profile),
+            "context_window_tokens": int(settings.local_runtime_context_window_tokens),
+            "prompt_safety_ratio": float(settings.local_runtime_prompt_safety_ratio),
+            "tool_reserve_tokens": int(settings.local_runtime_tool_reserve_tokens),
+            "prompt_budget_tokens": _profile_prompt_budget_tokens(profile),
             "summary": profile.summary,
             "options": profile.options,
         }
@@ -178,3 +183,14 @@ def _profile_timeout_seconds(profile: LocalRuntimeProfile) -> int:
     if profile.id == "chat_thinking":
         return max(settings.agent_chat_timeout, 1)
     return profile.timeout_seconds
+
+
+def _profile_prompt_budget_tokens(profile: LocalRuntimeProfile) -> int:
+    safe_ctx = math.floor(
+        max(int(settings.local_runtime_context_window_tokens), 1024)
+        * min(max(float(settings.local_runtime_prompt_safety_ratio), 0.25), 1.0)
+    )
+    return max(
+        safe_ctx - _profile_max_tokens(profile) - max(int(settings.local_runtime_tool_reserve_tokens), 0),
+        0,
+    )

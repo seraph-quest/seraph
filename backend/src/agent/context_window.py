@@ -10,12 +10,12 @@ import tiktoken
 from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.runtime import log_background_task_event_sync
-from src.llm_runtime import completion_with_fallback_sync
 
 logger = logging.getLogger(__name__)
 
 _summary_cache: dict[str, str] = {}
 _encoding_failure_logged = False
+completion_with_fallback_sync = None
 
 
 @lru_cache(maxsize=1)
@@ -68,6 +68,12 @@ def _summarize_middle(messages: list[dict], session_id: str, range_key: str) -> 
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
     runtime_tokens = None
     try:
+        global completion_with_fallback_sync
+        if completion_with_fallback_sync is None:
+            from src.llm_runtime import completion_with_fallback_sync as _completion_with_fallback_sync
+
+            completion_with_fallback_sync = _completion_with_fallback_sync
+
         if session_id:
             runtime_tokens = set_runtime_context(session_id, "high_risk")
         response = completion_with_fallback_sync(

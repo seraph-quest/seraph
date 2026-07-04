@@ -7,6 +7,7 @@ from src.agent.factory import create_agent
 from src.agent.prompt_compaction import (
     PromptCompactionConfigurationError,
     PromptSection,
+    compact_messages_for_local_runtime,
     compact_prompt_sections,
     local_runtime_prompt_budget,
 )
@@ -67,6 +68,36 @@ def test_compact_prompt_sections_preserves_fixed_prompt_and_fits_budget():
     assert result.compacted_tokens <= result.budget_tokens
     assert "Seraph must answer the current user." in result.text
     assert {"history", "memory"}.intersection(result.compacted_sections)
+    mock_log.assert_called_once()
+
+
+def test_compact_messages_for_local_runtime_preserves_current_user_and_fits_budget():
+    messages = [
+        {"role": "system", "content": _large_block("system", count=400)},
+        {"role": "user", "content": _large_block("old-user", count=400)},
+        {"role": "assistant", "content": _large_block("old-answer", count=400)},
+        {"role": "user", "content": "Current request: answer this exact question."},
+    ]
+
+    with (
+        patch.object(settings, "local_runtime_context_window_tokens", 4096),
+        patch.object(settings, "local_runtime_prompt_safety_ratio", 1.0),
+        patch.object(settings, "local_runtime_tool_reserve_tokens", 512),
+        patch.object(settings, "local_runtime_min_section_tokens", 64),
+        patch("src.agent.prompt_compaction.log_background_task_event_sync") as mock_log,
+    ):
+        compacted_messages, result = compact_messages_for_local_runtime(
+            messages,
+            runtime_path="chat_agent",
+            runtime_profile="local-gemma-chat-thinking",
+            reserved_output_tokens=512,
+            session_id="session-1",
+        )
+
+    assert result.compacted is True
+    assert result.compacted_tokens <= result.budget_tokens
+    assert compacted_messages[-1]["content"] == "Current request: answer this exact question."
+    assert any("compacted for local model context budget" in item["content"] for item in compacted_messages)
     mock_log.assert_called_once()
 
 

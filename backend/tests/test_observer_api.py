@@ -177,6 +177,63 @@ class TestObserverAPI:
         assert data["capture_ready"] is True
 
     @pytest.mark.asyncio
+    async def test_daemon_status_reports_configured_off(self, client, tmp_path, monkeypatch):
+        """A disabled daemon is surfaced as configured-off, not a crash."""
+        monkeypatch.setenv("DAEMON_ENABLED", "false")
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "missing-daemon-status.json"))
+        mgr = ContextManager()
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        daemon = payload["daemon"]
+        assert daemon["connected"] is False
+        assert daemon["daemon_state"] == "disabled"
+        assert daemon["last_error_kind"] == "configured_off"
+        assert "DAEMON_ENABLED=false" in daemon["status_reason"]
+        assert "DAEMON_ENABLED=true" in daemon["recovery_hint"]
+        native_transport = next(
+            item for item in payload["reach"]["transport_statuses"] if item["transport"] == "native_notification"
+        )
+        assert native_transport["status"] == "daemon_configured_off"
+        assert "DAEMON_ENABLED=true" in native_transport["repair_hint"]
+
+    @pytest.mark.asyncio
+    async def test_daemon_status_reports_automation_permission_failure(self, client, tmp_path, monkeypatch):
+        """System Events authorization failures get an actionable recovery kind."""
+        status_file = tmp_path / "daemon-status.json"
+        monkeypatch.setenv("DAEMON_ENABLED", "true")
+        monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(status_file))
+        status_file.write_text(
+            json.dumps(
+                {
+                    "state": "error",
+                    "last_error": "System Events got an error: Not authorised to send Apple events. (-1743)",
+                    "last_error_kind": "frontmost_app_unavailable",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        mgr = ContextManager()
+        with patch("src.api.observer.context_manager", mgr):
+            resp = await client.get("/api/observer/continuity")
+
+        assert resp.status_code == 200
+        daemon = resp.json()["daemon"]
+        assert daemon["connected"] is False
+        assert daemon["daemon_state"] == "error"
+        assert daemon["last_error_kind"] == "automation_permission_denied"
+        assert "Automation permission" in daemon["status_reason"]
+        assert "Privacy & Security > Automation" in daemon["recovery_hint"]
+        native_transport = next(
+            item for item in resp.json()["reach"]["transport_statuses"] if item["transport"] == "native_notification"
+        )
+        assert native_transport["status"] == "daemon_permission_denied"
+        assert "Privacy & Security > Automation" in native_transport["repair_hint"]
+
+    @pytest.mark.asyncio
     async def test_post_refresh(self, client):
         mgr = ContextManager()
         mgr.refresh = AsyncMock(return_value=CurrentContext(time_of_day="evening"))

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
@@ -434,6 +434,16 @@ export function SettingsPanel() {
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSection>("artifacts");
+  const wasOpenRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (settingsPanelOpen && !wasOpenRef.current) {
+      setActiveSection("artifacts");
+    } else if (!settingsPanelOpen && wasOpenRef.current) {
+      setActiveSection("artifacts");
+    }
+    wasOpenRef.current = settingsPanelOpen;
+  }, [settingsPanelOpen]);
 
   const fetchSkills = useCallback(async () => {
     try {

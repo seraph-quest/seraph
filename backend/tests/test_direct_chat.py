@@ -4,7 +4,13 @@ from unittest.mock import patch
 import pytest
 
 from config.settings import settings
-from src.agent.direct_chat import _stream_chunk_delta, run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
+from src.agent.direct_chat import (
+    _stream_chunk_delta,
+    looks_like_tool_or_web_request,
+    run_direct_local_chat,
+    should_use_direct_local_chat,
+    stream_direct_local_chat,
+)
 
 
 def test_direct_local_chat_handles_onboarding_when_local_gemma_configured():
@@ -94,6 +100,13 @@ def test_direct_local_chat_does_not_intercept_website_requests():
             runtime_path="onboarding_agent",
             is_onboarding=True,
         )
+
+
+def test_tool_or_web_request_classifier_uses_word_boundaries():
+    assert looks_like_tool_or_web_request("Check natgurlain.com and summarize it")
+    assert looks_like_tool_or_web_request("Open https://example.com/about")
+    assert looks_like_tool_or_web_request("Please inspect the website")
+    assert not looks_like_tool_or_web_request("Hello, I am ready for onboarding")
 
 
 @pytest.mark.asyncio

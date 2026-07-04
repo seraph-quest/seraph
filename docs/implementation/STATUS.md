@@ -170,6 +170,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 
 - [x] The extension-platform transition and five-wave capability import program are now represented in the shipped state on `develop`.
 - [x] Seraph now ships Hermes-style runtime primitives (`execute_code`, `delegate_task`, `clarify`, `todo`, `session_search`) plus packaged browser, messaging, automation, node, canvas, and workflow-runtime surfaces through the extension architecture.
+- [x] Local Gemma direct chat now stays bounded to true lightweight conversation: bare domains, explicit URLs, and website/tool-intent prompts route through the agent path, and onboarding bare domains normalize to scoped `https://...` browser access instead of being swallowed by no-tools chat.
 - [x] The workspace now makes imported capability reach, extension governance, and runtime-path/capability-family spend attribution visible inside the operator surface instead of leaving the new breadth opaque.
 - [x] The runtime now exposes provider-neutral source contracts and source inventory for public-web tools, managed authenticated connectors, and raw MCP gaps, so Seraph can compose source-aware routines without hardcoding one provider pipeline per use case.
 - [x] The runtime now also exposes reusable source-review planning for daily review, progress review, and goal-alignment review, so source routines can stay connector-first and provider-neutral even when one preferred adapter cannot satisfy every review step.

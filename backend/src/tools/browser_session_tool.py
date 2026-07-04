@@ -199,10 +199,13 @@ def browser_session(
     if normalized_action == "snapshot":
         if not session_id.strip():
             return "Error: browser_session snapshot requires a session_id."
-        session = browser_session_runtime.get_session(session_id.strip(), owner_session_id=owner_session_id)
-        if session is None:
+        capture_url = browser_session_runtime.get_session_capture_url(
+            session_id.strip(),
+            owner_session_id=owner_session_id,
+        )
+        if capture_url is None:
             return f"Error: Browser session '{session_id}' was not found."
-        content = browse_webpage(str(session["url"]), action=normalized_capture)
+        content = browse_webpage(capture_url, action=normalized_capture)
         if _browser_capture_failed(content):
             return content
         payload = browser_session_runtime.snapshot_session(

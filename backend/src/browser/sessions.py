@@ -1,4 +1,4 @@
-"""In-memory browser session runtime for structured browsing workflows."""
+"""Browser session runtime for structured browsing workflows."""
 
 from __future__ import annotations
 
@@ -6,25 +6,63 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+from pathlib import Path
 import threading
+from urllib.parse import urlsplit, urlunsplit
 import uuid
 from typing import Any
+
+from config.settings import settings
+
+
+_JOURNAL_SCHEMA = "seraph.browser_session_journal.v1"
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _excerpt(content: str, *, limit: int = 180) -> str:
-    collapsed = " ".join(str(content or "").split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return f"{collapsed[:limit - 1]}…"
-
-
 def _stable_digest(payload: Any) -> str:
     raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _metadata_summary(*, capture: str, content: str) -> str:
+    return f"{capture} capture metadata digest {_stable_digest(('browser-summary', content))[:16]}"
+
+
+def _public_url(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return f"url-digest:{_stable_digest(('url', url))[:16]}"
+    if not parts.scheme or not parts.netloc:
+        return f"url-digest:{_stable_digest(('url', url))[:16]}"
+    hostname = parts.hostname or ""
+    netloc = hostname
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    path = parts.path or ""
+    query = "redacted" if parts.query else ""
+    return urlunsplit((parts.scheme, netloc, path, query, ""))
+
+
+def _journal_path_for_workspace(workspace_dir: str | None = None) -> Path:
+    root = Path(workspace_dir or settings.workspace_dir).expanduser().resolve()
+    return root / "artifacts" / "browser-session-journal" / "session-journal.jsonl"
+
+
+def _metadata_snapshot(snapshot: "BrowserSnapshot") -> dict[str, object]:
+    return {
+        "ref": snapshot.ref,
+        "capture": snapshot.capture,
+        "created_at": snapshot.created_at,
+        "summary": snapshot.summary,
+        "content_digest": snapshot.artifact_provenance.get("content_digest")
+        or snapshot.artifact_provenance.get("artifact_body_digest"),
+        "content_available": bool(snapshot.content),
+        "artifact_provenance": snapshot.artifact_provenance,
+    }
 
 
 def _safe_artifact_provenance(
@@ -178,6 +216,9 @@ class BrowserSnapshot:
             "artifact_provenance": self.artifact_provenance,
         }
 
+    def as_metadata(self) -> dict[str, object]:
+        return _metadata_snapshot(self)
+
 
 @dataclass
 class BrowserSession:
@@ -204,10 +245,12 @@ class BrowserSession:
 
     def as_summary(self) -> dict[str, object]:
         latest = self.latest_snapshot()
+        public_url = _public_url(self.url)
         return {
             "session_id": self.session_id,
             "owner_session_id": self.owner_session_id,
-            "url": self.url,
+            "url": public_url,
+            "url_redacted": self.url != public_url,
             "provider_name": self.provider_name,
             "provider_kind": self.provider_kind,
             "execution_mode": self.execution_mode,
@@ -219,6 +262,8 @@ class BrowserSession:
             "boundary_decisions": self.boundary_decisions,
             "provider_degradation": self.provider_degradation,
             "control_events": list(self.control_events),
+            "journal_entry_count": len(self.control_events),
+            "journal_schema": _JOURNAL_SCHEMA,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "snapshot_count": len(self.snapshots),
@@ -234,14 +279,200 @@ class BrowserSessionRuntime:
         self._lock = threading.Lock()
         self._sessions: dict[str, BrowserSession] = {}
         self._refs: dict[str, tuple[str, int]] = {}
+        self._loaded_journal_path: Path | None = None
 
-    def reset_for_tests(self) -> None:
+    def _journal_path_locked(self) -> Path:
+        if self._loaded_journal_path is None:
+            self._loaded_journal_path = _journal_path_for_workspace()
+        return self._loaded_journal_path
+
+    def reset_for_tests(self, *, delete_journal: bool = False) -> None:
+        path = self._loaded_journal_path or _journal_path_for_workspace()
         with self._lock:
             self._sessions = {}
             self._refs = {}
+            self._loaded_journal_path = None
+        if delete_journal:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _ensure_loaded_locked(self) -> None:
+        if self._loaded_journal_path is not None:
+            return
+        path = self._journal_path_locked()
+        self._sessions = {}
+        self._refs = {}
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        for raw_line in lines:
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or entry.get("journal_schema") != _JOURNAL_SCHEMA:
+                continue
+            self._apply_journal_entry_locked(entry)
+
+    def _append_journal_entry_locked(self, entry: dict[str, object]) -> None:
+        path = self._journal_path_locked()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "journal_schema": _JOURNAL_SCHEMA,
+            "entry_id": entry.get("entry_id") or f"browser-journal:{uuid.uuid4().hex}",
+            "recorded_at": entry.get("recorded_at") or _utc_now(),
+            **entry,
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+            handle.write("\n")
+
+    def _append_session_journal_entry_locked(
+        self,
+        session: BrowserSession,
+        *,
+        action: str,
+        status: str,
+        reason: str = "",
+        snapshot: BrowserSnapshot | None = None,
+        event: dict[str, object] | None = None,
+    ) -> None:
+        latest = session.latest_snapshot()
+        target_snapshot = snapshot or latest
+        entry = {
+            "entry_id": f"browser-journal:{session.session_id}:{action}:{len(session.control_events)}:{uuid.uuid4().hex[:8]}",
+            "recorded_at": _utc_now(),
+            "action": action,
+            "status": status,
+            "reason": reason,
+            "session": session.as_summary(),
+            "snapshot": target_snapshot.as_metadata() if target_snapshot is not None else None,
+            "event": event or {},
+            "redaction": {
+                "metadata_only": True,
+                "raw_dom_stored": False,
+                "screenshot_stored": False,
+                "secret_values_stored": False,
+                "credential_values_stored": False,
+                "profile_path_stored": False,
+                "private_page_content_stored": False,
+            },
+        }
+        self._append_journal_entry_locked(entry)
+
+    def _apply_journal_entry_locked(self, entry: dict[str, object]) -> None:
+        session_payload = entry.get("session")
+        if not isinstance(session_payload, dict):
+            return
+        session_id = str(session_payload.get("session_id") or "")
+        owner_session_id = str(session_payload.get("owner_session_id") or "")
+        if not session_id or not owner_session_id:
+            return
+        snapshots: list[BrowserSnapshot] = []
+        snapshot_payload = entry.get("snapshot")
+        if isinstance(snapshot_payload, dict):
+            ref = str(snapshot_payload.get("ref") or "")
+            if ref:
+                snapshots.append(
+                    BrowserSnapshot(
+                        ref=ref,
+                        capture=str(snapshot_payload.get("capture") or "extract"),
+                        content="",
+                        created_at=str(snapshot_payload.get("created_at") or entry.get("recorded_at") or ""),
+                        summary=str(snapshot_payload.get("summary") or ""),
+                        artifact_provenance=(
+                            snapshot_payload.get("artifact_provenance")
+                            if isinstance(snapshot_payload.get("artifact_provenance"), dict)
+                            else {}
+                        ),
+                    )
+                )
+        existing = self._sessions.get(session_id)
+        if existing is None:
+            existing = BrowserSession(
+                session_id=session_id,
+                owner_session_id=owner_session_id,
+                url=str(session_payload.get("url") or ""),
+                provider_name=str(session_payload.get("provider_name") or "unknown"),
+                provider_kind=str(session_payload.get("provider_kind") or "unknown"),
+                execution_mode=str(session_payload.get("execution_mode") or "unknown"),
+                created_at=str(session_payload.get("created_at") or entry.get("recorded_at") or ""),
+                updated_at=str(session_payload.get("updated_at") or entry.get("recorded_at") or ""),
+                status=str(session_payload.get("status") or "open"),
+                risk_state=str(session_payload.get("risk_state") or "nominal"),
+                recovery_state=str(session_payload.get("recovery_state") or "ready"),
+                partition_id=str(session_payload.get("partition_id") or ""),
+                partition_revision=int(session_payload.get("partition_revision") or 1),
+                boundary_decisions=(
+                    session_payload.get("boundary_decisions")
+                    if isinstance(session_payload.get("boundary_decisions"), dict)
+                    else {}
+                ),
+                provider_degradation=(
+                    session_payload.get("provider_degradation")
+                    if isinstance(session_payload.get("provider_degradation"), dict)
+                    else {}
+                ),
+                control_events=[],
+                snapshots=[],
+            )
+            self._sessions[session_id] = existing
+        existing.status = str(session_payload.get("status") or existing.status)
+        existing.risk_state = str(session_payload.get("risk_state") or existing.risk_state)
+        existing.recovery_state = str(session_payload.get("recovery_state") or existing.recovery_state)
+        existing.partition_id = str(session_payload.get("partition_id") or existing.partition_id)
+        existing.partition_revision = int(session_payload.get("partition_revision") or existing.partition_revision)
+        existing.updated_at = str(session_payload.get("updated_at") or entry.get("recorded_at") or existing.updated_at)
+        control_events = session_payload.get("control_events")
+        if isinstance(control_events, list):
+            existing.control_events = [
+                item for item in control_events if isinstance(item, dict)
+            ]
+        for snapshot in snapshots:
+            if all(item.ref != snapshot.ref for item in existing.snapshots):
+                existing.snapshots.append(snapshot)
+        existing.snapshots.sort(key=lambda item: item.created_at)
+        for index, snapshot in enumerate(existing.snapshots):
+            self._refs[snapshot.ref] = (session_id, index)
+
+    def list_journal(self, *, owner_session_id: str, session_id: str | None = None) -> list[dict[str, object]]:
+        with self._lock:
+            self._ensure_loaded_locked()
+            path = self._journal_path_locked()
+            if not path.exists():
+                return []
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return []
+        entries: list[dict[str, object]] = []
+        for raw_line in lines:
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or entry.get("journal_schema") != _JOURNAL_SCHEMA:
+                continue
+            session = entry.get("session")
+            if not isinstance(session, dict) or session.get("owner_session_id") != owner_session_id:
+                continue
+            if session_id and session.get("session_id") != session_id:
+                continue
+            public_entry = dict(entry)
+            public_entry.pop("content", None)
+            public_entry["raw_content_available"] = False
+            entries.append(public_entry)
+        entries.sort(key=lambda item: str(item.get("recorded_at") or ""), reverse=True)
+        return entries
 
     def list_sessions(self, *, owner_session_id: str) -> list[dict[str, object]]:
         with self._lock:
+            self._ensure_loaded_locked()
             sessions = [
                 session
                 for session in self._sessions.values()
@@ -269,7 +500,7 @@ class BrowserSessionRuntime:
             capture=capture,
             content=content,
             created_at=created_at,
-            summary=_excerpt(content),
+            summary=_metadata_summary(capture=capture, content=content),
             artifact_provenance=_safe_artifact_provenance(
                 session_id=session_id,
                 ref=ref,
@@ -319,8 +550,16 @@ class BrowserSessionRuntime:
             snapshots=[snapshot],
         )
         with self._lock:
+            self._ensure_loaded_locked()
             self._sessions[session_id] = session
             self._refs[snapshot.ref] = (session_id, 0)
+            self._append_session_journal_entry_locked(
+                session,
+                action="open",
+                status="recorded",
+                snapshot=snapshot,
+                event=session.control_events[-1],
+            )
         payload = session.as_summary()
         payload["content"] = snapshot.content
         return payload
@@ -334,6 +573,7 @@ class BrowserSessionRuntime:
         content: str,
     ) -> dict[str, object] | None:
         with self._lock:
+            self._ensure_loaded_locked()
             session = self._sessions.get(session_id)
             if session is None or session.owner_session_id != owner_session_id:
                 return None
@@ -346,7 +586,7 @@ class BrowserSessionRuntime:
                 capture=capture,
                 content=content,
                 created_at=created_at,
-                summary=_excerpt(content),
+                summary=_metadata_summary(capture=capture, content=content),
                 artifact_provenance=_safe_artifact_provenance(
                     session_id=session_id,
                     ref=ref,
@@ -371,21 +611,38 @@ class BrowserSessionRuntime:
                     "artifact_handle": snapshot.artifact_provenance["handle"],
                 }
             )
+            self._append_session_journal_entry_locked(
+                session,
+                action="snapshot",
+                status="recorded",
+                snapshot=snapshot,
+                event=session.control_events[-1],
+            )
             payload = session.as_summary()
             payload["content"] = snapshot.content
             return payload
 
     def get_session(self, session_id: str, *, owner_session_id: str) -> dict[str, object] | None:
         with self._lock:
+            self._ensure_loaded_locked()
             session = self._sessions.get(session_id)
             if session is None or session.owner_session_id != owner_session_id:
                 return None
             payload = session.as_summary()
-            payload["snapshots"] = [snapshot.as_payload() for snapshot in session.snapshots]
+            payload["snapshots"] = [snapshot.as_metadata() for snapshot in session.snapshots]
             return payload
+
+    def get_session_capture_url(self, session_id: str, *, owner_session_id: str) -> str | None:
+        with self._lock:
+            self._ensure_loaded_locked()
+            session = self._sessions.get(session_id)
+            if session is None or session.owner_session_id != owner_session_id:
+                return None
+            return session.url
 
     def read_ref(self, ref: str, *, owner_session_id: str) -> dict[str, object] | None:
         with self._lock:
+            self._ensure_loaded_locked()
             target = self._refs.get(ref)
             if target is None:
                 return None
@@ -403,7 +660,8 @@ class BrowserSessionRuntime:
                 "owner_session_id": session.owner_session_id,
                 "ref": snapshot.ref,
                 "capture": snapshot.capture,
-                "content": snapshot.content,
+                "content": snapshot.content if snapshot.content else None,
+                "content_available": bool(snapshot.content),
                 "summary": snapshot.summary,
                 "url": session.url,
                 "provider_name": session.provider_name,
@@ -421,6 +679,7 @@ class BrowserSessionRuntime:
         acknowledge_degraded_fallback: bool = False,
     ) -> dict[str, object] | None:
         with self._lock:
+            self._ensure_loaded_locked()
             session = self._sessions.get(session_id)
             if session is None or session.owner_session_id != owner_session_id:
                 return None
@@ -432,12 +691,32 @@ class BrowserSessionRuntime:
 
     def close_session(self, session_id: str, *, owner_session_id: str) -> dict[str, object] | None:
         with self._lock:
+            self._ensure_loaded_locked()
             session = self._sessions.get(session_id)
             if session is None or session.owner_session_id != owner_session_id:
                 return None
             session = self._sessions.pop(session_id)
             for snapshot in session.snapshots:
                 self._refs.pop(snapshot.ref, None)
+            session.status = "closed"
+            session.recovery_state = "closed_by_operator"
+            session.updated_at = _utc_now()
+            session.control_events.append(
+                {
+                    "id": f"browser-control:{session_id}:close:{len(session.control_events) + 1}",
+                    "action": "close",
+                    "status": "applied",
+                    "created_at": session.updated_at,
+                    "operator_visible": True,
+                    "reason": "operator_requested",
+                }
+            )
+            self._append_session_journal_entry_locked(
+                session,
+                action="close",
+                status="applied",
+                event=session.control_events[-1],
+            )
             return session.as_summary()
 
     def control_session(
@@ -451,6 +730,7 @@ class BrowserSessionRuntime:
     ) -> dict[str, object] | None:
         normalized_action = action.strip().lower()
         with self._lock:
+            self._ensure_loaded_locked()
             session = self._sessions.get(session_id)
             if session is None or session.owner_session_id != owner_session_id:
                 return None
@@ -503,6 +783,13 @@ class BrowserSessionRuntime:
                 return {"error": "unsupported_control_action", "session": session.as_summary()}
             session.updated_at = created_at
             session.control_events.append(event)
+            self._append_session_journal_entry_locked(
+                session,
+                action=normalized_action,
+                status="applied",
+                reason=reason.strip() or "operator_requested",
+                event=event,
+            )
             return {"event": event, "session": session.as_summary()}
 
 

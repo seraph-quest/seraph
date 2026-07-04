@@ -112,6 +112,76 @@ describe("DaemonStatus", () => {
     expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 
+  it("surfaces configured-off daemon state with recovery guidance", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        daemon: {
+          connected: false,
+          daemon_alive: false,
+          last_post: null,
+          active_window: null,
+          has_screen_context: false,
+          capture_mode: "on_switch",
+          daemon_state: "disabled",
+          last_error: "Native daemon is configured off for this environment.",
+          last_error_kind: "configured_off",
+          status_reason: "Native desktop presence is disabled by DAEMON_ENABLED=false.",
+          recovery_hint: "Set DAEMON_ENABLED=true in .env.dev and start it with ./manage.sh -e dev daemon start when native desktop presence is wanted.",
+          pending_notification_count: 0,
+          last_native_notification_at: null,
+          last_native_notification_title: null,
+          last_native_notification_outcome: null,
+        },
+        notifications: [],
+        queued_insights: [],
+        queued_insight_count: 0,
+        recent_interventions: [],
+      }),
+    );
+
+    render(<DaemonStatus />);
+
+    await waitFor(() => expect(screen.getByText("Daemon disabled")).toBeInTheDocument());
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(screen.getByText("Native desktop presence is disabled by DAEMON_ENABLED=false.")).toBeInTheDocument();
+    expect(screen.getByText(/Set DAEMON_ENABLED=true/)).toBeInTheDocument();
+  });
+
+  it("surfaces macOS automation permission failures with an actionable hint", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        daemon: {
+          connected: false,
+          daemon_alive: false,
+          last_post: null,
+          active_window: null,
+          has_screen_context: false,
+          capture_mode: "on_switch",
+          daemon_state: "error",
+          last_error: "System Events got an error: Not authorised to send Apple events. (-1743)",
+          last_error_kind: "automation_permission_denied",
+          status_reason: "macOS Automation permission is blocking native desktop presence.",
+          recovery_hint: "Grant Automation permission for the terminal running Seraph to control System Events in System Settings > Privacy & Security > Automation, then restart with ./manage.sh -e dev daemon start.",
+          pending_notification_count: 0,
+          last_native_notification_at: null,
+          last_native_notification_title: null,
+          last_native_notification_outcome: null,
+        },
+        notifications: [],
+        queued_insights: [],
+        queued_insight_count: 0,
+        recent_interventions: [],
+      }),
+    );
+
+    render(<DaemonStatus />);
+
+    await waitFor(() => expect(screen.getByText("Automation permission needed")).toBeInTheDocument());
+    expect(screen.getByText("Permission")).toBeInTheDocument();
+    expect(screen.getByText(/System Events got an error/)).toBeInTheDocument();
+    expect(screen.getByText(/Privacy & Security > Automation/)).toBeInTheDocument();
+  });
+
   it("queues a test notification and refreshes the visible native status", async () => {
     fetchMock
       .mockResolvedValueOnce(

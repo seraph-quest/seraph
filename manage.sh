@@ -418,6 +418,28 @@ function daemon_status() {
     else
         echo "Daemon is not running"
     fi
+
+    if [ "${DAEMON_ENABLED:-false}" != "true" ]; then
+        echo "Daemon configured off: set DAEMON_ENABLED=true in $ENV_FILE to enable native desktop presence."
+        return 0
+    fi
+
+    if [ -f "$SERAPH_DAEMON_STATUS_FILE" ]; then
+        local status_summary
+        status_summary=$(grep -E '"(state|last_error_kind|last_error|updated_at)"' "$SERAPH_DAEMON_STATUS_FILE" | sed 's/^[[:space:]]*//' || true)
+        if [ -n "$status_summary" ]; then
+            echo "Status file: $SERAPH_DAEMON_STATUS_FILE"
+            echo "$status_summary"
+        fi
+        if grep -Eiq '(-1743|-10827|not authori[sz]ed to send apple events|system events got an error)' "$SERAPH_DAEMON_STATUS_FILE"; then
+            echo "Recovery: grant Automation permission for the terminal running Seraph to control System Events in System Settings > Privacy & Security > Automation, then restart with ./manage.sh -e $ENV daemon start."
+        fi
+    elif [ -f "$DAEMON_LOG_FILE" ] && grep -Eiq '(-1743|-10827|not authori[sz]ed to send apple events|system events got an error)' "$DAEMON_LOG_FILE"; then
+        echo "Recovery: daemon logs show macOS Automation permission denial for System Events."
+        echo "Grant Automation permission for the terminal running Seraph, then restart with ./manage.sh -e $ENV daemon start."
+    else
+        echo "Status file: $SERAPH_DAEMON_STATUS_FILE (not found yet)"
+    fi
 }
 
 function daemon_logs() {

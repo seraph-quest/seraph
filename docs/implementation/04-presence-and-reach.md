@@ -18,6 +18,7 @@
 - [x] observer refresh pipeline across time, calendar, git, goals, and screen context
 - [x] proactive delivery gating and queued-bundle delivery inside the current product
 - [x] first coherent desktop presence surface built on daemon status, capture-mode visibility, pending native-notification state, a safe test-notification path, desktop-notification fallback when browser delivery is unavailable, browser-side controls for pending native notifications, a first learning-driven native-channel preference layer, one continuity snapshot that exposes daemon state, deferred bundle items, pending native notifications, and recent interventions together, plus action-card continuation payloads and an actionable cockpit desktop-shell card with dismiss/follow-up/continue controls
+- [x] native daemon status now separates configured-off, offline, alive-but-not-posting, and macOS Automation-permission failures in the observer continuity payload, Settings native-presence card, and `./manage.sh -e dev daemon status` receipt
 - [x] cross-surface continuity now also exposes explicit open-thread and continue flows across native notifications, queued interventions, and recent interventions
 - [x] route-health snapshots now expose whether browser websocket and native delivery are actually reachable at runtime, including ready, fallback, and unavailable states with operator-readable repair hints instead of only static route bindings
 - [x] queued-bundle native delivery now preserves same-thread resume when every deferred item belongs to the same session, and the shared continuity snapshot now carries one continuation contract across notifications, queued insights, and recent interventions
@@ -53,11 +54,33 @@
 - [x] this workstream now also ships `cross-surface-presence-contracts-v1`
 - [x] this workstream now also ships `broader-reach-inventory-continuity-v2`
 - [x] this workstream now also ships `m4-channels-presence-device-pairing-benchmark-proof-v1`
+- [x] this workstream now also ships `native-daemon-permission-recovery-v1`
 - [x] this workstream now also ships `one-excellent-reach-channel-canary`
 - [x] this workstream now also ships `live-reach-media-proof-v1`
 - [x] this workstream now also ships `production-reach-voice-mobile-proof-v1`
 - [x] this workstream now also ships `broad-reach-field-operations-proof-v1`
 - [x] this workstream now also ships `browser-provider-usability-proof-v1`
+
+## Native Daemon Operations
+
+Native desktop presence is optional and is controlled by `DAEMON_ENABLED` in
+the selected `.env.*` file. `DAEMON_ENABLED=false` is a configured-off state, not
+a daemon crash. Enable it with `DAEMON_ENABLED=true`, then use
+`./manage.sh -e dev daemon start`, `./manage.sh -e dev daemon status`, and
+`./manage.sh -e dev daemon logs` for local operation.
+
+The daemon writes its operator receipt to `SERAPH_DAEMON_STATUS_FILE`, defaulting
+to the local workspace `daemon-status.json`. `/api/observer/daemon-status` and
+`/api/observer/continuity` expose that receipt as daemon state, screen-analysis
+readiness, last error, error kind, status reason, and recovery hint.
+
+macOS permission failures are operator-visible. `-1743`,
+`-10827`, and System Events Apple Events denial are classified as
+`automation_permission_denied` with a recovery hint to grant Automation access in
+System Settings > Privacy & Security > Automation to the terminal application
+running Seraph, then restart the daemon. Window-title presence also requires
+Accessibility permission. OCR or screenshot analysis requires Screen Recording
+or Screen & System Audio Recording permission.
 
 ## Still To Do On `develop`
 

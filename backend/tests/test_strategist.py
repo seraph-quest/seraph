@@ -1,12 +1,14 @@
-"""Tests for strategist agent — parse_strategist_response and create_strategist_agent."""
+"""Tests for strategist agent decisions and agent construction."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
+import pytest
 from config.settings import settings
 from src.agent.strategist import (
     StrategistDecision,
     create_strategist_agent,
     parse_strategist_response,
+    run_strategist_decision_completion,
 )
 from src.tools.audit import AuditedTool
 
@@ -141,3 +143,26 @@ def test_create_strategist_agent_max_steps(mock_model_cls):
     agent = create_strategist_agent("context")
 
     assert agent.max_steps == 5
+
+
+@pytest.mark.asyncio
+async def test_run_strategist_decision_completion_uses_bounded_runtime_path():
+    response = MagicMock()
+    response.choices = [
+        MagicMock(
+            message=MagicMock(
+                content='{"should_intervene": false, "content": "", "reasoning": "All good"}'
+            )
+        )
+    ]
+    completion = AsyncMock(return_value=response)
+
+    with patch("src.agent.strategist.completion_with_fallback", completion):
+        raw = await run_strategist_decision_completion("Current context")
+
+    assert raw == '{"should_intervene": false, "content": "", "reasoning": "All good"}'
+    completion.assert_awaited_once()
+    assert completion.await_args.kwargs["runtime_path"] == "strategist_agent"
+    assert completion.await_args.kwargs["temperature"] == 0.2
+    assert completion.await_args.kwargs["max_tokens"] == 512
+    assert "Do not call tools" in completion.await_args.kwargs["messages"][0]["content"]

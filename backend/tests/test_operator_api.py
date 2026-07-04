@@ -1,5 +1,7 @@
+import asyncio
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1420,6 +1422,22 @@ async def test_operator_m7_cockpit_composes_dense_control_surface(client):
     assert "/api/operator/m7-cockpit" in payload["proof_receipts"]
     assert "/api/operator/cockpit-efficiency-benchmark" in payload["proof_receipts"]
     assert "automatic_control_execution_from_cockpit_payload" in payload["claim_boundaries"]["not_claimed"]
+
+
+@pytest.mark.asyncio
+async def test_operator_benchmark_proof_does_not_block_event_loop(client):
+    def slow_payload() -> dict[str, object]:
+        time.sleep(0.05)
+        return {"summary": {"benchmark_posture": "test"}, "suites": []}
+
+    with patch("src.api.operator._run_operator_benchmark_proof_sync", side_effect=slow_payload):
+        request_task = asyncio.create_task(client.get("/api/operator/benchmark-proof"))
+        await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.01)
+        response = await request_task
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["benchmark_posture"] == "test"
 
 
 @pytest.mark.asyncio

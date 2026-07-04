@@ -108,6 +108,47 @@ function mockCockpitBaselineFetch(
   });
 }
 
+function mockOperatorControlPlaneRuntime(runtime: Record<string, unknown>) {
+  return {
+    governance: {
+      workspace_mode: "single_operator_guarded_workspace",
+      review_posture: "",
+      approval_mode: "high_risk",
+      tool_policy_mode: "balanced",
+      mcp_policy_mode: "approval",
+      delegation_enabled: true,
+      roles: [],
+    },
+    usage: {
+      window_hours: 24,
+      llm_call_count: 0,
+      llm_cost_usd: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      user_triggered_llm_calls: 0,
+      autonomous_llm_calls: 0,
+      failure_count: 0,
+      pending_approvals: 0,
+      active_workflows: 0,
+      blocked_workflows: 0,
+    },
+    runtime_posture: {
+      runtime,
+      extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 },
+      continuity: {
+        continuity_health: "ready",
+        primary_surface: "workspace",
+        recommended_focus: null,
+        actionable_thread_count: 0,
+        degraded_route_count: 0,
+        degraded_source_adapter_count: 0,
+        attention_presence_surface_count: 0,
+      },
+    },
+    handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+  };
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -272,6 +313,8 @@ describe("CockpitView", () => {
               silent_fallback_allowed: false,
             },
             snapshot_count: 1,
+            journal_entry_count: 2,
+            journal_schema: "seraph.browser_session_journal.v1",
             latest_ref: "bs-live-1:1",
             latest_capture: "extract",
             latest_summary: "Example page body",
@@ -284,17 +327,70 @@ describe("CockpitView", () => {
             updated_at: "2026-06-18T12:00:00Z",
           },
         ],
+        journal: [
+          {
+            entry_id: "browser-journal:bs-live-1:open",
+            recorded_at: "2026-06-18T12:00:00Z",
+            action: "open",
+            status: "recorded",
+            session: { session_id: "bs-live-1", owner_session_id: "session-1" },
+            redaction: {
+              metadata_only: true,
+              raw_dom_stored: false,
+              screenshot_stored: false,
+              secret_values_stored: false,
+              credential_values_stored: false,
+              private_page_content_stored: false,
+            },
+          },
+        ],
       },
     });
 
     render(<CockpitView onSend={() => {}} />);
 
     const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
-    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 degraded · no quarantine/i);
+    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i);
     expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
     expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
     expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);
+    expect(browserControls).toHaveTextContent(/2 journal/i);
+    expect(browserControls).toHaveTextContent(/journal: open recorded metadata only/i);
     expect(browserControls).toHaveTextContent(/seraph:\/\/browser-sessions\/bs-live-1/i);
+
+    fireEvent.change(within(browserControls).getByLabelText("Browser workbench URL"), {
+      target: { value: "https://example.test/new" },
+    });
+    fireEvent.change(within(browserControls).getByLabelText("Browser workbench capture mode"), {
+      target: { value: "html" },
+    });
+    fireEvent.click(within(browserControls).getByRole("button", { name: "open" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/browser/sessions"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"url":"https://example.test/new"'),
+        }),
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/browser/sessions"),
+      expect.objectContaining({
+        body: expect.stringContaining('"capture":"html"'),
+      }),
+    );
+
+    fireEvent.click(within(browserControls).getByRole("button", { name: "snapshot" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/browser/sessions/bs-live-1/snapshot"),
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"owner_session_id":"session-1"'),
+        }),
+      ),
+    );
 
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(within(browserControls).getByRole("button", { name: "replay" }));
@@ -329,6 +425,120 @@ describe("CockpitView", () => {
     expect(screen.getAllByText("disconnected").length).toBeGreaterThan(0);
     expect(screen.queryByText("LIVE LINK · BALANCED TOOLS · HIGH_RISK APPROVAL")).not.toBeInTheDocument();
     expect(screen.queryByText("runtime linked")).not.toBeInTheDocument();
+  });
+
+  it("keeps last known runtime label when runtime status refresh fails", async () => {
+    vi.useFakeTimers();
+    let runtimeStatusCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/runtime/status")) {
+        runtimeStatusCalls += 1;
+        if (runtimeStatusCalls === 1) {
+          return Promise.resolve(mockResponse({
+            version: "test",
+            build_id: "SERAPH_TEST",
+            provider: "local-gemma",
+            model: "openai/local-gemma",
+            model_label: "local-gemma",
+          }));
+        }
+        return Promise.resolve(mockResponse({ detail: "temporary runtime refresh failure" }, false, 503));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/browser/providers")) return Promise.resolve(mockResponse({ providers: [] }));
+      if (url.includes("/api/operator/browser-computer-use-control")) return Promise.resolve(mockResponse({ sessions: [] }));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("LOCAL GEMMA · LOCAL GEMMA")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    expect(runtimeStatusCalls).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("LOCAL GEMMA STALE · LOCAL GEMMA")).toBeInTheDocument();
+    expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
+  });
+
+  it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({ detail: "temporary runtime refresh failure" }, false, 503));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse(mockOperatorControlPlaneRuntime({
+          version: "test",
+          build_id: "SERAPH_TEST",
+          provider: "local-gemma",
+          model: "openai/gemma-4-26b",
+          model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+        })));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/browser/providers")) return Promise.resolve(mockResponse({ providers: [] }));
+      if (url.includes("/api/operator/browser-computer-use-control")) return Promise.resolve(mockResponse({ sessions: [] }));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
+    expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
+    expect(screen.queryByText("MODEL UNAVAILABLE")).not.toBeInTheDocument();
   });
 
   it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {
@@ -12159,7 +12369,7 @@ describe("CockpitView", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const view = render(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(cockpitFetchCount).toBe(27));
+    await waitFor(() => expect(cockpitFetchCount).toBe(4));
     view.unmount();
 
     await act(async () => {

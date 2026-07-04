@@ -25,7 +25,7 @@ class WSMessage(BaseModel):
 
 
 class WSResponse(BaseModel):
-    type: str = Field(..., description="Response type: step | final | error | pong | proactive | proactive_bundle | ambient | approval_required | clarification_required")
+    type: str = Field(..., description="Response type: status | step | delta | final | error | pong | proactive | proactive_bundle | ambient | approval_required | clarification_required")
     content: str = ""
     session_id: str = ""
     intervention_id: str | None = None

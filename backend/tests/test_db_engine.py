@@ -94,9 +94,12 @@ async def test_sqlite_connection_enables_foreign_keys(tmp_path):
 
     try:
         async with engine.connect() as conn:
-            row = (await conn.exec_driver_sql("PRAGMA foreign_keys")).fetchone()
-            assert row is not None
-            assert row[0] == 1
+            foreign_keys = (await conn.exec_driver_sql("PRAGMA foreign_keys")).fetchone()
+            assert foreign_keys is not None
+            assert foreign_keys[0] == 1
+            busy_timeout = (await conn.exec_driver_sql("PRAGMA busy_timeout")).fetchone()
+            assert busy_timeout is not None
+            assert busy_timeout[0] == 5000
     finally:
         await engine.dispose()
 

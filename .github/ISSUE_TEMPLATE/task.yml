@@ -31,6 +31,11 @@ body:
         - `docs/implementation/STATUS.md` is the shipped snapshot, not the task board
         - `docs/implementation/00-master-roadmap.md` is the strategic implementation program, not the live kanban
 
+        Intake contract:
+        - chat-originated bugs, requested changes, architecture issues, runtime complaints, and docs-truth changes must become tracked work unless the user explicitly says not to create a ticket
+        - search open and closed issues before creating a duplicate
+        - emergency investigation can happen first, but no PR or completion claim should happen before the issue exists
+
   - type: textarea
     id: objective
     attributes:

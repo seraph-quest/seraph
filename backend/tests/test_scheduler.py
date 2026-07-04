@@ -113,6 +113,9 @@ class TestSchedulerEngine:
             mock_settings.activity_digest_hour = 20
             mock_settings.weekly_review_hour = 18
             mock_settings.user_timezone = "UTC"
+            mock_settings.screenshot_folder_ingest_enabled = False
+            mock_settings.screenshot_folder_analysis_interval_seconds = 1
+            mock_settings.screenshot_observation_digest_enabled = False
 
             from src.scheduler.engine import init_scheduler, shutdown_scheduler
             scheduler = init_scheduler()
@@ -130,11 +133,48 @@ class TestSchedulerEngine:
                     "activity_digest",
                     "end_of_day_goal_report",
                     "screenshot_folder_ingest",
+                    "screenshot_folder_analysis",
+                    "screenshot_observation_digest",
                     "weekly_activity_review",
                     "screen_cleanup",
                 }
+                screenshot_analysis_job = scheduler.get_job("screenshot_folder_analysis")
+                assert screenshot_analysis_job is not None
+                assert screenshot_analysis_job.trigger.interval.total_seconds() == 1
+                assert screenshot_analysis_job.coalesce is True
+                assert screenshot_analysis_job.max_instances == 1
             finally:
                 shutdown_scheduler()
+
+    def test_startup_next_run_only_when_enabled(self):
+        from src.scheduler.engine import _startup_next_run
+
+        assert _startup_next_run(False) is None
+        assert _startup_next_run(True) is not None
+
+    @pytest.mark.asyncio
+    async def test_async_job_wrapper_tracks_coroutine_lifetime(self):
+        from src.scheduler.engine import _async_job_wrapper
+
+        completed = False
+        gate = asyncio.Event()
+
+        async def slow_job():
+            nonlocal completed
+            await gate.wait()
+            completed = True
+
+        wrapper = _async_job_wrapper(slow_job, asyncio.get_running_loop())
+        task = asyncio.create_task(wrapper())
+        await asyncio.sleep(0)
+
+        assert not completed
+        assert not task.done()
+
+        gate.set()
+        await task
+
+        assert completed
 
     def test_shutdown_when_not_running(self):
         from src.scheduler.engine import shutdown_scheduler
@@ -157,6 +197,9 @@ class TestSchedulerEngine:
             mock_settings.activity_digest_hour = 20
             mock_settings.weekly_review_hour = 18
             mock_settings.user_timezone = "UTC"
+            mock_settings.screenshot_folder_ingest_enabled = False
+            mock_settings.screenshot_folder_analysis_interval_seconds = 1
+            mock_settings.screenshot_observation_digest_enabled = False
 
             scheduler = init_scheduler()
             assert scheduler is not None

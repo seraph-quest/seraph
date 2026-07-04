@@ -167,6 +167,18 @@ The daemon uses AppleScript to read the frontmost window title, which requires t
 
 This is a one-time grant — macOS will not nag you about it again.
 
+### Automation (required for System Events)
+
+macOS can also require Automation permission before the terminal running Seraph
+may control **System Events**. When this is missing, logs or daemon status can
+show `-1743`, `-10827`, or "not authorised to send Apple events".
+
+**To grant:**
+1. Open **System Settings > Privacy & Security > Automation**
+2. Find the terminal app that starts Seraph
+3. Enable permission to control **System Events**
+4. Restart with `./manage.sh -e dev daemon start`
+
 ### Screen Recording (required for `--ocr`)
 
 OCR mode captures screenshots to extract visible text. This requires the Screen Recording permission.

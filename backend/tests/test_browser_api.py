@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from unittest.mock import patch
 
 import pytest
@@ -11,9 +13,9 @@ from src.browser.sessions import browser_session_runtime
 
 @pytest.fixture(autouse=True)
 def reset_browser_sessions():
-    browser_session_runtime.reset_for_tests()
+    browser_session_runtime.reset_for_tests(delete_journal=True)
     yield
-    browser_session_runtime.reset_for_tests()
+    browser_session_runtime.reset_for_tests(delete_journal=True)
 
 
 @pytest.mark.asyncio
@@ -141,6 +143,34 @@ async def test_browser_provider_inventory_endpoint_lists_staged_remote_modes(cli
 
 
 @pytest.mark.asyncio
+async def test_browser_session_capture_does_not_block_api_event_loop(client):
+    def slow_capture(_url: str, action: str = "extract") -> str:
+        assert action == "extract"
+        time.sleep(0.05)
+        return "Slow page body"
+
+    with patch("src.api.browser.browse_webpage", side_effect=slow_capture):
+        request_task = asyncio.create_task(
+            client.post(
+                "/api/browser/sessions",
+                json={
+                    "owner_session_id": "session-slow",
+                    "url": "https://example.test/slow",
+                    "capture": "extract",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+
+        loop_tick = asyncio.create_task(asyncio.sleep(0))
+        await asyncio.wait_for(loop_tick, timeout=0.01)
+        response = await request_task
+
+    assert response.status_code == 200
+    assert response.json()["session"]["owner_session_id"] == "session-slow"
+
+
+@pytest.mark.asyncio
 async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(client):
     with patch("src.api.browser.browse_webpage", return_value="Example page body"):
         open_response = await client.post(
@@ -193,8 +223,85 @@ async def test_browser_session_rest_surface_is_owner_scoped_and_provenanced(clie
     assert ref_response.status_code == 200
     ref_payload = ref_response.json()["ref"]
     assert ref_payload["content"] == "Example page body"
+    assert ref_payload["content_available"] is True
     assert ref_payload["artifact_provenance"]["raw_artifact_body_exposed"] is True
     assert ref_payload["artifact_provenance"]["safe_receipt"]["raw_artifact_body_exposed"] is True
+
+
+@pytest.mark.asyncio
+async def test_browser_session_journal_survives_reload_without_raw_content(client, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with patch.object(settings, "workspace_dir", str(workspace)):
+        with patch("src.api.browser.browse_webpage", return_value="Private page body with token=secret"):
+            open_response = await client.post(
+                "/api/browser/sessions",
+                json={
+                    "owner_session_id": "session-journal",
+                    "url": "https://example.test/private?token=secret",
+                    "capture": "extract",
+                },
+            )
+        assert open_response.status_code == 200
+        session = open_response.json()["session"]
+        assert "content" not in session
+        assert session["url"] == "https://example.test/private?redacted"
+        assert session["url_redacted"] is True
+
+        with patch("src.api.browser.browse_webpage", return_value="Second private DOM token=secret"):
+            snapshot_response = await client.post(
+                f"/api/browser/sessions/{session['session_id']}/snapshot",
+                json={"owner_session_id": "session-journal", "capture": "html"},
+            )
+        assert snapshot_response.status_code == 200
+        assert "content" not in snapshot_response.json()["session"]
+
+        journal_path = (
+            workspace
+            / "artifacts"
+            / "browser-session-journal"
+            / "session-journal.jsonl"
+        )
+        journal_text = journal_path.read_text(encoding="utf-8")
+        assert "Private page body" not in journal_text
+        assert "Second private DOM" not in journal_text
+        assert "token=secret" not in journal_text
+        assert "metadata_only" in journal_text
+
+        browser_session_runtime.reset_for_tests(delete_journal=False)
+        list_response = await client.get("/api/browser/sessions?owner_session_id=session-journal")
+        assert list_response.status_code == 200
+        listed = list_response.json()["sessions"]
+        assert [item["session_id"] for item in listed] == [session["session_id"]]
+        assert listed[0]["snapshot_count"] == 2
+        assert listed[0]["journal_schema"] == "seraph.browser_session_journal.v1"
+        assert listed[0]["journal_entry_count"] >= 2
+        assert "Private page body" not in json.dumps(list_response.json())
+        assert "Second private DOM" not in json.dumps(list_response.json())
+        assert "token=secret" not in json.dumps(list_response.json())
+
+        journal_response = await client.get(
+            f"/api/browser/sessions/{session['session_id']}/journal?owner_session_id=session-journal"
+        )
+        assert journal_response.status_code == 200
+        journal = journal_response.json()["journal"]
+        assert {entry["action"] for entry in journal} >= {"open", "snapshot"}
+        assert all(entry["redaction"]["metadata_only"] is True for entry in journal)
+        assert "token=secret" not in json.dumps(journal_response.json())
+
+        ref_response = await client.get(
+            f"/api/browser/refs/{listed[0]['latest_ref']}?owner_session_id=session-journal"
+        )
+        assert ref_response.status_code == 200
+        ref_payload = ref_response.json()["ref"]
+        assert ref_payload["content_available"] is False
+        assert ref_payload["content"] is None
+        assert ref_payload["artifact_provenance"]["raw_artifact_body_exposed"] is True
+
+        cross_owner_journal = await client.get(
+            f"/api/browser/sessions/{session['session_id']}/journal?owner_session_id=other-session"
+        )
+        assert cross_owner_journal.status_code == 404
 
 
 @pytest.mark.asyncio

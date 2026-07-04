@@ -12,7 +12,7 @@ from config.settings import settings
 from src.db import init_db, close_db
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
-from src.llm_runtime import provider_profile_statuses, resolve_runtime_profile
+from src.llm_runtime import provider_profile_statuses, provider_profiles, resolve_runtime_profile
 from src.memory.soul import ensure_soul_exists
 from src.operators.local_codex import is_local_codex_model, local_operator_statuses
 from src.runbooks.manager import runbook_manager
@@ -21,20 +21,31 @@ from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
+from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.workflows.manager import workflow_manager
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 _LOCAL_DEV_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 
 
-def _runtime_provider_label() -> str:
-    model = settings.default_model.strip()
-    api_base = settings.llm_api_base.strip()
+def _runtime_provider_label(
+    model: str | None = None,
+    *,
+    profile: str | None = None,
+    api_base: str | None = None,
+) -> str:
+    normalized_profile = (profile or "").strip()
+    if normalized_profile.startswith("local-gemma-"):
+        return "local-gemma"
+    model = (model or settings.default_model).strip()
+    api_base = (api_base if api_base is not None else settings.llm_api_base).strip()
     if is_local_codex_model(model):
         return "codex-local"
     if model.startswith("openrouter/") or "openrouter" in api_base:
         return "openrouter"
-    if model.startswith("ollama/") or settings.local_model.strip().startswith("ollama/"):
+    if normalized_profile == "local" or model.startswith("ollama/") or settings.local_model.strip().startswith("ollama/"):
+        return "local"
+    if "127.0.0.1" in api_base or "localhost" in api_base:
         return "local"
     if api_base:
         parsed = urlparse(api_base)
@@ -52,6 +63,30 @@ def _runtime_model_label(model: str) -> str:
     if is_local_codex_model(normalized):
         return settings.codex_local_model.strip() or "codex"
     return normalized.split("/")[-1]
+
+
+def _active_chat_runtime_status() -> dict[str, str]:
+    default_model = settings.default_model.strip()
+    if is_local_codex_model(default_model):
+        return {
+            "provider": "codex-local",
+            "model": default_model,
+            "model_label": _runtime_model_label(default_model),
+            "api_base": settings.llm_api_base.strip(),
+            "active_profile": "codex-local",
+        }
+
+    active_profile = resolve_runtime_profile(runtime_path="chat_agent")
+    profile = provider_profiles().get(active_profile)
+    model = (profile.model if profile is not None else default_model).strip()
+    api_base = (profile.api_base if profile is not None else settings.llm_api_base).strip()
+    return {
+        "provider": _runtime_provider_label(model, profile=active_profile, api_base=api_base),
+        "model": model,
+        "model_label": _runtime_model_label(model),
+        "api_base": api_base,
+        "active_profile": active_profile,
+    }
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -156,18 +191,19 @@ def create_app() -> FastAPI:
 
     @app.get("/api/runtime/status")
     async def runtime_status():
-        model = settings.default_model.strip()
-        active_profile = "codex-local" if is_local_codex_model(model) else resolve_runtime_profile(runtime_path="chat_agent")
+        runtime = _active_chat_runtime_status()
+        default_model = settings.default_model.strip()
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
-            "provider": _runtime_provider_label(),
-            "model": model,
-            "model_label": _runtime_model_label(model),
-            "api_base": settings.llm_api_base.strip(),
-            "active_profile": active_profile,
+            **runtime,
+            "default_provider": _runtime_provider_label(default_model),
+            "default_model": default_model,
+            "default_model_label": _runtime_model_label(default_model),
+            "default_api_base": settings.llm_api_base.strip(),
             "provider_profiles": provider_profile_statuses(),
             "local_operators": local_operator_statuses(probe=False),
+            "vlm_runtime": effective_vlm_status(live_probe=deferred_vlm_live_probe()),
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

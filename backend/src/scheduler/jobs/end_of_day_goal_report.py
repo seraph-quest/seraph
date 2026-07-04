@@ -7,28 +7,34 @@ import hashlib
 import json
 import logging
 import os
-import re
 import smtplib
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from email.message import EmailMessage
+from html import escape
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
+
 from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
-from src.db.models import GoalStatus, MemoryEpisodeType, ScreenObservation
+from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback
 from src.observer.image_metadata import image_metadata_label
+from src.observer.screenshot_folder_source import resolve_screenshot_folder
+from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
+from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 
 logger = logging.getLogger(__name__)
 
 _REPORT_PROMPT = """\
 You are Seraph. Write an end-of-day report for the human.
 
-Use only the redacted structured inputs. Do not invent screen details.
+Use only the stored LLM-authored screenshot digests, observation metadata, and goals.
+Do not invent screen details. If sensitive content appears, summarize it safely instead of copying it.
 
 ## Date
 {report_date}
@@ -42,8 +48,8 @@ Use only the redacted structured inputs. Do not invent screen details.
 {project_breakdown}
 - Source mix:
 {source_breakdown}
-- Screenshot samples:
-{screenshot_samples}
+## Screenshot Digest Text
+{screenshot_digest_text}
 
 ## Goals
 Active goals:
@@ -52,21 +58,15 @@ Active goals:
 Completed today:
 {completed_goals}
 
-## Alignment Hints
-{alignment_hints}
-
 Write:
 1. A short summary of what the day was mostly about.
-2. A "Goals vs day" section that says what aligned, what drifted, and what is unclear.
+2. A "Goals vs day" section that critically says what aligned, what drifted, what was blocked, what is unclear, and whether the user pushed the needle.
 3. 3 practical tips for tomorrow.
 
 Keep it useful and concise. No private raw screen text, no copied secrets, no long logs."""
 
-_SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+"),
-    re.compile(r"\b(sk-[A-Za-z0-9_-]{12,})\b"),
-    re.compile(r"\b([A-Za-z0-9_./+=-]{24,})\b"),
-)
+_SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
+_SCREENSHOT_DIGEST_SCHEMA_VERSION = "seraph.screenshot_observation_digest.v1"
 
 
 @dataclass(frozen=True)
@@ -75,27 +75,6 @@ class EmailDeliveryResult:
     reason: str | None = None
     recipient_hash: str | None = None
     provider_receipt: str | None = None
-
-
-def _redact_text(value: str | None, *, limit: int = 240) -> str:
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    text = " ".join(value.strip().split())
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub("[redacted]", text)
-    return text[:limit]
-
-
-def _redact_report_body(value: str | None, *, limit: int = 5000) -> str:
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    lines = []
-    for line in value.strip().splitlines():
-        text = " ".join(line.strip().split())
-        for pattern in _SECRET_PATTERNS:
-            text = pattern.sub("[redacted]", text)
-        lines.append(text)
-    return "\n".join(lines)[:limit]
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -270,7 +249,12 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
             .order_by(col(ScreenObservation.timestamp))
         )
-        observations = list(result.scalars().all())
+        current_root = resolve_screenshot_folder()
+        observations = [
+            observation
+            for observation in result.scalars().all()
+            if not _stale_incomplete_screenshot_observation(observation, root=current_root)
+        ]
 
     by_activity: dict[str, int] = {}
     by_project: dict[str, int] = {}
@@ -280,9 +264,10 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
     details: list[str] = []
     screenshot_samples: list[str] = []
     total_seconds = 0
-    for obs in observations:
-        duration = obs.duration_s or 0
+    for index, obs in enumerate(observations):
         source = _observation_source(obs)
+        next_obs = observations[index + 1] if index + 1 < len(observations) else None
+        duration = _observation_report_duration(obs, next_obs=next_obs, source=source)
         total_seconds += duration
         by_activity[obs.activity_type] = by_activity.get(obs.activity_type, 0) + duration
         by_app[obs.app_name] = by_app.get(obs.app_name, 0) + duration
@@ -290,10 +275,8 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
         source_observations[source] = source_observations.get(source, 0) + 1
         if obs.project:
             by_project[obs.project] = by_project.get(obs.project, 0) + duration
-        if obs.summary:
-            redacted = _redact_text(obs.summary, limit=160)
-            if redacted and redacted not in details:
-                details.append(redacted)
+        if obs.summary and obs.summary not in details:
+            details.append(obs.summary)
         screenshot_sample = _screenshot_image_sample(obs)
         if screenshot_sample and screenshot_sample not in screenshot_samples:
             screenshot_samples.append(screenshot_sample)
@@ -311,9 +294,128 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
         "source_observations": dict(
             sorted(source_observations.items(), key=lambda item: (-item[1], item[0]))
         ),
-        "redacted_samples": details[:8],
+        "samples": details[:8],
         "screenshot_samples": screenshot_samples[:8],
     }
+
+
+async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> dict[str, Any]:
+    local_start = datetime.combine(report_day, time.min, tzinfo=tz)
+    local_end = datetime.combine(report_day, time.max, tzinfo=tz)
+    start_utc = local_start.astimezone(timezone.utc)
+    end_utc = local_end.astimezone(timezone.utc)
+
+    from sqlmodel import col, select
+    from src.db.engine import get_session
+
+    async with get_session() as db:
+        result = await db.execute(
+            select(MemoryEpisode)
+            .where(col(MemoryEpisode.source_tool_name) == _SCREENSHOT_DIGEST_TOOL_NAME)
+            .where(col(MemoryEpisode.observed_at) >= start_utc)
+            .where(col(MemoryEpisode.observed_at) <= end_utc)
+            .order_by(col(MemoryEpisode.observed_at))
+        )
+        episodes = list(result.scalars().all())
+
+        episode_observation_ids: set[str] = set()
+        for episode in episodes:
+            metadata = _episode_metadata(episode)
+            if metadata.get("artifact_schema") != _SCREENSHOT_DIGEST_SCHEMA_VERSION:
+                continue
+            episode_observation_ids.update(str(item) for item in metadata.get("observation_ids", []) if item)
+
+        current_root = resolve_screenshot_folder()
+        stale_observation_ids: set[str] = set()
+        if episode_observation_ids:
+            observation_result = await db.execute(
+                select(ScreenObservation).where(col(ScreenObservation.id).in_(episode_observation_ids))
+            )
+            stale_observation_ids = {
+                observation.id
+                for observation in observation_result.scalars().all()
+                if _stale_incomplete_screenshot_observation(observation, root=current_root)
+            }
+
+    digests: list[dict[str, Any]] = []
+    observation_ids: list[str] = []
+    text_chunks: list[str] = []
+    for episode in episodes:
+        metadata = _episode_metadata(episode)
+        if metadata.get("artifact_schema") != _SCREENSHOT_DIGEST_SCHEMA_VERSION:
+            continue
+        ids = [str(item) for item in metadata.get("observation_ids", []) if item]
+        if any(observation_id in stale_observation_ids for observation_id in ids):
+            continue
+        observation_ids.extend(ids)
+        content = str(episode.content or "")[:1400]
+        digests.append(
+            {
+                "episode_id": episode.id,
+                "window_start": metadata.get("window_start"),
+                "window_end": metadata.get("window_end"),
+                "observation_count": int(metadata.get("observation_count") or len(ids)),
+                "observation_ids": ids,
+                "content": content,
+            }
+        )
+        if content:
+            text_chunks.append(content)
+
+    return {
+        "count": len(digests),
+        "observation_ids": _unique_values(observation_ids)[:100],
+        "digests": digests[:16],
+        "digest_text": "\n\n".join(text_chunks)[:8000],
+    }
+
+
+def _observation_details(observation: ScreenObservation) -> list[Any]:
+    if not observation.details_json:
+        return []
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return []
+    return details if isinstance(details, list) else []
+
+
+def _stale_incomplete_screenshot_observation(observation: ScreenObservation, *, root: Path | None = None) -> bool:
+    if _observation_source(observation) != "screenshot_folder":
+        return False
+    details = _observation_details(observation)
+    status = semantic_analysis_status_from_details(details) or {}
+    state = str(status.get("status") or "").strip().lower()
+    if state == "succeeded":
+        return False
+    if state in {"source_missing", "stale_root"}:
+        return True
+    return _screenshot_root_is_stale(_capture_artifacts_from_details(details), root)
+
+
+def _capture_artifacts_from_details(details: list[Any]) -> dict[str, Any] | None:
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("capture_artifacts:")):
+            continue
+        try:
+            artifacts = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(artifacts, dict) and artifacts.get("provider") == "screenshot_folder":
+            return artifacts
+    return None
+
+
+def _screenshot_root_is_stale(artifacts: dict[str, Any] | None, root: Path | None) -> bool:
+    if artifacts is None or root is None:
+        return False
+    try:
+        artifact_root = str(artifacts.get("screenshot_folder") or "").strip()
+        if artifact_root:
+            return Path(artifact_root).expanduser().resolve() != root
+        return False
+    except (OSError, RuntimeError):
+        return False
 
 
 def _observation_source(observation: ScreenObservation) -> str:
@@ -336,6 +438,59 @@ def _observation_source(observation: ScreenObservation) -> str:
     if observation.app_name == "Screenshot Folder":
         return "screenshot_folder"
     return "observer_daemon"
+
+
+def _observation_report_duration(
+    observation: ScreenObservation,
+    *,
+    next_obs: ScreenObservation | None,
+    source: str,
+) -> int:
+    if source != "screenshot_folder":
+        return max(int(observation.duration_s or 0), 0)
+    if _has_screenshot_visual_run(observation) and observation.duration_s is not None and int(observation.duration_s) > 0:
+        return max(int(observation.duration_s), 0)
+    if next_obs is None:
+        return 0
+    current_ts = _ensure_aware_utc(observation.timestamp)
+    next_ts = _ensure_aware_utc(next_obs.timestamp)
+    delta = int((next_ts - current_ts).total_seconds())
+    if delta <= 0:
+        return 0
+    return min(delta, 5 * 60)
+
+
+def _has_screenshot_visual_run(observation: ScreenObservation) -> bool:
+    if not observation.details_json:
+        return False
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(details, list):
+        return False
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("screenshot_visual_run:")):
+            continue
+        try:
+            payload = json.loads(item.removeprefix("screenshot_visual_run:"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("schema_version") != "seraph.screenshot_visual_dedupe.v1":
+            continue
+        try:
+            suppressed_count = int(payload.get("suppressed_count") or 0)
+        except (TypeError, ValueError):
+            suppressed_count = 0
+        if suppressed_count > 0:
+            return True
+    return False
+
+
+def _ensure_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _screenshot_image_sample(observation: ScreenObservation) -> str | None:
@@ -369,7 +524,7 @@ def _screenshot_image_sample(observation: ScreenObservation) -> str | None:
             }
         )
         label = f"{image_name} ({metadata_label})" if metadata_label else image_name
-        return _redact_text(label, limit=160)
+        return label[:160]
     return None
 
 
@@ -387,48 +542,12 @@ async def _goals_for_report(report_day: date) -> tuple[list[Any], list[Any]]:
     return active_goals, completed_today
 
 
-def _tokens(value: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]{3,}", value.lower())
-        if token not in {"the", "and", "for", "with", "today", "goal"}
-    }
-
-
-def _goal_alignment(summary: dict[str, Any], active_goals: list[Any]) -> list[dict[str, Any]]:
-    context_text = " ".join(
-        [
-            " ".join(summary.get("by_project", {}).keys()),
-            " ".join(summary.get("by_activity", {}).keys()),
-            " ".join(summary.get("by_app", {}).keys()),
-            " ".join(summary.get("redacted_samples", [])),
-        ]
-    )
-    context_tokens = _tokens(context_text)
-    results: list[dict[str, Any]] = []
-    for goal in active_goals:
-        goal_text = " ".join(
-            item for item in [goal.title, goal.description or "", goal.domain] if item
-        )
-        overlap = sorted(_tokens(goal_text) & context_tokens)
-        results.append(
-            {
-                "goal_id": goal.id,
-                "title": _redact_text(goal.title, limit=120),
-                "domain": goal.domain,
-                "status": "aligned" if overlap else "unclear",
-                "evidence_tokens": overlap[:6],
-            }
-        )
-    return results
-
-
 def _format_seconds_map(values: dict[str, int], *, empty: str) -> str:
     if not values:
         return empty
     lines = []
     for name, seconds in list(values.items())[:8]:
-        lines.append(f"- {_redact_text(name, limit=80)}: {seconds // 60}m")
+        lines.append(f"- {str(name)[:80]}: {seconds // 60}m")
     return "\n".join(lines)
 
 
@@ -449,149 +568,252 @@ def _format_source_mix(
         count = counts_by_source.get(name, 0)
         noun = "observation" if count == 1 else "observations"
         lines.append(
-            f"- {_redact_text(name, limit=80)}: {count} {noun}, "
+            f"- {str(name)[:80]}: {count} {noun}, "
             f"{seconds_by_source.get(name, 0) // 60}m"
         )
     return "\n".join(lines)
-
-
-def _format_samples(samples: list[str], *, empty: str) -> str:
-    if not samples:
-        return empty
-    return "\n".join(f"- {_redact_text(sample, limit=160)}" for sample in samples[:8])
 
 
 def _format_goals(goals: list[Any]) -> str:
     if not goals:
         return "- None"
     return "\n".join(
-        f"- {_redact_text(goal.title, limit=120)} ({goal.domain})"
+        f"- {str(goal.title)[:120]} ({goal.domain})"
         for goal in goals[:12]
     )
 
 
-def _format_alignment(alignment: list[dict[str, Any]]) -> str:
-    if not alignment:
-        return "- No active goals to compare."
-    lines = []
-    for item in alignment[:12]:
-        evidence = ", ".join(item["evidence_tokens"]) or "no clear screen-observation match"
-        lines.append(f"- {item['title']}: {item['status']} ({evidence})")
-    return "\n".join(lines)
+def _html_lines(text: str) -> str:
+    clean = str(text or "")[:7000]
+    return "<br>".join(escape(line) for line in clean.splitlines())
 
 
-def _deterministic_report_body(
-    *,
-    report_day: date,
-    summary: dict[str, Any],
-    alignment: list[dict[str, Any]],
-    completed_goals: list[Any],
-) -> str:
-    activity = _format_seconds_map(summary.get("by_activity", {}), empty="- No tracked activity")
-    projects = _format_seconds_map(summary.get("by_project", {}), empty="- No project labels detected")
-    sources = _format_source_mix(
-        summary.get("by_source", {}),
-        summary.get("source_observations", {}),
-        empty="- No observation sources detected",
+def _report_email_html(report: dict[str, Any]) -> str:
+    """Render a self-contained HTML email while keeping plain text as fallback."""
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    screenshot_digests = (
+        report.get("screenshot_digests") if isinstance(report.get("screenshot_digests"), dict) else {}
     )
-    screenshot_samples = _format_samples(
-        summary.get("screenshot_samples", []),
-        empty="- No screenshot-folder images analyzed",
-    )
-    aligned = [item for item in alignment if item["status"] == "aligned"]
-    unclear = [item for item in alignment if item["status"] != "aligned"]
-    completed = _format_goals(completed_goals)
+    date_label = escape(str(report.get("date") or "unknown"))
+    timezone_label = escape(str(report.get("timezone") or "local"))
+    provider_label = escape(str(report.get("analysis_provider") or "local"))
+    total_minutes = int(summary.get("total_tracked_minutes") or 0)
+    switch_count = int(summary.get("switch_count") or 0)
+    observation_count = int(summary.get("total_observations") or 0)
+    digest_count = int(screenshot_digests.get("count") or 0)
+    body_html = _html_lines(str(report.get("body") or "No report generated."))
 
-    tips = [
-        "Start tomorrow by naming the one goal the first focus block should serve.",
-        "Keep high-switching work in a deliberate admin block so deep work stays protected.",
-        "If a goal stayed unclear today, add a visible project label or next action before starting.",
+    stat_cards = [
+        ("Tracked", f"{total_minutes}m"),
+        ("Switches", str(switch_count)),
+        ("Screens", str(observation_count)),
+        ("Digests", str(digest_count)),
     ]
-    if summary.get("total_tracked_minutes", 0) == 0:
-        tips[0] = "Start tomorrow by setting a concrete daily goal before opening work apps."
-    elif not summary.get("by_project"):
-        tips[2] = "Add clearer project labels or goal titles so Seraph can connect screen activity to commitments."
-
-    return "\n".join(
-        [
-            f"End-of-day report for {report_day.isoformat()}",
-            "",
-            f"Today had {summary.get('total_tracked_minutes', 0)} tracked minutes across "
-            f"{summary.get('switch_count', 0)} context switches.",
-            "",
-            "Activity mix:",
-            activity,
-            "",
-            "Project mix:",
-            projects,
-            "",
-            "Source mix:",
-            sources,
-            "",
-            "Screenshot samples:",
-            screenshot_samples,
-            "",
-            "Goals vs day:",
-            f"- Aligned goals: {len(aligned)}",
-            f"- Unclear goals: {len(unclear)}",
-            f"- Completed today: {len(completed_goals)}",
-            completed,
-            "",
-            "Useful tips for tomorrow:",
-            *(f"- {tip}" for tip in tips),
-        ]
+    stat_html = "".join(
+        f"""
+        <td style="width:25%;padding:8px;">
+          <div style="border:1px solid #1f4f63;background:#081923;padding:14px 12px;">
+            <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#7fb4c7;">{escape(label)}</div>
+            <div style="font-size:24px;line-height:1.2;color:#e8fbff;font-weight:700;margin-top:6px;">{escape(value)}</div>
+          </div>
+        </td>
+        """
+        for label, value in stat_cards
     )
+
+    return f"""\
+<!doctype html>
+<html>
+  <body style="margin:0;background:#06111a;color:#d7eef5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#06111a;padding:28px 14px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:760px;border:1px solid #1e4150;background:#071722;">
+            <tr>
+              <td style="padding:24px 24px 12px;border-bottom:1px solid #1e4150;">
+                <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#66ffc8;font-weight:700;">Seraph</div>
+                <h1 style="margin:8px 0 4px;font-size:28px;line-height:1.15;color:#f2fdff;font-weight:800;">End-of-day report</h1>
+                <div style="font-size:13px;color:#8fb5c4;">{date_label} · {timezone_label} · {provider_label}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:14px 16px 4px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>{stat_html}</tr></table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 24px 28px;">
+                <div style="border-top:1px solid #1e4150;padding-top:18px;font-size:15px;line-height:1.62;color:#d7eef5;">
+                  {body_html}
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:14px 24px;border-top:1px solid #1e4150;color:#6e95a5;font-size:12px;">
+                Local-first report generated from Seraph observations. Raw screenshots are not attached.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
+
+def _template_value(value: Any, *, limit: int = 2000) -> str | int:
+    if isinstance(value, int):
+        return value
+    return str(value or "")[:limit]
+
+
+def _resend_api_key() -> str:
+    if settings.resend_api_key.strip():
+        return settings.resend_api_key.strip()
+    if (
+        settings.smtp_host.strip().lower() == "smtp.resend.com"
+        and settings.smtp_username.strip().lower() == "resend"
+    ):
+        return settings.smtp_password.strip()
+    return ""
+
+
+def _resend_template_variables(report: dict[str, Any]) -> dict[str, str | int]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    screenshot_digests = (
+        report.get("screenshot_digests") if isinstance(report.get("screenshot_digests"), dict) else {}
+    )
+    return {
+        "REPORT_DATE": _template_value(report.get("date")),
+        "TIMEZONE": _template_value(report.get("timezone")),
+        "ANALYSIS_PROVIDER": _template_value(report.get("analysis_provider")),
+        "TOTAL_TRACKED_MINUTES": int(summary.get("total_tracked_minutes") or 0),
+        "CONTEXT_SWITCHES": int(summary.get("switch_count") or 0),
+        "SCREEN_OBSERVATIONS": int(summary.get("total_observations") or 0),
+        "SCREENSHOT_DIGESTS": int(screenshot_digests.get("count") or 0),
+        "REPORT_BODY": _template_value(report.get("body"), limit=2000),
+    }
+
+
+async def _deliver_report_resend_template(
+    report: dict[str, Any],
+    *,
+    recipient: str,
+    sender: str,
+    subject: str,
+) -> EmailDeliveryResult:
+    api_key = _resend_api_key()
+    if not api_key:
+        return EmailDeliveryResult(status="skipped", reason="resend_api_key_missing")
+    payload: dict[str, Any] = {
+        "from": sender,
+        "to": [recipient],
+        "subject": subject,
+        "template": {
+            "id": settings.resend_template_id.strip(),
+            "variables": _resend_template_variables(report),
+        },
+    }
+    if settings.email_reports_reply_to.strip():
+        payload["reply_to"] = settings.email_reports_reply_to.strip()
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            settings.resend_api_url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        response.raise_for_status()
+    response_payload = response.json()
+    provider_receipt = response_payload.get("id") if isinstance(response_payload, dict) else None
+    return EmailDeliveryResult(status="sent", provider_receipt=provider_receipt)
+
+
+def _episode_metadata(episode: MemoryEpisode) -> dict[str, Any]:
+    try:
+        payload = json.loads(episode.metadata_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _unique_values(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _report_llm_label(runtime_profile: str) -> str:
+    model = (
+        settings.local_model.strip()
+        or settings.local_vlm_model.strip()
+        or settings.default_model.strip()
+    )
+    if runtime_profile:
+        return f"{runtime_profile}:{model}"
+    return model
 
 
 async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[str, Any]:
     tz = _safe_timezone()
     target_day = report_day or datetime.now(tz).date()
-    summary, goal_results = await asyncio.gather(
+    summary, screenshot_digests, goal_results = await asyncio.gather(
         _screen_summary_for_local_day(target_day, tz),
+        _screenshot_digests_for_local_day(target_day, tz),
         _goals_for_report(target_day),
     )
     active_goals, completed_goals = goal_results
-    alignment = _goal_alignment(summary, active_goals)
+    decision = screen_derived_llm_decision("end_of_day_goal_report")
+    if not decision.allowed:
+        body = (
+            "End-of-day report LLM generation was blocked by Seraph's screen-data privacy policy. "
+            f"Reason: {decision.reason}. Configure a verified local runtime profile or explicitly allow remote routing."
+        )
+        return {
+            "date": target_day.isoformat(),
+            "timezone": str(tz),
+            "body": body,
+            "summary": summary,
+            "screenshot_digests": screenshot_digests,
+            "goal_alignment": [],
+            "completed_goal_count": len(completed_goals),
+            "active_goal_count": len(active_goals),
+            "analysis_provider": f"blocked:{decision.reason}",
+            "artifact_schema": "seraph.end_of_day_goal_report.v1",
+        }
 
-    if settings.end_of_day_report_llm_enabled:
-        prompt = _REPORT_PROMPT.format(
-            report_date=target_day.isoformat(),
-            total_minutes=summary.get("total_tracked_minutes", 0),
-            switch_count=summary.get("switch_count", 0),
-            activity_breakdown=_format_seconds_map(summary.get("by_activity", {}), empty="- No tracked activity"),
-            project_breakdown=_format_seconds_map(summary.get("by_project", {}), empty="- No project labels detected"),
-            source_breakdown=_format_source_mix(
-                summary.get("by_source", {}),
-                summary.get("source_observations", {}),
-                empty="- No observation sources detected",
-            ),
-            screenshot_samples=_format_samples(
-                summary.get("screenshot_samples", []),
-                empty="- No screenshot-folder images analyzed",
-            ),
-            active_goals=_format_goals(active_goals),
-            completed_goals=_format_goals(completed_goals),
-            alignment_hints=_format_alignment(alignment),
-        )
+    prompt = _REPORT_PROMPT.format(
+        report_date=target_day.isoformat(),
+        total_minutes=summary.get("total_tracked_minutes", 0),
+        switch_count=summary.get("switch_count", 0),
+        activity_breakdown=_format_seconds_map(summary.get("by_activity", {}), empty="- No tracked activity"),
+        project_breakdown=_format_seconds_map(summary.get("by_project", {}), empty="- No project labels detected"),
+        source_breakdown=_format_source_mix(
+            summary.get("by_source", {}),
+            summary.get("source_observations", {}),
+            empty="- No observation sources detected",
+        ),
+        screenshot_digest_text=str(screenshot_digests.get("digest_text") or ""),
+        active_goals=_format_goals(active_goals),
+        completed_goals=_format_goals(completed_goals),
+    )
 
-        response = await completion_with_fallback(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=900,
-            timeout=settings.agent_briefing_timeout,
-            runtime_path="end_of_day_goal_report",
-        )
-        body = _redact_report_body(response.choices[0].message.content, limit=5000)
-    else:
-        body = _redact_report_body(
-            _deterministic_report_body(
-                report_day=target_day,
-                summary=summary,
-                alignment=alignment,
-                completed_goals=completed_goals,
-            ),
-            limit=5000,
-        )
+    response = await completion_with_fallback(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        max_tokens=900,
+        timeout=settings.agent_briefing_timeout,
+        runtime_path="end_of_day_goal_report",
+        local_runtime_only=not settings.screen_derived_llm_allow_remote,
+    )
+    body = str(response.choices[0].message.content or "").strip()
     if not body:
         body = "No report generated."
 
@@ -600,10 +822,11 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         "timezone": str(tz),
         "body": body,
         "summary": summary,
-        "goal_alignment": alignment,
+        "screenshot_digests": screenshot_digests,
+        "goal_alignment": [],
         "completed_goal_count": len(completed_goals),
         "active_goal_count": len(active_goals),
-        "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "deterministic-local",
+        "analysis_provider": f"llm:{_report_llm_label(decision.runtime_profile)}",
         "artifact_schema": "seraph.end_of_day_goal_report.v1",
     }
 
@@ -625,6 +848,10 @@ async def store_end_of_day_goal_report(report: dict[str, Any]) -> str:
             "date": report["date"],
             "timezone": report["timezone"],
             "screen_observation_count": report["summary"].get("total_observations", 0),
+            "screenshot_digest_count": (report.get("screenshot_digests") or {}).get("count", 0),
+            "screenshot_digest_observation_ids": (report.get("screenshot_digests") or {}).get(
+                "observation_ids", []
+            ),
             "total_tracked_minutes": report["summary"].get("total_tracked_minutes", 0),
             "active_goal_count": report["active_goal_count"],
             "completed_goal_count": report["completed_goal_count"],
@@ -659,6 +886,40 @@ async def deliver_report_email(
             reason="recipient_not_allowlisted",
             recipient_hash=recipient_digest,
         )
+    subject = f"Seraph end-of-day report: {report['date']}"
+    if settings.resend_template_id.strip():
+        try:
+            result = await _deliver_report_resend_template(
+                report,
+                recipient=recipient,
+                sender=sender,
+                subject=subject,
+            )
+        except Exception as exc:
+            await log_integration_event(
+                integration_type="email_report",
+                name="resend_template",
+                outcome="failed",
+                details={"reason": exc.__class__.__name__, "recipient_hash": recipient_digest},
+            )
+            raise
+        await log_integration_event(
+            integration_type="email_report",
+            name="resend_template",
+            outcome="succeeded" if result.status == "sent" else "skipped",
+            details={
+                "reason": result.reason,
+                "recipient_hash": recipient_digest,
+                "provider_receipt": result.provider_receipt,
+            },
+        )
+        return EmailDeliveryResult(
+            status=result.status,
+            reason=result.reason,
+            recipient_hash=recipient_digest,
+            provider_receipt=result.provider_receipt,
+        )
+
     if not settings.smtp_host:
         return EmailDeliveryResult(
             status="skipped",
@@ -667,12 +928,13 @@ async def deliver_report_email(
         )
 
     message = EmailMessage()
-    message["Subject"] = f"Seraph end-of-day report: {report['date']}"
+    message["Subject"] = subject
     message["From"] = sender
     message["To"] = recipient
     if settings.email_reports_reply_to:
         message["Reply-To"] = settings.email_reports_reply_to
     message.set_content(report["body"])
+    message.add_alternative(_report_email_html(report), subtype="html")
 
     try:
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
@@ -745,7 +1007,7 @@ async def send_end_of_day_report_test_email() -> dict[str, Any]:
         "date": datetime.now(_safe_timezone()).date().isoformat(),
         "timezone": str(_safe_timezone()),
         "body": "Seraph test email: end-of-day report delivery is configured.",
-        "analysis_provider": "deterministic-local",
+        "analysis_provider": "test-email",
         "artifact_schema": "seraph.end_of_day_report_test_email.v1",
     }
     email_result = await deliver_report_email(test_report, preview_acknowledged=True)

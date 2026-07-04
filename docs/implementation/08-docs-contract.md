@@ -68,6 +68,27 @@ Project fields:
 - `Linked pull requests`: built-in GitHub linkage
 - `PR`: `Not Ready`, `Open`, `Merged`
 
+### Untracked Request Intake
+
+Chat-originated bugs, requested changes, architecture issues, runtime
+complaints, workflow changes, and docs-truth changes are not exempt from the
+execution layer. If no matching issue exists, agents must search open and closed
+issues first, then create or refine a tracked issue before PR-sized
+implementation.
+
+Emergency investigation may happen before issue creation when a service is down
+or evidence would disappear, but no commit, PR, merge, or completion claim should
+happen before the issue exists unless the user explicitly says not to create a
+ticket.
+
+The issue or a linked comment should capture:
+
+- observed symptom or requested behavior
+- root cause or implementation plan
+- acceptance criteria
+- expected validation
+- docs or operator surfaces that should change
+
 Expected flow:
 
 1. Create or refine the tracked issue.
@@ -75,6 +96,7 @@ Expected flow:
    - set `Status=Todo`
    - set `Code Review=Not Ready`
    - set `PR=Not Ready`
+   - record issue, project item, or field receipts before claiming tracking is correct
 2. Start execution.
    - set `Status=In Progress`
    - move `Queue=Now` if the task is active now
@@ -88,7 +110,7 @@ Expected flow:
    - move to `Changes Requested` or `Passed`
    - every PR-sized slice must be reviewed before merge; non-trivial PR-sized slices require an independent subagent review
    - material findings must be fixed, explicitly rejected with rationale, or converted into tracked follow-up work before merge
-   - PR bodies must record material findings or an explicit no-findings result, plus validation receipts
+   - PR bodies must record reviewer identity, reviewed branch/commit or diff, material findings or an explicit no-findings result, disposition, and validation receipts
 5. Merge and close.
    - set `PR=Merged`
    - set `Status=Done`

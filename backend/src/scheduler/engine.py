@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -13,14 +14,22 @@ _scheduler: AsyncIOScheduler | None = None
 _scheduler_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _async_job_wrapper(coro_func, loop: asyncio.AbstractEventLoop):
+def _async_job_wrapper(coro_func, _loop: asyncio.AbstractEventLoop):
     """Wrap an async job function so APScheduler 3.x can run it.
 
-    APScheduler 3.x runs jobs in a ThreadPoolExecutor, so we need to schedule
-    the coroutine back onto the main event loop captured at init time.
+    Keep the returned callable async so AsyncIOScheduler tracks the real
+    coroutine lifetime without blocking the app loop.
     """
-    def wrapper():
-        asyncio.run_coroutine_threadsafe(coro_func(), loop)
+    async def wrapper():
+        try:
+            if asyncio.get_running_loop() is _loop:
+                await coro_func()
+            else:
+                future = asyncio.run_coroutine_threadsafe(coro_func(), _loop)
+                await asyncio.wrap_future(future)
+        except Exception:
+            logger.exception("Scheduled job %s failed", getattr(coro_func, "__name__", repr(coro_func)))
+            raise
     return wrapper
 
 
@@ -54,6 +63,11 @@ def _settings_int(name: str, default: int, *, minimum: int | None = None, maximu
     return value
 
 
+def _startup_next_run(enabled: bool, *, delay_seconds: int = 0) -> datetime | None:
+    """Return an immediate first run for enabled jobs that should catch up local state."""
+    return datetime.now(timezone.utc) + timedelta(seconds=max(delay_seconds, 0)) if enabled else None
+
+
 def init_scheduler() -> AsyncIOScheduler | None:
     """Create and start the background scheduler with all configured jobs.
 
@@ -80,6 +94,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.activity_digest import run_activity_digest
     from src.scheduler.jobs.end_of_day_goal_report import run_end_of_day_goal_report
     from src.scheduler.jobs.screenshot_folder_ingest import run_screenshot_folder_ingest
+    from src.scheduler.jobs.screenshot_folder_analysis import run_screenshot_folder_analysis
+    from src.scheduler.jobs.screenshot_observation_digest import run_screenshot_observation_digest
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
 
@@ -161,6 +177,28 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "screenshot_folder_ingest",
             "name": "Screenshot folder image ingest",
+            "next_run_time": _startup_next_run(bool(settings.screenshot_folder_ingest_enabled)),
+            "misfire_grace_time": 120,
+        },
+        {
+            "func": _async_job_wrapper(run_screenshot_folder_analysis, loop),
+            "trigger": IntervalTrigger(
+                seconds=_settings_int("screenshot_folder_analysis_interval_seconds", 1, minimum=1, maximum=300)
+            ),
+            "id": "screenshot_folder_analysis",
+            "name": "Screenshot folder semantic analysis",
+            "next_run_time": _startup_next_run(bool(settings.screenshot_folder_ingest_enabled), delay_seconds=10),
+            "misfire_grace_time": 120,
+        },
+        {
+            "func": _async_job_wrapper(run_screenshot_observation_digest, loop),
+            "trigger": IntervalTrigger(
+                minutes=_settings_int("screenshot_observation_digest_interval_min", 15, minimum=1, maximum=1440)
+            ),
+            "id": "screenshot_observation_digest",
+            "name": "Screenshot observation digest",
+            "next_run_time": _startup_next_run(bool(settings.screenshot_observation_digest_enabled)),
+            "misfire_grace_time": 120,
         },
         {
             "func": _async_job_wrapper(run_screen_cleanup, loop),
@@ -172,7 +210,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
 
     for job in jobs:
         try:
-            _scheduler.add_job(**job, replace_existing=True)
+            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
         except Exception:
             logger.exception("Failed to register job: %s", job["id"])
 

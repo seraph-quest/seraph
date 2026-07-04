@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Insights older than this are expired and cleaned up
 EXPIRY_HOURS = 24
+PEEK_ALL_LIMIT = 100
 
 
 def _cutoff_time() -> datetime:
@@ -79,16 +80,17 @@ class InsightQueue:
         """
         cutoff = _cutoff_time()
         async with get_session() as db:
-            result = await db.execute(select(QueuedInsight))
-            all_rows = list(result.scalars().all())
-            items = sorted(
-                [row for row in all_rows if _is_fresh(row, cutoff)],
-                key=lambda row: row.urgency,
-                reverse=True,
+            result = await db.execute(
+                select(QueuedInsight)
+                .where(QueuedInsight.created_at > cutoff)
+                .order_by(QueuedInsight.urgency.desc())
+                .limit(PEEK_ALL_LIMIT)
             )
-            for row in all_rows:
-                if not _is_fresh(row, cutoff):
-                    await db.delete(row)
+            items = list(result.scalars().all())
+            expired_result = await db.execute(select(QueuedInsight).where(QueuedInsight.created_at <= cutoff))
+            expired_rows = list(expired_result.scalars().all())
+            for row in expired_rows:
+                await db.delete(row)
         return items
 
     async def delete_many(self, ids: list[str]) -> int:

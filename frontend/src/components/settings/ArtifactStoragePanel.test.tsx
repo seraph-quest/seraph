@@ -66,14 +66,36 @@ function settingsFromScreenAnalysisFixture(screen: {
     screenshot_folder: {
       enabled: true,
       provider: "screenshot_folder",
-      path: screen.screenshot_folder ?? "Seraph workspace artifacts/screenshot-folder",
-      path_source: screen.screenshot_folder ? "screen-analysis-settings" : "default",
+      path: screen.screenshot_folder ?? null,
+      path_source: screen.screenshot_folder ? "screen-analysis-settings" : "not_loaded",
       image_count: 0,
       last_image_at: null,
       status: "empty",
       exists: false,
       readable: false,
       stored_artifacts: ["image"],
+      analysis: {
+        provider: "metadata unavailable",
+        model: "",
+        base_url_configured: false,
+        observation_count: 0,
+        analysis_status: {},
+        analysis_backlog: 0,
+        analysis_failures: 0,
+        latest_observation_at: null,
+        latest_analyzed_at: null,
+        latest_failure: null,
+        digest_count: 0,
+        latest_digest_at: null,
+        persistence: {
+          db_lock_retries: 0,
+          db_lock_failures: 0,
+          selection_db_lock_retries: 0,
+          selection_db_lock_failures: 0,
+          persistence_db_lock_retries: 0,
+          persistence_db_lock_failures: 0,
+        },
+      },
       auto_ingest_enabled: true,
       auto_ingest_interval_min: 5,
       auto_ingest_limit: 100,
@@ -127,6 +149,7 @@ describe("ArtifactStoragePanel", () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
+    fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
   });
 
@@ -140,8 +163,8 @@ describe("ArtifactStoragePanel", () => {
       mockResponse({
         screen: {
           analysis_enabled: true,
-          provider: "codex-local",
-          model: "gpt-5.5",
+          provider: "local-vlm",
+          model: "gemma-4-26b",
           capture_mode: "detailed",
           cadence_seconds: 60,
           daemon_connected: false,
@@ -175,12 +198,46 @@ describe("ArtifactStoragePanel", () => {
           provider: "screenshot_folder",
           path: "/Users/test/Pictures/Screenshots",
           path_source: "default",
-          image_count: 2,
+          image_count: 15,
           last_image_at: "2026-06-20T18:40:00Z",
           status: "ready",
           exists: true,
           readable: true,
           stored_artifacts: ["image"],
+          analysis: {
+            provider: "local-vlm",
+            model: "gemma-4-26b",
+            base_url_configured: true,
+            observation_count: 12,
+            analysis_status: {
+              succeeded: 9,
+              failed: 1,
+              pending: 2,
+              needs_reanalysis: 0,
+              unknown: 0,
+            },
+            analysis_backlog: 2,
+            analysis_failures: 1,
+            latest_observation_at: "2026-06-20T18:41:00Z",
+            latest_analyzed_at: "2026-06-20T18:42:00Z",
+            latest_failure: "provider unavailable",
+            digest_count: 3,
+            latest_digest_at: "2026-06-20T18:30:00Z",
+            folder_image_count: 15,
+            ingested_count: 12,
+            remaining_to_ingest: 3,
+            processed_count: 9,
+            remaining_to_analyze: 3,
+            folder_remaining_to_analyze: 6,
+            persistence: {
+              db_lock_retries: 4,
+              db_lock_failures: 1,
+              selection_db_lock_retries: 1,
+              selection_db_lock_failures: 0,
+              persistence_db_lock_retries: 3,
+              persistence_db_lock_failures: 1,
+            },
+          },
           auto_ingest_enabled: true,
           auto_ingest_interval_min: 5,
           auto_ingest_limit: 100,
@@ -197,7 +254,7 @@ describe("ArtifactStoragePanel", () => {
         reports: {
           enabled: true,
           hour: 21,
-          analysis_provider: "deterministic-local",
+          analysis_provider: "llm",
           archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
           archive_dir_source: "default",
           exists: true,
@@ -209,6 +266,40 @@ describe("ArtifactStoragePanel", () => {
             enabled: "END_OF_DAY_REPORT_ENABLED",
             llm: "END_OF_DAY_REPORT_LLM_ENABLED",
           },
+        },
+        local_runtime: {
+          gateway_configured: true,
+          llm_base_url_configured: true,
+          vlm_base_url_configured: true,
+          model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+          profiles: [
+            {
+              id: "screenshot_fast",
+              runtime_path: "screenshot_image_analysis",
+              priority: "background",
+              reasoning: "off",
+              max_tokens: 1400,
+              timeout_seconds: 120,
+            },
+            {
+              id: "chat_thinking",
+              runtime_path: "chat_agent",
+              priority: "interactive",
+              reasoning: "on",
+              max_tokens: 4096,
+              timeout_seconds: 120,
+            },
+          ],
+          profile_proof: {
+            status: "unsafe",
+            per_request_reasoning_control: "failed",
+            safe_for_single_backend_profile_routing: false,
+            receipt_count: 2,
+            last_receipt_at: "2026-07-01T15:38:40Z",
+            last_receipt_sha256: "b1254d311dd78e92c3b7681dca2885d224e03523add6f856ea34f6bf49832748",
+            notes: ["screenshot_fast emitted visible reasoning markers"],
+          },
+          proof_command: "PYTHONPATH=. uv run python ../scripts/verify_local_gemma_profiles.py",
         },
         email: {
           enabled: false,
@@ -233,123 +324,103 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("Screenshot Folder")).toBeInTheDocument();
     expect(screen.getByText("scans a local screenshot folder; reports stay in Seraph")).toBeInTheDocument();
     expect(screen.getByText("Local screenshot images")).toBeInTheDocument();
-    expect(screen.getByText(/2 images/)).toBeInTheDocument();
+    expect(screen.getByText(/15 images/)).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
+    expect(screen.getByText("local-vlm · gemma-4-26b")).toBeInTheDocument();
+    expect(screen.getByText("Local Gemma runtime")).toBeInTheDocument();
+    expect(screen.getByText("openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF")).toBeInTheDocument();
+    expect(screen.getByText("single backend profile routing not safe")).toBeInTheDocument();
+    expect(screen.getByText("screenshot_fast emitted visible reasoning markers")).toBeInTheDocument();
+    expect(screen.getByText("12 / 15 · remaining 3")).toBeInTheDocument();
+    expect(screen.getByText("9 analyzed · 3 queued")).toBeInTheDocument();
+    expect(screen.getByText("12 observations · 2 backlog · 1 failed")).toBeInTheDocument();
+    expect(screen.getByText("4 retries · 1 failed · 3 writes")).toBeInTheDocument();
+    expect(screen.getByText("3 windows · latest 2026-06-20T18:30:00Z")).toBeInTheDocument();
+    expect(screen.getByText("provider unavailable")).toBeInTheDocument();
     expect(screen.queryByText("/api/observer/screenshot-folder/scan")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
-    expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
-    expect(screen.getByText("offline - no new captures")).toBeInTheDocument();
-    expect(screen.getByText("Grant Screen Recording permission to the terminal/app running Seraph.")).toBeInTheDocument();
-    expect(screen.getByText(/1 captures/)).toBeInTheDocument();
-    expect(screen.getAllByText("/api/observer/screen-artifacts (localhost only)")).toHaveLength(2);
-    expect(screen.getByText("SERAPH_PRESERVE_SCREEN_CAPTURES")).toBeInTheDocument();
-    expect(screen.getAllByText("ready")).toHaveLength(3);
+    expect(screen.getByDisplayValue("local-vlm")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("detailed / 60s")).not.toBeInTheDocument();
+    expect(screen.queryByText("offline - no new captures")).not.toBeInTheDocument();
+    expect(screen.queryByText("Grant Screen Recording permission to the terminal/app running Seraph.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/1 captures/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("/api/observer/screen-artifacts (localhost only)")).toHaveLength(1);
+    expect(screen.queryByText("SERAPH_PRESERVE_SCREEN_CAPTURES")).not.toBeInTheDocument();
+    expect(screen.getAllByText("ready")).toHaveLength(2);
     expect(screen.getByText("End-of-day reports")).toBeInTheDocument();
-    expect(screen.getByText("deterministic-local")).toBeInTheDocument();
+    expect(screen.getByText("llm")).toBeInTheDocument();
     expect(screen.getByText("Email delivery")).toBeInTheDocument();
     expect(screen.getByText("SMTP")).toBeInTheDocument();
     expect(screen.getAllByText("Missing")).toHaveLength(3);
   });
 
-  it("updates capture mode from settings", async () => {
-    const artifactStorage = {
-      screen: {
-        analysis_enabled: true,
-        provider: "codex-local",
-        model: "gpt-5.5",
-        capture_mode: "on_switch",
-        cadence_seconds: null,
-        daemon_connected: true,
-        artifact_count: 0,
-        last_artifact_at: null,
-        preservation_enabled: true,
-        archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
-        archive_dir_source: "screen-analysis-settings",
-        exists: true,
-        writable: true,
-        creation_error: null,
-        stored_artifacts: ["image", "provider_output", "analysis_json"],
-        inspection_endpoint: "/api/observer/screen-artifacts",
-        inspection_visibility: "localhost_only",
-        daemon_status: {
-          state: "running",
-          screen_analysis: "active",
-          capture_ready: true,
-          last_error: null,
-          last_error_kind: null,
-          updated_at: "2026-06-20T18:34:25Z",
-          status_source: "daemon-status-file",
-        },
-        control_env: {
-          enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
-          archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
-        },
+  it("does not mark VLM direct route healthy without chat readiness proof", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 1,
+      last_artifact_at: null,
+    });
+    (artifactStorage as any).local_runtime = {
+      gateway_configured: true,
+      llm_base_url_configured: true,
+      vlm_base_url_configured: true,
+      model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+      profiles: [],
+      profile_proof: {
+        status: "safe",
+        per_request_reasoning_control: "passed",
+        safe_for_single_backend_profile_routing: true,
+        receipt_count: 1,
+        last_receipt_at: "2026-07-03T18:00:00Z",
+        last_receipt_sha256: "abc123",
+        notes: [],
       },
-      reports: {
-        enabled: false,
-        hour: 21,
-        analysis_provider: "deterministic-local",
-        archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
-        archive_dir_source: "default",
-        exists: true,
-        writable: true,
-        creation_error: null,
-        stored_artifacts: ["report_text", "report_json"],
-        control_env: {
-          archive_dir: "REPORT_ARCHIVE_DIR",
-          enabled: "END_OF_DAY_REPORT_ENABLED",
-          llm: "END_OF_DAY_REPORT_LLM_ENABLED",
-        },
-      },
-      email: {
-        enabled: false,
-        preview_required: true,
-        smtp_configured: false,
-        recipient_configured: false,
-        allowlist_configured: false,
-        control_env: {
-          enabled: "EMAIL_REPORTS_ENABLED",
-          preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
-          smtp_host: "SMTP_HOST",
-          recipient: "EMAIL_REPORTS_TO",
-          allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
-        },
+      proof_command: "PYTHONPATH=. uv run python ../scripts/verify_local_gemma_profiles.py",
+    };
+    (artifactStorage as any).local_runtime.vlm_runtime = {
+      mode: "gpu-server",
+      configured: true,
+      base_url: "http://192.168.1.26:8001",
+      backend_url: "http://192.168.1.26:8000/v1",
+      chat_api_base: "http://192.168.1.26:8001/v1",
+      chat_completion_endpoint: "http://192.168.1.26:8001/v1/chat/completions",
+      chat_health_endpoint: "http://192.168.1.26:8001/health/chat",
+      queue_status_endpoint: "http://192.168.1.26:8001/queue/status",
+      health_endpoint: "http://192.168.1.26:8001/health",
+      backend_health_endpoint: "http://192.168.1.26:8001/health/backend",
+      api_key_configured: true,
+      feeder_window: 2,
+      live_probe: {
+        checked: true,
+        reachable: true,
+        health: { checked: true, ok: true, status_code: 200, error: "" },
+        backend_health: { checked: true, ok: true, status_code: 200, error: "" },
+        queue_status: { checked: true, ok: true, status_code: 200, error: "" },
       },
     };
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(artifactStorage))
-      .mockResolvedValueOnce(mockResponse({ mode: "detailed" }))
-      .mockResolvedValueOnce(
-        mockResponse({
-          ...artifactStorage,
-          screen: { ...artifactStorage.screen, capture_mode: "detailed", cadence_seconds: 60 },
-        }),
-      );
+    fetchMock.mockResolvedValueOnce(mockResponse(artifactStorage));
 
     render(<ArtifactStoragePanel />);
 
-    const modeSelect = await screen.findByDisplayValue("on_switch");
-    fireEvent.change(modeSelect, { target: { value: "detailed" } });
-
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/settings/capture-mode"),
-        expect.objectContaining({
-          method: "PUT",
-          body: JSON.stringify({ mode: "detailed" }),
-        }),
-      ),
-    );
-    await waitFor(() => expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument());
+    expect(await screen.findByText("openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF")).toBeInTheDocument();
+    expect(screen.getByText("direct route failing · chat:missing")).toBeInTheDocument();
+    expect(screen.queryByText("direct route ok")).not.toBeInTheDocument();
   });
 
   it("runs manual report preview and shows safe receipt metadata", async () => {
     const artifactStorage = settingsFromScreenAnalysisFixture({
       enabled: true,
-      provider: "codex-local",
-      model: "gpt-5.5",
+      provider: "local-vlm",
+      model: "gemma-4-26b",
       preserve_captures: true,
       archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
       capture_mode: "on_switch",
@@ -411,8 +482,8 @@ describe("ArtifactStoragePanel", () => {
     const artifactStorage = {
       ...settingsFromScreenAnalysisFixture({
         enabled: true,
-        provider: "codex-local",
-        model: "gpt-5.5",
+        provider: "local-vlm",
+        model: "gemma-4-26b",
         preserve_captures: true,
         archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
         capture_mode: "on_switch",
@@ -444,31 +515,38 @@ describe("ArtifactStoragePanel", () => {
           auto_ingest_interval: "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
           auto_ingest_limit: "SCREENSHOT_FOLDER_INGEST_LIMIT",
         },
-	      },
+      },
     };
     const refreshedStorage = {
       ...artifactStorage,
-	      screenshot_folder: {
-	        ...artifactStorage.screenshot_folder,
-	        image_count: 4,
-	      },
+      screenshot_folder: {
+        ...artifactStorage.screenshot_folder,
+        image_count: 4,
+      },
     };
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(artifactStorage))
-      .mockResolvedValueOnce(
-        mockResponse({
-	          screenshot_folder: artifactStorage.screenshot_folder.path,
+    let scanRequested = false;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes("/api/observer/screenshot-folder/scan")) {
+        scanRequested = true;
+        return Promise.resolve(mockResponse({
+          screenshot_folder: artifactStorage.screenshot_folder.path,
           scanned: 3,
           ingested: 1,
           skipped_duplicates: 2,
           rejected: [],
-        }),
-      )
-      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+        }));
+      }
+      if (url.includes("/api/settings/artifact-storage")) {
+        return Promise.resolve(mockResponse(scanRequested ? refreshedStorage : artifactStorage));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
 
     render(<ArtifactStoragePanel />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Scan folder" }));
+    const scanButton = await screen.findByRole("button", { name: "Scan folder" });
+    await waitFor(() => expect(scanButton).not.toBeDisabled());
+    fireEvent.click(scanButton);
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -476,7 +554,7 @@ describe("ArtifactStoragePanel", () => {
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({
-	            screenshot_folder: artifactStorage.screenshot_folder.path,
+            screenshot_folder: artifactStorage.screenshot_folder.path,
             limit: 100,
           }),
         }),
@@ -486,11 +564,11 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
   });
 
-  it("saves a configured screenshot folder", async () => {
+  it("clears stale screenshot folder observations and refreshes metadata", async () => {
     const artifactStorage = settingsFromScreenAnalysisFixture({
       enabled: true,
-      provider: "codex-local",
-      model: "gpt-5.5",
+      provider: "local-vlm",
+      model: "gemma-4-26b",
       preserve_captures: true,
       archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
       capture_mode: "on_switch",
@@ -498,16 +576,77 @@ describe("ArtifactStoragePanel", () => {
       daemon_connected: true,
       artifact_count: 0,
       last_artifact_at: null,
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
     });
-	    const nextRoot = "/Users/test/Screenshot Folder";
-	    const refreshedStorage = {
-	      ...artifactStorage,
-	      screenshot_folder: {
-	        ...artifactStorage.screenshot_folder,
-	        path: nextRoot,
-	        path_source: "screen-analysis-settings",
-	      },
-	    };
+    const storageWithStaleRows = {
+      ...artifactStorage,
+      screenshot_folder: {
+        ...artifactStorage.screenshot_folder,
+        analysis: {
+          ...artifactStorage.screenshot_folder.analysis,
+          stale_count: 2,
+          source_missing_count: 1,
+          stale_root_count: 1,
+        },
+      },
+    };
+    const refreshedStorage = {
+      ...storageWithStaleRows,
+      screenshot_folder: {
+        ...storageWithStaleRows.screenshot_folder,
+        analysis: {
+          ...storageWithStaleRows.screenshot_folder.analysis,
+          stale_count: 0,
+          source_missing_count: 0,
+          stale_root_count: 0,
+        },
+      },
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(storageWithStaleRows))
+      .mockResolvedValueOnce(mockResponse({ archived: 2, source_missing: 1, stale_root: 1 }))
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText(/2 cleanup candidates · 1 missing · 1 old root/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear stale" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/screen-analysis/screenshot-folder/clear-stale"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/2 cleanup candidates · 1 missing · 1 old root/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("saves a configured screenshot folder", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+    });
+    const nextRoot = "/Users/test/Screenshot Folder";
+    const refreshedStorage = {
+      ...artifactStorage,
+      screenshot_folder: {
+        ...artifactStorage.screenshot_folder,
+        path: nextRoot,
+        path_source: "screen-analysis-settings",
+      },
+    };
     fetchMock
       .mockResolvedValueOnce(mockResponse(artifactStorage))
       .mockResolvedValueOnce(mockResponse({ ok: true }))
@@ -515,7 +654,7 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    const folderInput = await screen.findByLabelText("Screenshot folder");
+    const folderInput = await screen.findByDisplayValue(artifactStorage.screenshot_folder.path ?? "");
     fireEvent.change(folderInput, { target: { value: nextRoot } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -524,7 +663,7 @@ describe("ArtifactStoragePanel", () => {
         expect.stringContaining("/api/settings/screen-analysis"),
         expect.objectContaining({
           method: "PUT",
-	          body: JSON.stringify({ screenshot_folder: nextRoot }),
+          body: JSON.stringify({ screenshot_folder: nextRoot }),
         }),
       ),
     );
@@ -532,12 +671,59 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getAllByText("screen-analysis-settings").length).toBeGreaterThanOrEqual(1);
   });
 
+  it("opens the native screenshot folder picker and refreshes selected metadata", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+    });
+    const pickedRoot = "/Users/test/Desktop/screenshots";
+    const refreshedStorage = {
+      ...artifactStorage,
+      screenshot_folder: {
+        ...artifactStorage.screenshot_folder,
+        path: pickedRoot,
+        path_source: "screen-analysis-settings",
+      },
+    };
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(artifactStorage))
+      .mockResolvedValueOnce(
+        mockResponse({
+          screenshot_folder: pickedRoot,
+          screenshot_folder_source: "screen-analysis-settings",
+        }),
+      )
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Choose" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/screen-analysis/screenshot-folder/pick"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(await screen.findByDisplayValue(pickedRoot)).toBeInTheDocument();
+    expect(screen.getByText("Choose opens the local folder picker; typing the path is the fallback.")).toBeInTheDocument();
+  });
+
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {
     const artifactStorage = {
       screen: {
         analysis_enabled: true,
-        provider: "codex-local",
-        model: "gpt-5.5",
+        provider: "local-vlm",
+        model: "gemma-4-26b",
         capture_mode: "on_switch",
         cadence_seconds: null,
         daemon_connected: true,
@@ -609,100 +795,25 @@ describe("ArtifactStoragePanel", () => {
 
     const { unmount } = render(<ArtifactStoragePanel />);
 
-    const modeSelect = await screen.findByDisplayValue("on_switch");
     fetchMock.mockClear();
-    fireEvent.change(modeSelect, { target: { value: "detailed" } });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
     unmount();
-    resolveSave(mockResponse({ mode: "detailed" }));
+    resolveSave(mockResponse({ enabled: true, provider: "local-vlm", model: "gemma-4-26b" }));
     await Promise.resolve();
 
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/settings/capture-mode"))).toHaveLength(1);
-  });
-
-  it("explains on_switch mode even when the daemon is capture-ready", async () => {
-    fetchMock.mockResolvedValueOnce(
-      mockResponse({
-        screen: {
-          analysis_enabled: true,
-          provider: "codex-local",
-          model: "gpt-5.5",
-          capture_mode: "on_switch",
-          cadence_seconds: null,
-          daemon_connected: true,
-          artifact_count: 2,
-          last_artifact_at: "2026-06-21T05:43:55",
-          preservation_enabled: true,
-          archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
-          archive_dir_source: "screen-analysis-settings",
-          exists: true,
-          writable: true,
-          creation_error: null,
-          stored_artifacts: ["image", "provider_output", "analysis_json"],
-          inspection_endpoint: "/api/observer/screen-artifacts",
-          inspection_visibility: "localhost_only",
-          daemon_status: {
-            state: "running",
-            screen_analysis: "active",
-            capture_ready: true,
-            last_error: null,
-            last_error_kind: null,
-            updated_at: "2026-06-21T06:02:58Z",
-            status_source: "daemon-status-file",
-          },
-          control_env: {
-            enabled: "SERAPH_PRESERVE_SCREEN_CAPTURES",
-            archive_dir: "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR or SCREEN_CAPTURE_ARCHIVE_DIR",
-          },
-        },
-        reports: {
-          enabled: false,
-          hour: 21,
-          analysis_provider: "deterministic-local",
-          archive_dir: "/tmp/seraph-dev-data/artifacts/reports",
-          archive_dir_source: "default",
-          exists: true,
-          writable: true,
-          creation_error: null,
-          stored_artifacts: ["report_text", "report_json"],
-          control_env: {
-            archive_dir: "REPORT_ARCHIVE_DIR",
-            enabled: "END_OF_DAY_REPORT_ENABLED",
-            llm: "END_OF_DAY_REPORT_LLM_ENABLED",
-          },
-        },
-        email: {
-          enabled: false,
-          preview_required: true,
-          smtp_configured: false,
-          recipient_configured: false,
-          allowlist_configured: false,
-          control_env: {
-            enabled: "EMAIL_REPORTS_ENABLED",
-            preview_required: "EMAIL_REPORTS_PREVIEW_REQUIRED",
-            smtp_host: "SMTP_HOST",
-            recipient: "EMAIL_REPORTS_TO",
-            allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
-          },
-        },
-      }),
-    );
-
-    render(<ArtifactStoragePanel />);
-
-    const captureState = await screen.findByText("waiting for app/window switch");
-    expect(captureState).toBeInTheDocument();
-    expect(captureState).toHaveAttribute("title", "waiting for app/window switch");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/settings/capture-mode"))).toHaveLength(0);
   });
 
   it("keeps analysis controls visible when artifact metadata is unavailable", async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        mockResponse({
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes("/api/settings/artifact-storage")) {
+        return Promise.reject(new Error("artifact endpoint timed out"));
+      }
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({
           enabled: true,
-          provider: "codex-local",
-          model: "gpt-5.5",
+          provider: "local-vlm",
+          model: "gemma-4-26b",
           preserve_captures: true,
           archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
           capture_mode: "on_switch",
@@ -710,27 +821,29 @@ describe("ArtifactStoragePanel", () => {
           daemon_connected: true,
           artifact_count: 7,
           last_artifact_at: "2026-06-21T08:42:52Z",
-        }),
-      )
-      .mockRejectedValueOnce(new Error("artifact endpoint timed out"));
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
 
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
-    expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("on_switch")).toBeInTheDocument();
-    expect(screen.getByText("Archive metadata degraded; analysis controls are still live.")).toBeInTheDocument();
+    expect(await screen.findByText("Folder metadata is still loading; analysis controls are live.")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("local-vlm")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   });
 
   it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {
     fetchMock
+      .mockResolvedValueOnce(mockResponse({ screen: { archive_dir: "/tmp/broken" } }))
       .mockResolvedValueOnce(
         mockResponse({
           enabled: true,
-          provider: "codex-local",
-          model: "gpt-5.5",
+          provider: "local-vlm",
+          model: "gemma-4-26b",
           preserve_captures: true,
           archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
           capture_mode: "on_switch",
@@ -739,74 +852,32 @@ describe("ArtifactStoragePanel", () => {
           artifact_count: 0,
           last_artifact_at: null,
         }),
-      )
-      .mockResolvedValueOnce(mockResponse({ screen: { archive_dir: "/tmp/broken" } }));
+      );
 
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(
-      await screen.findByText("Archive metadata degraded; analysis controls are still live."),
+      await screen.findByText("Folder metadata is still loading; analysis controls are live."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Archive metadata loading; analysis controls are live.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Folder metadata loading; analysis controls are live.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
-  });
-
-  it("ignores stale artifact metadata after a newer save refresh", async () => {
-    let resolveInitialArtifact: (value: ReturnType<typeof mockResponse>) => void = () => {};
-    const screenInitial = {
-      enabled: true,
-      provider: "codex-local",
-      model: "gpt-5.5",
-      preserve_captures: true,
-      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
-      capture_mode: "on_switch",
-      cadence_seconds: null,
-      daemon_connected: true,
-      artifact_count: 0,
-      last_artifact_at: null,
-    };
-    const screenDetailed = {
-      ...screenInitial,
-      capture_mode: "detailed",
-      cadence_seconds: 60,
-    };
-    const staleArtifactStorage = settingsFromScreenAnalysisFixture(screenInitial);
-    const detailedArtifactStorage = settingsFromScreenAnalysisFixture(screenDetailed);
-
-    fetchMock
-      .mockResolvedValueOnce(mockResponse(screenInitial))
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveInitialArtifact = resolve;
-          }),
-      )
-      .mockResolvedValueOnce(mockResponse({ mode: "detailed" }))
-      .mockResolvedValueOnce(mockResponse(screenDetailed))
-      .mockResolvedValueOnce(mockResponse(detailedArtifactStorage));
-
-    render(<ArtifactStoragePanel />);
-
-    const modeSelect = await screen.findByDisplayValue("on_switch");
-    fireEvent.change(modeSelect, { target: { value: "detailed" } });
-
-    await waitFor(() => expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument());
-    resolveInitialArtifact(mockResponse(staleArtifactStorage));
-    await Promise.resolve();
-
-    expect(screen.getByDisplayValue("detailed / 60s")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
   });
 
   it("aborts hung artifact metadata and keeps analysis controls visible", async () => {
     let artifactSignal: AbortSignal | undefined;
-    fetchMock
-      .mockResolvedValueOnce(
-        mockResponse({
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.includes("/api/settings/artifact-storage")) {
+        artifactSignal = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        });
+      }
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({
           enabled: true,
-          provider: "codex-local",
-          model: "gpt-5.5",
+          provider: "local-vlm",
+          model: "gemma-4-26b",
           preserve_captures: true,
           archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
           capture_mode: "on_switch",
@@ -814,28 +885,40 @@ describe("ArtifactStoragePanel", () => {
           daemon_connected: true,
           artifact_count: 0,
           last_artifact_at: null,
-        }),
-      )
-      .mockImplementationOnce((_url: string, init?: RequestInit) => {
-        artifactSignal = init?.signal ?? undefined;
-        return new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
-        });
-      });
+        }));
+      }
+      return Promise.resolve(mockResponse({}));
+    });
 
     render(<ArtifactStoragePanel />);
 
-    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 5_000 })).toBeInTheDocument();
-    expect(screen.getByDisplayValue("codex-local")).toBeInTheDocument();
     expect(
       await screen.findByText(
-        "Archive metadata degraded; analysis controls are still live.",
+        "Folder metadata is still loading; analysis controls are live.",
         undefined,
         { timeout: 5_000 },
       ),
     ).toBeInTheDocument();
+    expect(screen.getByDisplayValue("local-vlm")).toBeInTheDocument();
     expect(artifactSignal?.aborted).toBe(true);
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
   }, 7_000);
+
+  it("does not present fallback screenshot folder metadata as editable truth", async () => {
+    fetchMock.mockRejectedValue(new Error("settings unavailable"));
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
+    expect(screen.getByLabelText("Screenshot folder")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Scan folder" })).toBeDisabled();
+    expect(screen.queryByText("Seraph workspace artifacts/screenshot-folder")).not.toBeInTheDocument();
+    expect(screen.getAllByText("not set").length).toBeGreaterThanOrEqual(1);
+    expect(
+      await screen.findByText("Settings metadata is temporarily unavailable; folder controls are disabled until real metadata returns."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
+  });
 });

@@ -22,6 +22,7 @@
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with degrade-open behavior when no compliant target exists
 - [x] richer provider planning and route comparison now score candidate routes before execution, make budget steering explicit, carry per-target live feedback plus production-readiness and capability-gap state into route-comparison metadata around selection, and expose planning-winner versus retained-primary tradeoffs, alternate-route margins, and route-comparison summaries across runtime audit, operator timeline, and activity-ledger surfaces
 - [x] operator control-plane surfaces now also synthesize runtime posture, extension health, continuity summaries, and review receipts alongside usage rollups, so deployment and governance legibility does not require reconstructing team state from raw runtime or audit rows
+- [x] cockpit runtime telemetry now resolves labels from live `/api/runtime/status`, then fresh operator control-plane runtime posture, then retained last-known metadata marked as `STALE`; transient status-poll failures no longer erase local Gemma runtime truth or render `UNKNOWN` when another usable runtime receipt exists
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
@@ -167,6 +168,20 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
 - pretending the runtime is done because the fallback baseline works
 - live-provider eval dependence for every reliability check
 - claiming remote OpenAI API profiles, local Codex, Claude/Anthropic, OpenRouter, local Ollama, or generic OpenAI-compatible endpoints are behaviorally equivalent just because they can be configured behind Seraph controls
+
+## Local Chat Streaming Contract
+
+Direct local Gemma chat over `/ws/chat` streams assistant text with `delta` frames before the final answer. The expected lightweight chat frame order is:
+
+```text
+status -> status -> delta... -> final
+```
+
+The frontend reconciles those deltas into one in-progress assistant message and updates that same message when the `final` frame arrives, so the operator sees text appear progressively without duplicate final bubbles.
+
+The Docker VLM wrapper forwards authenticated OpenAI-compatible `stream: true` chat requests as `text/event-stream` responses while keeping the request inside the same priority queue worker until the stream completes. Wrapper repo `seraph-quest/vlm-screenshot-server` commit `48eb4e3` implemented that SSE forwarding. The 2026-07-02 receipt used the older local Docker wrapper path and proved the streaming contract itself: Seraph received `delta` frames before `final`, with 8 deltas, first delta at 2143 ms, and final at 2209 ms. That local-wrapper topology has since been superseded by the GPU-hosted wrapper at `http://192.168.1.26:8001`; current runtime validation must use the direct HTTP route described in `docs/implementation/18-screenshot-folder-source.md`. Seraph still keeps a defensive non-stream fallback if the wrapper or backend rejects streaming, but that fallback is no longer the expected healthy path.
+
+This token streaming contract currently applies to the direct local chat path used for lightweight conversational turns. Tool-capable smolagents runs still stream operator-visible `step` frames plus `final`; they do not expose raw model token deltas yet because the agent runtime only yields structured steps at this boundary. That remaining deeper token-tap work is tracked separately from VLM queue scheduling and GPU utilization.
 
 ## Acceptance Checklist
 

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from config.settings import settings
+from src.agent.context_window import _count_tokens
+from src.agent.prompt_compaction import local_runtime_prompt_budget
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.audit.repository import audit_repository
 from src.llm_runtime import (
@@ -33,6 +35,17 @@ from src.llm_runtime import (
     _safe_error,
     set_current_llm_request_id,
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_ambient_runtime_profile_preferences():
+    with (
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "local_runtime_paths", ""),
+        patch.object(settings, "seraph_vlm_api_key", ""),
+        patch.object(settings, "local_vlm_api_key", ""),
+    ):
+        yield
 
 
 def test_build_model_kwargs_uses_provider_agnostic_settings():
@@ -234,6 +247,129 @@ def test_built_in_profile_statuses_include_expected_operator_profiles(monkeypatc
     assert all("api_key" not in profile for profile in profiles.values())
 
 
+def test_built_in_local_gemma_profiles_resolve_with_runtime_options(monkeypatch):
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", ""),
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+        profiles = {item["id"]: item for item in provider_profile_statuses()}
+
+    assert "local-gemma-screenshot-fast" in profiles
+    assert "local-gemma-report-thinking" in profiles
+    assert "local-gemma-chat-thinking" in profiles
+    assert profiles["local-gemma-screenshot-fast"]["task_class"] == "screenshot_image_analysis"
+    assert profiles["local-gemma-screenshot-fast"]["options"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert profiles["local-gemma-screenshot-fast"]["context_window_tokens"] == settings.local_runtime_context_window_tokens
+    assert profiles["local-gemma-screenshot-fast"]["prompt_budget_tokens"] >= 0
+    assert profiles["local-gemma-chat-thinking"]["options"]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert profiles["local-gemma-chat-thinking"]["keyless"] is True
+    assert kwargs["model"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert kwargs["chat_template_kwargs"] == {"enable_thinking": True}
+    assert kwargs["reasoning"] is True
+    assert kwargs["metadata"] == {
+        "runtime_profile": "chat_thinking",
+        "runtime_path": "chat_agent",
+        "priority": "interactive",
+    }
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Profile"] == "chat_thinking"
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Path"] == "chat_agent"
+    assert kwargs["extra_headers"]["X-Seraph-Priority"] == "interactive"
+    assert "api_key" not in kwargs
+
+
+def test_built_in_local_gemma_profile_uses_local_key_from_settings(monkeypatch):
+    with (
+        patch.object(settings, "local_model", "openai/local"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+    ):
+        kwargs = build_completion_kwargs(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="chat_agent",
+        )
+        profiles = {item["id"]: item for item in provider_profile_statuses()}
+
+    assert kwargs["api_key"] == "local-secret"
+    assert profiles["local-gemma-chat-thinking"]["keyless"] is False
+    assert profiles["local-gemma-chat-thinking"]["secret_configured"] is True
+
+
+def test_delegated_orchestrator_can_route_to_local_gemma_chat_profile(monkeypatch):
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(settings, "runtime_profile_preferences", "orchestrator_agent=local-gemma-chat-thinking"),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.2,
+            max_tokens=256,
+            runtime_path="orchestrator_agent",
+        )
+
+    assert kwargs["runtime_profile"] == "local-gemma-chat-thinking"
+    assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert kwargs["api_key"] == "local-secret"
+    assert kwargs["metadata"] == {
+        "runtime_profile": "chat_thinking",
+        "runtime_path": "chat_agent",
+        "priority": "interactive",
+    }
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Profile"] == "chat_thinking"
+    assert kwargs["extra_headers"]["X-Seraph-Runtime-Path"] == "chat_agent"
+    assert kwargs["extra_headers"]["X-Seraph-Priority"] == "interactive"
+
+
+def test_all_interactive_paths_can_route_to_local_gemma_chat_profile(monkeypatch):
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "llm_provider_profiles", ""),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            (
+                "chat_agent=local-gemma-chat-thinking;"
+                "onboarding_agent=local-gemma-chat-thinking;"
+                "orchestrator_agent=local-gemma-chat-thinking"
+            ),
+        ),
+    ):
+        routed = {
+            runtime_path: build_model_kwargs(
+                temperature=0.2,
+                max_tokens=256,
+                runtime_path=runtime_path,
+            )
+            for runtime_path in ("chat_agent", "onboarding_agent", "orchestrator_agent")
+        }
+
+    for kwargs in routed.values():
+        assert kwargs["runtime_profile"] == "local-gemma-chat-thinking"
+        assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+        assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+        assert kwargs["api_key"] == "local-secret"
+        assert kwargs["metadata"]["priority"] == "interactive"
+        assert kwargs["extra_headers"]["X-Seraph-Priority"] == "interactive"
+
+
 def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
     from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 
@@ -252,6 +388,8 @@ def test_built_in_claude_anthropic_profile_resolves_with_litellm(monkeypatch):
     assert kwargs["model_id"] == "anthropic/claude-sonnet-4-20250514"
     assert kwargs["runtime_profile"] == "claude-anthropic"
     assert kwargs["api_key"] == "anthropic-secret-key"
+    assert "metadata" not in kwargs
+    assert "extra_headers" not in kwargs
     resolved_model, provider, _, _ = get_llm_provider(model=kwargs["model_id"])
     assert resolved_model == "claude-sonnet-4-20250514"
     assert provider == "anthropic"
@@ -561,6 +699,160 @@ def test_build_model_kwargs_uses_runtime_profile_preferences_for_primary_target(
     assert kwargs["runtime_profile"] == "local"
     assert kwargs["api_key"] == "primary-key"
     assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+def test_build_model_kwargs_routes_strategist_agent_to_local_profile():
+    with (
+        patch.object(settings, "default_model", "openrouter/x-ai/grok-4.1-fast"),
+        patch.object(settings, "llm_api_key", ""),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"),
+        patch.object(settings, "local_llm_api_key", "not-needed"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            "strategist_agent=local-gemma-strategist-fast",
+        ),
+    ):
+        kwargs = build_model_kwargs(
+            temperature=0.4,
+            max_tokens=4096,
+            runtime_path="strategist_agent",
+        )
+
+    assert kwargs["model_id"] == "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+    assert kwargs["runtime_profile"] == "local-gemma-strategist-fast"
+    assert kwargs["api_key"] == "not-needed"
+    assert kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert kwargs["max_tokens"] == 512
+
+
+def test_local_runtime_profiles_clamp_output_contracts_for_all_local_paths():
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(
+            settings,
+            "runtime_profile_preferences",
+            (
+                "chat_agent=local-gemma-chat-thinking;"
+                "onboarding_agent=local-gemma-chat-thinking;"
+                "orchestrator_agent=local-gemma-chat-thinking;"
+                "end_of_day_goal_report=local-gemma-report-thinking;"
+                "screenshot_image_analysis=local-gemma-screenshot-fast"
+            ),
+        ),
+    ):
+        interactive = {
+            path: build_model_kwargs(
+                temperature=0.2,
+                max_tokens=8192,
+                runtime_path=path,
+            )
+            for path in ("chat_agent", "onboarding_agent", "orchestrator_agent")
+        }
+        report = build_completion_kwargs(
+            messages=[{"role": "user", "content": "report"}],
+            temperature=0.2,
+            max_tokens=8192,
+            runtime_path="end_of_day_goal_report",
+        )
+        screenshot = build_completion_kwargs(
+            messages=[{"role": "user", "content": "analyze image"}],
+            temperature=0.0,
+            max_tokens=8192,
+            runtime_path="screenshot_image_analysis",
+        )
+
+    assert {kwargs["runtime_profile"] for kwargs in interactive.values()} == {
+        "local-gemma-chat-thinking"
+    }
+    assert {kwargs["max_tokens"] for kwargs in interactive.values()} == {settings.model_max_tokens}
+    assert report["max_tokens"] == 4096
+    assert screenshot["max_tokens"] == 1400
+
+
+def _oversized_messages() -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": "\n".join("system context " * 20 for _ in range(700))},
+        {"role": "user", "content": "\n".join("older user context " * 20 for _ in range(700))},
+        {"role": "assistant", "content": "\n".join("older assistant context " * 20 for _ in range(700))},
+        {"role": "user", "content": "Current request must survive compaction."},
+    ]
+
+
+def _formatted_message_tokens(messages: list[dict[str, str]]) -> int:
+    return _count_tokens(
+        "\n\n".join(f"{message['role'].capitalize()}: {message['content']}" for message in messages)
+    )
+
+
+def test_fallback_litellm_model_compacts_local_runtime_messages_before_generate():
+    success_response = MagicMock()
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "local_runtime_context_window_tokens", 4096),
+        patch.object(settings, "local_runtime_prompt_safety_ratio", 1.0),
+        patch.object(settings, "local_runtime_tool_reserve_tokens", 512),
+        patch.object(settings, "local_runtime_min_section_tokens", 64),
+        patch("src.agent.prompt_compaction.log_background_task_event_sync") as mock_receipt,
+        patch(
+            "src.llm_runtime.BaseLiteLLMModel.generate",
+            autospec=True,
+            return_value=success_response,
+        ) as mock_generate,
+    ):
+        model = FallbackLiteLLMModel(**build_model_kwargs(
+            temperature=0.2,
+            max_tokens=512,
+            runtime_path="chat_agent",
+        ))
+        result = model.generate(_oversized_messages())
+
+    sent_messages = mock_generate.call_args.args[1]
+    assert result is success_response
+    assert _formatted_message_tokens(sent_messages) <= local_runtime_prompt_budget(
+        reserved_output_tokens=512
+    )
+    assert sent_messages[-1]["content"] == "Current request must survive compaction."
+    assert any("compacted for local model context budget" in item["content"] for item in sent_messages)
+    mock_receipt.assert_called_once()
+
+
+def test_completion_with_fallback_sync_compacts_local_runtime_messages_before_litellm():
+    success_response = MagicMock()
+    with (
+        patch.object(settings, "local_model", "openai/unsloth/gemma-local"),
+        patch.object(settings, "local_llm_api_key", "local-secret"),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch.object(settings, "runtime_profile_preferences", "chat_agent=local-gemma-chat-thinking"),
+        patch.object(settings, "local_runtime_context_window_tokens", 4096),
+        patch.object(settings, "local_runtime_prompt_safety_ratio", 1.0),
+        patch.object(settings, "local_runtime_tool_reserve_tokens", 512),
+        patch.object(settings, "local_runtime_min_section_tokens", 64),
+        patch("src.agent.prompt_compaction.log_background_task_event_sync") as mock_receipt,
+        patch("litellm.completion", return_value=success_response) as mock_completion,
+    ):
+        result = completion_with_fallback_sync(
+            messages=_oversized_messages(),
+            temperature=0.2,
+            max_tokens=512,
+            runtime_path="chat_agent",
+        )
+
+    sent_messages = mock_completion.call_args.kwargs["messages"]
+    assert result is success_response
+    assert _formatted_message_tokens(sent_messages) <= local_runtime_prompt_budget(
+        reserved_output_tokens=512
+    )
+    assert sent_messages[-1]["content"] == "Current request must survive compaction."
+    assert any("compacted for local model context budget" in item["content"] for item in sent_messages)
+    mock_receipt.assert_called_once()
 
 
 def test_build_model_kwargs_uses_runtime_profile_preference_glob():
@@ -1321,6 +1613,36 @@ def test_completion_with_fallback_sync_keeps_remote_fallback_base_for_local_runt
     assert mock_completion.call_args_list[1].kwargs["model"] == "openai/gpt-4o-mini"
     assert mock_completion.call_args_list[1].kwargs["api_key"] == "primary-key"
     assert mock_completion.call_args_list[1].kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+
+def test_completion_with_fallback_sync_local_runtime_only_blocks_remote_fallback():
+    with (
+        patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
+        patch.object(settings, "local_model", "ollama/llama3.2"),
+        patch.object(settings, "local_llm_api_key", "local-key"),
+        patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "local_runtime_paths", "screenshot_observation_digest"),
+        patch.object(settings, "fallback_model", ""),
+        patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+        patch.object(settings, "fallback_llm_api_key", ""),
+        patch.object(settings, "fallback_llm_api_base", ""),
+        patch("litellm.completion", side_effect=RuntimeError("local down")) as mock_completion,
+    ):
+        with pytest.raises(RuntimeError, match="local down"):
+            completion_with_fallback_sync(
+                messages=[{"role": "user", "content": "private screenshot summary"}],
+                temperature=0.2,
+                max_tokens=256,
+                runtime_path="screenshot_observation_digest",
+                local_runtime_only=True,
+            )
+
+    assert mock_completion.call_count == 1
+    assert mock_completion.call_args.kwargs["model"] == "ollama/llama3.2"
+    assert mock_completion.call_args.kwargs["api_key"] == "local-key"
+    assert mock_completion.call_args.kwargs["api_base"] == "http://localhost:11434/v1"
 
 
 def test_fallback_litellm_model_keeps_remote_fallback_base_for_local_runtime_path():

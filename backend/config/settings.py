@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     model_max_tokens: int = 4096
     agent_max_steps: int = 10
     debug: bool = False
+    database_echo: bool = False
     workspace_dir: str = "/app/data"
 
     # Phase 1 — Soul & Memory
@@ -60,6 +61,10 @@ class Settings(BaseSettings):
     context_window_token_budget: int = 12000  # max tokens for conversation history
     context_window_keep_first: int = 2        # always keep first N messages
     context_window_keep_recent: int = 20      # always keep last N messages
+    local_runtime_context_window_tokens: int = 32768  # configured ctx-size for local Gemma-compatible backends
+    local_runtime_prompt_safety_ratio: float = 0.9    # keep prompt+output below ctx to leave tokenizer/server margin
+    local_runtime_tool_reserve_tokens: int = 14000    # reserve for smolagents tool schemas and step traces
+    local_runtime_min_section_tokens: int = 256       # minimum retained text budget per compacted section
 
     # Phase 2 — Capable Executor
     sandbox_url: str = "http://sandbox:8060"
@@ -70,6 +75,7 @@ class Settings(BaseSettings):
 
     # Phase 3.5 — Timeouts
     agent_chat_timeout: int = 120    # seconds
+    guardian_state_timeout_seconds: int = 5
     agent_strategist_timeout: int = 60  # seconds
     agent_briefing_timeout: int = 60  # daily briefing + evening review LiteLLM calls
     consolidation_llm_timeout: int = 30  # memory consolidation LiteLLM call
@@ -95,9 +101,6 @@ class Settings(BaseSettings):
     observer_git_repo_path: str = ""
     deep_work_apps: str = ""  # comma-separated extra app keywords for deep work detection
 
-    # Capture mode
-    default_capture_mode: str = "on_switch"  # on_switch | balanced | detailed
-
     # Screen Activity Tracking
     activity_digest_hour: int = 20                    # 8 PM daily digest
     weekly_review_hour: int = 18                      # 6 PM Sunday weekly review
@@ -108,12 +111,32 @@ class Settings(BaseSettings):
     screen_capture_archive_retention_days: int = 365
     screen_capture_archive_max_mb: int = 0
     screenshot_folder_ingest_enabled: bool = True
-    screenshot_folder_ingest_interval_min: int = 5
+    screenshot_folder_ingest_interval_min: int = 1
     screenshot_folder_ingest_limit: int = 100
+    screenshot_folder_analysis_interval_seconds: int = 1
+    screenshot_folder_analysis_limit: int = 100
+    screenshot_folder_analysis_concurrency: int = 2
+    screenshot_folder_analysis_job_timeout_seconds: int = 30
+    screenshot_observation_digest_enabled: bool = True
+    screenshot_observation_digest_interval_min: int = 15
+    screenshot_observation_digest_window_min: int = 30
+    screenshot_observation_digest_max_chars: int = 6000
+    screen_derived_llm_allow_remote: bool = False
+    screen_derived_llm_require_profile_proof: bool = True
+    screen_analysis_provider: str = ""  # local-vlm enables semantic screenshot analysis
+    seraph_vlm_mode: str = ""  # gpu-server, mac-wrapper, or empty for legacy local VLM config
+    seraph_vlm_base_url: str = ""  # wrapper base URL, e.g. http://192.168.1.26:8001
+    seraph_vlm_backend_url: str = ""  # model backend behind the wrapper, e.g. http://192.168.1.26:8000/v1
+    seraph_vlm_api_key: str = ""
+    seraph_vlm_feeder_window: int = 2  # active + queued jobs Seraph may keep in the one-GPU wrapper
+    local_vlm_base_url: str = ""
+    local_vlm_model: str = ""
+    local_vlm_api_key: str = ""
+    local_vlm_timeout_seconds: int = 120
     report_archive_dir: str = ""
     end_of_day_report_enabled: bool = True
     end_of_day_report_hour: int = 21
-    end_of_day_report_llm_enabled: bool = False
+    end_of_day_report_llm_enabled: bool = True
     email_reports_enabled: bool = False
     email_reports_preview_required: bool = True
     email_reports_to: str = ""
@@ -125,6 +148,9 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_use_tls: bool = True
+    resend_api_key: str = ""
+    resend_api_url: str = "https://api.resend.com/emails"
+    resend_template_id: str = ""
 
     # Vault
     vault_encryption_key: str = ""  # Fernet key; auto-generates key file when empty

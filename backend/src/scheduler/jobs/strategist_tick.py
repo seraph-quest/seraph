@@ -1,13 +1,11 @@
 """Strategist tick — periodic strategic reasoning via restricted agent."""
 
 import asyncio
-import contextvars
 import logging
 from time import perf_counter
 
-from src.approval.runtime import reset_runtime_context, set_runtime_context
 from config.settings import settings
-from src.agent.strategist import create_strategist_agent, parse_strategist_response
+from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
 from src.audit.runtime import log_scheduler_job_event
 from src.guardian.state import build_guardian_state
 from src.llm_runtime import (
@@ -20,7 +18,6 @@ from src.llm_runtime import (
 from src.models.schemas import WSResponse
 
 logger = logging.getLogger(__name__)
-_STRATEGIST_RUNTIME_SESSION_ID = "scheduler:strategist_tick"
 
 
 def _delivery_value(result) -> str | None:
@@ -40,26 +37,18 @@ def _policy_action_value(result) -> str | None:
 async def run_strategist_tick() -> None:
     """Review context and decide if proactive intervention is warranted."""
     started_at = perf_counter()
+    llm_request_id: str | None = None
     try:
         guardian_state = await build_guardian_state(
             refresh_observer=True,
             memory_query="current priorities, commitments, and recent intervention patterns",
         )
-        agent = create_strategist_agent(guardian_state=guardian_state)
         llm_request_id = f"strategist_tick:{started_at}"
         _register_request(llm_request_id)
-        runtime_tokens = set_runtime_context(_STRATEGIST_RUNTIME_SESSION_ID, "high_risk")
         llm_request_token = set_current_llm_request_id(llm_request_id)
-        run_ctx = contextvars.copy_context()
-        reset_runtime_context(runtime_tokens)
         reset_current_llm_request_id(llm_request_token)
-        raw = await asyncio.wait_for(
-            asyncio.to_thread(
-                run_ctx.run,
-                agent.run,
-                "Analyze the current context and decide whether to intervene.",
-            ),
-            timeout=settings.agent_strategist_timeout,
+        raw = await run_strategist_decision_completion(
+            guardian_state=guardian_state,
         )
 
         decision = parse_strategist_response(str(raw))
@@ -111,7 +100,7 @@ async def run_strategist_tick() -> None:
         )
 
     except asyncio.TimeoutError:
-        if "llm_request_id" in locals():
+        if llm_request_id is not None:
             _mark_request_timed_out(llm_request_id)
         await log_scheduler_job_event(
             job_name="strategist_tick",
@@ -135,5 +124,5 @@ async def run_strategist_tick() -> None:
         )
         logger.exception("strategist_tick failed")
     finally:
-        if "llm_request_id" in locals():
+        if llm_request_id is not None:
             _finish_request(llm_request_id)

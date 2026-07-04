@@ -114,6 +114,7 @@ describe("cockpit overlays", () => {
     expect(await screen.findByText("Settings")).toBeInTheDocument();
     expect(container.querySelector(".cockpit-modal-card")).not.toBeNull();
     expect(container.querySelector(".rpg-frame")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
     expect(screen.getByRole("group", { name: "Theme preference" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "light" })).toBeInTheDocument();
 
@@ -138,6 +139,7 @@ describe("cockpit overlays", () => {
     useChatStore.setState({ settingsPanelOpen: true, themePreference: "system" });
     render(<SettingsPanel />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "General" }));
     const lightButton = await screen.findByRole("button", { name: "light" });
     fireEvent.click(lightButton);
 

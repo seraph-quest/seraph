@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from time import perf_counter
 
@@ -10,20 +11,33 @@ from src.audit.runtime import log_scheduler_job_event
 from src.observer.screenshot_folder_source import resolve_screenshot_folder, scan_screenshot_folder
 
 logger = logging.getLogger(__name__)
+_INGEST_LOCK = asyncio.Lock()
+_MAX_SCHEDULED_SCAN_LIMIT = 1000
 
 
 def _clamped_limit() -> int:
     try:
         limit = int(settings.screenshot_folder_ingest_limit)
     except (TypeError, ValueError):
-        return 100
-    return max(1, min(limit, 1000))
+        limit = 100
+    return max(1, min(limit, _MAX_SCHEDULED_SCAN_LIMIT))
 
 
 async def run_screenshot_folder_ingest() -> None:
     """Scan the configured screenshot folder for new image files."""
     started_at = perf_counter()
     root = resolve_screenshot_folder()
+    if _INGEST_LOCK.locked():
+        await log_scheduler_job_event(
+            job_name="screenshot_folder_ingest",
+            outcome="skipped",
+            details={
+                "duration_ms": int((perf_counter() - started_at) * 1000),
+                "reason": "scan_already_running",
+                "screenshot_folder": str(root),
+            },
+        )
+        return
     if not settings.screenshot_folder_ingest_enabled:
         await log_scheduler_job_event(
             job_name="screenshot_folder_ingest",
@@ -49,31 +63,8 @@ async def run_screenshot_folder_ingest() -> None:
         return
 
     try:
-        result = await scan_screenshot_folder(root, limit=_clamped_limit())
-        outcome = "succeeded"
-        if result.rejected:
-            outcome = "degraded"
-        elif result.ingested == 0:
-            outcome = "skipped"
-        await log_scheduler_job_event(
-            job_name="screenshot_folder_ingest",
-            outcome=outcome,
-            details={
-                "duration_ms": int((perf_counter() - started_at) * 1000),
-                "screenshot_folder": str(root),
-                "scanned": result.scanned,
-                "ingested": result.ingested,
-                "skipped_duplicates": result.skipped_duplicates,
-                "rejected_count": len(result.rejected),
-            },
-        )
-        logger.info(
-            "screenshot_folder_ingest: scanned=%d ingested=%d duplicates=%d rejected=%d",
-            result.scanned,
-            result.ingested,
-            result.skipped_duplicates,
-            len(result.rejected),
-        )
+        async with _INGEST_LOCK:
+            result = await scan_screenshot_folder(root, limit=_clamped_limit())
     except Exception as exc:
         await log_scheduler_job_event(
             job_name="screenshot_folder_ingest",
@@ -85,3 +76,29 @@ async def run_screenshot_folder_ingest() -> None:
             },
         )
         logger.exception("screenshot_folder_ingest failed")
+        return
+
+    outcome = "succeeded"
+    if result.rejected:
+        outcome = "degraded"
+    elif result.ingested == 0:
+        outcome = "skipped"
+    await log_scheduler_job_event(
+        job_name="screenshot_folder_ingest",
+        outcome=outcome,
+        details={
+            "duration_ms": int((perf_counter() - started_at) * 1000),
+            "screenshot_folder": str(root),
+            "scanned": result.scanned,
+            "ingested": result.ingested,
+            "skipped_duplicates": result.skipped_duplicates,
+            "rejected_count": len(result.rejected),
+        },
+    )
+    logger.info(
+        "screenshot_folder_ingest: scanned=%d ingested=%d duplicates=%d rejected=%d",
+        result.scanned,
+        result.ingested,
+        result.skipped_duplicates,
+        len(result.rejected),
+    )

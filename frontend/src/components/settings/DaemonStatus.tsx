@@ -3,10 +3,19 @@ import { API_URL } from "../../config/constants";
 
 interface DaemonStatusData {
   connected: boolean;
+  daemon_alive?: boolean;
   last_post: number | null;
   active_window: string | null;
   has_screen_context: boolean;
-  capture_mode: "on_switch" | "balanced" | "detailed";
+  capture_mode?: string | null;
+  daemon_state?: string | null;
+  daemon_status_updated_at?: string | null;
+  screen_analysis?: string | null;
+  capture_ready?: boolean;
+  last_error?: string | null;
+  last_error_kind?: string | null;
+  status_reason?: string | null;
+  recovery_hint?: string | null;
   pending_notification_count: number;
   last_native_notification_at: string | null;
   last_native_notification_title: string | null;
@@ -177,23 +186,44 @@ export function DaemonStatus() {
   }
 
   const connected = status?.connected ?? false;
-  const dotColor = connected ? "bg-green-400" : "bg-retro-text/30";
+  const isConfiguredOff = status?.last_error_kind === "configured_off" || status?.daemon_state === "disabled";
+  const isPermissionBlocked = status?.last_error_kind === "automation_permission_denied";
+  const needsRecovery = !connected && Boolean(status?.recovery_hint || status?.status_reason || status?.last_error);
+  const dotColor = connected
+    ? "bg-green-400"
+    : isConfiguredOff
+      ? "bg-retro-text/30"
+      : isPermissionBlocked
+        ? "bg-yellow-400"
+        : "bg-retro-text/30";
   const activeWindow = status?.active_window;
   const pendingCount = status?.pending_notification_count ?? 0;
-  const captureMode = status?.capture_mode ?? "on_switch";
   const lastNativeOutcome = status?.last_native_notification_outcome;
   const lastNativeTitle = status?.last_native_notification_title;
-
   const displayWindow =
     activeWindow && activeWindow.length > 40
       ? activeWindow.slice(0, 37) + "..."
       : activeWindow;
-  const captureLabel =
-    captureMode === "on_switch"
-      ? "On Switch"
-      : captureMode === "balanced"
-        ? "Balanced"
-        : "Detailed";
+  const presenceLabel = connected
+    ? "Linked"
+    : isConfiguredOff
+      ? "Disabled"
+      : isPermissionBlocked
+        ? "Permission"
+        : status?.daemon_alive
+          ? "Daemon alive"
+          : "Offline";
+  const headline = connected
+    ? "Desktop link live"
+    : isConfiguredOff
+      ? "Daemon disabled"
+      : isPermissionBlocked
+        ? "Automation permission needed"
+        : status?.daemon_alive
+          ? "Daemon alive, awaiting context"
+          : "Daemon offline";
+  const statusDetail =
+    status?.status_reason ?? (isPermissionBlocked ? status?.last_error : null) ?? displayWindow ?? "No active window yet";
   const lastNativeLabel =
     lastNativeOutcome === "queued"
       ? "Queued for desktop delivery"
@@ -215,10 +245,10 @@ export function DaemonStatus() {
           <div className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
           <div className="flex-1 min-w-0">
             <div className="text-[10px] text-retro-text">
-              {connected ? "Desktop link live" : "Daemon offline"}
+              {headline}
             </div>
             <div className="text-[9px] text-retro-text/40 truncate">
-              {displayWindow ?? "No active window yet"}
+              {statusDetail}
             </div>
           </div>
           {connected && status?.has_screen_context && (
@@ -228,14 +258,24 @@ export function DaemonStatus() {
 
         <div className="grid grid-cols-2 gap-2 text-[9px] text-retro-text/50 uppercase tracking-wider">
           <div>
-            <div className="text-retro-text/30">Capture</div>
-            <div className="text-retro-text">{captureLabel}</div>
+            <div className="text-retro-text/30">Presence</div>
+            <div className="text-retro-text">{presenceLabel}</div>
           </div>
           <div>
             <div className="text-retro-text/30">Pending</div>
             <div className="text-retro-text">{pendingCount}</div>
           </div>
         </div>
+
+        {needsRecovery && (
+          <div className="border border-retro-text/10 rounded px-2 py-1 text-[9px] text-retro-text/50">
+            <div className="text-retro-text/30 uppercase tracking-wider mb-0.5">Recovery</div>
+            {status?.last_error && !isConfiguredOff && (
+              <div className="text-retro-text/40 mb-1 truncate">{status.last_error}</div>
+            )}
+            <div className="text-retro-text">{status?.recovery_hint ?? status?.status_reason}</div>
+          </div>
+        )}
 
         <div className="text-[9px] text-retro-text/50">
           <div className="text-retro-text/30 uppercase tracking-wider mb-0.5">Last native event</div>

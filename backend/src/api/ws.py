@@ -13,6 +13,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.agent.exceptions import ClarificationRequired
+from src.agent.direct_chat import run_direct_local_chat, should_use_direct_local_chat, stream_direct_local_chat
 from src.agent.factory import build_agent
 from src.agent.onboarding import create_onboarding_agent
 from src.agent.session import session_manager
@@ -31,7 +32,8 @@ from src.operators.local_codex import (
 )
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
-from src.vault.redaction import redact_secrets_in_text
+from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
+from src.vlm_runtime import direct_local_chat_route_error
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -46,6 +48,10 @@ router = APIRouter()
 
 
 _DONE = object()  # sentinel for queue completion
+_INTERRUPTED_TURN_MESSAGE = (
+    "Response interrupted because the browser connection closed before Seraph could finish. "
+    "Please send that turn again."
+)
 
 
 def _format_tool_step(step_name: str, arguments: dict, specialist_names: set[str]) -> str:
@@ -74,10 +80,20 @@ async def _build_agent(session_id: str, message: str):
     if not profile.onboarding_completed:
         return create_onboarding_agent(message), True, set()
 
-    guardian_state = await build_guardian_state(
-        session_id=session_id,
-        user_message=message,
-    )
+    try:
+        guardian_state = await asyncio.wait_for(
+            build_guardian_state(
+                session_id=session_id,
+                user_message=message,
+            ),
+            timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
+        )
+    except Exception:
+        logger.warning(
+            "Guardian state unavailable for websocket chat; continuing with minimal agent context",
+            exc_info=True,
+        )
+        return build_agent(), False, set()
     agent = build_agent(guardian_state=guardian_state)
     specialist_names = (
         set(agent.managed_agents.keys())
@@ -93,11 +109,21 @@ async def websocket_chat(websocket: WebSocket):
     await websocket.accept()
     ws_manager.connect(websocket)
     _seq = 0
+    active_turn_session_id: str | None = None
+    active_turn_completed = True
 
     def _next_seq() -> int:
         nonlocal _seq
         _seq += 1
         return _seq
+
+    async def _record_interrupted_turn() -> None:
+        nonlocal active_turn_completed
+        if active_turn_completed or not active_turn_session_id:
+            return
+        active_turn_completed = True
+        with suppress(Exception):
+            await session_manager.add_message(active_turn_session_id, "assistant", _INTERRUPTED_TURN_MESSAGE)
 
     # Send welcome message if user hasn't completed onboarding
     try:
@@ -155,6 +181,16 @@ async def websocket_chat(websocket: WebSocket):
             session = await session_manager.get_or_create(ws_msg.session_id)
             if ws_msg.type != "resume_message":
                 await session_manager.add_message(session.id, "user", ws_msg.message)
+            active_turn_session_id = session.id
+            active_turn_completed = False
+            await websocket.send_text(
+                WSResponse(
+                    type="status",
+                    content="Seraph received the message.",
+                    session_id=session.id,
+                    seq=_next_seq(),
+                ).model_dump_json()
+            )
             try:
                 from src.observer.manager import context_manager
                 context_manager.update_last_interaction()
@@ -195,6 +231,7 @@ async def websocket_chat(websocket: WebSocket):
                             "runtime": "codex-local",
                         },
                     )
+                    active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
@@ -219,6 +256,7 @@ async def websocket_chat(websocket: WebSocket):
                             "runtime": "codex-local",
                         },
                     )
+                    active_turn_completed = True
                     await websocket.send_text(
                         WSResponse(
                             type="error",
@@ -230,6 +268,7 @@ async def websocket_chat(websocket: WebSocket):
                     continue
 
                 await session_manager.add_message(session.id, "assistant", final_result)
+                active_turn_completed = True
                 await log_agent_run_event(
                     session_id=session.id,
                     transport="websocket",
@@ -253,7 +292,205 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 continue
 
+            profile = await get_or_create_profile()
+            direct_is_onboarding = not profile.onboarding_completed
+            direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
+            if should_use_direct_local_chat(
+                ws_msg.message,
+                runtime_path=direct_runtime_path,
+                is_onboarding=direct_is_onboarding,
+            ):
+                started_at = perf_counter()
+                route_error = await direct_local_chat_route_error()
+                if route_error:
+                    safe_error = await redact_secrets_in_text(route_error)
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="failed",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "runtime": "direct-local-chat",
+                            "failure_stage": "route_preflight",
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=safe_error,
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                llm_request_id = f"direct-ws:{session.id}:{started_at}"
+                _register_request(llm_request_id)
+                try:
+                    await websocket.send_text(
+                        WSResponse(
+                            type="status",
+                            content="Seraph is using the local chat runtime.",
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    streamed_parts: list[str] = []
+                    emitted_safe_chars = 0
+
+                    async def _stream_direct_reply() -> str:
+                        nonlocal emitted_safe_chars
+                        async for delta in stream_direct_local_chat(
+                            ws_msg.message,
+                            runtime_path=direct_runtime_path,
+                            is_onboarding=direct_is_onboarding,
+                        ):
+                            streamed_parts.append(delta)
+                            safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
+                                "".join(streamed_parts),
+                                emitted_safe_chars,
+                            )
+                            if safe_delta:
+                                await websocket.send_text(
+                                    WSResponse(
+                                        type="delta",
+                                        content=safe_delta,
+                                        session_id=session.id,
+                                        seq=_next_seq(),
+                                    ).model_dump_json()
+                                )
+                        return "".join(streamed_parts).strip()
+
+                    try:
+                        final_result = await asyncio.wait_for(
+                            _stream_direct_reply(),
+                            timeout=min(settings.agent_chat_timeout, 60),
+                        )
+                    except Exception:
+                        if streamed_parts:
+                            raise
+                        logger.warning("Direct local websocket streaming unavailable; falling back to non-streaming chat")
+                        await websocket.send_text(
+                            WSResponse(
+                                type="status",
+                                content="Local streaming is unavailable; Seraph is falling back to the local chat runtime.",
+                                session_id=session.id,
+                                seq=_next_seq(),
+                            ).model_dump_json()
+                        )
+                        final_result = ""
+
+                    if not final_result:
+                        final_result = await run_direct_local_chat(
+                            ws_msg.message,
+                            runtime_path=direct_runtime_path,
+                            is_onboarding=direct_is_onboarding,
+                            request_id=llm_request_id,
+                        )
+                    final_result = await redact_secrets_in_text(final_result, fail_closed=True)
+                except asyncio.TimeoutError:
+                    _mark_request_timed_out(llm_request_id)
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="timed_out",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "timeout_seconds": min(settings.agent_chat_timeout, 60),
+                            "request_id": llm_request_id,
+                            "runtime": "direct-local-chat",
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content="Local chat timed out — try again",
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                except Exception as e:
+                    logger.exception("Direct local websocket chat failed")
+                    safe_error = await redact_secrets_in_text(f"Agent error: {e}")
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="failed",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "request_id": llm_request_id,
+                            "runtime": "direct-local-chat",
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=safe_error,
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+                finally:
+                    _finish_request(llm_request_id)
+
+                await session_manager.add_message(session.id, "assistant", final_result)
+                active_turn_completed = True
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=direct_is_onboarding,
+                    outcome="succeeded",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(ws_msg.message),
+                        "response_length": len(final_result),
+                        "request_id": llm_request_id,
+                        "runtime": "direct-local-chat",
+                    },
+                )
+                await websocket.send_text(
+                    WSResponse(
+                        type="final",
+                        content=final_result,
+                        session_id=session.id,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+
+            await websocket.send_text(
+                WSResponse(
+                    type="status",
+                    content="Seraph is preparing the agent context.",
+                    session_id=session.id,
+                    seq=_next_seq(),
+                ).model_dump_json()
+            )
             agent, is_onboarding, specialist_names = await _build_agent(session.id, ws_msg.message)
+            await websocket.send_text(
+                WSResponse(
+                    type="status",
+                    content="Seraph is running the local model.",
+                    session_id=session.id,
+                    seq=_next_seq(),
+                ).model_dump_json()
+            )
 
             step_num = 0
             final_result = ""
@@ -363,6 +600,7 @@ async def websocket_chat(websocket: WebSocket):
                     policy_mode=get_current_tool_policy_mode(),
                     summary=exc.summary,
                 )
+                active_turn_completed = True
                 await websocket.send_text(
                     WSResponse(
                         type="approval_required",
@@ -391,6 +629,7 @@ async def websocket_chat(websocket: WebSocket):
                         "options": exc.options,
                     }),
                 )
+                active_turn_completed = True
                 await audit_repository.log_event(
                     session_id=session.id,
                     actor="agent",
@@ -435,6 +674,7 @@ async def websocket_chat(websocket: WebSocket):
                         "request_id": llm_request_id,
                     },
                 )
+                active_turn_completed = True
                 await websocket.send_text(
                     WSResponse(
                         type="error",
@@ -449,6 +689,7 @@ async def websocket_chat(websocket: WebSocket):
                     _finish_request(llm_request_id)
 
             await session_manager.add_message(session.id, "assistant", final_result)
+            active_turn_completed = True
             if run_outcome == "succeeded":
                 await log_agent_run_event(
                     session_id=session.id,
@@ -494,11 +735,13 @@ async def websocket_chat(websocket: WebSocket):
                     logger.debug("Failed to schedule memory consolidation", exc_info=True)
 
     except WebSocketDisconnect:
+        await _record_interrupted_turn()
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")
     except RuntimeError as exc:
         ws_manager.disconnect(websocket)
         if "WebSocket is not connected" in str(exc):
+            await _record_interrupted_turn()
             logger.info("WebSocket client disconnected before next receive")
             return
         raise

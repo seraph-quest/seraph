@@ -65,6 +65,13 @@ interface RuntimeStatus {
   llm_logging_enabled?: boolean;
 }
 
+type RuntimeReceiptSource = "runtime_status" | "operator_posture" | "retained";
+
+interface RuntimeReceipt {
+  status: RuntimeStatus;
+  source: RuntimeReceiptSource;
+}
+
 interface OperatorControlPlaneRole {
   id: string;
   label: string;
@@ -1266,7 +1273,6 @@ interface PendingApproval {
 interface DaemonPresenceState {
   connected: boolean;
   pending_notification_count: number;
-  capture_mode: string;
   last_native_notification_outcome?: string | null;
 }
 
@@ -1894,7 +1900,25 @@ interface BrowserSessionControlInfo {
   latest_summary?: string | null;
   latest_artifact_provenance?: BrowserSessionArtifactProvenance | null;
   control_events: Array<Record<string, unknown>>;
+  journal_entry_count: number;
+  journal_schema?: string | null;
   updated_at: string;
+}
+
+interface BrowserSessionJournalEntry {
+  entry_id: string;
+  recorded_at: string;
+  action: string;
+  status: string;
+  session_id: string;
+  redaction: {
+    metadata_only?: boolean;
+    raw_dom_stored?: boolean;
+    screenshot_stored?: boolean;
+    secret_values_stored?: boolean;
+    credential_values_stored?: boolean;
+    private_page_content_stored?: boolean;
+  };
 }
 
 interface ExtensionConnectorSummary {
@@ -6573,15 +6597,83 @@ function normalizeBrowserSessions(payload: unknown): BrowserSessionControlInfo[]
       control_events: Array.isArray(record.control_events)
         ? record.control_events.filter((item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item))
         : [],
+      journal_entry_count: typeof record.journal_entry_count === "number" ? record.journal_entry_count : 0,
+      journal_schema: typeof record.journal_schema === "string" ? record.journal_schema : null,
       updated_at: typeof record.updated_at === "string" ? record.updated_at : "",
     }];
   });
 }
 
+function normalizeBrowserJournal(payload: unknown): BrowserSessionJournalEntry[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const journalValue = (payload as Record<string, unknown>).journal;
+  if (!Array.isArray(journalValue)) return [];
+  return journalValue.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const session = record.session && typeof record.session === "object" && !Array.isArray(record.session)
+      ? record.session as Record<string, unknown>
+      : {};
+    const redaction = record.redaction && typeof record.redaction === "object" && !Array.isArray(record.redaction)
+      ? record.redaction as BrowserSessionJournalEntry["redaction"]
+      : {};
+    return [{
+      entry_id: typeof record.entry_id === "string" ? record.entry_id : `${String(session.session_id ?? "browser")}:${String(record.recorded_at ?? "")}`,
+      recorded_at: typeof record.recorded_at === "string" ? record.recorded_at : "",
+      action: typeof record.action === "string" ? record.action : "unknown",
+      status: typeof record.status === "string" ? record.status : "unknown",
+      session_id: typeof session.session_id === "string" ? session.session_id : "",
+      redaction,
+    }];
+  });
+}
+
+const RUNTIME_RECEIPT_STORAGE_KEY = "seraph.cockpit.runtimeReceipt.v1";
+
+function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+  const model = typeof record.model === "string" ? record.model.trim() : "";
+  const modelLabel = typeof record.model_label === "string" ? record.model_label.trim() : "";
+  if (!provider || (!model && !modelLabel)) return null;
+  return {
+    version: typeof record.version === "string" ? record.version : "",
+    build_id: typeof record.build_id === "string" ? record.build_id : SERAPH_BUILD_ID,
+    provider,
+    model: model || modelLabel,
+    model_label: modelLabel || model,
+    api_base: typeof record.api_base === "string" ? record.api_base : undefined,
+    timezone: typeof record.timezone === "string" ? record.timezone : undefined,
+    llm_logging_enabled: typeof record.llm_logging_enabled === "boolean" ? record.llm_logging_enabled : undefined,
+  };
+}
+
+function loadStoredRuntimeReceipt(): RuntimeReceipt | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(RUNTIME_RECEIPT_STORAGE_KEY);
+    if (!value) return null;
+    const status = normalizeRuntimeStatus(JSON.parse(value));
+    return status ? { status, source: "retained" } : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeRuntimeReceipt(status: RuntimeStatus) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(RUNTIME_RECEIPT_STORAGE_KEY, JSON.stringify(status));
+  } catch {
+    // Best-effort retention only; cockpit runtime truth still comes from live APIs.
+  }
+}
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeReceipt, setRuntimeReceipt] = useState<RuntimeReceipt | null>(() => loadStoredRuntimeReceipt());
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -6629,8 +6721,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorContinuityGraph, setOperatorContinuityGraph] = useState<OperatorContinuityGraph | null>(null);
   const [browserProviders, setBrowserProviders] = useState<BrowserProviderControlInfo[]>([]);
   const [browserSessions, setBrowserSessions] = useState<BrowserSessionControlInfo[]>([]);
+  const [browserJournal, setBrowserJournal] = useState<BrowserSessionJournalEntry[]>([]);
+  const [browserWorkbenchUrl, setBrowserWorkbenchUrl] = useState("");
+  const [browserWorkbenchProvider, setBrowserWorkbenchProvider] = useState("");
+  const [browserWorkbenchCapture, setBrowserWorkbenchCapture] = useState<"extract" | "html" | "screenshot">("extract");
   const [activityFilter, setActivityFilter] = useState<ActivityLedgerFilter>("all");
   const activityLedgerScopeRef = useRef<string>("");
+  const cockpitRefreshInFlightRef = useRef(false);
   const [toolPolicyMode, setToolPolicyMode] = useState<ToolPolicyMode | "unknown">("unknown");
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
@@ -6778,6 +6875,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
 
   const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
+    type FetchResult = { ok: boolean; payload: unknown | null };
     const fetchJson = async (url: string, timeoutMs = 5000) => {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -6797,7 +6895,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         window.clearTimeout(timeout);
       }
     };
-
+    const fetchWithConcurrency = async (
+      requests: Array<() => Promise<FetchResult>>,
+      concurrency = 4,
+    ): Promise<FetchResult[]> => {
+      const results: FetchResult[] = new Array(requests.length);
+      let nextIndex = 0;
+      const workers = Array.from({ length: Math.min(concurrency, requests.length) }, async () => {
+        while (!isCancelled()) {
+          const index = nextIndex;
+          nextIndex += 1;
+          if (index >= requests.length) return;
+          results[index] = await requests[index]();
+        }
+      });
+      await Promise.all(workers);
+      return results.map((result) => result ?? { ok: false, payload: null });
+    };
     const [
       runtimeStatusResult,
       observerResult,
@@ -6826,41 +6940,54 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       toolModeResult,
       mcpModeResult,
       approvalModeResult,
-    ] = await Promise.all([
-      fetchJson(`${API_URL}/api/runtime/status`),
-      fetchJson(`${API_URL}/api/observer/state`),
-      fetchJson(`${API_URL}/api/audit/events?limit=12`),
-      fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
-      fetchJson(`${API_URL}/api/observer/continuity`),
-      fetchJson(`${API_URL}/api/capabilities/overview`),
-      fetchJson(`${API_URL}/api/extensions`),
-      fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/control-plane`),
-      fetchJson(`${API_URL}/api/operator/benchmark-proof`),
-      fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
-      fetchJson(`${API_URL}/api/operator/background-sessions`),
-      fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
-      fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
-      fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
-      fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
-      fetchJson(`${API_URL}/api/browser/providers`),
-      sessionId
+    ] = await fetchWithConcurrency([
+      () => fetchJson(`${API_URL}/api/runtime/status`),
+      () => fetchJson(`${API_URL}/api/observer/state`),
+      () => fetchJson(`${API_URL}/api/audit/events?limit=12`),
+      () => fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
+      () => fetchJson(`${API_URL}/api/observer/continuity`),
+      () => fetchJson(`${API_URL}/api/capabilities/overview`),
+      () => fetchJson(`${API_URL}/api/extensions`),
+      () => fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/control-plane`),
+      () => fetchJson(`${API_URL}/api/operator/benchmark-proof`),
+      () => fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
+      () => fetchJson(`${API_URL}/api/operator/background-sessions`),
+      () => fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
+      () => fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
+      () => fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
+      () => fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
+      () => fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
+      () => fetchJson(`${API_URL}/api/browser/providers`),
+      () => sessionId
         ? fetchJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`)
         : Promise.resolve({ ok: true, payload: { sessions: [] } }),
-      fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
-      fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
-      fetchJson(`${API_URL}/api/settings/approval-mode`),
+      () => fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
+      () => fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
+      () => fetchJson(`${API_URL}/api/settings/approval-mode`),
     ]);
 
     if (isCancelled()) return;
-    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
-      setRuntimeStatus(runtimeStatusResult.payload as RuntimeStatus);
+    const nextOperatorControlPlane = normalizeOperatorControlPlane(controlPlaneResult.payload);
+    const runtimeStatusPayload = runtimeStatusResult.ok
+      ? normalizeRuntimeStatus(runtimeStatusResult.payload)
+      : null;
+    const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
+    const nextRuntimeReceipt: RuntimeReceipt | null = runtimeStatusPayload
+      ? { status: runtimeStatusPayload, source: "runtime_status" }
+      : operatorPostureRuntime
+        ? { status: operatorPostureRuntime, source: "operator_posture" }
+        : null;
+    if (nextRuntimeReceipt) {
+      storeRuntimeReceipt(nextRuntimeReceipt.status);
+      setRuntimeReceipt(nextRuntimeReceipt);
+    } else {
+      setRuntimeReceipt((current) => (current ? { ...current, source: "retained" } : null));
     }
     if (observerResult.ok) {
       setObserverState((observerResult.payload as ObserverState | null) ?? {});
@@ -6907,7 +7034,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } else {
       setExtensionPackages([]);
     }
-    setOperatorControlPlane(normalizeOperatorControlPlane(controlPlaneResult.payload));
+    setOperatorControlPlane(nextOperatorControlPlane);
     setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
     setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
     setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
@@ -6921,6 +7048,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
+    setBrowserJournal(normalizeBrowserJournal(browserSessionsResult.payload));
     const activityLedgerScope = sessionId ?? "__all__";
     if (
       activityLedgerResult.ok
@@ -6982,15 +7110,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     let cancelled = false;
 
     const refresh = async () => {
+      if (cockpitRefreshInFlightRef.current) return;
+      cockpitRefreshInFlightRef.current = true;
       try {
         await refreshCockpit(() => cancelled);
-      } catch {}
+      } catch {
+      } finally {
+        cockpitRefreshInFlightRef.current = false;
+      }
     };
 
     void refresh();
     const interval = window.setInterval(() => {
       void refresh();
-    }, 12_000);
+    }, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -7061,6 +7194,81 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   useEffect(() => {
     syncCockpitPaneStack(paneVisibility);
   }, [paneVisibility, syncCockpitPaneStack]);
+
+  const openBrowserWorkbenchSession = useCallback(async () => {
+    if (!sessionId) {
+      setOperatorStatus("Browser workbench unavailable: no active session");
+      return;
+    }
+    const url = browserWorkbenchUrl.trim();
+    if (!url) {
+      setOperatorStatus("Browser workbench needs a URL");
+      return;
+    }
+    const fallbackProvider = browserProviders.find((providerInfo) => providerInfo.selected) ?? browserProviders[0] ?? null;
+    const provider = browserWorkbenchProvider || fallbackProvider?.name || "";
+    try {
+      const response = await fetch(`${API_URL}/api/browser/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          url,
+          provider,
+          capture: browserWorkbenchCapture,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        setOperatorStatus(`Browser workbench open refused: ${String(detail ?? response.status)}`);
+        await refreshCockpit();
+        return;
+      }
+      setOperatorStatus(`Browser workbench opened ${url}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Browser workbench open failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [
+    browserWorkbenchCapture,
+    browserWorkbenchProvider,
+    browserWorkbenchUrl,
+    browserProviders,
+    refreshCockpit,
+    sessionId,
+  ]);
+
+  const snapshotBrowserWorkbenchSession = useCallback(async (session: BrowserSessionControlInfo) => {
+    if (!sessionId) {
+      setOperatorStatus("Browser snapshot unavailable: no active session");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/browser/sessions/${encodeURIComponent(session.session_id)}/snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner_session_id: sessionId,
+          capture: browserWorkbenchCapture,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = payload && typeof payload === "object" ? (payload as Record<string, unknown>).detail : null;
+        const reason = detail && typeof detail === "object"
+          ? String((detail as Record<string, unknown>).error ?? "refused")
+          : String(detail ?? response.status);
+        setOperatorStatus(`Browser snapshot refused ${session.session_id}: ${reason}`);
+        await refreshCockpit();
+        return;
+      }
+      setOperatorStatus(`Browser snapshot recorded ${session.session_id}`);
+      await refreshCockpit();
+    } catch (error) {
+      setOperatorStatus(`Browser snapshot failed ${session.session_id}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }, [browserWorkbenchCapture, refreshCockpit, sessionId]);
 
   const runBrowserSessionControl = useCallback(async (
     session: BrowserSessionControlInfo,
@@ -7167,9 +7375,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     (provider) => provider.runtime_state.includes("fallback") || provider.runtime_state.includes("degraded"),
   ).length;
   const quarantinedBrowserSessionCount = browserSessions.filter((session) => session.status === "quarantined").length;
+  const browserJournalCount = browserJournal.length;
+  const recentBrowserJournal = browserJournal.slice(0, 3);
   const browserControlSummary = [
     `${browserProviders.length} providers`,
     `${browserSessions.length} sessions`,
+    `${browserJournalCount} journaled`,
     degradedBrowserProviderCount ? `${degradedBrowserProviderCount} degraded` : "no degraded fallback",
     quarantinedBrowserSessionCount ? `${quarantinedBrowserSessionCount} quarantined` : "no quarantine",
   ].join(" · ");
@@ -8009,7 +8220,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     () => starterPacks.filter((pack) => pack.availability === "ready"),
     [starterPacks],
   );
-  const runtimeAvailable = runtimeStatus !== null;
+  const runtimeStatus = runtimeReceipt?.status ?? null;
+  const runtimeAvailable = runtimeReceipt !== null;
   const effectiveConnectionStatus: ConnectionStatus = connectionStatus === "connected"
     ? "connected"
     : connectionStatus === "connecting" || connectionStatus === "error"
@@ -8018,7 +8230,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const connectionLabel = effectiveConnectionStatus === "connected"
     ? "live"
     : effectiveConnectionStatus;
-  const runtimeProviderLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeProviderBaseLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeProviderLabel = runtimeReceipt?.source === "retained"
+    ? `${runtimeProviderBaseLabel} STALE`
+    : runtimeProviderBaseLabel;
   const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
     .replace(/^openrouter\//, "")
     .replace(/^anthropic\//, "")
@@ -14389,7 +14604,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
                   <div className="cockpit-sublist-item">
-                    capture {daemonPresence?.capture_mode ?? "unknown"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
+                    presence {daemonPresence?.connected ? "linked" : "offline"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
                   </div>
                   {continuitySummary && (
                     <>
@@ -15126,6 +15341,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     ) : (
                       <div className="cockpit-sublist-item">No browser provider inventory loaded.</div>
                     )}
+                    <div className="cockpit-operator-row cockpit-operator-row--entry">
+                      <div className="cockpit-operator-details">
+                        <div className="cockpit-value">Workbench session</div>
+                        <div className="cockpit-operator-note">
+                          metadata-first journal · owner scoped · raw page bodies stay out of summaries
+                        </div>
+                        <div className="cockpit-operator-note cockpit-browser-workbench-controls">
+                          <input
+                            aria-label="Browser workbench URL"
+                            className="cockpit-input cockpit-browser-workbench-url"
+                            placeholder="https://example.com"
+                            value={browserWorkbenchUrl}
+                            onChange={(event) => setBrowserWorkbenchUrl(event.currentTarget.value)}
+                          />
+                          <select
+                            aria-label="Browser workbench provider"
+                            className="cockpit-input cockpit-browser-workbench-select"
+                            value={browserWorkbenchProvider}
+                            onChange={(event) => setBrowserWorkbenchProvider(event.currentTarget.value)}
+                          >
+                            <option value="">selected provider</option>
+                            {browserProviders.map((provider) => (
+                              <option key={provider.name} value={provider.name}>
+                                {provider.name}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            aria-label="Browser workbench capture mode"
+                            className="cockpit-input cockpit-browser-workbench-select"
+                            value={browserWorkbenchCapture}
+                            onChange={(event) => setBrowserWorkbenchCapture(event.currentTarget.value as "extract" | "html" | "screenshot")}
+                          >
+                            <option value="extract">extract</option>
+                            <option value="html">html</option>
+                            <option value="screenshot">screenshot</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="cockpit-operator-actions">
+                        <button
+                          type="button"
+                          className="cockpit-operator-button"
+                          disabled={!sessionId || !browserWorkbenchUrl.trim()}
+                          onClick={() => void openBrowserWorkbenchSession()}
+                        >
+                          open
+                        </button>
+                      </div>
+                    </div>
+                    {recentBrowserJournal.length > 0 ? (
+                      <div className="cockpit-sublist-item">
+                        journal: {recentBrowserJournal.map((entry) => [
+                          entry.action.replace(/_/g, " "),
+                          entry.status.replace(/_/g, " "),
+                          entry.redaction.metadata_only ? "metadata only" : "redaction unknown",
+                        ].join(" ")).join(" · ")}
+                      </div>
+                    ) : (
+                      <div className="cockpit-sublist-item">Journal is empty for this thread.</div>
+                    )}
                     {browserSessions.slice(0, 4).map((browserSession) => {
                       const boundaryNames = Object.entries(browserSession.boundary_decisions)
                         .filter(([, decision]) => decision.operator_visible)
@@ -15179,6 +15455,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                                 browserSession.recovery_state.replace(/_/g, " "),
                                 `partition r${browserSession.partition_revision}`,
                                 `${browserSession.snapshot_count} snapshots`,
+                                `${browserSession.journal_entry_count} journal`,
                               ].join(" · ")}
                             </div>
                             <div className="cockpit-operator-note">
@@ -15212,6 +15489,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                               onClick={() => void runBrowserSessionControl(browserSession, "recover")}
                             >
                               recover
+                            </button>
+                            <button
+                              type="button"
+                              className="cockpit-operator-button"
+                              disabled={quarantined}
+                              onClick={() => void snapshotBrowserWorkbenchSession(browserSession)}
+                            >
+                              snapshot
                             </button>
                             <button
                               type="button"

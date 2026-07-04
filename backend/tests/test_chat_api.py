@@ -1,8 +1,10 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from config.settings import settings
 from src.agent.exceptions import ClarificationRequired
+from src.agent.direct_chat import should_use_direct_local_chat
 from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
@@ -10,6 +12,13 @@ from src.vault.repository import vault_repository
 
 @pytest.mark.asyncio
 class TestChatAPI:
+    @pytest.fixture(autouse=True)
+    def _disable_direct_local_chat_by_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.api.chat.should_use_direct_local_chat",
+            lambda *args, **kwargs: False,
+        )
+
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
@@ -30,6 +39,133 @@ class TestChatAPI:
             event["event_type"] == "agent_run_succeeded"
             and event["tool_name"] == "onboarding_agent"
             and event["details"]["transport"] == "rest"
+            for event in events
+        )
+
+    @patch("src.api.chat.run_direct_local_chat")
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_onboarding_bare_domain_uses_agent_path(
+        self,
+        mock_onboarding,
+        mock_search,
+        mock_direct_chat,
+        monkeypatch,
+        client,
+    ):
+        monkeypatch.setattr("src.api.chat.should_use_direct_local_chat", should_use_direct_local_chat)
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = "I reviewed your site and saved the relevant priorities."
+        mock_onboarding.return_value = mock_agent
+
+        with (
+            patch.object(settings, "local_model", "openai/local-gemma"),
+            patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+            patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
+        ):
+            response = await client.post("/api/chat", json={"message": "natgurlain.com"})
+
+        assert response.status_code == 200
+        mock_onboarding.assert_called_once_with("natgurlain.com")
+        mock_agent.run.assert_called_once_with("natgurlain.com")
+        mock_direct_chat.assert_not_called()
+
+    @patch("src.api.chat.run_direct_local_chat")
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_onboarding_website_intent_uses_agent_path(
+        self,
+        mock_onboarding,
+        mock_search,
+        mock_direct_chat,
+        monkeypatch,
+        client,
+    ):
+        monkeypatch.setattr("src.api.chat.should_use_direct_local_chat", should_use_direct_local_chat)
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = "Which exact page should I inspect?"
+        mock_onboarding.return_value = mock_agent
+
+        with (
+            patch.object(settings, "local_model", "openai/local-gemma"),
+            patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+            patch.object(settings, "runtime_profile_preferences", "onboarding_agent=local-gemma-chat-thinking"),
+        ):
+            response = await client.post(
+                "/api/chat",
+                json={"message": "Check the website and get the goals from it"},
+            )
+
+        assert response.status_code == 200
+        mock_onboarding.assert_called_once_with("Check the website and get the goals from it")
+        mock_agent.run.assert_called_once_with("Check the website and get the goals from it")
+        mock_direct_chat.assert_not_called()
+
+    @patch("src.api.chat.direct_local_chat_route_error", new_callable=AsyncMock)
+    @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
+    @patch("src.api.chat.run_direct_local_chat", return_value="Hello. What should I call you?")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_onboarding_hello_can_use_direct_local_path(
+        self,
+        mock_onboarding,
+        mock_direct_chat,
+        mock_should_use_direct,
+        mock_route_error,
+        client,
+    ):
+        mock_route_error.return_value = None
+        response = await client.post("/api/chat", json={"message": "Hello"})
+
+        assert response.status_code == 200
+        assert response.json()["response"] == "Hello. What should I call you?"
+        mock_should_use_direct.assert_called_once()
+        mock_route_error.assert_awaited_once()
+        mock_direct_chat.assert_awaited_once()
+        mock_onboarding.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_succeeded"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["runtime"] == "direct-local-chat"
+            for event in events
+        )
+
+    @patch("src.api.chat.direct_local_chat_route_error", new_callable=AsyncMock)
+    @patch("src.api.chat.should_use_direct_local_chat", return_value=True)
+    @patch("src.api.chat.run_direct_local_chat")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_direct_local_preflight_failure_returns_operator_error(
+        self,
+        mock_onboarding,
+        mock_direct_chat,
+        mock_should_use_direct,
+        mock_route_error,
+        client,
+    ):
+        mock_route_error.return_value = (
+            "Local chat runtime is unreachable from the Seraph backend at http://192.168.1.26:8001. "
+            "Health endpoint http://192.168.1.26:8001/health/chat reported chat proxy connect_error."
+        )
+
+        response = await client.post("/api/chat", json={"message": "Hello"})
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert "Local chat runtime is unreachable" in detail
+        assert "health/chat" in detail
+        assert "LiteLLM" not in detail
+        mock_should_use_direct.assert_called_once()
+        mock_route_error.assert_awaited_once()
+        mock_direct_chat.assert_not_called()
+        mock_onboarding.assert_not_called()
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_failed"
+            and event["tool_name"] == "onboarding_agent"
+            and event["details"]["runtime"] == "direct-local-chat"
+            and event["details"]["failure_stage"] == "route_preflight"
             for event in events
         )
 

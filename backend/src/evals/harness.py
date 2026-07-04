@@ -7,13 +7,11 @@ import asyncio
 import inspect
 import json
 import os
-import queue
 import shutil
 import socket
 import sys
 import time
 import tempfile
-import threading
 import types
 from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
@@ -23,6 +21,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import anyio
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -991,6 +990,7 @@ from src.tools.process_tools import (
 from src.tools.secret_ref_tools import SecretRefResolvingTool
 from src.tools.shell_tool import shell_execute
 from src.tools.web_search_tool import web_search
+from src.db.engine import _ensure_search_indexes
 from src.utils.background import drain_tracked_tasks
 from src.workflows.manager import WorkflowManager
 from src.models.schemas import WSResponse
@@ -1001,6 +1001,41 @@ from src.vault.repository import VaultRepository
 Runner = Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]]
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
+
+
+async def _browse_webpage_async(url: str, *, action: str = "extract") -> str:
+    return await asyncio.to_thread(browse_webpage, url, action=action)
+
+
+EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
+    "src.db.engine.get_session",
+    "src.agent.session.get_session",
+    "src.approval.repository.get_session",
+    "src.audit.repository.get_session",
+    "src.goals.repository.get_session",
+    "src.guardian.feedback.get_session",
+    "src.observer.insight_queue.get_session",
+    "src.vault.repository.get_session",
+    "src.api.settings.get_db",
+    "src.api.profile.get_db",
+    "src.api.observer.get_session",
+    "src.api.capabilities.get_db",
+    "src.api.workflows.get_session",
+    "src.scheduler.jobs.memory_consolidation.get_session",
+    "src.scheduler.jobs.screenshot_observation_digest.get_session",
+    "src.scheduler.scheduled_jobs.get_session",
+    "src.observer.screenshot_folder_source.get_session",
+    "src.observer.screen_repository.get_session",
+    "src.workflows.durable_state.get_session",
+    "src.workflows.manager.get_session",
+    "src.workflows.production_workflow_guarantees.get_session",
+    "src.memory.repository.get_session",
+    "src.profile.service.get_db",
+    "src.memory.hybrid_retrieval.get_session",
+    "src.memory.decay.get_session",
+    "src.memory.flush.get_session",
+    "src.memory.superiority.get_session",
+)
 
 
 @dataclass(frozen=True)
@@ -1302,7 +1337,7 @@ async def _patched_async_db(*patch_targets: str):
 def _make_sync_client_with_db():
     tmpdir = tempfile.mkdtemp(prefix="seraph-eval-")
     engine = create_async_engine(
-        "sqlite+aiosqlite://",
+        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-eval.db')}",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
@@ -1321,27 +1356,15 @@ def _make_sync_client_with_db():
     async def _test_init_db():
         async with engine.begin() as conn:
             await conn.run_sync(SQLModel.metadata.create_all)
+            await _ensure_search_indexes(conn)
 
     async def _test_close_db():
-        await engine.dispose()
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+        finally:
+            await engine.dispose()
 
-    targets = [
-        "src.db.engine.get_session",
-        "src.agent.session.get_session",
-        "src.approval.repository.get_session",
-        "src.audit.repository.get_session",
-        "src.goals.repository.get_session",
-        "src.guardian.feedback.get_session",
-        "src.observer.insight_queue.get_session",
-        "src.vault.repository.get_session",
-        "src.api.settings.get_db",
-        "src.memory.repository.get_session",
-        "src.profile.service.get_db",
-        "src.memory.hybrid_retrieval.get_session",
-        "src.memory.decay.get_session",
-        "src.memory.flush.get_session",
-    ]
-    patches = [patch(target, _get_session) for target in targets]
+    patches = [patch(target, _get_session) for target in EVAL_SYNC_CLIENT_DB_PATCH_TARGETS]
     patches.append(patch("src.app.init_db", _test_init_db))
     patches.append(patch("src.app.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))
@@ -1350,6 +1373,9 @@ def _make_sync_client_with_db():
     patches.append(patch.object(settings, "llm_log_dir", os.path.join(tmpdir, "logs")))
     patches.append(patch.object(soul_mod, "_soul_path", os.path.join(tmpdir, settings.soul_file)))
     patches.append(patch("src.vault.crypto._fernet", None))
+    patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))
+    patches.append(patch("src.api.chat.should_use_direct_local_chat", return_value=False))
+    patches.append(patch("src.api.ws.should_use_direct_local_chat", return_value=False))
 
     stack = ExitStack()
     stack.callback(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
@@ -1366,26 +1392,40 @@ def _make_sync_client_with_db():
         raise
 
 
-def _receive_ws_json(ws: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-    def _reader() -> None:
-        try:
-            result_queue.put(("text", ws.receive_text()))
-        except Exception as exc:  # pragma: no cover - exercised via timeout/failure handling
-            result_queue.put(("error", exc))
-
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-
+def _close_sync_client_with_db(patches: list[Any], stack: ExitStack) -> None:
     try:
-        kind, payload = result_queue.get(timeout=timeout_seconds)
-    except queue.Empty as exc:
+        stack.close()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(drain_tracked_tasks(timeout_seconds=5.0))
+    finally:
+        for item in reversed(patches):
+            item.stop()
+
+
+async def _aclose_sync_client_with_db(patches: list[Any], stack: ExitStack) -> None:
+    try:
+        stack.close()
+        await drain_tracked_tasks(timeout_seconds=5.0)
+    finally:
+        for item in reversed(patches):
+            item.stop()
+
+
+async def _receive_ws_text_with_timeout(ws: Any, timeout_seconds: float) -> str:
+    try:
+        with anyio.fail_after(timeout_seconds):
+            message = await ws._send_rx.receive()
+    except TimeoutError as exc:
         raise AssertionError(f"Timed out waiting for WebSocket message after {timeout_seconds}s") from exc
 
-    if kind == "error":
-        raise payload
-    return json.loads(payload)
+    ws._raise_on_close(message)
+    return str(message["text"])
+
+
+def _receive_ws_json(ws: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+    return json.loads(ws.portal.call(_receive_ws_text_with_timeout, ws, timeout_seconds))
 
 
 def _make_agent_steps(final_output: str = "It's sunny and 72°F today!") -> list[Any]:
@@ -1483,6 +1523,8 @@ def _eval_chat_model_wrapper() -> dict[str, Any]:
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
         patch.object(settings, "fallback_llm_api_key", ""),
         patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "runtime_profile_preferences", ""),
+        patch.object(settings, "local_runtime_paths", ""),
     ):
         model = get_model()
 
@@ -1535,9 +1577,7 @@ def _eval_rest_chat_behavior() -> dict[str, Any]:
             "audit_transport": success_event["details"]["transport"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_rest_chat_approval_contract() -> dict[str, Any]:
@@ -1576,9 +1616,7 @@ def _eval_rest_chat_approval_contract() -> dict[str, Any]:
             "audit_summary_contains_shell": "shell_execute" in approval_event["summary"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_rest_chat_timeout_contract() -> dict[str, Any]:
@@ -1616,9 +1654,7 @@ def _eval_rest_chat_timeout_contract() -> dict[str, Any]:
             "timeout_seconds": timeout_event["details"]["timeout_seconds"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_websocket_chat_behavior() -> dict[str, Any]:
@@ -1668,9 +1704,7 @@ def _eval_websocket_chat_behavior() -> dict[str, Any]:
             "audit_tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
@@ -1706,7 +1740,7 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
                         approval_msg = msg
                         break
 
-            events = client.get("/api/audit/events").json()
+                events = client.get("/api/audit/events").json()
 
         if approval_msg is None:
             raise AssertionError("Expected approval_required WebSocket message")
@@ -1723,9 +1757,7 @@ def _eval_websocket_chat_approval_contract() -> dict[str, Any]:
             "audit_summary_contains_shell": "shell_execute" in approval_event["summary"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
@@ -1786,9 +1818,7 @@ def _eval_websocket_chat_timeout_contract() -> dict[str, Any]:
             ),
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_delegated_tool_workflow_behavior() -> dict[str, Any]:
@@ -1849,9 +1879,7 @@ def _eval_delegated_tool_workflow_behavior() -> dict[str, Any]:
             "tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
@@ -1918,9 +1946,7 @@ def _eval_delegated_tool_workflow_degraded_behavior() -> dict[str, Any]:
             "tool_call_count": success_event["details"]["tool_call_count"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 def _eval_workflow_composition_behavior() -> dict[str, Any]:
@@ -4765,6 +4791,9 @@ def _eval_runtime_fallback_overrides() -> dict[str, Any]:
             patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
             patch.object(settings, "fallback_model", ""),
             patch.object(settings, "fallback_models", "openai/gpt-4o-mini"),
+            patch.object(settings, "local_runtime_paths", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "runtime_profile_preferences", ""),
             patch.object(
                 settings,
                 "runtime_fallback_overrides",
@@ -4932,6 +4961,8 @@ def _eval_provider_policy_capabilities() -> dict[str, Any]:
             patch.object(settings, "local_model", "ollama/llama3.2"),
             patch.object(settings, "local_llm_api_key", ""),
             patch.object(settings, "local_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "runtime_profile_preferences", ""),
+            patch.object(settings, "local_runtime_paths", "chat_agent"),
             patch.object(settings, "fallback_model", ""),
             patch.object(
                 settings,
@@ -5003,6 +5034,9 @@ def _eval_provider_policy_scoring() -> dict[str, Any]:
             patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
             patch.object(settings, "fallback_model", ""),
             patch.object(settings, "fallback_models", ""),
+            patch.object(settings, "local_runtime_paths", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "runtime_profile_preferences", ""),
             patch.object(
                 settings,
                 "runtime_fallback_overrides",
@@ -5084,49 +5118,60 @@ async def _eval_provider_policy_safeguards() -> dict[str, Any]:
     _reset_target_health()
     try:
         async with _patched_async_db("src.audit.repository.get_session"):
-            with (
-                patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
-                patch.object(settings, "llm_api_key", "primary-key"),
-                patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"),
-                patch.object(settings, "fallback_model", ""),
-                patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"),
-                patch.object(
-                    settings,
-                    "provider_capability_overrides",
-                    (
-                        "openrouter/anthropic/claude-sonnet-4=reasoning;"
-                        "openai/gpt-4o-mini=tool_use|fast;"
-                        "openai/gpt-4.1-nano=cheap"
-                    ),
-                ),
-                patch.object(
-                    settings,
-                    "provider_cost_tiers",
-                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                ),
-                patch.object(
-                    settings,
-                    "provider_latency_tiers",
-                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                ),
-                patch.object(
-                    settings,
-                    "provider_task_classes",
-                    "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
-                ),
-                patch.object(
-                    settings,
-                    "provider_budget_classes",
-                    "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
-                ),
-                patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"),
-                patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"),
-                patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"),
-                patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"),
-                patch.object(settings, "runtime_task_class", "chat_agent=chat"),
-                patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"),
-                patch("litellm.completion", return_value=completion_response) as mock_completion,
-            ):
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"))
+                stack.enter_context(patch.object(settings, "llm_api_key", "primary-key"))
+                stack.enter_context(patch.object(settings, "llm_api_base", "https://openrouter.ai/api/v1"))
+                stack.enter_context(patch.object(settings, "runtime_profile_preferences", ""))
+                stack.enter_context(patch.object(settings, "local_runtime_paths", ""))
+                stack.enter_context(patch.object(settings, "fallback_model", ""))
+                stack.enter_context(patch.object(settings, "fallback_models", "openai/gpt-4o-mini,openai/gpt-4.1-nano"))
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_capability_overrides",
+                        (
+                            "openrouter/anthropic/claude-sonnet-4=reasoning;"
+                            "openai/gpt-4o-mini=tool_use|fast;"
+                            "openai/gpt-4.1-nano=cheap"
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_cost_tiers",
+                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_latency_tiers",
+                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_task_classes",
+                        "openrouter/anthropic/claude-sonnet-4=analysis;openai/gpt-4o-mini=chat;openai/gpt-4.1-nano=analysis",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "provider_budget_classes",
+                        "openrouter/anthropic/claude-sonnet-4=high;openai/gpt-4o-mini=low;openai/gpt-4.1-nano=medium",
+                    )
+                )
+                stack.enter_context(patch.object(settings, "runtime_policy_intents", "chat_agent=tool_use|fast"))
+                stack.enter_context(patch.object(settings, "runtime_policy_requirements", "chat_agent=tool_use"))
+                stack.enter_context(patch.object(settings, "runtime_max_cost_tier", "chat_agent=medium"))
+                stack.enter_context(patch.object(settings, "runtime_max_latency_tier", "chat_agent=medium"))
+                stack.enter_context(patch.object(settings, "runtime_task_class", "chat_agent=chat"))
+                stack.enter_context(patch.object(settings, "runtime_max_budget_class", "chat_agent=medium"))
+                mock_completion = stack.enter_context(patch("litellm.completion", return_value=completion_response))
                 response = completion_with_fallback_sync(
                     messages=[{"role": "user", "content": "pick the guardrail-compliant provider"}],
                     temperature=0.2,
@@ -5177,6 +5222,9 @@ async def _eval_provider_routing_decision_audit() -> dict[str, Any]:
             patch.object(settings, "fallback_models", "openai/gpt-4.1-nano,openai/gpt-4o-mini"),
             patch.object(settings, "fallback_llm_api_key", ""),
             patch.object(settings, "fallback_llm_api_base", "http://localhost:11434/v1"),
+            patch.object(settings, "local_runtime_paths", ""),
+            patch.object(settings, "runtime_model_overrides", ""),
+            patch.object(settings, "runtime_profile_preferences", ""),
             patch.object(
                 settings,
                 "runtime_fallback_overrides",
@@ -5921,25 +5969,9 @@ async def _eval_web_search_empty_result_audit() -> dict[str, Any]:
 
 
 async def _eval_browser_runtime_audit() -> dict[str, Any]:
-    class _ImmediateFuture:
-        def result(self):
-            raise TimeoutError("Timed out")
-
-    class _ImmediateExecutor:
-        def __enter__(self) -> "_ImmediateExecutor":
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-        def submit(self, _fn, *args, **kwargs) -> _ImmediateFuture:
-            return _ImmediateFuture()
-
-    with (
-        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
-        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
-    ):
-        result = browse_webpage("https://example.com/slow", action="extract")
+    with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+        with patch("src.tools.browser_tool._run_browse_sync", side_effect=TimeoutError("Timed out")):
+            result = await _browse_webpage_async("https://example.com/slow", action="extract")
         await asyncio.sleep(0)
 
     assert "timed out after" in result.lower()
@@ -5959,28 +5991,13 @@ async def _eval_browser_runtime_audit() -> dict[str, Any]:
 async def _eval_browser_execution_task_replay_behavior() -> dict[str, Any]:
     from src.security.site_policy import SiteAccessDecision
 
-    class _ImmediateFuture:
-        def __init__(self, value: str) -> None:
-            self._value = value
-
-        def result(self) -> str:
-            return self._value
-
-    class _ImmediateExecutor:
-        def __enter__(self) -> "_ImmediateExecutor":
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-        def submit(self, _fn, url: str, action: str) -> _ImmediateFuture:
-            del url
-            outputs = {
-                "extract": "Atlas launch checklist\nOpen blockers\nOwner: Seraph",
-                "html": "<html><body><button>Ship</button></body></html>",
-                "screenshot": "Screenshot captured (32 bytes). Base64 data: QUJDREVGR0g=",
-            }
-            return _ImmediateFuture(outputs[action])
+    def _fake_browse_sync(_url: str, action: str) -> str:
+        outputs = {
+            "extract": "Atlas launch checklist\nOpen blockers\nOwner: Seraph",
+            "html": "<html><body><button>Ship</button></body></html>",
+            "screenshot": "Screenshot captured (32 bytes). Base64 data: QUJDREVGR0g=",
+        }
+        return outputs[action]
 
     decision = SiteAccessDecision(
         allowed=True,
@@ -5989,14 +6006,14 @@ async def _eval_browser_execution_task_replay_behavior() -> dict[str, Any]:
         allowlist_active=True,
     )
 
-    with (
-        patch("src.tools.browser_tool.evaluate_site_access", return_value=decision),
-        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
-        patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event,
-    ):
-        extract_result = browse_webpage("https://example.com/task", action="extract")
-        html_result = browse_webpage("https://example.com/task", action="html")
-        screenshot_result = browse_webpage("https://example.com/task", action="screenshot")
+    with patch.object(audit_repository, "log_event", AsyncMock()) as mock_log_event:
+        with (
+            patch("src.tools.browser_tool.evaluate_site_access", return_value=decision),
+            patch("src.tools.browser_tool._run_browse_sync", side_effect=_fake_browse_sync),
+        ):
+            extract_result = await _browse_webpage_async("https://example.com/task", action="extract")
+            html_result = await _browse_webpage_async("https://example.com/task", action="html")
+            screenshot_result = await _browse_webpage_async("https://example.com/task", action="screenshot")
         await asyncio.sleep(0)
 
     succeeded_calls = [
@@ -6127,7 +6144,7 @@ async def _eval_execution_security_gauntlet_behavior() -> dict[str, Any]:
     shell_meta = run_command(command="python3;cat", args_json="[]")
     arg_newline = run_command(command="python3", args_json=json.dumps(["script.py\n--escape"]))
     inline_python = start_process(command="python3", args_json=json.dumps(["-c", "print('escape')"]))
-    localhost_browser = browse_webpage("http://127.0.0.1/admin", action="extract")
+    localhost_browser = await _browse_webpage_async("http://127.0.0.1/admin", action="extract")
 
     underdeclared_profile = {
         "missing_network": True,
@@ -6260,17 +6277,19 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
     audited_tool = wrap_tools_for_audit([_DummyStrategistTool()])[0]
     mock_log_event = AsyncMock()
 
-    class DummyAgent:
-        def run(self, _prompt: str) -> str:
-            audited_tool()
-            return (
-                '{"should_intervene": false, "content": "", "intervention_type": "nudge", '
-                '"urgency": 0, "reasoning": "No intervention"}'
-            )
+    async def mock_strategist_completion(*_args: object, **_kwargs: object) -> str:
+        audited_tool()
+        return (
+            '{"should_intervene": false, "content": "", "intervention_type": "nudge", '
+            '"urgency": 0, "reasoning": "No intervention"}'
+        )
 
     with (
         patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
-        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=DummyAgent()),
+        patch(
+            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+            AsyncMock(side_effect=mock_strategist_completion),
+        ),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
         await run_strategist_tick()
@@ -6286,8 +6305,7 @@ async def _eval_strategist_tick_tool_audit() -> dict[str, Any]:
 async def _eval_strategist_tick_behavior() -> dict[str, Any]:
     mock_context_manager = MagicMock()
     mock_context_manager.refresh = AsyncMock(return_value=_make_context(time_of_day="afternoon"))
-    mock_agent = MagicMock()
-    mock_agent.run.return_value = (
+    strategist_response = (
         '{"should_intervene": true, "content": "Time to refocus on the eval roadmap.", '
         '"intervention_type": "advisory", "urgency": 3, "reasoning": "Focus drift"}'
     )
@@ -6296,7 +6314,10 @@ async def _eval_strategist_tick_behavior() -> dict[str, Any]:
 
     with (
         patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=MagicMock())),
-        patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+        patch(
+            "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+            AsyncMock(return_value=strategist_response),
+        ),
         patch("src.observer.delivery.deliver_or_queue", mock_deliver),
         patch.object(audit_repository, "log_event", mock_log_event),
     ):
@@ -6370,8 +6391,7 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
         mock_context_manager.get_context.return_value = strategist_ctx
         mock_context_manager.is_daemon_connected.return_value = True
         mock_context_manager.decrement_attention_budget = MagicMock()
-        mock_agent = MagicMock()
-        mock_agent.run.return_value = (
+        strategist_response = (
             '{"should_intervene": true, '
             '"content": "Stay on the workflow review while the current context is still loaded.", '
             '"intervention_type": "advisory", "urgency": 2, "reasoning": "Aligned work"}'
@@ -6386,7 +6406,10 @@ async def _eval_strategist_tick_learning_continuity_behavior() -> dict[str, Any]
 
         with (
             patch("src.scheduler.jobs.strategist_tick.build_guardian_state", AsyncMock(return_value=guardian_state)),
-            patch("src.scheduler.jobs.strategist_tick.create_strategist_agent", return_value=mock_agent),
+            patch(
+                "src.scheduler.jobs.strategist_tick.run_strategist_decision_completion",
+                AsyncMock(return_value=strategist_response),
+            ),
             patch("src.observer.manager.context_manager", mock_context_manager),
             patch("src.api.observer.context_manager", mock_context_manager),
             patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
@@ -10370,9 +10393,13 @@ async def _eval_cross_surface_continuity_behavior() -> dict[str, Any]:
             intervention_id=bundle_intervention.id,
             session_id="continuity-session",
         )
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.active_count = 1
 
         with (
             patch("src.api.observer.context_manager", mgr),
+            patch("src.scheduler.connection_manager.ws_manager", mock_ws_manager),
+            patch("src.observer.delivery._active_channel_adapters", return_value={"websocket"}),
             patch(
                 "src.api.observer._observer_imported_reach_payload",
                 return_value={
@@ -13433,9 +13460,7 @@ async def _eval_governed_self_evolution_behavior() -> dict[str, Any]:
             ),
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        await _aclose_sync_client_with_db(patches, stack)
 
 
 async def _eval_governed_preference_diversity_behavior() -> dict[str, Any]:
@@ -13497,9 +13522,7 @@ async def _eval_governed_preference_diversity_behavior() -> dict[str, Any]:
             ),
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        await _aclose_sync_client_with_db(patches, stack)
 
 
 async def _eval_governed_canary_rollout_behavior() -> dict[str, Any]:
@@ -13556,9 +13579,7 @@ async def _eval_governed_canary_rollout_behavior() -> dict[str, Any]:
             "stored_receipt_rollback_ready": stored_receipt["benchmark_gate"]["rollback_ready"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        await _aclose_sync_client_with_db(patches, stack)
 
 
 async def _eval_operator_governed_improvement_benchmark_surface_behavior() -> dict[str, Any]:
@@ -25300,9 +25321,7 @@ def _eval_tool_policy_guardrails_behavior() -> dict[str, Any]:
             "mcp_approval_credential_egress_visible": approval_tools["mcp_tasks"]["credential_egress_policy"]["allowed_hosts"] == ["api.example.com"],
         }
     finally:
-        stack.close()
-        for item in patches:
-            item.stop()
+        _close_sync_client_with_db(patches, stack)
 
 
 async def _eval_screen_repository_runtime_audit() -> dict[str, Any]:

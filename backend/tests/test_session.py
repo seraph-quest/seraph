@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from config.settings import settings
 from src.agent.session import SessionManager
 from src.audit.repository import audit_repository
 from src.scheduler.scheduled_jobs import scheduled_job_repository
@@ -383,11 +384,34 @@ class TestGenerateTitle:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "AI Discussion"
 
-        with patch("src.llm_runtime.completion_with_fallback", AsyncMock(return_value=mock_response)) as mock_completion:
+        with patch.object(settings, "local_runtime_paths", ""), patch(
+            "src.llm_runtime.completion_with_fallback",
+            AsyncMock(return_value=mock_response),
+        ) as mock_completion:
             title = await sm.generate_title("s1")
 
         assert title == "AI Discussion"
         assert mock_completion.await_args.kwargs["runtime_path"] == "session_title_generation"
+        assert mock_completion.await_args.kwargs["local_runtime_only"] is False
+
+    async def test_generates_title_requires_local_runtime_when_configured(self, async_db, sm):
+        await sm.get_or_create("s1")
+        await sm.add_message("s1", "user", "Tell me about AI")
+        await sm.add_message("s1", "assistant", "AI is fascinating")
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "AI Discussion"
+
+        with patch.object(settings, "local_runtime_paths", "session_title_generation"), patch(
+            "src.llm_runtime.completion_with_fallback",
+            AsyncMock(return_value=mock_response),
+        ) as mock_completion:
+            title = await sm.generate_title("s1")
+
+        assert title == "AI Discussion"
+        assert mock_completion.await_args.kwargs["runtime_path"] == "session_title_generation"
+        assert mock_completion.await_args.kwargs["local_runtime_only"] is True
 
     async def test_skips_non_default_title(self, async_db, sm):
         s = await sm.get_or_create("s1")

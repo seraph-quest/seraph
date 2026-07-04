@@ -3,7 +3,6 @@ import { API_URL } from "../config/constants";
 import { useChatStore } from "../stores/chatStore";
 import { InterruptionModeToggle } from "./settings/InterruptionModeToggle";
 import { DaemonStatus } from "./settings/DaemonStatus";
-import { CaptureModeToggle } from "./settings/CaptureModeToggle";
 import { ToolPolicyModeToggle } from "./settings/ToolPolicyModeToggle";
 import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
 import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
@@ -131,6 +130,20 @@ interface McpServer {
   has_headers: boolean;
   auth_hint: string;
 }
+
+type SettingsSection = "artifacts" | "general" | "native" | "policies" | "audit" | "workflows" | "skills" | "discover" | "mcp";
+
+const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
+  { id: "artifacts", label: "Screenshot/VLM" },
+  { id: "general", label: "General" },
+  { id: "native", label: "Native" },
+  { id: "policies", label: "Policies" },
+  { id: "audit", label: "Audit" },
+  { id: "workflows", label: "Workflows" },
+  { id: "skills", label: "Skills" },
+  { id: "discover", label: "Discover" },
+  { id: "mcp", label: "MCP" },
+];
 
 function McpServerRow({
   server,
@@ -420,6 +433,7 @@ export function SettingsPanel() {
   const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSection>("artifacts");
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -458,19 +472,22 @@ export function SettingsPanel() {
   }, []);
 
   useEffect(() => {
-    if (settingsPanelOpen) {
+    if (!settingsPanelOpen) return;
+    if (activeSection === "skills") {
       fetchSkills();
+    } else if (activeSection === "mcp") {
       fetchServers();
+    } else if (activeSection === "discover") {
       fetchCatalog();
     }
-  }, [settingsPanelOpen, fetchSkills, fetchServers, fetchCatalog]);
+  }, [settingsPanelOpen, activeSection, fetchSkills, fetchServers, fetchCatalog]);
 
-  // Poll MCP servers while panel is open to catch external changes (mcp.sh, API)
+  // Poll MCP servers only while the MCP section is visible.
   useEffect(() => {
-    if (!settingsPanelOpen) return;
+    if (!settingsPanelOpen || activeSection !== "mcp") return;
     const id = setInterval(fetchServers, 5000);
     return () => clearInterval(id);
-  }, [settingsPanelOpen, fetchServers]);
+  }, [settingsPanelOpen, activeSection, fetchServers]);
 
   const handleSkillToggle = async (name: string, enabled: boolean) => {
     try {
@@ -577,6 +594,24 @@ export function SettingsPanel() {
           </button>
         </div>
         <div className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
+          <div className="flex flex-wrap gap-1 px-1">
+            {SETTINGS_SECTIONS.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                className={`border px-2 py-1 text-[9px] uppercase tracking-wider ${
+                  activeSection === section.id
+                    ? "border-retro-highlight text-retro-highlight"
+                    : "border-retro-text/15 text-retro-text/45 hover:text-retro-text"
+                }`}
+                onClick={() => setActiveSection(section.id)}
+              >
+                {section.label}
+              </button>
+            ))}
+          </div>
+
+          {activeSection === "general" && (
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
               General
@@ -631,25 +666,25 @@ export function SettingsPanel() {
               </button>
             </div>
           </div>
+          )}
 
-          <InterruptionModeToggle />
+          {activeSection === "general" && <InterruptionModeToggle />}
 
-          <DaemonStatus />
+          {activeSection === "native" && <DaemonStatus />}
 
-          <CaptureModeToggle />
+          {activeSection === "artifacts" && <ArtifactStoragePanel />}
 
-          <ArtifactStoragePanel />
+          {activeSection === "policies" && <ToolPolicyModeToggle />}
 
-          <ToolPolicyModeToggle />
+          {activeSection === "policies" && <McpPolicyModeToggle />}
 
-          <McpPolicyModeToggle />
+          {activeSection === "policies" && <ApprovalModeToggle />}
 
-          <ApprovalModeToggle />
+          {activeSection === "audit" && <AuditLogPanel />}
 
-          <AuditLogPanel />
+          {activeSection === "workflows" && <WorkflowPanel />}
 
-          <WorkflowPanel />
-
+          {activeSection === "skills" && (
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
               Skills
@@ -674,7 +709,9 @@ export function SettingsPanel() {
               Reload skills
             </button>
           </div>
+          )}
 
+          {activeSection === "discover" && (
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
               Discover
@@ -694,7 +731,9 @@ export function SettingsPanel() {
               <div className="text-[9px] text-retro-text/30 mb-1 px-1">No catalog items available</div>
             )}
           </div>
+          )}
 
+          {activeSection === "mcp" && (
           <div className="px-1">
             <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
               MCP Servers
@@ -734,6 +773,7 @@ export function SettingsPanel() {
               useChatStore.getState().fetchToolRegistry();
             }} />
           </div>
+          )}
 
           <div className="flex-1" />
           <div className="text-[9px] text-retro-text/20 px-1 pb-1">

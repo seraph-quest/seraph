@@ -418,6 +418,28 @@ function daemon_status() {
     else
         echo "Daemon is not running"
     fi
+
+    if [ "${DAEMON_ENABLED:-false}" != "true" ]; then
+        echo "Daemon configured off: set DAEMON_ENABLED=true in $ENV_FILE to enable native desktop presence."
+        return 0
+    fi
+
+    if [ -f "$SERAPH_DAEMON_STATUS_FILE" ]; then
+        local status_summary
+        status_summary=$(grep -E '"(state|last_error_kind|last_error|updated_at)"' "$SERAPH_DAEMON_STATUS_FILE" | sed 's/^[[:space:]]*//' || true)
+        if [ -n "$status_summary" ]; then
+            echo "Status file: $SERAPH_DAEMON_STATUS_FILE"
+            echo "$status_summary"
+        fi
+        if grep -Eiq '(-1743|-10827|not authori[sz]ed to send apple events|system events got an error)' "$SERAPH_DAEMON_STATUS_FILE"; then
+            echo "Recovery: grant Automation permission for the terminal running Seraph to control System Events in System Settings > Privacy & Security > Automation, then restart with ./manage.sh -e $ENV daemon start."
+        fi
+    elif [ -f "$DAEMON_LOG_FILE" ] && grep -Eiq '(-1743|-10827|not authori[sz]ed to send apple events|system events got an error)' "$DAEMON_LOG_FILE"; then
+        echo "Recovery: daemon logs show macOS Automation permission denial for System Events."
+        echo "Grant Automation permission for the terminal running Seraph, then restart with ./manage.sh -e $ENV daemon start."
+    else
+        echo "Status file: $SERAPH_DAEMON_STATUS_FILE (not found yet)"
+    fi
 }
 
 function daemon_logs() {
@@ -559,7 +581,7 @@ function start_local_frontend() {
             exec ./node_modules/.bin/vite --host 0.0.0.0 --port "$4"
         fi
         exec npm run dev -- --host 0.0.0.0 --port "$4"
-    ' seraph-local-frontend "$SCRIPT_DIR/frontend" "http://localhost:$LOCAL_BACKEND_PORT" "ws://localhost:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
+    ' seraph-local-frontend "$SCRIPT_DIR/frontend" "/api" "ws://127.0.0.1:$LOCAL_BACKEND_PORT/ws/chat" "$LOCAL_FRONTEND_PORT" </dev/null >> "$LOCAL_FRONTEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_FRONTEND_PID_FILE"
     disown "$pid" 2>/dev/null || true
@@ -704,6 +726,10 @@ if [ ! -f "$ENV_FILE" ]; then
     error_exit "$ENV_FILE not found. Please create it by copying from $SCRIPT_DIR/env.$ENV.example and filling in the values."
 fi
 
+if grep -E "^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[^\"'][^#]*;" "$ENV_FILE" >/dev/null 2>&1; then
+    error_exit "Env values containing semicolons must be quoted in $ENV_FILE because manage.sh sources the env file."
+fi
+
 # Source env file for daemon config without leaking values when bash xtrace is enabled.
 TRACE_WAS_ENABLED=false
 case "$-" in
@@ -732,7 +758,7 @@ if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
 fi
 LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-/tmp/seraph-dev-logs}"
 LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-/tmp/uv-cache}"
-LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-codex-local}"
+LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-codex-local}}"
 SCREEN_CAPTURE_ARCHIVE_DIR="${SCREEN_CAPTURE_ARCHIVE_DIR:-$LOCAL_WORKSPACE_DIR/artifacts/screen-captures}"
 SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR="${SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR:-$SCREEN_CAPTURE_ARCHIVE_DIR}"
 SERAPH_DAEMON_STATUS_FILE="${SERAPH_DAEMON_STATUS_FILE:-$LOCAL_WORKSPACE_DIR/daemon-status.json}"

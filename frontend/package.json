@@ -1,7 +1,7 @@
 {
   "name": "seraph-frontend",
   "private": true,
-  "version": "2026.6.30",
+  "version": "2026.7.5",
   "type": "module",
   "scripts": {
     "dev": "vite",

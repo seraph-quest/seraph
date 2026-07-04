@@ -199,6 +199,7 @@ def transport_runtime_status(
     active_transports: set[str],
     websocket_connection_count: int,
     daemon_connected: bool,
+    daemon_unavailable_status: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     websocket_connection_count = _normalized_websocket_connection_count(websocket_connection_count)
     daemon_connected = _normalized_daemon_connected(daemon_connected)
@@ -245,6 +246,30 @@ def transport_runtime_status(
                 "repair_hint": None,
                 "daemon_connected": daemon_connected,
             }
+        daemon_unavailable_status = daemon_unavailable_status or {}
+        daemon_reason = daemon_unavailable_status.get("last_error_kind")
+        if daemon_reason == "configured_off":
+            return {
+                "transport": transport,
+                "label": _transport_label(transport),
+                "status": "daemon_configured_off",
+                "available": False,
+                "summary": "Native daemon is configured off, so desktop delivery is unavailable.",
+                "repair_hint": daemon_unavailable_status.get("recovery_hint")
+                or "Set DAEMON_ENABLED=true and start the native daemon.",
+                "daemon_connected": daemon_connected,
+            }
+        if daemon_reason == "automation_permission_denied":
+            return {
+                "transport": transport,
+                "label": _transport_label(transport),
+                "status": "daemon_permission_denied",
+                "available": False,
+                "summary": "macOS Automation permission is blocking native desktop delivery.",
+                "repair_hint": daemon_unavailable_status.get("recovery_hint")
+                or "Grant Automation permission for System Events, then restart the native daemon.",
+                "daemon_connected": daemon_connected,
+            }
         return {
             "transport": transport,
             "label": _transport_label(transport),
@@ -271,6 +296,7 @@ def route_runtime_status(
     active_transports: set[str],
     websocket_connection_count: int,
     daemon_connected: bool,
+    daemon_unavailable_status: dict[str, str | None] | None = None,
 ) -> tuple[ChannelRouteBinding, dict[str, Any]]:
     binding = get_channel_route_binding(payload, route)
     configured_order: list[str] = []
@@ -284,6 +310,7 @@ def route_runtime_status(
             active_transports=active_transports,
             websocket_connection_count=websocket_connection_count,
             daemon_connected=daemon_connected,
+            daemon_unavailable_status=daemon_unavailable_status,
         )
         for transport in configured_order
     ]
@@ -367,6 +394,7 @@ def route_runtime_statuses(
     active_transports: set[str],
     websocket_connection_count: int,
     daemon_connected: bool,
+    daemon_unavailable_status: dict[str, str | None] | None = None,
 ) -> list[dict[str, Any]]:
     return [
         route_runtime_status(
@@ -375,6 +403,7 @@ def route_runtime_statuses(
             active_transports=active_transports,
             websocket_connection_count=websocket_connection_count,
             daemon_connected=daemon_connected,
+            daemon_unavailable_status=daemon_unavailable_status,
         )[1]
         for spec in _CHANNEL_ROUTE_SPECS
     ]

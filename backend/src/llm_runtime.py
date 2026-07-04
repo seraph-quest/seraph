@@ -21,9 +21,12 @@ from smolagents import LiteLLMModel as BaseLiteLLMModel
 from smolagents.models import ChatMessage, MessageRole
 
 from config.settings import settings
+from src.agent.prompt_compaction import compact_messages_for_local_runtime
 from src.approval.runtime import get_current_session_id
 from src.audit.repository import audit_repository
+from src.local_runtime_profiles import local_runtime_profile
 from src.operators.local_codex import is_local_codex_model, local_codex_chat_timeout_seconds, run_local_codex
+from src.vlm_runtime import effective_vlm_api_key, effective_vlm_chat_api_base
 
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
@@ -102,6 +105,8 @@ def _redact_text(value: str | None) -> str | None:
         settings.openai_api_key,
         settings.anthropic_api_key,
         settings.local_llm_api_key,
+        settings.local_vlm_api_key,
+        settings.seraph_vlm_api_key,
         settings.fallback_llm_api_key,
     ):
         if secret:
@@ -147,6 +152,10 @@ def _secret_value(env_name: str) -> str:
         return settings.anthropic_api_key or os.getenv(env_name, "")
     if env_name == "LLM_API_KEY":
         return settings.llm_api_key or os.getenv(env_name, "")
+    if env_name == "LOCAL_LLM_API_KEY":
+        return settings.local_llm_api_key or os.getenv(env_name, "")
+    if env_name == "SERAPH_VLM_API_KEY":
+        return settings.seraph_vlm_api_key or settings.local_vlm_api_key or settings.local_llm_api_key or os.getenv(env_name, "")
     return os.getenv(env_name, "")
 
 
@@ -368,6 +377,7 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
         ),
     }
     if has_local_model_profile():
+        local_chat_api_base = effective_vlm_chat_api_base()
         profiles["local-ollama"] = ProviderProfile(
             id="local-ollama",
             provider_kind="ollama",
@@ -381,7 +391,88 @@ def _builtin_provider_profiles() -> dict[str, ProviderProfile]:
             keyless=True,
             safety_notes="Local Ollama-compatible profile.",
         )
+        if local_chat_api_base:
+            for profile_id in ("screenshot_fast", "report_thinking", "chat_thinking", "strategist_fast"):
+                runtime_profile = local_runtime_profile(profile_id)
+                profiles[f"local-gemma-{profile_id.replace('_', '-')}"] = ProviderProfile(
+                    id=f"local-gemma-{profile_id.replace('_', '-')}",
+                    provider_kind="openai_compatible",
+                    model=settings.local_model.strip(),
+                    api_base=local_chat_api_base,
+                    capabilities=("local", "private", "reasoning_profile", runtime_profile.reasoning),
+                    cost_tier="low",
+                    latency_tier="low" if runtime_profile.priority != "background" else "medium",
+                    task_class=runtime_profile.runtime_path,
+                    budget_class="low",
+                    keyless=not bool(effective_vlm_api_key()),
+                    secret_env="SERAPH_VLM_API_KEY",
+                    options=_local_gemma_profile_options(profile_id),
+                    safety_notes=(
+                        "Local Gemma profile contract. Treat as unsafe for production "
+                        "profile routing until the local runtime proof receipt says safe."
+                    ),
+                )
     return profiles
+
+
+def _local_gemma_profile_options(profile_id: str) -> dict[str, Any]:
+    options = dict(local_runtime_profile(profile_id).options)
+    options.pop("response_shape", None)
+    return options
+
+
+def _local_gemma_runtime_profile_id(profile: str | None) -> str | None:
+    if not profile:
+        return None
+    normalized = _normal_profile_id(profile)
+    prefix = "local-gemma-"
+    if not normalized.startswith(prefix):
+        return None
+    profile_id = normalized.removeprefix(prefix).replace("-", "_")
+    try:
+        local_runtime_profile(profile_id)
+    except ValueError:
+        return None
+    return profile_id
+
+
+def _apply_local_runtime_request_metadata(kwargs: dict[str, Any], profile: str | None) -> None:
+    profile_id = _local_gemma_runtime_profile_id(profile)
+    if not profile_id:
+        return
+    runtime_profile = local_runtime_profile(profile_id)
+    metadata = dict(kwargs.get("metadata") or {})
+    metadata.update(
+        {
+            "runtime_profile": runtime_profile.id,
+            "runtime_path": runtime_profile.runtime_path,
+            "priority": runtime_profile.priority,
+        }
+    )
+    kwargs["metadata"] = metadata
+    extra_headers = dict(kwargs.get("extra_headers") or {})
+    extra_headers.setdefault("X-Seraph-Runtime-Profile", runtime_profile.id)
+    extra_headers.setdefault("X-Seraph-Runtime-Path", runtime_profile.runtime_path)
+    extra_headers.setdefault("X-Seraph-Priority", runtime_profile.priority)
+    extra_headers.setdefault("X-Seraph-Reasoning", runtime_profile.reasoning)
+    kwargs["extra_headers"] = extra_headers
+
+
+def _local_runtime_profile_max_tokens(profile: str | None) -> int | None:
+    profile_id = _local_gemma_runtime_profile_id(profile)
+    if not profile_id:
+        return None
+    runtime_profile = local_runtime_profile(profile_id)
+    if runtime_profile.id == "chat_thinking":
+        return int(settings.model_max_tokens)
+    return int(runtime_profile.max_tokens)
+
+
+def _effective_max_tokens_for_profile(max_tokens: int, profile: str | None) -> int:
+    local_max_tokens = _local_runtime_profile_max_tokens(profile)
+    if local_max_tokens is None:
+        return max_tokens
+    return min(max_tokens, max(local_max_tokens, 1))
 
 
 def provider_profiles() -> dict[str, ProviderProfile]:
@@ -402,8 +493,16 @@ def _is_local_profile(profile: str | None) -> bool:
     provider_profile = _provider_profile(profile)
     return bool(
         provider_profile is not None
-        and provider_profile.provider_kind in {"local", "ollama"}
+        and (
+            provider_profile.provider_kind in {"local", "ollama"}
+            or "local" in provider_profile.capabilities
+        )
     )
+
+
+def is_local_runtime_profile(profile: str | None) -> bool:
+    """Return whether a resolved runtime profile stays on a local provider."""
+    return _is_local_profile(profile)
 
 
 def provider_profile_statuses() -> list[dict[str, Any]]:
@@ -415,7 +514,7 @@ def provider_profile_statuses() -> list[dict[str, Any]]:
             and profile.secret_env
             and not profile.api_key
         )
-        statuses.append({
+        status = {
             "id": profile.id,
             "provider_kind": profile.provider_kind,
             "model": profile.model,
@@ -440,7 +539,32 @@ def provider_profile_statuses() -> list[dict[str, Any]]:
             "fallback": list(profile.fallback_models),
             "fallback_models": list(profile.fallback_models),
             "safety_notes": profile.safety_notes,
-        })
+        }
+        profile_id = _local_gemma_runtime_profile_id(profile.id)
+        if profile_id:
+            runtime_profile = local_runtime_profile(profile_id)
+            safe_ctx = math.floor(
+                max(int(settings.local_runtime_context_window_tokens), 1024)
+                * min(max(float(settings.local_runtime_prompt_safety_ratio), 0.25), 1.0)
+            )
+            effective_max_tokens = _effective_max_tokens_for_profile(
+                int(settings.model_max_tokens),
+                profile.id,
+            )
+            status.update({
+                "context_window_tokens": int(settings.local_runtime_context_window_tokens),
+                "prompt_safety_ratio": float(settings.local_runtime_prompt_safety_ratio),
+                "tool_reserve_tokens": int(settings.local_runtime_tool_reserve_tokens),
+                "prompt_budget_tokens": max(
+                    safe_ctx
+                    - effective_max_tokens
+                    - max(int(settings.local_runtime_tool_reserve_tokens), 0),
+                    0,
+                ),
+                "runtime_path": runtime_profile.runtime_path,
+                "runtime_priority": runtime_profile.priority,
+            })
+        statuses.append(status)
     return statuses
 
 
@@ -963,14 +1087,16 @@ def build_model_kwargs(
             profile=resolved_profile,
         )
     )
+    effective_max_tokens = _effective_max_tokens_for_profile(max_tokens, resolved_profile)
     kwargs: dict[str, Any] = {
         "model_id": model_id or resolved_model_id,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": effective_max_tokens,
         "runtime_profile": resolved_profile,
         "runtime_path": runtime_path,
     }
     kwargs.update(_profile_options(resolved_profile))
+    _apply_local_runtime_request_metadata(kwargs, resolved_profile)
     api_key = _profile_api_key(resolved_profile)
     if api_key:
         kwargs["api_key"] = api_key
@@ -990,6 +1116,7 @@ def build_completion_kwargs(
     fallback_model_id: str | None = None,
     fallback_api_key: str | None = None,
     fallback_api_base: str | None = None,
+    fallback_profile: str | None = None,
     fallback_options: dict[str, Any] | None = None,
     runtime_path: str | None = None,
     profile: str | None = None,
@@ -1003,7 +1130,7 @@ def build_completion_kwargs(
             "model": model_id or fallback_model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": _effective_max_tokens_for_profile(max_tokens, fallback_profile),
         }
         kwargs.update(fallback_options or {})
         api_key = (
@@ -1030,9 +1157,10 @@ def build_completion_kwargs(
             "model": model_id or resolved_model_id,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": _effective_max_tokens_for_profile(max_tokens, resolved_profile),
         }
         kwargs.update(_profile_options(resolved_profile))
+        _apply_local_runtime_request_metadata(kwargs, resolved_profile)
         api_key = _profile_api_key(resolved_profile)
         api_base = _profile_api_base(resolved_profile)
 
@@ -1122,7 +1250,7 @@ def has_fallback_model(*, runtime_path: str | None = None) -> bool:
 def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "default") -> str:
     if settings.fallback_llm_api_key:
         return settings.fallback_llm_api_key
-    if primary_profile == "local":
+    if _is_local_profile(primary_profile):
         return _primary_api_key()
     return primary_api_key or _primary_api_key()
 
@@ -1130,7 +1258,7 @@ def _fallback_api_key(primary_api_key: str | None, *, primary_profile: str = "de
 def _fallback_api_base(primary_api_base: str | None, *, primary_profile: str = "default") -> str:
     if settings.fallback_llm_api_base:
         return settings.fallback_llm_api_base
-    if primary_profile == "local":
+    if _is_local_profile(primary_profile):
         return settings.llm_api_base
     return primary_api_base or settings.llm_api_base
 
@@ -1236,6 +1364,11 @@ def _fallback_targets(
             }
         )
     return _order_targets_by_policy(targets, runtime_path=runtime_path)
+
+
+def _target_uses_local_runtime_profile(target: dict[str, Any]) -> bool:
+    profile = target.get("profile")
+    return bool(profile and is_local_runtime_profile(str(profile)))
 
 
 def _target_cooldown_seconds() -> int:
@@ -2265,6 +2398,43 @@ def _attemptable_targets(
     return ordered_targets
 
 
+def _reserved_output_tokens_from_kwargs(
+    *,
+    kwargs: dict[str, Any],
+    fallback: int | None,
+) -> int:
+    value = kwargs.get("max_tokens", fallback)
+    if value is None:
+        value = settings.model_max_tokens
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return max(int(settings.model_max_tokens), 0)
+
+
+def _messages_for_local_target(
+    messages: list[Any],
+    *,
+    target: dict[str, Any],
+    runtime_path: str,
+    reserved_output_tokens: int,
+) -> list[Any]:
+    profile = target.get("profile")
+    if not is_local_runtime_profile(str(profile) if profile else None):
+        return messages
+    profile_max_tokens = _local_runtime_profile_max_tokens(str(profile) if profile else None)
+    if profile_max_tokens is not None:
+        reserved_output_tokens = min(reserved_output_tokens, profile_max_tokens)
+    compacted, _receipt = compact_messages_for_local_runtime(
+        list(messages),
+        runtime_path=runtime_path,
+        runtime_profile=str(profile or "local"),
+        reserved_output_tokens=reserved_output_tokens,
+        session_id=get_current_session_id(),
+    )
+    return compacted
+
+
 def _register_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests[request_id] = False
@@ -2386,6 +2556,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
     ):
         self._runtime_profile = runtime_profile or "default"
         self._runtime_path = runtime_path
+        self._seraph_max_tokens = kwargs.get("max_tokens")
         super().__init__(
             model_id=model_id,
             api_base=api_base,
@@ -2436,6 +2607,11 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         **kwargs,
     ):
         primary_model = self.model_id
+        runtime_path = self._runtime_path or "agent_generate"
+        reserved_output_tokens = _reserved_output_tokens_from_kwargs(
+            kwargs=kwargs,
+            fallback=getattr(self, "_seraph_max_tokens", None),
+        )
         request_id = _current_llm_request_id()
         primary_target = {
             "model_id": primary_model,
@@ -2521,11 +2697,17 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         for index, target in enumerate(attempt_targets):
             is_primary = target["source"] == "primary"
             try:
+                target_messages = _messages_for_local_target(
+                    messages,
+                    target=target,
+                    runtime_path=runtime_path,
+                    reserved_output_tokens=reserved_output_tokens,
+                )
                 if is_primary:
                     primary_attempted = True
                     if is_local_codex_model(primary_model):
                         local_result = _run_local_codex_completion(
-                            _messages_to_local_operator_prompt(messages),
+                            _messages_to_local_operator_prompt(target_messages),
                             session_id=get_current_session_id(),
                         )
                         if not local_result.get("ok", False):
@@ -2543,7 +2725,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         )
                     else:
                         response = super().generate(
-                            messages,
+                            target_messages,
                             stop_sequences=stop_sequences,
                             response_format=response_format,
                             tools_to_call_from=tools_to_call_from,
@@ -2575,7 +2757,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 attempted_fallback_models.append(fallback_model.model_id)
                 if is_local_codex_model(fallback_model.model_id):
                     local_result = _run_local_codex_completion(
-                        _messages_to_local_operator_prompt(messages),
+                        _messages_to_local_operator_prompt(target_messages),
                         session_id=get_current_session_id(),
                     )
                     if not local_result.get("ok", False):
@@ -2593,7 +2775,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     )
                 else:
                     response = fallback_model.generate(
-                        messages,
+                        target_messages,
                         stop_sequences=stop_sequences,
                         response_format=response_format,
                         tools_to_call_from=tools_to_call_from,
@@ -2707,6 +2889,7 @@ def completion_with_fallback_sync(
     request_id: str | None = None,
     runtime_path: str = "completion",
     profile: str | None = None,
+    local_runtime_only: bool = False,
 ):
     """Execute a litellm completion with an optional fallback target."""
     import litellm
@@ -2729,6 +2912,10 @@ def completion_with_fallback_sync(
             "profile": resolved_profile,
             "source": "primary",
         }
+        if local_runtime_only and not _target_uses_local_runtime_profile(primary_target):
+            raise ProviderProfileConfigurationError(
+                f"Runtime path '{runtime_path}' requires a local runtime profile"
+            )
         fallback_targets = _fallback_targets(
             primary_model_id=primary_model,
             primary_api_base=primary_kwargs.get("api_base"),
@@ -2737,6 +2924,10 @@ def completion_with_fallback_sync(
             runtime_path=runtime_path,
             profile=profile,
         )
+        if local_runtime_only:
+            fallback_targets = [
+                target for target in fallback_targets if _target_uses_local_runtime_profile(target)
+            ]
         ordered_targets = _ordered_candidate_targets(
             primary_target=primary_target,
             fallback_targets=fallback_targets,
@@ -2804,10 +2995,16 @@ def completion_with_fallback_sync(
         for index, target in enumerate(attempt_targets):
             is_primary = target["source"] == "primary"
             try:
+                target_messages = _messages_for_local_target(
+                    messages,
+                    target=target,
+                    runtime_path=runtime_path,
+                    reserved_output_tokens=max_tokens,
+                )
                 if is_primary:
                     primary_attempted = True
                     if is_local_codex_model(primary_model):
-                        local_prompt = _messages_to_local_operator_prompt(messages)
+                        local_prompt = _messages_to_local_operator_prompt(target_messages)
                         if not local_prompt:
                             raise ValueError("Local Codex completion requires at least one non-empty message")
                         local_result = _run_local_codex_completion(
@@ -2822,7 +3019,9 @@ def completion_with_fallback_sync(
                             )
                         response = _local_operator_completion_response(str(local_result.get("stdout") or "").strip())
                     else:
-                        response = litellm.completion(**primary_kwargs)
+                        response = litellm.completion(
+                            **{**primary_kwargs, "messages": target_messages}
+                        )
                     _mark_target_succeeded(
                         model_id=primary_model,
                         api_base=primary_kwargs.get("api_base"),
@@ -2847,13 +3046,14 @@ def completion_with_fallback_sync(
                     return response
 
                 fallback_kwargs = build_completion_kwargs(
-                    messages=messages,
+                    messages=target_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     use_fallback=True,
                     fallback_model_id=str(target["model_id"]),
                     fallback_api_key=target["api_key"],
                     fallback_api_base=target["api_base"],
+                    fallback_profile=target.get("profile"),
                     fallback_options=dict(target.get("options") or {}),
                     runtime_path=runtime_path,
                 )
@@ -2974,6 +3174,7 @@ async def completion_with_fallback(
     model_id: str | None = None,
     runtime_path: str = "completion",
     profile: str | None = None,
+    local_runtime_only: bool = False,
 ):
     """Async wrapper around the shared completion fallback flow."""
     request_id = uuid4().hex
@@ -2988,6 +3189,7 @@ async def completion_with_fallback(
         request_id=request_id,
         runtime_path=runtime_path,
         profile=profile,
+        local_runtime_only=local_runtime_only,
     )
     try:
         if timeout is None:

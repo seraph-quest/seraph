@@ -3527,6 +3527,14 @@ async def get_operator_production_parity_readiness():
 
 @router.get("/operator/benchmark-proof")
 async def get_operator_benchmark_proof():
+    return await asyncio.to_thread(_run_operator_benchmark_proof_sync)
+
+
+def _run_operator_benchmark_proof_sync() -> dict[str, Any]:
+    return asyncio.run(_build_operator_benchmark_proof_payload())
+
+
+async def _build_operator_benchmark_proof_payload() -> dict[str, Any]:
     suites = benchmark_suite_report()
     (
         production_parity_readiness,

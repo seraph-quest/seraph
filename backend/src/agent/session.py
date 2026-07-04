@@ -931,7 +931,7 @@ class SessionManager:
         runtime_tokens = None
 
         try:
-            from src.llm_runtime import completion_with_fallback
+            from src.llm_runtime import completion_with_fallback, prefers_local_runtime_path
 
             runtime_tokens = set_runtime_context(session_id, "high_risk")
             response = await completion_with_fallback(
@@ -942,6 +942,7 @@ class SessionManager:
                 temperature=0.3,
                 max_tokens=20,
                 runtime_path="session_title_generation",
+                local_runtime_only=prefers_local_runtime_path("session_title_generation"),
             )
 
             title = response.choices[0].message.content.strip().strip('"\'')

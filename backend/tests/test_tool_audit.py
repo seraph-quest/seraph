@@ -327,6 +327,15 @@ def test_onboarding_agent_normalizes_quoted_explicit_urls():
     mock_browse.assert_called_once_with("https://example.com/about", action="extract")
 
 
+def test_onboarding_agent_normalizes_bare_domains_for_webpage_access():
+    agent = create_onboarding_agent("Check natgurlain.com to get to know me.")
+
+    with patch("src.agent.onboarding.base_browse_webpage.forward", return_value="profile page") as mock_browse:
+        assert agent.tools["browse_webpage"](url="https://natgurlain.com") == "profile page"
+
+    mock_browse.assert_called_once_with("https://natgurlain.com", action="extract")
+
+
 @patch("src.agent.onboarding.LiteLLMModel")
 def test_onboarding_agent_uses_local_profile_runtime_path(mock_model_cls):
     mock_model_cls.return_value = object()

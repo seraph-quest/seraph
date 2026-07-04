@@ -58,6 +58,12 @@ class ScreenshotFolderScanRequest(BaseModel):
     limit: int = 100
 
 
+class ScreenshotReanalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reanalysis_reason: str
+
+
 class NativeNotificationResponse(BaseModel):
     id: str
     intervention_id: str | None = None
@@ -109,6 +115,8 @@ class DaemonStatusResponse(BaseModel):
     capture_ready: bool = False
     last_error: str | None = None
     last_error_kind: str | None = None
+    status_reason: str | None = None
+    recovery_hint: str | None = None
     pending_notification_count: int
     last_native_notification_at: str | None = None
     last_native_notification_title: str | None = None
@@ -493,6 +501,16 @@ def _screen_capture_artifacts(observation: ScreenObservation) -> dict[str, Any] 
     return None
 
 
+def _screen_observation_details(observation: ScreenObservation) -> list[Any]:
+    if not observation.details_json:
+        return []
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return []
+    return details if isinstance(details, list) else []
+
+
 def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] | None:
     artifacts = _screen_capture_artifacts(observation)
     if artifacts is None:
@@ -609,6 +627,62 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
     return payload if isinstance(payload, dict) else {"value": payload}
 
 
+@router.post("/observer/screen-artifacts/{observation_id}/reanalyze")
+async def reanalyze_screen_artifact(
+    observation_id: str,
+    body: ScreenshotReanalysisRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Explicitly re-run Seraph semantic analysis for one local screenshot artifact."""
+    from src.observer.screenshot_semantic_analysis import (
+        ScreenshotSemanticAnalysisError,
+        analyze_screenshot_image,
+        replace_semantic_analysis_details,
+        validate_reanalysis_reason,
+    )
+
+    _require_local_artifact_request(request)
+    try:
+        reanalysis_reason = validate_reanalysis_reason(body.reanalysis_reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    observation = await _screen_artifact_observation(observation_id)
+    artifacts = _screen_capture_artifacts(observation) or {}
+    if artifacts.get("provider") != "screenshot_folder":
+        raise HTTPException(status_code=400, detail="Only screenshot-folder artifacts can be reanalyzed here")
+    image_path = _artifact_path(
+        str(artifacts.get("image_path") or ""),
+        allowed_roots=_artifact_allowed_roots(artifacts),
+    )
+
+    analysis = None
+    error_reason = None
+    try:
+        analysis = await analyze_screenshot_image(image_path, artifacts)
+        if analysis is None:
+            error_reason = "provider not configured"
+    except ScreenshotSemanticAnalysisError as exc:
+        error_reason = str(exc)
+
+    details = replace_semantic_analysis_details(
+        _screen_observation_details(observation),
+        analysis=analysis,
+        error_reason=error_reason,
+        reanalysis_reason=reanalysis_reason,
+    )
+    observation.details_json = json.dumps(details)
+    async with get_session() as db:
+        db.add(observation)
+
+    return {
+        "observation_id": observation.id,
+        "image_sha256": artifacts.get("image_sha256"),
+        "reanalysis_reason": reanalysis_reason,
+        "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
+    }
+
+
 @router.post("/observer/screenshot-folder/scan")
 async def scan_screenshot_folder(body: ScreenshotFolderScanRequest, request: Request) -> dict[str, Any]:
     """Scan a local screenshot folder as a Seraph image source."""
@@ -647,10 +721,31 @@ def _screenshot_folder_image_analysis(
     artifacts: dict[str, Any],
     observation: ScreenObservation,
 ) -> dict[str, Any]:
+    from src.observer.screenshot_semantic_analysis import (
+        semantic_analysis_needs_reanalysis,
+        semantic_analysis_error_from_details,
+        semantic_analysis_from_details,
+        semantic_analysis_status_from_details,
+    )
+
     metadata = local_image_metadata(image_path)
+    details = _screen_observation_details(observation)
+    semantic_analysis = semantic_analysis_from_details(details)
+    semantic_error = semantic_analysis_error_from_details(details)
+    persisted_status = semantic_analysis_status_from_details(details) or {}
+    if semantic_analysis_needs_reanalysis(details):
+        semantic_status = "needs_reanalysis"
+    elif semantic_analysis:
+        semantic_status = "succeeded"
+    elif semantic_error:
+        semantic_status = "failed"
+    else:
+        semantic_status = str(persisted_status.get("status") or "pending")
     return {
         "source": "local_screenshot_folder",
         "analysis_owner": "seraph",
+        "semantic_status": semantic_status,
+        "semantic_status_detail": persisted_status or None,
         "image_path": str(image_path),
         "image_sha256": artifacts.get("image_sha256"),
         "image_bytes": metadata.get("image_bytes"),
@@ -659,6 +754,8 @@ def _screenshot_folder_image_analysis(
         "height": metadata.get("height"),
         "observation_id": observation.id,
         "observation_summary": observation.summary,
+        "semantic_analysis": semantic_analysis,
+        "semantic_error": semantic_error,
         "report_ready": True,
         "notes": [
             "The screenshot folder source produced only the image file.",
@@ -690,9 +787,66 @@ def _continuity_surface(
     return "browser"
 
 
+_AUTOMATION_PERMISSION_NEEDLES = (
+    "-1743",
+    "-10827",
+    "not authorised to send apple events",
+    "not authorized to send apple events",
+    "system events got an error",
+)
+
+_AUTOMATION_PERMISSION_HINT = (
+    "Grant Automation permission for the terminal running Seraph to control "
+    "System Events in System Settings > Privacy & Security > Automation, then "
+    "restart with ./manage.sh -e dev daemon start."
+)
+
+_DAEMON_DISABLED_HINT = (
+    "Set DAEMON_ENABLED=true in .env.dev and start it with "
+    "./manage.sh -e dev daemon start when native desktop presence is wanted."
+)
+
+
+def _classify_daemon_status(
+    daemon_status: dict[str, object],
+) -> dict[str, str | bool | None]:
+    enabled_value = os.environ.get("DAEMON_ENABLED")
+    if enabled_value is not None and enabled_value.strip().lower() != "true":
+        return {
+            "state": "disabled",
+            "last_error": "Native daemon is configured off for this environment.",
+            "last_error_kind": "configured_off",
+            "status_reason": "Native desktop presence is disabled by DAEMON_ENABLED=false.",
+            "recovery_hint": _DAEMON_DISABLED_HINT,
+        }
+
+    last_error = daemon_status.get("last_error")
+    last_error_text = last_error if isinstance(last_error, str) else ""
+    last_error_kind = daemon_status.get("last_error_kind")
+    last_error_kind_text = last_error_kind if isinstance(last_error_kind, str) else None
+    normalized_error = f"{last_error_kind_text or ''} {last_error_text}".lower()
+    if any(needle in normalized_error for needle in _AUTOMATION_PERMISSION_NEEDLES):
+        return {
+            "state": daemon_status.get("state") if isinstance(daemon_status.get("state"), str) else "error",
+            "last_error": last_error_text or "macOS denied Automation access to System Events.",
+            "last_error_kind": "automation_permission_denied",
+            "status_reason": "macOS Automation permission is blocking native desktop presence.",
+            "recovery_hint": _AUTOMATION_PERMISSION_HINT,
+        }
+
+    return {
+        "state": daemon_status.get("state") if isinstance(daemon_status.get("state"), str) else None,
+        "last_error": last_error_text or None,
+        "last_error_kind": last_error_kind_text,
+        "status_reason": None,
+        "recovery_hint": None,
+    }
+
+
 async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]:
     ctx = context_manager.get_context()
     daemon_status = _read_daemon_status_file()
+    classified = _classify_daemon_status(daemon_status)
     connected = context_manager.is_daemon_connected()
     pending_notification_count = await native_notification_queue.count()
     return {
@@ -702,12 +856,14 @@ async def _daemon_status_payload() -> dict[str, str | int | float | bool | None]
         "active_window": ctx.active_window,
         "has_screen_context": bool(ctx.screen_context),
         "capture_mode": ctx.capture_mode,
-        "daemon_state": daemon_status.get("state"),
+        "daemon_state": classified.get("state"),
         "daemon_status_updated_at": daemon_status.get("updated_at"),
         "screen_analysis": daemon_status.get("screen_analysis"),
         "capture_ready": daemon_status.get("capture_ready"),
-        "last_error": daemon_status.get("last_error"),
-        "last_error_kind": daemon_status.get("last_error_kind"),
+        "last_error": classified.get("last_error"),
+        "last_error_kind": classified.get("last_error_kind"),
+        "status_reason": classified.get("status_reason"),
+        "recovery_hint": classified.get("recovery_hint"),
         "pending_notification_count": pending_notification_count,
         "last_native_notification_at": (
             ctx.last_native_notification_at.isoformat()
@@ -2016,6 +2172,15 @@ def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
     active_transports = _active_channel_adapters()
     websocket_connection_count = ws_manager.active_count
     daemon_connected = context_manager.is_daemon_connected()
+    daemon_status = _classify_daemon_status(_read_daemon_status_file())
+    daemon_unavailable_status = {
+        "last_error_kind": (
+            daemon_status.get("last_error_kind") if isinstance(daemon_status.get("last_error_kind"), str) else None
+        ),
+        "recovery_hint": (
+            daemon_status.get("recovery_hint") if isinstance(daemon_status.get("recovery_hint"), str) else None
+        ),
+    }
     state_payload = load_extension_state_payload()
     return {
         "transport_statuses": [
@@ -2024,6 +2189,7 @@ def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
                 active_transports=active_transports,
                 websocket_connection_count=websocket_connection_count,
                 daemon_connected=daemon_connected,
+                daemon_unavailable_status=daemon_unavailable_status,
             )
             for transport in SUPPORTED_CHANNEL_ROUTE_TRANSPORTS
         ],
@@ -2032,6 +2198,7 @@ def _observer_reach_payload() -> dict[str, list[dict[str, Any]]]:
             active_transports=active_transports,
             websocket_connection_count=websocket_connection_count,
             daemon_connected=daemon_connected,
+            daemon_unavailable_status=daemon_unavailable_status,
         ),
     }
 

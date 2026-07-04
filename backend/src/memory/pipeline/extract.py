@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from config.settings import settings
 from src.approval.runtime import reset_runtime_context, set_runtime_context
+from src.llm_runtime import prefers_local_runtime_path
 from src.memory.types import ConsolidatedMemoryItem, parse_consolidated_memories
 
 
@@ -61,6 +62,7 @@ async def extract_session_memories(
             max_tokens=1024,
             timeout=settings.consolidation_llm_timeout,
             runtime_path="session_consolidation",
+            local_runtime_only=prefers_local_runtime_path("session_consolidation"),
         )
     finally:
         if runtime_tokens is not None:

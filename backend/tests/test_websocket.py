@@ -164,6 +164,7 @@ class TestWebSocket:
         try:
             with (
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
                 patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")),
                 client.websocket_connect("/ws/chat") as ws,
@@ -205,6 +206,7 @@ class TestWebSocket:
             with (
                 patch("src.api.ws.should_use_direct_local_chat", side_effect=real_should_use_direct_local_chat),
                 patch("src.agent.direct_chat._uses_local_gemma_profile", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
                 patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")),
                 client.websocket_connect("/ws/chat") as ws,
@@ -239,6 +241,7 @@ class TestWebSocket:
         try:
             with (
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
                 patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Fallback ready.")),
                 client.websocket_connect("/ws/chat") as ws,
@@ -261,6 +264,45 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
+    def test_websocket_direct_chat_preflight_failure_emits_operator_error(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _fake_stream(*args, **kwargs):
+            yield "unreachable"
+
+        route_error = (
+            "Local chat runtime is unreachable from the Seraph backend at http://192.168.1.26:8001. "
+            "Health endpoint http://192.168.1.26:8001/health/chat reported chat proxy connect_error."
+        )
+        stream_mock = MagicMock(side_effect=_fake_stream)
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=route_error)),
+                patch("src.api.ws.stream_direct_local_chat", stream_mock),
+                patch("src.api.ws.run_direct_local_chat", new=AsyncMock(return_value="Unused.")) as mock_direct,
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+
+                received = [json.loads(ws.receive_text()) for _ in range(2)]
+
+            assert received[0]["type"] == "status"
+            assert received[0]["content"] == "Seraph received the message."
+            assert received[1]["type"] == "error"
+            assert "Local chat runtime is unreachable" in received[1]["content"]
+            assert "health/chat" in received[1]["content"]
+            assert "LiteLLM" not in received[1]["content"]
+            assert all("local chat runtime" not in msg["content"] for msg in received if msg["type"] == "status")
+            stream_mock.assert_not_called()
+            mock_direct.assert_not_awaited()
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
     def test_websocket_direct_chat_error_close_does_not_record_interrupted_turn(self):
         client, patches, stack = _make_sync_client_with_db()
 
@@ -271,6 +313,7 @@ class TestWebSocket:
         try:
             with (
                 patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
                 patch("src.api.ws.stream_direct_local_chat", _fake_stream),
                 patch("src.api.ws.run_direct_local_chat", new=AsyncMock(side_effect=RuntimeError("chat failed"))),
                 client.websocket_connect("/ws/chat") as ws,

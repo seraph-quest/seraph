@@ -23,8 +23,10 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
 from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback
-from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 from src.observer.image_metadata import image_metadata_label
+from src.observer.screenshot_folder_source import resolve_screenshot_folder
+from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
+from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +249,12 @@ async def _screen_summary_for_local_day(report_day: date, tz: ZoneInfo) -> dict[
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
             .order_by(col(ScreenObservation.timestamp))
         )
-        observations = list(result.scalars().all())
+        current_root = resolve_screenshot_folder()
+        observations = [
+            observation
+            for observation in result.scalars().all()
+            if not _stale_incomplete_screenshot_observation(observation, root=current_root)
+        ]
 
     by_activity: dict[str, int] = {}
     by_project: dict[str, int] = {}
@@ -311,6 +318,25 @@ async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> d
         )
         episodes = list(result.scalars().all())
 
+        episode_observation_ids: set[str] = set()
+        for episode in episodes:
+            metadata = _episode_metadata(episode)
+            if metadata.get("artifact_schema") != _SCREENSHOT_DIGEST_SCHEMA_VERSION:
+                continue
+            episode_observation_ids.update(str(item) for item in metadata.get("observation_ids", []) if item)
+
+        current_root = resolve_screenshot_folder()
+        stale_observation_ids: set[str] = set()
+        if episode_observation_ids:
+            observation_result = await db.execute(
+                select(ScreenObservation).where(col(ScreenObservation.id).in_(episode_observation_ids))
+            )
+            stale_observation_ids = {
+                observation.id
+                for observation in observation_result.scalars().all()
+                if _stale_incomplete_screenshot_observation(observation, root=current_root)
+            }
+
     digests: list[dict[str, Any]] = []
     observation_ids: list[str] = []
     text_chunks: list[str] = []
@@ -319,6 +345,8 @@ async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> d
         if metadata.get("artifact_schema") != _SCREENSHOT_DIGEST_SCHEMA_VERSION:
             continue
         ids = [str(item) for item in metadata.get("observation_ids", []) if item]
+        if any(observation_id in stale_observation_ids for observation_id in ids):
+            continue
         observation_ids.extend(ids)
         content = str(episode.content or "")[:1400]
         digests.append(
@@ -340,6 +368,54 @@ async def _screenshot_digests_for_local_day(report_day: date, tz: ZoneInfo) -> d
         "digests": digests[:16],
         "digest_text": "\n\n".join(text_chunks)[:8000],
     }
+
+
+def _observation_details(observation: ScreenObservation) -> list[Any]:
+    if not observation.details_json:
+        return []
+    try:
+        details = json.loads(observation.details_json)
+    except json.JSONDecodeError:
+        return []
+    return details if isinstance(details, list) else []
+
+
+def _stale_incomplete_screenshot_observation(observation: ScreenObservation, *, root: Path | None = None) -> bool:
+    if _observation_source(observation) != "screenshot_folder":
+        return False
+    details = _observation_details(observation)
+    status = semantic_analysis_status_from_details(details) or {}
+    state = str(status.get("status") or "").strip().lower()
+    if state == "succeeded":
+        return False
+    if state in {"source_missing", "stale_root"}:
+        return True
+    return _screenshot_root_is_stale(_capture_artifacts_from_details(details), root)
+
+
+def _capture_artifacts_from_details(details: list[Any]) -> dict[str, Any] | None:
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("capture_artifacts:")):
+            continue
+        try:
+            artifacts = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(artifacts, dict) and artifacts.get("provider") == "screenshot_folder":
+            return artifacts
+    return None
+
+
+def _screenshot_root_is_stale(artifacts: dict[str, Any] | None, root: Path | None) -> bool:
+    if artifacts is None or root is None:
+        return False
+    try:
+        artifact_root = str(artifacts.get("screenshot_folder") or "").strip()
+        if artifact_root:
+            return Path(artifact_root).expanduser().resolve() != root
+        return False
+    except (OSError, RuntimeError):
+        return False
 
 
 def _observation_source(observation: ScreenObservation) -> str:

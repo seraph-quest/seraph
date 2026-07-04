@@ -557,6 +557,55 @@ async def test_screenshot_folder_scan_keeps_metadata_when_local_vlm_fails(
 
 
 @pytest.mark.asyncio
+async def test_screenshot_folder_analysis_marks_missing_file_source_missing(
+    async_db, client, tmp_path, monkeypatch
+):
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-deleted.png")
+
+    async def unexpected_analyze_screenshot_image(_image_path, _artifacts):
+        raise AssertionError("missing screenshot source should not call the VLM")
+
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.analyze_screenshot_image",
+        unexpected_analyze_screenshot_image,
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.screen_analysis_provider",
+        "local-vlm",
+    )
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.settings.local_vlm_base_url",
+        "http://gpu:8088",
+    )
+
+    scan_resp = await client.post(
+        "/api/observer/screenshot-folder/scan",
+        json={"screenshot_folder": str(root), "limit": 10},
+    )
+    assert scan_resp.status_code == 200
+    image.unlink()
+
+    from src.observer.screenshot_folder_source import analyze_pending_screenshot_folder_observations
+
+    result = await analyze_pending_screenshot_folder_observations(limit=10)
+    assert result.failed == 1
+
+    async with async_db() as db:
+        result = await db.execute(select(ScreenObservation))
+        observation = result.scalar_one()
+
+    stored_details = json.loads(observation.details_json or "[]")
+    status_details = [
+        json.loads(item.removeprefix("screenshot_analysis_status:"))
+        for item in stored_details
+        if isinstance(item, str) and item.startswith("screenshot_analysis_status:")
+    ]
+    assert status_details[0]["status"] == "source_missing"
+    assert status_details[0]["reason"] == "image file not found"
+
+
+@pytest.mark.asyncio
 async def test_screenshot_folder_reanalysis_requires_explicit_allowed_reason(async_db, client, tmp_path):
     root = tmp_path / "screenshots"
     _write_screenshot(root, name="capture-invalid-reason.png")

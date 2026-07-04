@@ -267,6 +267,180 @@ async def test_build_report_counts_screenshot_folder_observation_source(async_db
 
 
 @pytest.mark.asyncio
+async def test_build_report_excludes_stale_screenshot_folder_observations_and_digests(async_db, monkeypatch):
+    from src.db.models import MemoryEpisode, MemoryEpisodeType, ScreenObservation
+    from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report
+
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", "/tmp/screenshot-recorder")
+    active_details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "screenshot_folder",
+                "image_path": "/tmp/screenshot-recorder/active.png",
+                "image_sha256": "active",
+            },
+            sort_keys=True,
+        ),
+        "screenshot_analysis_status:"
+        + json.dumps(
+            {
+                "status": "succeeded",
+                "recorded_at": "2026-06-20T12:00:00+00:00",
+            },
+            sort_keys=True,
+        ),
+    ]
+    stale_details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "screenshot_folder",
+                "image_path": "/tmp/screenshot-recorder/missing.png",
+                "image_sha256": "missing",
+            },
+            sort_keys=True,
+        ),
+        "screenshot_analysis_status:"
+        + json.dumps(
+            {
+                "status": "source_missing",
+                "reason": "image file not found",
+                "recorded_at": "2026-06-20T12:05:00+00:00",
+            },
+            sort_keys=True,
+        ),
+    ]
+    old_root_details = [
+        "capture_artifacts:"
+        + json.dumps(
+            {
+                "provider": "screenshot_folder",
+                "screenshot_folder": "/tmp/old-screenshot-recorder",
+                "image_path": "/tmp/old-screenshot-recorder/old-root.png",
+                "image_sha256": "old-root",
+            },
+            sort_keys=True,
+        ),
+        "screenshot_analysis_status:"
+        + json.dumps(
+            {
+                "status": "pending",
+                "reason": "queued_for_analysis",
+                "recorded_at": "2026-06-20T12:10:00+00:00",
+            },
+            sort_keys=True,
+        ),
+    ]
+    async with async_db() as db:
+        db.add(
+            ScreenObservation(
+                id="active-screenshot-row",
+                timestamp=datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+                app_name="Screenshot Folder",
+                window_title="active.png",
+                activity_type="screen",
+                summary="Active screenshot summary.",
+                details_json=json.dumps(active_details),
+            )
+        )
+        db.add(
+            ScreenObservation(
+                id="stale-screenshot-row",
+                timestamp=datetime(2026, 6, 20, 12, 5, tzinfo=timezone.utc),
+                app_name="Screenshot Folder",
+                window_title="missing.png",
+                activity_type="screen",
+                summary="Stale screenshot summary that should not count.",
+                details_json=json.dumps(stale_details),
+            )
+        )
+        db.add(
+            ScreenObservation(
+                id="old-root-screenshot-row",
+                timestamp=datetime(2026, 6, 20, 12, 10, tzinfo=timezone.utc),
+                app_name="Screenshot Folder",
+                window_title="old-root.png",
+                activity_type="screen",
+                summary="Old root screenshot summary that should not count.",
+                details_json=json.dumps(old_root_details),
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Active screenshot digest",
+                content="Active digest text survives.",
+                metadata_json=json.dumps(
+                    {
+                        "artifact_schema": "seraph.screenshot_observation_digest.v1",
+                        "window_start": "2026-06-20T12:00:00+00:00",
+                        "window_end": "2026-06-20T12:15:00+00:00",
+                        "observation_count": 1,
+                        "observation_ids": ["active-screenshot-row"],
+                    },
+                    sort_keys=True,
+                ),
+                observed_at=datetime(2026, 6, 20, 12, 15, tzinfo=timezone.utc),
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Stale screenshot digest",
+                content="Stale digest text should not survive.",
+                metadata_json=json.dumps(
+                    {
+                        "artifact_schema": "seraph.screenshot_observation_digest.v1",
+                        "window_start": "2026-06-20T12:15:00+00:00",
+                        "window_end": "2026-06-20T12:30:00+00:00",
+                        "observation_count": 1,
+                        "observation_ids": ["stale-screenshot-row"],
+                    },
+                    sort_keys=True,
+                ),
+                observed_at=datetime(2026, 6, 20, 12, 30, tzinfo=timezone.utc),
+            )
+        )
+        db.add(
+            MemoryEpisode(
+                episode_type=MemoryEpisodeType.observer,
+                source_tool_name="screenshot_observation_digest",
+                summary="Old root screenshot digest",
+                content="Old root digest text should not survive.",
+                metadata_json=json.dumps(
+                    {
+                        "artifact_schema": "seraph.screenshot_observation_digest.v1",
+                        "window_start": "2026-06-20T12:30:00+00:00",
+                        "window_end": "2026-06-20T12:45:00+00:00",
+                        "observation_count": 1,
+                        "observation_ids": ["old-root-screenshot-row"],
+                    },
+                    sort_keys=True,
+                ),
+                observed_at=datetime(2026, 6, 20, 12, 45, tzinfo=timezone.utc),
+            )
+        )
+
+    with patch.object(settings, "user_timezone", "UTC"), patch(
+        "src.scheduler.jobs.end_of_day_goal_report.completion_with_fallback",
+        new=AsyncMock(return_value=_llm_response("Filtered screenshot report")),
+    ) as completion:
+        report = await build_end_of_day_goal_report(date(2026, 6, 20))
+
+    assert report["summary"]["total_observations"] == 1
+    assert report["summary"]["samples"] == ["Active screenshot summary."]
+    assert report["screenshot_digests"]["count"] == 1
+    assert report["screenshot_digests"]["digest_text"] == "Active digest text survives."
+    prompt = completion.await_args.kwargs["messages"][0]["content"]
+    assert "Active digest text survives." in prompt
+    assert "Stale digest text should not survive." not in prompt
+    assert "Old root digest text should not survive." not in prompt
+
+
+@pytest.mark.asyncio
 async def test_build_report_caps_screenshot_folder_duration_from_timestamp_gaps(async_db):
     from src.db.models import ScreenObservation
     from src.scheduler.jobs.end_of_day_goal_report import build_end_of_day_goal_report

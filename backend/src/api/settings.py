@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, or_
+from sqlalchemy import func, update
 from sqlmodel import col, select
 
 from config.settings import settings
@@ -94,6 +94,7 @@ _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
 _SCREENSHOT_FOLDER_ENV = SCREENSHOT_FOLDER_ENV
 _SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
+_SCREENSHOT_STALE_STATUSES = {"source_missing", "stale_root"}
 _SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S = 0.25
 _SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S = 0.25
 _REPORT_RECEIPT_SUMMARY_TIMEOUT_S = 0.25
@@ -379,16 +380,61 @@ def _is_screenshot_folder_observation(observation: ScreenObservation) -> bool:
     return False
 
 
-async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
-    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
+def _screenshot_capture_artifacts(details: list[object]) -> dict[str, object] | None:
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("capture_artifacts:")):
+            continue
+        try:
+            artifacts = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(artifacts, dict) and artifacts.get("provider") == "screenshot_folder":
+            return artifacts
+    return None
 
-    def status_patterns(status: str) -> tuple[str, ...]:
-        return (
-            f'"status":"{status}"',
-            f'"status": "{status}"',
-            f'\\"status\\":\\"{status}\\"',
-            f'\\"status\\": \\"{status}\\"',
-        )
+
+def _screenshot_root_matches_current(artifacts: dict[str, object] | None, root: Path | None) -> bool:
+    if root is None:
+        return True
+    if not artifacts:
+        return False
+    try:
+        artifact_root_value = str(artifacts.get("screenshot_folder") or "").strip()
+        if artifact_root_value:
+            return Path(artifact_root_value).expanduser().resolve() == root
+        image_path_value = str(artifacts.get("image_path") or "").strip()
+        if not image_path_value:
+            return False
+        return Path(image_path_value).expanduser().resolve().is_relative_to(root)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _screenshot_status_from_details(details: list[object]) -> dict[str, object]:
+    status = semantic_analysis_status_from_details(details) or {}
+    return status if status else {"status": "unknown"}
+
+
+def _classify_screenshot_observation(
+    observation: ScreenObservation,
+    *,
+    root: Path | None,
+) -> tuple[str, dict[str, object], dict[str, object] | None]:
+    details = _screen_observation_details(observation.details_json)
+    status = _screenshot_status_from_details(details)
+    state = str(status.get("status") or "unknown").strip().lower() or "unknown"
+    artifacts = _screenshot_capture_artifacts(details)
+    if state == "succeeded":
+        return "succeeded", status, artifacts
+    if state in _SCREENSHOT_STALE_STATUSES:
+        return state, status, artifacts
+    if artifacts is not None and not _screenshot_root_matches_current(artifacts, root):
+        return "stale_root", status, artifacts
+    return state, status, artifacts
+
+
+async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[str, object]:
+    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
 
     async with get_db() as db:
         base_filters = [
@@ -396,71 +442,46 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
             col(ScreenObservation.app_name) == "Screenshot Folder",
         ]
 
-        async def count_matching(*patterns: str) -> int:
-            filters = list(base_filters)
-            if patterns:
-                filters.append(or_(*(col(ScreenObservation.details_json).contains(pattern) for pattern in patterns)))
-            result = await db.execute(
-                select(func.count())
-                .select_from(ScreenObservation)
-                .where(*filters)
-            )
-            return int(result.scalar_one() or 0)
-
-        total_observations = await count_matching()
         status_counts: dict[str, int] = {
-            "pending": await count_matching(*status_patterns("pending")),
-            "succeeded": await count_matching(*status_patterns("succeeded")),
-            "failed": await count_matching(*status_patterns("failed")),
-            "needs_reanalysis": await count_matching(*status_patterns("needs_reanalysis")),
+            "pending": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "needs_reanalysis": 0,
+            "source_missing": 0,
+            "stale_root": 0,
             "unknown": 0,
         }
-        status_counts["unknown"] = max(total_observations - sum(status_counts.values()), 0)
-
-        visual_run_result = await db.execute(
-            select(ScreenObservation.details_json)
+        current_observation_count = 0
+        current_latest_observation_at: datetime | None = None
+        latest_analyzed_at: str | None = None
+        latest_failure: str | None = None
+        visual_detail_payloads: list[str] = []
+        classification_result = await db.execute(
+            select(ScreenObservation)
             .where(*base_filters)
-            .where(col(ScreenObservation.details_json).contains("screenshot_visual_run:"))
-        )
-        visual_runs = _screenshot_visual_run_summary(
-            [str(item or "") for item in visual_run_result.scalars().all()]
-        )
-
-        latest_observation_result = await db.execute(
-            select(ScreenObservation.timestamp)
-            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
             .order_by(col(ScreenObservation.timestamp).desc())
-            .limit(1)
         )
-        latest_observation_at = _utc_iso(latest_observation_result.scalar_one_or_none())
+        observations = list(classification_result.scalars().all())
+        total_observations = len(observations)
+        for observation in observations:
+            state, status, artifacts = _classify_screenshot_observation(observation, root=root)
+            status_counts[state if state in status_counts else "unknown"] += 1
+            if state in _SCREENSHOT_STALE_STATUSES:
+                continue
+            visual_detail_payloads.append(str(observation.details_json or ""))
+            if _screenshot_root_matches_current(artifacts, root):
+                current_observation_count += 1
+                if current_latest_observation_at is None:
+                    current_latest_observation_at = observation.timestamp
+            if state == "succeeded" and latest_analyzed_at is None:
+                recorded_at = status.get("recorded_at")
+                if isinstance(recorded_at, str):
+                    latest_analyzed_at = recorded_at
+            if state == "failed" and latest_failure is None:
+                latest_failure = str(status.get("reason") or "analysis failed")
 
-        latest_analyzed_result = await db.execute(
-            select(ScreenObservation.details_json)
-            .where(*base_filters)
-            .where(or_(*(col(ScreenObservation.details_json).contains(pattern) for pattern in status_patterns("succeeded"))))
-            .order_by(col(ScreenObservation.timestamp).desc())
-            .limit(1)
-        )
-        latest_analyzed_at = None
-        latest_analyzed_details = _screen_observation_details(latest_analyzed_result.scalar_one_or_none())
-        latest_analyzed_status = semantic_analysis_status_from_details(latest_analyzed_details) or {}
-        recorded_at = latest_analyzed_status.get("recorded_at")
-        if isinstance(recorded_at, str):
-            latest_analyzed_at = recorded_at
-
-        latest_failure_result = await db.execute(
-            select(ScreenObservation.details_json)
-            .where(*base_filters)
-            .where(or_(*(col(ScreenObservation.details_json).contains(pattern) for pattern in status_patterns("failed"))))
-            .order_by(col(ScreenObservation.timestamp).desc())
-            .limit(1)
-        )
-        latest_failure = None
-        latest_failure_details = _screen_observation_details(latest_failure_result.scalar_one_or_none())
-        latest_failure_status = semantic_analysis_status_from_details(latest_failure_details) or {}
-        if latest_failure_status:
-            latest_failure = str(latest_failure_status.get("reason") or "analysis failed")
+        visual_runs = _screenshot_visual_run_summary(visual_detail_payloads)
+        latest_observation_at = _utc_iso(current_latest_observation_at)
 
         digest_result = await db.execute(
             select(MemoryEpisode)
@@ -477,10 +498,14 @@ async def _screenshot_folder_pipeline_summary() -> dict[str, object]:
         digest_count = int(digest_count_result.scalar_one() or 0)
 
     return {
-        "observation_count": total_observations,
+        "observation_count": current_observation_count if root is not None else total_observations,
+        "total_observation_count": total_observations,
         "analysis_status": status_counts,
         "analysis_backlog": status_counts["pending"] + status_counts["needs_reanalysis"] + status_counts["unknown"],
         "analysis_failures": status_counts["failed"],
+        "stale_count": status_counts["source_missing"] + status_counts["stale_root"],
+        "source_missing_count": status_counts["source_missing"],
+        "stale_root_count": status_counts["stale_root"],
         "visual_run_count": visual_runs["visual_run_count"],
         "visual_suppressed_count": visual_runs["visual_suppressed_count"],
         "persistence": screenshot_folder_persistence_status(),
@@ -502,10 +527,16 @@ def _empty_screenshot_folder_pipeline_summary(*, latest_failure: str | None = No
             "succeeded": 0,
             "failed": 0,
             "needs_reanalysis": 0,
+            "source_missing": 0,
+            "stale_root": 0,
             "unknown": 0,
         },
+        "total_observation_count": 0,
         "analysis_backlog": 0,
         "analysis_failures": 0,
+        "stale_count": 0,
+        "source_missing_count": 0,
+        "stale_root_count": 0,
         "visual_run_count": 0,
         "visual_suppressed_count": 0,
         "persistence": screenshot_folder_persistence_status(),
@@ -541,10 +572,10 @@ def _screenshot_visual_run_summary(details_payloads: list[str]) -> dict[str, int
     }
 
 
-async def _screenshot_folder_pipeline_summary_fast() -> dict[str, object]:
+async def _screenshot_folder_pipeline_summary_fast(root: Path | None = None) -> dict[str, object]:
     try:
         return await asyncio.wait_for(
-            _screenshot_folder_pipeline_summary(),
+            _screenshot_folder_pipeline_summary(root),
             timeout=_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
@@ -818,6 +849,46 @@ async def pick_screenshot_folder(request: Request):
     )
 
 
+@router.post("/settings/screen-analysis/screenshot-folder/clear-stale")
+async def clear_stale_screenshot_folder_observations(request: Request):
+    """Archive stale incomplete screenshot-folder rows without deleting analyzed history."""
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Screenshot folder cleanup is only available from localhost")
+    screenshot_folder, _ = _screenshot_folder()
+    async with get_db() as db:
+        result = await db.execute(
+            select(ScreenObservation)
+            .where(col(ScreenObservation.blocked) == False)  # noqa: E712
+            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .order_by(col(ScreenObservation.timestamp).desc())
+        )
+        stale_ids: list[str] = []
+        source_missing = 0
+        stale_root = 0
+        for observation in result.scalars().all():
+            state, _status, _artifacts = _classify_screenshot_observation(observation, root=screenshot_folder)
+            if state == "succeeded":
+                continue
+            if state == "source_missing":
+                source_missing += 1
+                stale_ids.append(observation.id)
+            elif state == "stale_root":
+                stale_root += 1
+                stale_ids.append(observation.id)
+        if stale_ids:
+            await db.execute(
+                update(ScreenObservation)
+                .where(col(ScreenObservation.id).in_(stale_ids))
+                .values(blocked=True)
+            )
+    return {
+        "archived": len(stale_ids),
+        "source_missing": source_missing,
+        "stale_root": stale_root,
+        "screenshot_folder": str(screenshot_folder),
+    }
+
+
 @router.get("/settings/artifact-storage")
 async def get_artifact_storage_settings():
     """Return operator-visible evidence/report archive configuration."""
@@ -827,7 +898,7 @@ async def get_artifact_storage_settings():
     screenshot_source, report_receipts, screenshot_pipeline, local_runtime_proof = await asyncio.gather(
         _screenshot_folder_summary_fast(screenshot_folder),
         _report_receipt_summary_fast(report_archive_dir),
-        _screenshot_folder_pipeline_summary_fast(),
+        _screenshot_folder_pipeline_summary_fast(screenshot_folder),
         _local_runtime_profile_proof_summary_fast(),
     )
     screenshot_image_count = int(screenshot_source["image_count"] or 0)

@@ -190,8 +190,10 @@ async def analyze_pending_screenshot_folder_observations(
         image_path = Path(str(artifacts.get("image_path") or "")).expanduser().resolve()
         analysis = None
         failed_reason: str | None = None
+        status_override: str | None = None
         try:
             if not image_path.is_file():
+                status_override = "source_missing"
                 raise ScreenshotFolderImageError("image file not found")
             async with semaphore:
                 logger.info("screenshot_folder_analysis: analyzing %s", image_path.name)
@@ -209,6 +211,7 @@ async def analyze_pending_screenshot_folder_observations(
                 details,
                 analysis=None,
                 error_reason=str(exc),
+                status=status_override or "failed",
             )
 
         try:
@@ -720,6 +723,7 @@ def _replace_analysis_details(
     *,
     analysis,
     error_reason: str | None,
+    status: str = "failed",
 ) -> list[str]:
     previous_status = semantic_analysis_status_from_details(details) or {}
     try:
@@ -742,7 +746,7 @@ def _replace_analysis_details(
     else:
         reason = error_reason or "unknown"
         next_details.append(screenshot_analysis_error_detail(reason))
-        next_details.append(screenshot_analysis_status_detail("failed", reason=reason, attempts=attempts))
+        next_details.append(screenshot_analysis_status_detail(status, reason=reason, attempts=attempts))
     return next_details
 
 

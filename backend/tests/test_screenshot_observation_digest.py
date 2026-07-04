@@ -100,6 +100,59 @@ async def test_screenshot_digest_groups_window_and_links_evidence(async_db):
 
 
 @pytest.mark.asyncio
+async def test_screenshot_digest_excludes_stale_incomplete_observations(async_db):
+    from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
+
+    start = datetime(2026, 6, 30, 9, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 30, 9, 30, tzinfo=timezone.utc)
+    active_observation = _observation(
+        timestamp=datetime(2026, 6, 30, 9, 5, tzinfo=timezone.utc),
+        image_sha256="hash-active",
+        summary="Active screenshot work",
+    )
+    async with async_db() as db:
+        db.add(active_observation)
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 10, tzinfo=timezone.utc),
+                image_sha256="hash-missing",
+                summary="Deleted screenshot work",
+                status="source_missing",
+            )
+        )
+        db.add(
+            _observation(
+                timestamp=datetime(2026, 6, 30, 9, 15, tzinfo=timezone.utc),
+                image_sha256="hash-old-root",
+                summary="Old root screenshot work",
+                status="pending",
+            )
+        )
+
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="LLM digest: active row only."))]
+
+    with patch(
+        "src.scheduler.jobs.screenshot_observation_digest.completion_with_fallback",
+        new=AsyncMock(return_value=response),
+    ) as completion:
+        result = await build_screenshot_observation_digest(window_start=start, window_end=end)
+
+    assert result.status == "created"
+    assert result.observation_count == 1
+    prompt = completion.await_args.kwargs["messages"][0]["content"]
+    assert "Active screenshot work" in prompt
+    assert "Deleted screenshot work" not in prompt
+    assert "Old root screenshot work" not in prompt
+
+    async with async_db() as db:
+        episode = (await db.execute(select(MemoryEpisode))).scalar_one()
+    metadata = json.loads(episode.metadata_json or "{}")
+    assert metadata["observation_count"] == 1
+    assert metadata["observation_ids"] == [active_observation.id]
+
+
+@pytest.mark.asyncio
 async def test_screenshot_digest_blocks_without_local_profile_or_remote_opt_in(async_db):
     from src.scheduler.jobs.screenshot_observation_digest import build_screenshot_observation_digest
 
@@ -260,6 +313,7 @@ def _observation(
     image_sha256: str,
     summary: str,
     analysis: dict | None = None,
+    status: str = "succeeded",
 ) -> ScreenObservation:
     analysis_payload = {
         "schema_version": "seraph.screenshot_analysis.v1",
@@ -309,7 +363,7 @@ def _observation(
         "screenshot_analysis_status:"
         + json.dumps(
             {
-                "status": "succeeded",
+                "status": status,
                 "provider": "local-vlm",
                 "model": "gemma",
                 "schema_version": "seraph.screenshot_analysis.v1",

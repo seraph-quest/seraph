@@ -58,6 +58,9 @@ interface ArtifactStorageSettings {
       analysis_status: Record<string, number>;
       analysis_backlog: number;
       analysis_failures: number;
+      stale_count?: number;
+      source_missing_count?: number;
+      stale_root_count?: number;
       latest_observation_at: string | null;
       latest_analyzed_at: string | null;
       latest_failure: string | null;
@@ -489,6 +492,7 @@ export function ArtifactStoragePanel() {
   const [screenshotFolderScanResult, setScreenshotFolderScanResult] = useState<ScreenshotFolderScanResult | null>(null);
   const [screenshotFolderScanError, setScreenshotFolderScanError] = useState<string | null>(null);
   const [screenshotFolderPicking, setScreenshotFolderPicking] = useState(false);
+  const [screenshotFolderClearingStale, setScreenshotFolderClearingStale] = useState(false);
   const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
@@ -577,6 +581,7 @@ export function ArtifactStoragePanel() {
   const screenshotFolderSource = settings?.screenshot_folder ?? null;
   const screenshotFolderPath = screenshotFolderSource?.path ?? null;
   const screenshotFolderPathSource = screenshotFolderSource?.path_source ?? "";
+  const screenshotFolderStaleCount = screenshotFolderSource?.analysis?.stale_count ?? 0;
   const screenshotFolderLockedByEnv = screenshotFolderPathSource === "SERAPH_SCREENSHOT_FOLDER";
   const screenshotFolderMetadataLoaded = Boolean(
     screenshotFolderSource &&
@@ -675,6 +680,26 @@ export function ArtifactStoragePanel() {
       if (mountedRef.current) setScreenshotFolderScanError("Folder picker failed or was cancelled.");
     } finally {
       if (mountedRef.current) setScreenshotFolderPicking(false);
+    }
+  };
+
+  const clearStaleScreenshotFolderObservations = async () => {
+    if (screenshotFolderClearingStale || screenshotFolderStaleCount <= 0) return;
+    setScreenshotFolderClearingStale(true);
+    setScreenshotFolderScanResult(null);
+    setScreenshotFolderScanError(null);
+    try {
+      await fetchJsonWithTimeout(
+        "/api/settings/screen-analysis/screenshot-folder/clear-stale",
+        20_000,
+        { method: "POST" },
+      );
+      if (!mountedRef.current) return;
+      await fetchSettings(() => !mountedRef.current);
+    } catch {
+      if (mountedRef.current) setScreenshotFolderScanError("Stale screenshot cleanup failed.");
+    } finally {
+      if (mountedRef.current) setScreenshotFolderClearingStale(false);
     }
   };
 
@@ -841,6 +866,17 @@ export function ArtifactStoragePanel() {
                       }
                       tone={screenshotAnalysisTone(screenshotFolderSource.analysis)}
                     />
+                    {screenshotFolderStaleCount > 0 && (
+                      <ArtifactRow
+                        label="Stale"
+                        value={
+                          `${screenshotFolderStaleCount} cleanup candidates · ` +
+                          `${screenshotFolderSource.analysis.source_missing_count ?? 0} missing · ` +
+                          `${screenshotFolderSource.analysis.stale_root_count ?? 0} old root`
+                        }
+                        tone="warn"
+                      />
+                    )}
                     {screenshotFolderSource.analysis.persistence && (
                       <ArtifactRow
                         label="DB locks"
@@ -887,6 +923,14 @@ export function ArtifactStoragePanel() {
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
                     {screenshotFolderPicking ? "Choosing" : "Choose folder"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={screenshotFolderClearingStale || screenshotFolderStaleCount <= 0}
+                    onClick={() => void clearStaleScreenshotFolderObservations()}
+                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    {screenshotFolderClearingStale ? "Clearing" : "Clear stale"}
                   </button>
                   <div className="text-[9px] text-retro-text/40">
                     {screenshotFolderLockedByEnv ? "locked by env" : "local scan only"}

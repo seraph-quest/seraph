@@ -564,6 +564,66 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText(/duplicates 2/)).toBeInTheDocument();
   });
 
+  it("clears stale screenshot folder observations and refreshes metadata", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: true,
+      provider: "local-vlm",
+      model: "gemma-4-26b",
+      preserve_captures: true,
+      archive_dir: "/tmp/seraph-dev-data/artifacts/screen-captures",
+      capture_mode: "on_switch",
+      cadence_seconds: null,
+      daemon_connected: true,
+      artifact_count: 0,
+      last_artifact_at: null,
+      screenshot_folder: "/Users/test/Pictures/Screenshots",
+    });
+    const storageWithStaleRows = {
+      ...artifactStorage,
+      screenshot_folder: {
+        ...artifactStorage.screenshot_folder,
+        analysis: {
+          ...artifactStorage.screenshot_folder.analysis,
+          stale_count: 2,
+          source_missing_count: 1,
+          stale_root_count: 1,
+        },
+      },
+    };
+    const refreshedStorage = {
+      ...storageWithStaleRows,
+      screenshot_folder: {
+        ...storageWithStaleRows.screenshot_folder,
+        analysis: {
+          ...storageWithStaleRows.screenshot_folder.analysis,
+          stale_count: 0,
+          source_missing_count: 0,
+          stale_root_count: 0,
+        },
+      },
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(mockResponse(storageWithStaleRows))
+      .mockResolvedValueOnce(mockResponse({ archived: 2, source_missing: 1, stale_root: 1 }))
+      .mockResolvedValueOnce(mockResponse(refreshedStorage));
+
+    render(<ArtifactStoragePanel />);
+
+    expect(await screen.findByText(/2 cleanup candidates · 1 missing · 1 old root/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear stale" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/screen-analysis/screenshot-folder/clear-stale"),
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/2 cleanup candidates · 1 missing · 1 old root/)).not.toBeInTheDocument(),
+    );
+  });
+
   it("saves a configured screenshot folder", async () => {
     const artifactStorage = settingsFromScreenAnalysisFixture({
       enabled: true,

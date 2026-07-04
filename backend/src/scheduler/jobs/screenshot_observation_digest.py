@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import or_
@@ -21,6 +22,7 @@ from src.observer.screenshot_semantic_analysis import (
     semantic_analysis_from_details,
     semantic_analysis_status_from_details,
 )
+from src.observer.screenshot_folder_source import resolve_screenshot_folder
 from src.llm_runtime import completion_with_fallback
 from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 
@@ -225,7 +227,48 @@ async def _screenshot_observations(start: datetime, end: datetime) -> list[Scree
             )
             .order_by(col(ScreenObservation.timestamp))
         )
-        return list(result.scalars().all())
+        current_root = resolve_screenshot_folder()
+        return [
+            observation
+            for observation in result.scalars().all()
+            if not _stale_incomplete_screenshot_observation(observation, root=current_root)
+        ]
+
+
+def _stale_incomplete_screenshot_observation(observation: ScreenObservation, *, root: Path | None = None) -> bool:
+    details = _details(observation)
+    status = semantic_analysis_status_from_details(details) or {}
+    state = str(status.get("status") or "").strip().lower()
+    if state == "succeeded":
+        return False
+    if state in {"source_missing", "stale_root"}:
+        return True
+    return _screenshot_root_is_stale(_capture_artifacts_from_details(details), root)
+
+
+def _capture_artifacts_from_details(details: list[Any]) -> dict[str, Any] | None:
+    for item in details:
+        if not (isinstance(item, str) and item.startswith("capture_artifacts:")):
+            continue
+        try:
+            artifacts = json.loads(item.removeprefix("capture_artifacts:"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(artifacts, dict) and artifacts.get("provider") == "screenshot_folder":
+            return artifacts
+    return None
+
+
+def _screenshot_root_is_stale(artifacts: dict[str, Any] | None, root: Path | None) -> bool:
+    if artifacts is None or root is None:
+        return False
+    try:
+        artifact_root = str(artifacts.get("screenshot_folder") or "").strip()
+        if artifact_root:
+            return Path(artifact_root).expanduser().resolve() != root
+        return False
+    except (OSError, RuntimeError):
+        return False
 
 
 def _digest_payload(

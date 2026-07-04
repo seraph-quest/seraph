@@ -24,6 +24,7 @@
 - [x] operator control-plane surfaces now also synthesize runtime posture, extension health, continuity summaries, and review receipts alongside usage rollups, so deployment and governance legibility does not require reconstructing team state from raw runtime or audit rows
 - [x] cockpit runtime telemetry now resolves labels from live `/api/runtime/status`, then fresh operator control-plane runtime posture, then retained last-known metadata marked as `STALE`; transient status-poll failures no longer erase local Gemma runtime truth or render `UNKNOWN` when another usable runtime receipt exists
 - [x] timeout-safe audit visibility into primary-vs-fallback completion and agent-model behavior
+- [x] browser and sandbox timeout receipts are grouped and rate-limited per integration/action window, so repeated provider timeouts still leave one operator-visible degraded audit receipt without flooding status/audit surfaces while chat or VLM work is active
 - [x] session-bound LLM runtime traces for helper and agent flows, including request-id visibility for routing and fallback decisions
 - [x] fallback-capable model wrappers for chat, onboarding, strategist, and specialists
 - [x] repeatable runtime eval harness for guardian, core chat behavior, observer refresh and delivery behavior, session consolidation behavior, tool/MCP policy guardrails, proactive flow behavior, delegated workflow behavior, workflow composition behavior, threaded workflow recovery, capability repair, observer, storage, and integration seam checks

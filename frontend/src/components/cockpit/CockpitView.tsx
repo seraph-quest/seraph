@@ -6670,6 +6670,22 @@ function storeRuntimeReceipt(status: RuntimeStatus) {
   }
 }
 
+type CockpitFetchResult = { ok: boolean; payload: unknown | null };
+type DeepPaneLoadState = "idle" | "loading" | "loaded" | "stale" | "failed";
+type DeepPaneKey =
+  | "presence"
+  | "activity"
+  | "workflows"
+  | "control_plane"
+  | "workflow_orchestration"
+  | "background"
+  | "m5"
+  | "m6"
+  | "m7"
+  | "guardian_memory"
+  | "benchmark"
+  | "m8";
+
 export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
@@ -6732,6 +6748,20 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [mcpPolicyMode, setMcpPolicyMode] = useState<McpPolicyMode | "unknown">("unknown");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | "unknown">("unknown");
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
+  const [deepPaneLoadState, setDeepPaneLoadState] = useState<Record<DeepPaneKey, DeepPaneLoadState>>({
+    presence: "idle",
+    activity: "idle",
+    workflows: "idle",
+    control_plane: "idle",
+    workflow_orchestration: "idle",
+    background: "idle",
+    m5: "idle",
+    m6: "idle",
+    m7: "idle",
+    guardian_memory: "idle",
+    benchmark: "idle",
+    m8: "idle",
+  });
   const [doctorPlans, setDoctorPlans] = useState<DoctorPlanRecord[]>([]);
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioSelectedId, setStudioSelectedId] = useState<string | null>(null);
@@ -6874,118 +6904,85 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setPendingLifecycleApprovalId(null);
   }, [focusPane, pendingApprovals, pendingLifecycleApprovalId]);
 
-  const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
-    type FetchResult = { ok: boolean; payload: unknown | null };
-    const fetchJson = async (url: string, timeoutMs = 5000) => {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetch(url, { signal: controller.signal });
-        if (isCancelled() || !response.ok) {
-          return { ok: false, payload: null };
-        }
-        const payload = await response.json().catch(() => null);
-        if (isCancelled()) {
-          return { ok: false, payload: null };
-        }
-        return { ok: true, payload };
-      } catch {
+  const fetchCockpitJson = useCallback(async (
+    url: string,
+    timeoutMs = 5000,
+    isCancelled: () => boolean = () => false,
+  ): Promise<CockpitFetchResult> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (isCancelled() || !response.ok) {
         return { ok: false, payload: null };
-      } finally {
-        window.clearTimeout(timeout);
       }
-    };
-    const fetchWithConcurrency = async (
-      requests: Array<() => Promise<FetchResult>>,
-      concurrency = 4,
-    ): Promise<FetchResult[]> => {
-      const results: FetchResult[] = new Array(requests.length);
-      let nextIndex = 0;
-      const workers = Array.from({ length: Math.min(concurrency, requests.length) }, async () => {
-        while (!isCancelled()) {
-          const index = nextIndex;
-          nextIndex += 1;
-          if (index >= requests.length) return;
-          results[index] = await requests[index]();
-        }
-      });
-      await Promise.all(workers);
-      return results.map((result) => result ?? { ok: false, payload: null });
-    };
+      const payload = await response.json().catch(() => null);
+      if (isCancelled()) {
+        return { ok: false, payload: null };
+      }
+      return { ok: true, payload };
+    } catch {
+      return { ok: false, payload: null };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }, []);
+
+  const fetchCockpitBatch = useCallback(async (
+    requests: Array<() => Promise<CockpitFetchResult>>,
+    isCancelled: () => boolean = () => false,
+    concurrency = 4,
+  ): Promise<CockpitFetchResult[]> => {
+    const results: CockpitFetchResult[] = new Array(requests.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(concurrency, requests.length) }, async () => {
+      while (!isCancelled()) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= requests.length) return;
+        results[index] = await requests[index]();
+      }
+    });
+    await Promise.all(workers);
+    return results.map((result) => result ?? { ok: false, payload: null });
+  }, []);
+
+  const refreshCockpit = useCallback(async (isCancelled: () => boolean = () => false) => {
     const [
       runtimeStatusResult,
       observerResult,
       auditResult,
       approvalsResult,
-      continuityResult,
       capabilitiesResult,
       extensionsResult,
-      activityLedgerResult,
-      controlPlaneResult,
-      benchmarkProofResult,
-      guardianStateResult,
-      workflowOrchestrationResult,
-      backgroundSessionsResult,
-      m5OperatingLayerResult,
-      guardianMemoryLiveControlResult,
-      m6MemorySuperiorityResult,
-      m7CockpitResult,
-      m8GuardianBrainResult,
-      engineeringMemoryResult,
-      continuityGraphResult,
-      workflowRunsResult,
-      artifactLineageRunsResult,
       browserProvidersResult,
       browserSessionsResult,
       toolModeResult,
       mcpModeResult,
       approvalModeResult,
-    ] = await fetchWithConcurrency([
-      () => fetchJson(`${API_URL}/api/runtime/status`),
-      () => fetchJson(`${API_URL}/api/observer/state`),
-      () => fetchJson(`${API_URL}/api/audit/events?limit=12`),
-      () => fetchJson(`${API_URL}/api/approvals/pending?limit=8`),
-      () => fetchJson(`${API_URL}/api/observer/continuity`),
-      () => fetchJson(`${API_URL}/api/capabilities/overview`),
-      () => fetchJson(`${API_URL}/api/extensions`),
-      () => fetchJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/control-plane`),
-      () => fetchJson(`${API_URL}/api/operator/benchmark-proof`),
-      () => fetchJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/workflow-orchestration`),
-      () => fetchJson(`${API_URL}/api/operator/background-sessions`),
-      () => fetchJson(`${API_URL}/api/operator/m5-operating-layer`),
-      () => fetchJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`),
-      () => fetchJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`),
-      () => fetchJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`),
-      () => fetchJson(`${API_URL}/api/workflows/runs?limit=40`),
-      () => fetchJson(`${API_URL}/api/browser/providers`),
+    ] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/runtime/status`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/audit/events?limit=12`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/capabilities/overview`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/extensions`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/browser/providers`, 5000, isCancelled),
       () => sessionId
-        ? fetchJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`)
+        ? fetchCockpitJson(`${API_URL}/api/operator/browser-computer-use-control?owner_session_id=${encodeURIComponent(sessionId)}`, 5000, isCancelled)
         : Promise.resolve({ ok: true, payload: { sessions: [] } }),
-      () => fetchJson(`${API_URL}/api/settings/tool-policy-mode`),
-      () => fetchJson(`${API_URL}/api/settings/mcp-policy-mode`),
-      () => fetchJson(`${API_URL}/api/settings/approval-mode`),
-    ]);
+      () => fetchCockpitJson(`${API_URL}/api/settings/tool-policy-mode`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/settings/mcp-policy-mode`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/settings/approval-mode`, 5000, isCancelled),
+    ], isCancelled);
 
     if (isCancelled()) return;
-    const nextOperatorControlPlane = normalizeOperatorControlPlane(controlPlaneResult.payload);
     const runtimeStatusPayload = runtimeStatusResult.ok
       ? normalizeRuntimeStatus(runtimeStatusResult.payload)
       : null;
-    const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
-    const nextRuntimeReceipt: RuntimeReceipt | null = runtimeStatusPayload
-      ? { status: runtimeStatusPayload, source: "runtime_status" }
-      : operatorPostureRuntime
-        ? { status: operatorPostureRuntime, source: "operator_posture" }
-        : null;
-    if (nextRuntimeReceipt) {
-      storeRuntimeReceipt(nextRuntimeReceipt.status);
-      setRuntimeReceipt(nextRuntimeReceipt);
+    if (runtimeStatusPayload) {
+      storeRuntimeReceipt(runtimeStatusPayload);
+      setRuntimeReceipt({ status: runtimeStatusPayload, source: "runtime_status" });
     } else {
       setRuntimeReceipt((current) => (current ? { ...current, source: "retained" } : null));
     }
@@ -6997,21 +6994,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     }
     if (approvalsResult.ok) {
       setPendingApprovals(Array.isArray(approvalsResult.payload) ? approvalsResult.payload : []);
-    }
-    if (continuityResult.ok && continuityResult.payload) {
-      const continuityPayload = continuityResult.payload as ObserverContinuitySnapshot;
-      setDaemonPresence(continuityPayload.daemon);
-      setDesktopNotifications(continuityPayload.notifications ?? []);
-      setQueuedInsights(continuityPayload.queued_insights ?? []);
-      setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
-      setRecentInterventions(continuityPayload.recent_interventions ?? []);
-      setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
-      setContinuityImportedReach(continuityPayload.imported_reach ?? null);
-      setContinuitySourceAdapters(continuityPayload.source_adapters ?? null);
-      setContinuityPresenceSurfaces(continuityPayload.presence_surfaces ?? null);
-      setContinuitySummary(continuityPayload.summary ?? null);
-      setContinuityThreads(continuityPayload.threads ?? []);
-      setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
     }
     if (capabilitiesResult.ok && capabilitiesResult.payload) {
       const capabilityPayload = capabilitiesResult.payload as CapabilityOverview;
@@ -7034,67 +7016,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     } else {
       setExtensionPackages([]);
     }
-    setOperatorControlPlane(nextOperatorControlPlane);
-    setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
-    setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
-    setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(workflowOrchestrationResult.payload));
-    setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
-    setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(m5OperatingLayerResult.payload));
-    setGuardianMemoryLiveControl(normalizeGuardianMemoryLiveControl(guardianMemoryLiveControlResult.payload));
-    setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(m6MemorySuperiorityResult.payload));
-    setOperatorM7Cockpit(normalizeOperatorM7Cockpit(m7CockpitResult.payload));
-    setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(m8GuardianBrainResult.payload));
-    setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
-    setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
     setBrowserJournal(normalizeBrowserJournal(browserSessionsResult.payload));
-    const activityLedgerScope = sessionId ?? "__all__";
-    if (
-      activityLedgerResult.ok
-      && activityLedgerResult.payload
-      && typeof activityLedgerResult.payload === "object"
-      && Array.isArray((activityLedgerResult.payload as { items?: unknown }).items)
-    ) {
-      const payload = activityLedgerResult.payload as { items?: unknown; summary?: unknown };
-      const items = Array.isArray(payload.items)
-        ? payload.items.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item)
-          ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
-          : []))
-        : [];
-      const derivedSummary = deriveActivitySummary(items);
-      setActivityLedger(
-        items,
-      );
-      setActivitySummary(
-        payload.summary && typeof payload.summary === "object"
-          ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
-          : derivedSummary,
-      );
-      activityLedgerScopeRef.current = activityLedgerScope;
-    } else if (activityLedgerScopeRef.current !== activityLedgerScope) {
-      setActivityLedger([]);
-      setActivitySummary(deriveActivitySummary([]));
-      activityLedgerScopeRef.current = activityLedgerScope;
-    }
-    if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
-      const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
-      setWorkflowRuns(
-        Array.isArray(runs)
-          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-          : [],
-      );
-    }
-    if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
-      const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
-      setArtifactLineageRuns(
-        Array.isArray(runs)
-          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
-          : [],
-      );
-    } else {
-      setArtifactLineageRuns([]);
-    }
     if (toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
       setToolPolicyMode(((toolModeResult.payload as { mode?: string }).mode ?? "unknown") as ToolPolicyMode | "unknown");
     }
@@ -7104,7 +7028,212 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (approvalModeResult.ok && approvalModeResult.payload && typeof approvalModeResult.payload === "object") {
       setApprovalMode(((approvalModeResult.payload as { mode?: string }).mode ?? "unknown") as ApprovalMode | "unknown");
     }
-  }, [sessionId]);
+  }, [fetchCockpitBatch, fetchCockpitJson, sessionId]);
+
+  const updateDeepPaneState = useCallback((pane: DeepPaneKey, state: DeepPaneLoadState) => {
+    setDeepPaneLoadState((current) => ({ ...current, [pane]: state }));
+  }, []);
+
+  const markDeepPaneLoaded = useCallback((pane: DeepPaneKey, ok: boolean) => {
+    updateDeepPaneState(pane, ok ? "loaded" : "stale");
+  }, [updateDeepPaneState]);
+
+  const loadPresenceContinuity = useCallback(async () => {
+    updateDeepPaneState("presence", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/observer/continuity`, 5000);
+    if (result.ok && result.payload) {
+      const continuityPayload = result.payload as ObserverContinuitySnapshot;
+      setDaemonPresence(continuityPayload.daemon);
+      setDesktopNotifications(continuityPayload.notifications ?? []);
+      setQueuedInsights(continuityPayload.queued_insights ?? []);
+      setQueuedBundleCount(continuityPayload.queued_insight_count ?? 0);
+      setRecentInterventions(continuityPayload.recent_interventions ?? []);
+      setDesktopRouteStatuses(continuityPayload.reach?.route_statuses ?? []);
+      setContinuityImportedReach(continuityPayload.imported_reach ?? null);
+      setContinuitySourceAdapters(continuityPayload.source_adapters ?? null);
+      setContinuityPresenceSurfaces(continuityPayload.presence_surfaces ?? null);
+      setContinuitySummary(continuityPayload.summary ?? null);
+      setContinuityThreads(continuityPayload.threads ?? []);
+      setContinuityRecoveryActions(continuityPayload.recovery_actions ?? []);
+      markDeepPaneLoaded("presence", true);
+      return;
+    }
+    markDeepPaneLoaded("presence", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+
+  const loadActivityLedger = useCallback(async () => {
+    updateDeepPaneState("activity", "loading");
+    const activityLedgerScope = sessionId ?? "__all__";
+    const result = await fetchCockpitJson(`${API_URL}/api/activity/ledger?limit=40${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000);
+    if (
+      result.ok
+      && result.payload
+      && typeof result.payload === "object"
+      && Array.isArray((result.payload as { items?: unknown }).items)
+    ) {
+      const payload = result.payload as { items?: unknown; summary?: unknown };
+      const items = Array.isArray(payload.items)
+        ? payload.items.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item)
+          ? [normalizeActivityLedgerEntry(item as Record<string, unknown>)]
+          : []))
+        : [];
+      const derivedSummary = deriveActivitySummary(items);
+      setActivityLedger(items);
+      setActivitySummary(
+        payload.summary && typeof payload.summary === "object"
+          ? ({ ...derivedSummary, ...(payload.summary as Partial<ActivityLedgerSummary>) } as ActivityLedgerSummary)
+          : derivedSummary,
+      );
+      activityLedgerScopeRef.current = activityLedgerScope;
+      markDeepPaneLoaded("activity", true);
+      return;
+    }
+    if (activityLedgerScopeRef.current !== activityLedgerScope) {
+      setActivityLedger([]);
+      setActivitySummary(deriveActivitySummary([]));
+      activityLedgerScopeRef.current = activityLedgerScope;
+      updateDeepPaneState("activity", "failed");
+      return;
+    }
+    markDeepPaneLoaded("activity", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
+
+  const loadWorkflowRuns = useCallback(async () => {
+    updateDeepPaneState("workflows", "loading");
+    const [workflowRunsResult, artifactLineageRunsResult] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=8${sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000),
+      () => fetchCockpitJson(`${API_URL}/api/workflows/runs?limit=40`, 5000),
+    ]);
+    let ok = false;
+    if (workflowRunsResult.ok && workflowRunsResult.payload && typeof workflowRunsResult.payload === "object") {
+      const runs = (workflowRunsResult.payload as { runs?: unknown }).runs;
+      setWorkflowRuns(
+        Array.isArray(runs)
+          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+          : [],
+      );
+      ok = true;
+    }
+    if (artifactLineageRunsResult.ok && artifactLineageRunsResult.payload && typeof artifactLineageRunsResult.payload === "object") {
+      const runs = (artifactLineageRunsResult.payload as { runs?: unknown }).runs;
+      setArtifactLineageRuns(
+        Array.isArray(runs)
+          ? runs.map((run: Record<string, unknown>) => normalizeWorkflowRun(run))
+          : [],
+      );
+      ok = true;
+    } else if (!ok) {
+      setArtifactLineageRuns([]);
+    }
+    markDeepPaneLoaded("workflows", ok);
+  }, [fetchCockpitBatch, fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
+
+  const loadControlPlane = useCallback(async () => {
+    updateDeepPaneState("control_plane", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/control-plane`, 5000);
+    if (result.ok) {
+      const nextOperatorControlPlane = normalizeOperatorControlPlane(result.payload);
+      setOperatorControlPlane(nextOperatorControlPlane);
+      const operatorPostureRuntime = normalizeRuntimeStatus(nextOperatorControlPlane?.runtime_posture.runtime);
+      if (operatorPostureRuntime) {
+        storeRuntimeReceipt(operatorPostureRuntime);
+        setRuntimeReceipt({ status: operatorPostureRuntime, source: "operator_posture" });
+      }
+      markDeepPaneLoaded("control_plane", Boolean(nextOperatorControlPlane));
+      return;
+    }
+    markDeepPaneLoaded("control_plane", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+
+  const loadWorkflowOrchestration = useCallback(async () => {
+    updateDeepPaneState("workflow_orchestration", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/workflow-orchestration`, 5000);
+    if (result.ok) {
+      setOperatorWorkflowOrchestration(normalizeWorkflowOrchestration(result.payload));
+      markDeepPaneLoaded("workflow_orchestration", true);
+      return;
+    }
+    markDeepPaneLoaded("workflow_orchestration", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+
+  const loadBackgroundContinuity = useCallback(async () => {
+    updateDeepPaneState("background", "loading");
+    const [backgroundSessionsResult, engineeringMemoryResult, continuityGraphResult] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/operator/background-sessions`, 5000),
+      () => fetchCockpitJson(`${API_URL}/api/operator/engineering-memory?limit_bundles=4&limit_session_matches=2&window_hours=168`, 5000),
+      () => fetchCockpitJson(`${API_URL}/api/operator/continuity-graph?limit_sessions=4`, 5000),
+    ], undefined, 2);
+    if (backgroundSessionsResult.ok) setOperatorBackgroundSessions(normalizeOperatorBackgroundSessions(backgroundSessionsResult.payload));
+    if (engineeringMemoryResult.ok) setOperatorEngineeringMemory(normalizeOperatorEngineeringMemory(engineeringMemoryResult.payload));
+    if (continuityGraphResult.ok) setOperatorContinuityGraph(normalizeOperatorContinuityGraph(continuityGraphResult.payload));
+    markDeepPaneLoaded("background", backgroundSessionsResult.ok || engineeringMemoryResult.ok || continuityGraphResult.ok);
+  }, [fetchCockpitBatch, fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+
+  const loadM5OperatingLayer = useCallback(async () => {
+    updateDeepPaneState("m5", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/m5-operating-layer`, 5000);
+    if (result.ok) {
+      setOperatorM5OperatingLayer(normalizeOperatorM5OperatingLayer(result.payload));
+      markDeepPaneLoaded("m5", true);
+      return;
+    }
+    markDeepPaneLoaded("m5", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, updateDeepPaneState]);
+
+  const loadGuardianMemory = useCallback(async () => {
+    updateDeepPaneState("guardian_memory", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/guardian-memory-live-control${sessionId ? `?owner_session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000);
+    if (result.ok) {
+      setGuardianMemoryLiveControl(normalizeGuardianMemoryLiveControl(result.payload));
+      markDeepPaneLoaded("guardian_memory", true);
+      return;
+    }
+    markDeepPaneLoaded("guardian_memory", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
+
+  const loadM6MemorySuperiority = useCallback(async () => {
+    updateDeepPaneState("m6", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/m6-memory-superiority${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000);
+    if (result.ok) {
+      setOperatorM6MemorySuperiority(normalizeOperatorM6MemorySuperiority(result.payload));
+      markDeepPaneLoaded("m6", true);
+      return;
+    }
+    markDeepPaneLoaded("m6", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
+
+  const loadM7Cockpit = useCallback(async () => {
+    updateDeepPaneState("m7", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/m7-cockpit${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000);
+    if (result.ok) {
+      setOperatorM7Cockpit(normalizeOperatorM7Cockpit(result.payload));
+      markDeepPaneLoaded("m7", true);
+      return;
+    }
+    markDeepPaneLoaded("m7", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
+
+  const loadBenchmarkProof = useCallback(async () => {
+    updateDeepPaneState("benchmark", "loading");
+    const [benchmarkProofResult, guardianStateResult] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/operator/benchmark-proof`, 5000),
+      () => fetchCockpitJson(`${API_URL}/api/operator/guardian-state${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000),
+    ], undefined, 2);
+    if (benchmarkProofResult.ok) setOperatorBenchmarkProof(normalizeOperatorBenchmarkProof(benchmarkProofResult.payload));
+    if (guardianStateResult.ok) setOperatorGuardianState(normalizeOperatorGuardianState(guardianStateResult.payload));
+    markDeepPaneLoaded("benchmark", benchmarkProofResult.ok || guardianStateResult.ok);
+  }, [fetchCockpitBatch, fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
+
+  const loadM8GuardianBrain = useCallback(async () => {
+    updateDeepPaneState("m8", "loading");
+    const result = await fetchCockpitJson(`${API_URL}/api/operator/m8-guardian-brain${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`, 5000);
+    if (result.ok) {
+      setOperatorM8GuardianBrain(normalizeOperatorM8GuardianBrain(result.payload));
+      markDeepPaneLoaded("m8", true);
+      return;
+    }
+    markDeepPaneLoaded("m8", false);
+  }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
   useEffect(() => {
     let cancelled = false;
@@ -13181,6 +13310,31 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     );
   }
 
+  function renderDeepLoadButton(pane: DeepPaneKey, label: string, onClick: () => void) {
+    const state = deepPaneLoadState[pane];
+    const buttonLabel = state === "loading" ? "loading" : state === "loaded" ? "refresh" : "load";
+    return (
+      <button
+        type="button"
+        className="cockpit-operator-button"
+        aria-label={`${buttonLabel} ${label}`}
+        disabled={state === "loading"}
+        onClick={onClick}
+      >
+        {buttonLabel}
+      </button>
+    );
+  }
+
+  function renderDeepLoadState(pane: DeepPaneKey) {
+    const state = deepPaneLoadState[pane];
+    if (state === "idle") return "not loaded";
+    if (state === "loading") return "loading";
+    if (state === "loaded") return "loaded";
+    if (state === "stale") return "stale";
+    return "unavailable";
+  }
+
   return (
     <div className="cockpit-shell">
       <header className="cockpit-topbar">
@@ -13207,8 +13361,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <button
               type="button"
               className="cockpit-pill"
-              onClick={() => setSettingsPanelOpen(true)}
-              title="Open settings to inspect deferred bundle items and recent guardian continuity"
+              aria-label={deepPaneLoadState.presence === "loading" ? "loading presence continuity" : deepPaneLoadState.presence === "loaded" ? "refresh presence continuity" : "load presence continuity"}
+              disabled={deepPaneLoadState.presence === "loading"}
+              onClick={() => void loadPresenceContinuity()}
+              title={deepPaneLoadState.presence === "loaded" ? "Refresh deferred bundle items and recent guardian continuity" : "Load deferred bundle items and recent guardian continuity"}
             >
               bundle {queuedBundleCount} queued
             </button>
@@ -13723,6 +13879,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("guardian_state_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
+              <div className="cockpit-operator-row">
+                <span className="cockpit-key">proof controls</span>
+                <span className="cockpit-operator-link">{renderDeepLoadState("benchmark")} · {renderDeepLoadState("m8")}</span>
+                <div className="cockpit-operator-actions">
+                  {renderDeepLoadButton("benchmark", "guardian proof", () => void loadBenchmarkProof())}
+                  {renderDeepLoadButton("m8", "M8 guardian brain", () => void loadM8GuardianBrain())}
+                </div>
+              </div>
               <div className="cockpit-state-grid">
                 <div>
                   <div className="cockpit-key">overall confidence</div>
@@ -13978,6 +14142,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             <section className="cockpit-panel cockpit-panel--embedded">
               <div className="cockpit-ledger-toolbar">
                 <div className="cockpit-ledger-summary">
+                  {renderDeepLoadButton("activity", "activity ledger", () => void loadActivityLedger())}
+                  <span className="cockpit-ledger-badge">{renderDeepLoadState("activity")}</span>
                   <span className="cockpit-ledger-badge">
                     spend {formatUsd(activitySummary?.llm_cost_usd ?? 0) ?? "$0.0000"}
                   </span>
@@ -14153,6 +14319,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
             onClose={() => closeWindowPane("workflows_pane")}
           >
             <section className="cockpit-panel cockpit-panel--embedded">
+              <div className="cockpit-operator-row">
+                <span className="cockpit-key">workflow run data</span>
+                <span className="cockpit-operator-link">{renderDeepLoadState("workflows")}</span>
+                <div className="cockpit-operator-actions">
+                  {renderDeepLoadButton("workflows", "workflow runs", () => void loadWorkflowRuns())}
+                </div>
+              </div>
               <div className="cockpit-list">
                 {workflowRunsWithArtifacts.map((workflow) => {
                   const approval = approvalForWorkflow(workflow);
@@ -14603,6 +14776,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               >
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
+                  <div className="cockpit-operator-row">
+                    <span className="cockpit-key">continuity details</span>
+                    <span className="cockpit-operator-link">{renderDeepLoadState("presence")}</span>
+                    <div className="cockpit-operator-actions">
+                      {renderDeepLoadButton("presence", "presence continuity", () => void loadPresenceContinuity())}
+                    </div>
+                  </div>
                   <div className="cockpit-sublist-item">
                     presence {daemonPresence?.connected ? "linked" : "offline"} · bundle {queuedInsights.length} · recent {recentInterventions.length}
                   </div>
@@ -14979,6 +15159,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">quick actions</span>
                       <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("control_plane", "control plane", () => void loadControlPlane())}
+                        {renderDeepLoadButton("workflow_orchestration", "workflow orchestration", () => void loadWorkflowOrchestration())}
+                        {renderDeepLoadButton("background", "background continuity", () => void loadBackgroundContinuity())}
                         <button
                           type="button"
                           className="cockpit-operator-button"
@@ -15179,6 +15362,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                           ? `${m7PrimaryWorkflow.workflowName} · ${formatContinuityLabel(m7PrimaryWorkflow.status)}`
                           : "standing by"}
                       </span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("m7", "M7 cockpit", () => void loadM7Cockpit())}
+                      </div>
                     </div>
                     <div className="cockpit-m7-signal-grid">
                       {m7SignalTiles.map((tile) => (
@@ -15534,8 +15720,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">team control plane</span>
                       <span className="cockpit-operator-link">
-                        {operatorControlPlane?.governance.delegation_enabled ? "delegation on" : "delegation off"}
+                        {operatorControlPlane?.governance.delegation_enabled ? "delegation on" : `delegation off · ${renderDeepLoadState("control_plane")}`}
                       </span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("control_plane", "control plane", () => void loadControlPlane())}
+                      </div>
                     </div>
                     {operatorControlPlane ? (
                       <>
@@ -15621,7 +15810,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <section className="cockpit-operator-section" aria-label="Benchmark proof">
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">benchmark proof</span>
-                      <span className="cockpit-operator-link">{benchmarkProofSummary ?? "summary unavailable"}</span>
+                      <span className="cockpit-operator-link">{benchmarkProofSummary ?? renderDeepLoadState("benchmark")}</span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("benchmark", "benchmark proof", () => void loadBenchmarkProof())}
+                      </div>
                     </div>
                     {operatorBenchmarkProof ? (
                       <>
@@ -16061,7 +16253,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <section className="cockpit-operator-section" aria-label="Guardian memory controls">
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">guardian memory controls</span>
-                      <span className="cockpit-operator-link">{guardianMemoryControlSummary ?? "summary unavailable"}</span>
+                      <span className="cockpit-operator-link">{guardianMemoryControlSummary ?? `${renderDeepLoadState("guardian_memory")} · m6 ${renderDeepLoadState("m6")}`}</span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("guardian_memory", "guardian memory controls", () => void loadGuardianMemory())}
+                        {renderDeepLoadButton("m6", "M6 memory", () => void loadM6MemorySuperiority())}
+                      </div>
                     </div>
                     {guardianMemoryLiveControl ? (
                       <>
@@ -16477,8 +16673,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">
                         {operatorM5OperatingLayer
                           ? `${operatorM5OperatingLayer.summary.work_item_count} work items · ${operatorM5OperatingLayer.summary.scheduled_job_count} jobs · ${operatorM5OperatingLayer.summary.delegation_partition_count} delegations`
-                          : "summary unavailable"}
+                          : renderDeepLoadState("m5")}
                       </span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("m5", "M5 operating layer", () => void loadM5OperatingLayer())}
+                      </div>
                     </div>
                     {operatorM5OperatingLayer ? (
                       <>
@@ -16620,8 +16819,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                       <span className="cockpit-operator-link">
                         {operatorWorkflowOrchestration
                           ? `${operatorWorkflowOrchestration.summary.workflow_count} workflows · ${operatorWorkflowOrchestration.summary.tracked_sessions} sessions · ${operatorWorkflowOrchestration.summary.compacted_workflows} compacted`
-                          : "summary unavailable"}
+                          : renderDeepLoadState("workflow_orchestration")}
                       </span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("workflow_orchestration", "workflow orchestration", () => void loadWorkflowOrchestration())}
+                      </div>
                     </div>
                     {operatorWorkflowOrchestration ? (
                       <>
@@ -16954,7 +17156,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   <section className="cockpit-operator-section" aria-label="Background continuity">
                     <div className="cockpit-operator-row">
                       <span className="cockpit-key">background continuity</span>
-                      <span className="cockpit-operator-link">{backgroundContinuitySummary ?? "summary unavailable"}</span>
+                      <span className="cockpit-operator-link">{backgroundContinuitySummary ?? renderDeepLoadState("background")}</span>
+                      <div className="cockpit-operator-actions">
+                        {renderDeepLoadButton("background", "background continuity", () => void loadBackgroundContinuity())}
+                      </div>
                     </div>
                     {operatorBackgroundSessions && operatorEngineeringMemory && operatorContinuityGraph ? (
                       <>

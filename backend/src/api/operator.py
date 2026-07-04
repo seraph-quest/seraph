@@ -54,6 +54,7 @@ from src.cockpit.operator_control_production_certification import (
 from src.cockpit.post_dp_operator_debugging_recovery import (
     build_post_dp_operator_debugging_recovery_report,
 )
+from src.db.engine import OPERATOR_REQUIRED_TABLES, check_required_tables
 from src.evals.benchmark_catalog import benchmark_suite_report
 from src.evals.final_parity_audit import (
     build_final_parity_readiness_report,
@@ -157,6 +158,65 @@ from src.workflows.post_dx_live_durable_orchestration import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_OPERATOR_DB_REPAIR_COMMAND = "./manage.sh -e dev local run"
+
+
+async def _operator_database_doctor_payload(
+    *,
+    surface: str = "/api/operator/database-doctor",
+) -> dict[str, Any]:
+    receipt = await check_required_tables(OPERATOR_REQUIRED_TABLES)
+    missing_tables = list(receipt.get("missing_tables") or [])
+    return {
+        "summary": {
+            "operator_status": (
+                "operator_database_ready"
+                if not missing_tables
+                else "operator_database_degraded_missing_tables"
+            ),
+            "database_status": receipt["status"],
+            "missing_table_count": len(missing_tables),
+            "repair_command": _OPERATOR_DB_REPAIR_COMMAND,
+            "claim_boundary": "sqlite_schema_prerequisite_check_only",
+        },
+        "surface": surface,
+        "required_tables": receipt["required_tables"],
+        "missing_tables": missing_tables,
+        "repair": {
+            "command": _OPERATOR_DB_REPAIR_COMMAND,
+            "reason": "Backend startup runs SQLModel table creation plus local SQLite legacy migrations.",
+        },
+    }
+
+
+def _operator_database_degraded_payload(
+    *,
+    surface: str,
+    missing_tables: list[str],
+) -> dict[str, Any]:
+    return {
+        "summary": {
+            "operator_status": "operator_database_degraded_missing_tables",
+            "database_status": "degraded",
+            "missing_table_count": len(missing_tables),
+            "repair_command": _OPERATOR_DB_REPAIR_COMMAND,
+            "claim_boundary": "operator_surface_degraded_before_live_db_reads",
+        },
+        "surface": surface,
+        "items": [],
+        "required_tables": list(OPERATOR_REQUIRED_TABLES),
+        "missing_tables": missing_tables,
+        "repair": {
+            "command": _OPERATOR_DB_REPAIR_COMMAND,
+            "reason": "Restart the managed local backend so startup can create missing tables and apply legacy migrations.",
+        },
+    }
+
+
+async def _operator_database_missing_tables() -> list[str]:
+    doctor = await _operator_database_doctor_payload()
+    return list(doctor.get("missing_tables") or [])
+
 
 class MemoryOperatorControlRequest(BaseModel):
     action: str = Field(..., description="One of: correct, pin, forget, audit")
@@ -197,6 +257,11 @@ def _memory_live_control_acknowledgement(request: MemoryLiveControlActionRequest
 @router.get("/operator/local-codex/status")
 async def operator_local_codex_status():
     return local_codex_status()
+
+
+@router.get("/operator/database-doctor")
+async def get_operator_database_doctor():
+    return await _operator_database_doctor_payload()
 
 
 @router.post("/operator/local-codex/exec")
@@ -3516,6 +3581,12 @@ async def get_operator_m7_cockpit(
 async def get_operator_m8_guardian_brain(
     session_id: str | None = Query(default=None),
 ):
+    missing_tables = await _operator_database_missing_tables()
+    if missing_tables:
+        return _operator_database_degraded_payload(
+            surface="/api/operator/m8-guardian-brain",
+            missing_tables=missing_tables,
+        )
     state = await build_guardian_state(session_id=session_id)
     return _operator_m8_guardian_brain_payload(state, session_id=session_id)
 
@@ -4612,6 +4683,12 @@ async def get_operator_governed_improvement_benchmark():
 async def get_operator_guardian_state(
     session_id: str | None = Query(default=None),
 ):
+    missing_tables = await _operator_database_missing_tables()
+    if missing_tables:
+        return _operator_database_degraded_payload(
+            surface="/api/operator/guardian-state",
+            missing_tables=missing_tables,
+        )
     state = await build_guardian_state(session_id=session_id)
     return _operator_guardian_state_payload(state, session_id=session_id)
 
@@ -4918,6 +4995,12 @@ async def get_operator_timeline(
     limit: int = Query(default=20, ge=1, le=50),
     session_id: str | None = Query(default=None),
 ):
+    missing_tables = await _operator_database_missing_tables()
+    if missing_tables:
+        return _operator_database_degraded_payload(
+            surface="/api/operator/timeline",
+            missing_tables=missing_tables,
+        )
     session_titles = {
         str(session["id"]): str(session.get("title") or "Untitled session")
         for session in await session_manager.list_sessions()

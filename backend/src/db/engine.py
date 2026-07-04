@@ -1,8 +1,8 @@
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Iterable
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -34,6 +34,17 @@ event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 
 async_session_factory = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
+)
+
+OPERATOR_REQUIRED_TABLES = (
+    "sessions",
+    "messages",
+    "approval_requests",
+    "audit_events",
+    "workflow_run_states",
+    "workflow_step_states",
+    "queued_insights",
+    "guardian_interventions",
 )
 
 
@@ -343,3 +354,32 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+async def check_required_tables(required_tables: Iterable[str]) -> dict[str, object]:
+    """Return a small operator-readable table readiness receipt."""
+    required = tuple(
+        dict.fromkeys(
+            str(table).strip()
+            for table in required_tables
+            if str(table).strip()
+        )
+    )
+    existing: set[str] = set()
+    async with get_session() as db:
+        for table in required:
+            result = await db.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = :table_name"
+                ),
+                {"table_name": table},
+            )
+            if result.scalar_one_or_none():
+                existing.add(table)
+    missing = [table for table in required if table not in existing]
+    return {
+        "status": "ready" if not missing else "degraded",
+        "required_tables": list(required),
+        "missing_tables": missing,
+    }

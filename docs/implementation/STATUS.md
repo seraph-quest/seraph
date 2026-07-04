@@ -348,6 +348,7 @@ The remaining parity work is feature-first. Do not treat this section as a reque
 ### Runtime and execution
 
 - [ ] broader user-facing live-provider and long-running integration behavior beyond the shipped deterministic REST, WebSocket, observer, delivery, activity-ledger, imported-capability, tool/MCP guardrail, delegated workflow, workflow-composition, and provider-planning contracts
+- [x] local Gemma runtime routes now have profile-aware context-budget contracts plus deterministic auto-compaction at both agent-construction and final LiteLLM runtime-call boundaries, preserving the current user turn and recording compaction receipts instead of surfacing predictable raw context-overflow failures.
 - [ ] stronger usable execution isolation and privileged-path recovery beyond the current workflow/tool, browser-mode, and connector-boundary pass
 - [ ] richer capability installation, recommendation, update, rollback, diagnostics, and recovery flows beyond the shipped catalog/install, runbook preflight, bounded bootstrap flow, extension studio, and imported-reach governance surfaces
 

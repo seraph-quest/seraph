@@ -49,6 +49,7 @@ function emptyCapabilityOverview(overrides: Record<string, unknown> = {}) {
 function mockCockpitBaselineFetch(
   fetchMock: ReturnType<typeof vi.fn>,
   options: {
+    runtimeStatus?: Record<string, unknown>;
     capabilities?: Record<string, unknown>;
     extensions?: Record<string, unknown>;
     browserProviders?: Record<string, unknown>;
@@ -63,7 +64,7 @@ function mockCockpitBaselineFetch(
       return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
     }
     if (url.includes("/api/runtime/status")) {
-      return Promise.resolve(mockResponse({
+      return Promise.resolve(mockResponse(options.runtimeStatus ?? {
         version: "test",
         build_id: "test",
         provider: "test",
@@ -488,6 +489,43 @@ describe("CockpitView", () => {
     expect(runtimeStatusCalls).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("LOCAL GEMMA STALE · LOCAL GEMMA")).toBeInTheDocument();
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
+  });
+
+  it("renders GPU VLM route labels from effective runtime status", async () => {
+    mockCockpitBaselineFetch(fetchMock, {
+      runtimeStatus: {
+        version: "test",
+        build_id: "SERAPH_TEST",
+        provider: "local-gemma",
+        model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+        model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+        effective_runtime: {
+          runtime_path: "chat_agent",
+          active_profile: "local-gemma-chat-thinking",
+          provider: "local-gemma",
+          provider_label: "local-gemma/gpu-vlm",
+          model: "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+          model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+          mode: "gpu-server",
+          route_label: "GPU VLM",
+          summary_label: "GPU VLM · gemma-4-26B-A4B-it-qat-GGUF",
+          api_base: "http://192.168.1.26:8001/v1",
+          vlm_base_url: "http://192.168.1.26:8001",
+          vlm_backend_url: "http://192.168.1.26:8000/v1",
+          vlm_configured: true,
+          queue_status_endpoint: "http://192.168.1.26:8001/queue/status",
+          health_endpoint: "http://192.168.1.26:8001/health",
+          backend_health_endpoint: "http://192.168.1.26:8001/health/backend",
+        },
+      },
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("GPU VLM · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).not.toBeInTheDocument();
   });
 
   it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {

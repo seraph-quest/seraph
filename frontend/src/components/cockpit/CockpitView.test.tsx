@@ -108,6 +108,47 @@ function mockCockpitBaselineFetch(
   });
 }
 
+function mockOperatorControlPlaneRuntime(runtime: Record<string, unknown>) {
+  return {
+    governance: {
+      workspace_mode: "single_operator_guarded_workspace",
+      review_posture: "",
+      approval_mode: "high_risk",
+      tool_policy_mode: "balanced",
+      mcp_policy_mode: "approval",
+      delegation_enabled: true,
+      roles: [],
+    },
+    usage: {
+      window_hours: 24,
+      llm_call_count: 0,
+      llm_cost_usd: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      user_triggered_llm_calls: 0,
+      autonomous_llm_calls: 0,
+      failure_count: 0,
+      pending_approvals: 0,
+      active_workflows: 0,
+      blocked_workflows: 0,
+    },
+    runtime_posture: {
+      runtime,
+      extensions: { total: 0, ready: 0, degraded: 0, governed: 0, issue_count: 0, degraded_connector_count: 0 },
+      continuity: {
+        continuity_health: "ready",
+        primary_surface: "workspace",
+        recommended_focus: null,
+        actionable_thread_count: 0,
+        degraded_route_count: 0,
+        degraded_source_adapter_count: 0,
+        attention_presence_surface_count: 0,
+      },
+    },
+    handoff: { pending_approvals: [], blocked_workflows: [], follow_ups: [], review_receipts: [] },
+  };
+}
+
 describe("CockpitView", () => {
   const fetchMock = vi.fn();
 
@@ -445,8 +486,59 @@ describe("CockpitView", () => {
     });
 
     expect(runtimeStatusCalls).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("LOCAL GEMMA · LOCAL GEMMA")).toBeInTheDocument();
+    expect(screen.getByText("LOCAL GEMMA STALE · LOCAL GEMMA")).toBeInTheDocument();
     expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
+  });
+
+  it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/runtime/status")) {
+        return Promise.resolve(mockResponse({ detail: "temporary runtime refresh failure" }, false, 503));
+      }
+      if (url.includes("/api/operator/control-plane")) {
+        return Promise.resolve(mockResponse(mockOperatorControlPlaneRuntime({
+          version: "test",
+          build_id: "SERAPH_TEST",
+          provider: "local-gemma",
+          model: "openai/gemma-4-26b",
+          model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+        })));
+      }
+      if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/tree")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/goals/dashboard")) {
+        return Promise.resolve(mockResponse({ domains: {}, active_count: 0, completed_count: 0, total_count: 0 }));
+      }
+      if (url.includes("/api/observer/state")) return Promise.resolve(mockResponse({}));
+      if (url.includes("/api/audit/events")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/approvals/pending")) return Promise.resolve(mockResponse([]));
+      if (url.includes("/api/observer/continuity")) {
+        return Promise.resolve(mockResponse({
+          daemon: { connected: false, pending_notification_count: 0, capture_mode: "balanced" },
+          notifications: [],
+          queued_insights: [],
+          queued_insight_count: 0,
+          recent_interventions: [],
+          reach: { route_statuses: [] },
+        }));
+      }
+      if (url.includes("/api/capabilities/overview")) return Promise.resolve(mockResponse(emptyCapabilityOverview()));
+      if (url.includes("/api/browser/providers")) return Promise.resolve(mockResponse({ providers: [] }));
+      if (url.includes("/api/operator/browser-computer-use-control")) return Promise.resolve(mockResponse({ sessions: [] }));
+      if (url.includes("/api/extensions")) return Promise.resolve(mockResponse({ extensions: [] }));
+      if (url.includes("/api/workflows/runs")) return Promise.resolve(mockResponse({ runs: [] }));
+      if (url.includes("/api/settings/tool-policy-mode")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      if (url.includes("/api/settings/mcp-policy-mode")) return Promise.resolve(mockResponse({ mode: "approval" }));
+      if (url.includes("/api/settings/approval-mode")) return Promise.resolve(mockResponse({ mode: "high_risk" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={vi.fn()} />);
+
+    expect(await screen.findByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
+    expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
+    expect(screen.queryByText("MODEL UNAVAILABLE")).not.toBeInTheDocument();
   });
 
   it("does not queue stale workflow fallback drafts when live recovery control is refused", async () => {

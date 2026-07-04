@@ -85,6 +85,19 @@ def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict
     return status
 
 
+def deferred_vlm_live_probe(reason: str = "deferred_fast_metadata") -> dict[str, object]:
+    """Return the non-blocking live-probe placeholder for fast metadata endpoints."""
+    return {
+        "checked": False,
+        "reachable": False,
+        "reason": reason,
+        "health": _unprobed_endpoint(),
+        "backend_health": _unprobed_endpoint(),
+        "queue_status": _unprobed_endpoint(),
+        "chat_proxy": _unprobed_endpoint(),
+    }
+
+
 async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[str, object]:
     """Probe the effective VLM wrapper route from this Seraph process."""
     base_url = effective_vlm_base_url()

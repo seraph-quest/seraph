@@ -206,11 +206,31 @@ async def test_artifact_storage_exposes_gpu_vlm_runtime_without_secret(client, t
     assert runtime["queue_status_endpoint"] == "http://192.168.1.26:8001/queue/status"
     assert runtime["api_key_configured"] is True
     assert runtime["live_probe"]["checked"] is False
-    assert runtime["live_probe"]["reason"] == "test_stub"
+    assert runtime["live_probe"]["reason"] == "deferred_fast_metadata"
     assert data["screenshot_folder"]["analysis"]["runtime"] == runtime
     assert data["local_runtime"]["gateway_configured"] is True
     assert data["local_runtime"]["vlm_base_url_configured"] is True
     assert "secret-token" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_artifact_storage_does_not_wait_for_live_vlm_probe(client, tmp_path, monkeypatch):
+    screenshot_root = tmp_path / "captures"
+    screenshot_root.mkdir()
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
+    with (
+        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+        patch.object(settings, "screen_analysis_provider", "local-vlm"),
+        patch.object(settings, "seraph_vlm_mode", "gpu-server"),
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch("src.vlm_runtime.probe_effective_vlm_runtime", side_effect=AssertionError("live probe should not run")),
+    ):
+        resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    runtime = resp.json()["local_runtime"]["vlm_runtime"]
+    assert runtime["live_probe"]["checked"] is False
+    assert runtime["live_probe"]["reason"] == "deferred_fast_metadata"
 
 
 @pytest.mark.asyncio

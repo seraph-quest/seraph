@@ -764,29 +764,44 @@ export function ArtifactStoragePanel() {
                     {screenshotFolderSource.status.replace(/_/g, " ")}
                   </div>
                 </div>
-                <div className="grid grid-cols-[92px_minmax(0,1fr)_auto] gap-2 text-[9px] items-center">
+                <div className="grid grid-cols-[92px_minmax(0,1fr)] gap-2 text-[9px] items-center">
                   <div className="text-retro-text/30 uppercase tracking-wider">Folder</div>
-                  <input
-                    aria-label="Screenshot folder"
-                    value={screenshotFolderDraft}
-                    disabled={saving || screenshotFolderLockedByEnv || !screenshotFolderMetadataLoaded}
-                    onChange={(event) => setScreenshotFolderDraft(event.target.value)}
-                    placeholder={screenshotFolderMetadataLoaded ? "Choose a local folder" : "folder metadata not loaded"}
-                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
-                  />
-                  <button
-                    type="button"
-                    disabled={
-                      saving ||
-                      screenshotFolderLockedByEnv ||
-                      !screenshotFolderMetadataLoaded ||
-                      screenshotFolderDraft.trim() === (screenshotFolderPath ?? "")
-                    }
-                    onClick={() => void saveScreenshotFolder()}
-                    className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
-                  >
-                    Save
-                  </button>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <input
+                      aria-label="Screenshot folder"
+                      value={screenshotFolderDraft}
+                      disabled={saving || screenshotFolderLockedByEnv || !screenshotFolderMetadataLoaded}
+                      onChange={(event) => setScreenshotFolderDraft(event.target.value)}
+                      placeholder={screenshotFolderMetadataLoaded ? "Choose a local folder" : "folder metadata not loaded"}
+                      className="min-w-[180px] flex-1 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      disabled={saving || screenshotFolderLockedByEnv || screenshotFolderPicking}
+                      onClick={() => void pickScreenshotFolder()}
+                      className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                    >
+                      {screenshotFolderPicking ? "Choosing" : "Choose"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={
+                        saving ||
+                        screenshotFolderLockedByEnv ||
+                        !screenshotFolderMetadataLoaded ||
+                        screenshotFolderDraft.trim() === (screenshotFolderPath ?? "")
+                      }
+                      onClick={() => void saveScreenshotFolder()}
+                      className="border border-retro-text/20 px-2 py-1 uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+                <div className="text-[9px] text-retro-text/40">
+                  {screenshotFolderLockedByEnv
+                    ? "locked by SERAPH_SCREENSHOT_FOLDER"
+                    : "Choose opens the local folder picker; typing the path is the fallback."}
                 </div>
                 <ArtifactRow label="Folder" value={screenshotFolderDisplayPath(screenshotFolderPath)} tone={screenshotFolderPath ? "normal" : "warn"} />
                 <ArtifactRow label="Source" value={sourceLabel(screenshotFolderPathSource)} />
@@ -915,14 +930,6 @@ export function ArtifactStoragePanel() {
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
                     {screenshotFolderScanning ? "Scanning" : "Scan folder"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={saving || screenshotFolderLockedByEnv || screenshotFolderPicking}
-                    onClick={() => void pickScreenshotFolder()}
-                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
-                  >
-                    {screenshotFolderPicking ? "Choosing" : "Choose folder"}
                   </button>
                   <button
                     type="button"

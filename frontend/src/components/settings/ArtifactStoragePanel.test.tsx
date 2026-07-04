@@ -685,7 +685,7 @@ describe("ArtifactStoragePanel", () => {
       last_artifact_at: null,
       screenshot_folder: "/Users/test/Pictures/Screenshots",
     });
-    const pickedRoot = "/Users/test/Desktop/screenshots/captures";
+    const pickedRoot = "/Users/test/Desktop/screenshots";
     const refreshedStorage = {
       ...artifactStorage,
       screenshot_folder: {
@@ -706,7 +706,7 @@ describe("ArtifactStoragePanel", () => {
 
     render(<ArtifactStoragePanel />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Choose folder" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -715,6 +715,7 @@ describe("ArtifactStoragePanel", () => {
       ),
     );
     expect(await screen.findByDisplayValue(pickedRoot)).toBeInTheDocument();
+    expect(screen.getByText("Choose opens the local folder picker; typing the path is the fallback.")).toBeInTheDocument();
   });
 
   it("does not refresh settings after a save resolves on an unmounted panel", async () => {

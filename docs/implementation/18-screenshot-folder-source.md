@@ -42,6 +42,8 @@ Seraph resolves the screenshot folder in this order:
 
 The default is a generic Seraph-owned workspace folder so unconfigured Seraph never assumes a specific screenshot producer. To consume screenshots from another app, configure Seraph with that app's screenshot folder explicitly.
 
+The configured folder is the image root. Seraph does not append, require, or special-case a producer-side `captures/` subdirectory; if screenshots are written directly under `/Users/.../Desktop/screenshots`, that exact folder is the Seraph `screenshot_folder`.
+
 Seraph does not migrate or resolve producer-specific screenshot keys. API requests, stored settings, and environment configuration use only `screenshot_folder` or `SERAPH_SCREENSHOT_FOLDER`. `artifact_root` and producer-specific key names are not part of the current contract.
 
 ## Folder Scan

@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from config.settings import settings
-from src.vlm_runtime import effective_vlm_status, probe_effective_vlm_runtime
+from src.vlm_runtime import direct_local_chat_route_error, effective_vlm_status, probe_effective_vlm_runtime
 
 
 @pytest.mark.asyncio
@@ -227,3 +227,55 @@ async def test_probe_effective_vlm_runtime_marks_chat_auth_mismatch_unreachable(
     assert probe["chat_proxy"]["error"] == "auth_failed"
     assert probe["reachable"] is False
     assert "wrong-secret" not in str(probe)
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_names_chat_health_endpoint():
+    probe = {
+        "checked": True,
+        "reachable": False,
+        "health": {"checked": True, "ok": True, "status_code": 200, "error": ""},
+        "backend_health": {"checked": True, "ok": True, "status_code": 200, "error": ""},
+        "queue_status": {"checked": True, "ok": True, "status_code": 200, "error": ""},
+        "chat_proxy": {"checked": True, "ok": False, "status_code": None, "error": "connect_error"},
+    }
+
+    with (
+        patch.object(settings, "seraph_vlm_base_url", "http://192.168.1.26:8001"),
+        patch.object(settings, "local_llm_api_base", ""),
+        patch("src.vlm_runtime.probe_effective_vlm_runtime", return_value=probe),
+    ):
+        error = await direct_local_chat_route_error()
+
+    assert error is not None
+    assert "Local chat runtime is unreachable" in error
+    assert "http://192.168.1.26:8001" in error
+    assert "http://192.168.1.26:8001/health/chat" in error
+    assert "chat proxy connect_error" in error
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_allows_reachable_route():
+    probe = {"checked": True, "reachable": True}
+
+    with (
+        patch.object(settings, "seraph_vlm_base_url", "http://127.0.0.1:8000"),
+        patch.object(settings, "local_llm_api_base", ""),
+        patch("src.vlm_runtime.probe_effective_vlm_runtime", return_value=probe),
+    ):
+        error = await direct_local_chat_route_error()
+
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_direct_local_chat_route_error_allows_explicit_api_base_without_wrapper():
+    with (
+        patch.object(settings, "seraph_vlm_base_url", ""),
+        patch.object(settings, "local_vlm_base_url", ""),
+        patch.object(settings, "local_llm_api_base", "http://127.0.0.1:8000/v1"),
+        patch("src.vlm_runtime.probe_effective_vlm_runtime", side_effect=AssertionError("wrapper probe not available")),
+    ):
+        error = await direct_local_chat_route_error()
+
+    assert error is None

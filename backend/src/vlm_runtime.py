@@ -136,12 +136,58 @@ async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[
     }
 
 
+async def direct_local_chat_route_error(*, timeout_seconds: float = 0.75) -> str | None:
+    """Return an operator-readable route error when local chat cannot run."""
+    status = effective_vlm_status()
+    base_url = str(status.get("base_url") or "")
+    chat_api_base = str(status.get("chat_api_base") or "")
+    chat_health_endpoint = str(status.get("chat_health_endpoint") or "")
+    if not chat_api_base:
+        return (
+            "Local chat runtime is not configured for the Seraph backend. "
+            "Set SERAPH_VLM_BASE_URL or LOCAL_VLM_BASE_URL before using direct local chat."
+        )
+    if not base_url:
+        return None
+
+    probe = await probe_effective_vlm_runtime(timeout_seconds=timeout_seconds)
+    if probe.get("reachable") is True:
+        return None
+
+    detail = _probe_failure_detail(probe)
+    endpoint = chat_health_endpoint or str(status.get("backend_health_endpoint") or status.get("health_endpoint") or base_url)
+    return (
+        "Local chat runtime is unreachable from the Seraph backend at "
+        f"{base_url}. Health endpoint {endpoint} reported {detail}. "
+        "Check the VLM wrapper route before retrying."
+    )
+
+
 def _trim_url(value: str | None) -> str:
     return str(value or "").strip().rstrip("/")
 
 
 def _unprobed_endpoint() -> dict[str, object]:
     return {"checked": False, "ok": False, "status_code": None, "error": ""}
+
+
+def _probe_failure_detail(probe: dict[str, object]) -> str:
+    for key, label in (
+        ("chat_proxy", "chat proxy"),
+        ("backend_health", "backend health"),
+        ("health", "wrapper health"),
+        ("queue_status", "queue status"),
+    ):
+        endpoint = probe.get(key)
+        if not isinstance(endpoint, dict) or endpoint.get("ok") is True:
+            continue
+        error = str(endpoint.get("error") or "unreachable")
+        status_code = endpoint.get("status_code")
+        if status_code is not None:
+            return f"{label} {error} ({status_code})"
+        return f"{label} {error}"
+    reason = str(probe.get("reason") or "unreachable")
+    return _safe_probe_detail(reason)
 
 
 async def _probe_json_endpoint(client: httpx.AsyncClient, endpoint: str) -> dict[str, object]:

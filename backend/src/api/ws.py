@@ -33,6 +33,7 @@ from src.operators.local_codex import (
 from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
+from src.vlm_runtime import direct_local_chat_route_error
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -300,6 +301,33 @@ async def websocket_chat(websocket: WebSocket):
                 is_onboarding=direct_is_onboarding,
             ):
                 started_at = perf_counter()
+                route_error = await direct_local_chat_route_error()
+                if route_error:
+                    safe_error = await redact_secrets_in_text(route_error)
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=direct_is_onboarding,
+                        outcome="failed",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={
+                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "message_length": len(ws_msg.message),
+                            "error": safe_error,
+                            "runtime": "direct-local-chat",
+                            "failure_stage": "route_preflight",
+                        },
+                    )
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=safe_error,
+                            session_id=session.id,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
                 llm_request_id = f"direct-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
                 try:

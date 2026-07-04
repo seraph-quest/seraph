@@ -29,6 +29,7 @@ from src.operators.local_codex import (
 )
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
+from src.vlm_runtime import direct_local_chat_route_error
 from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
@@ -126,6 +127,24 @@ async def chat(request: ChatRequest):
         is_onboarding=is_onboarding,
     ):
         started_at = perf_counter()
+        route_error = await direct_local_chat_route_error()
+        if route_error:
+            safe_detail = await redact_secrets_in_text(route_error)
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=is_onboarding,
+                outcome="failed",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "error": safe_detail,
+                    "runtime": "direct-local-chat",
+                    "failure_stage": "route_preflight",
+                },
+            )
+            raise HTTPException(status_code=503, detail=safe_detail)
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
         try:

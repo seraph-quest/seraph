@@ -366,6 +366,97 @@ describe("CockpitView", () => {
     expect(within(consoleRegion).getByRole("button", { name: "install" })).toBeEnabled();
   });
 
+  it("opens extension diagnostics drill-down from the governed extension console", async () => {
+    const diagnosticsPayload = {
+      extension: {
+        id: "seraph.test-installable",
+        display_name: "Test Installable",
+        status: "ready",
+        version_line: "2026.4",
+      },
+      lifecycle: {
+        rollback: {
+          available: true,
+          snapshots: [{ id: "snapshot-1", version: "2026.3.21", path_digest: "abc123" }],
+        },
+      },
+      recommended_actions: [
+        { type: "rollback", label: "Rollback to previous snapshot", reason: "Bad update suspected." },
+      ],
+      claim_boundary: "metadata_only_extension_diagnostics_no_source_secret_config_or_private_paths",
+      blocked_claims: ["production_secure_marketplace"],
+      redaction: { metadata_only: true, private_paths_exposed: false },
+    };
+    mockCockpitBaselineFetch(fetchMock, {
+      extensions: {
+        extensions: [
+          {
+            id: "seraph.test-installable",
+            display_name: "Test Installable",
+            status: "ready",
+            source: "manifest",
+            location: "workspace",
+            trust: "local",
+            version: "2026.4.01",
+            version_line: "2026.4",
+            kind: "capability-pack",
+            publisher: { name: "Seraph" },
+            compatibility: { seraph: ">=2026.4.11", current_version: "2026.7.4", compatible: true },
+            diagnostics_summary: {
+              issue_count: 0,
+              error_issue_count: 0,
+              warning_issue_count: 0,
+              load_error_count: 0,
+              degraded_contribution_count: 0,
+              degraded_connector_count: 0,
+              highlighted_messages: [],
+            },
+            permission_summary: { status: "granted", ok: true, required: {}, missing: {}, risk_level: "low" },
+            approval_profile: { requires_lifecycle_approval: false, requires_runtime_approval: false },
+            connector_summary: { ready: 0, total: 0 },
+            issues: [],
+            load_errors: [],
+            contributions: [{ type: "skills", status: "ready", loaded: true }],
+            disable_supported: true,
+            removable: true,
+            rollback_ready: true,
+            lifecycle: {
+              rollback_snapshots: [{ id: "snapshot-1", version: "2026.3.21" }],
+            },
+          },
+        ],
+        summary: { total: 1 },
+      },
+    });
+    const baselineFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/extensions/seraph.test-installable/diagnostics")) {
+        return Promise.resolve(mockResponse(diagnosticsPayload));
+      }
+      return baselineFetch
+        ? baselineFetch(input)
+        : Promise.resolve(mockResponse({}));
+    });
+
+    render(<CockpitView onSend={() => {}} />);
+
+    const consoleRegion = await screen.findByRole("region", { name: "M9 governed extension console" });
+    fireEvent.click(within(consoleRegion).getByRole("button", { name: "diagnostics" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/extensions/seraph.test-installable/diagnostics"),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText("Diagnostics ready: Rollback to previous snapshot"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getAllByText(/metadata_only_extension_diagnostics/i).length).toBeGreaterThan(0);
+  });
+
   it("renders live browser session controls with degraded fallback and redacted provenance", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       browserProviders: {
@@ -453,7 +544,9 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     const browserControls = await screen.findByRole("region", { name: "Browser computer-use live controls" });
-    expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i);
+    await waitFor(() =>
+      expect(browserControls).toHaveTextContent(/1 providers · 1 sessions · 1 journaled · 1 degraded · no quarantine/i),
+    );
     expect(browserControls).toHaveTextContent(/remote-cdp · remote cdp · staged local fallback · local fallback/i);
     expect(browserControls).toHaveTextContent(/degraded fallback labeled · silent fallback blocked/i);
     expect(browserControls).toHaveTextContent(/boundaries: profile · cookie · credential · download · upload · network/i);

@@ -433,6 +433,21 @@ relevant docs.
   `Changes Requested` or `Passed`.
 - When the PR merges, set `PR=Merged` and `Status=Done`.
 
+### GitHub Approval Discipline
+
+- Reuse the operator's existing scoped approvals for routine `gh issue`,
+  `gh pr`, `gh project`, `gh api`, and related Git operations. Do not request
+  repeated approval for operations already covered by those scopes.
+- For issue comments, PR bodies, and other multiline GitHub text, write the
+  content to a workspace or `/tmp` file with `apply_patch`, then pass it with
+  `--body-file`. Avoid shell-expanded inline bodies such as `$'...'`, command
+  substitution, or heredocs that turn a routine `gh` call into a new approval
+  shape.
+- If an optional GitHub receipt cannot run under the existing scoped approvals,
+  skip it and report the omission instead of interrupting the operator. Request
+  a new permission only when the operation is required to complete the task;
+  keep that request narrow and reusable.
+
 ## Review Rule
 
 - Every PR-sized slice must be reviewed before merge. Non-trivial PR-sized

@@ -273,6 +273,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [x] runtime-path-specific primary model overrides
 - [x] runtime-path-specific fallback-chain overrides
 - [x] first-class local runtime routing for helper, all current scheduled completion jobs, core agent, delegation, and connected MCP-specialist paths
+- [x] managed local lifecycle status now treats PID-plus-owned-listener agreement as the readiness contract; PID-only and listener-only drift are degraded, and `local up` rechecks the whole local stack before reporting the frontend/backend URLs.
 - [x] operator database doctor now checks required live operator tables, including `guardian_interventions`, and the guardian-state, M8 guardian-brain, and timeline endpoints degrade with `missing_tables` plus `./manage.sh -e dev local run` repair guidance instead of leaking raw SQLite missing-table errors.
 - [x] strict runtime-path provider safeguards for required capability intents plus cost, latency, task-class, and budget guardrails, with explicit degrade-open audit semantics when no compliant target exists
 - [x] first simulation-grade provider planning pass that scores candidate routes before execution, makes budget steering explicit, carries per-target live feedback plus production-readiness state into route choice, and surfaces route scores plus simulated-route explanations through runtime audit, operator timeline, and activity-ledger views

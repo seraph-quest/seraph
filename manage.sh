@@ -343,6 +343,80 @@ function wait_for_pid_and_port() {
     return 1
 }
 
+function service_readiness() {
+    local pid_file="$1"
+    local port="$2"
+    local service="$3"
+    local marker="${4:-}"
+
+    local pid_ready=false
+    local port_ready=false
+    local supervisor_pid=""
+    if pid_is_running "$pid_file" "$marker"; then
+        pid_ready=true
+        supervisor_pid=$(cat "$pid_file")
+    fi
+
+    local listener_pid listener_pids
+    listener_pids=$(pids_listening_on_port "$port")
+    for listener_pid in $listener_pids; do
+        if { [ -n "$supervisor_pid" ] && pid_is_descendant_of "$listener_pid" "$supervisor_pid"; } || seraph_local_port_owner "$listener_pid" "$service"; then
+            port_ready=true
+            break
+        fi
+    done
+
+    if [ "$pid_ready" = true ] && [ "$port_ready" = true ]; then
+        echo "ready"
+    elif [ "$pid_ready" = true ]; then
+        echo "pid_only"
+    elif [ "$port_ready" = true ]; then
+        echo "listener_only"
+    else
+        echo "stopped"
+    fi
+}
+
+function print_local_service_status() {
+    local label="$1"
+    local pid_file="$2"
+    local port="$3"
+    local service="$4"
+    local readiness
+    readiness=$(service_readiness "$pid_file" "$port" "$service")
+
+    case "$readiness" in
+        ready)
+            echo "$label: running (PID $(cat "$pid_file")) -> http://127.0.0.1:$port"
+            ;;
+        pid_only)
+            echo "$label: degraded (PID $(cat "$pid_file"), port $port not listening)"
+            ;;
+        listener_only)
+            echo "$label: degraded (port $port has Seraph listener, PID file missing/stale)"
+            ;;
+        *)
+            echo "$label: stopped"
+            ;;
+    esac
+}
+
+function verify_local_stack_ready() {
+    local backend_ready frontend_ready
+    backend_ready=$(service_readiness "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend)
+    frontend_ready=$(service_readiness "$LOCAL_FRONTEND_PID_FILE" "$LOCAL_FRONTEND_PORT" frontend)
+
+    if [ "$backend_ready" = ready ] && [ "$frontend_ready" = ready ]; then
+        return 0
+    fi
+
+    echo "Local stack readiness check failed after startup:" >&2
+    echo "  backend=$backend_ready (pid_file=$LOCAL_BACKEND_PID_FILE, port=$LOCAL_BACKEND_PORT)" >&2
+    echo "  frontend=$frontend_ready (pid_file=$LOCAL_FRONTEND_PID_FILE, port=$LOCAL_FRONTEND_PORT)" >&2
+    echo "Use './manage.sh -e $ENV local run' for managed-shell live observation." >&2
+    return 1
+}
+
 # --- Daemon Functions ---
 function daemon_is_running() {
     if [ -f "$DAEMON_PID_FILE" ]; then
@@ -605,6 +679,9 @@ function local_up() {
         stop_port_listeners "$LOCAL_BACKEND_PORT" "Local backend" backend || true
         return 1
     fi
+    if ! verify_local_stack_ready; then
+        return 1
+    fi
     echo "Local stack is running: frontend http://127.0.0.1:$LOCAL_FRONTEND_PORT, backend http://127.0.0.1:$LOCAL_BACKEND_PORT"
     if [ "${DAEMON_ENABLED:-false}" = "true" ]; then
         if ! start_daemon; then
@@ -629,16 +706,8 @@ function local_status() {
     echo "Default model: ${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}"
     echo "Workspace dir: $LOCAL_WORKSPACE_DIR"
     echo "LLM log dir: $LOCAL_LLM_LOG_DIR"
-    if local_backend_is_running; then
-        echo "Local backend: running (PID $(cat "$LOCAL_BACKEND_PID_FILE")) -> http://127.0.0.1:$LOCAL_BACKEND_PORT"
-    else
-        echo "Local backend: stopped"
-    fi
-    if local_frontend_is_running; then
-        echo "Local frontend: running (PID $(cat "$LOCAL_FRONTEND_PID_FILE")) -> http://127.0.0.1:$LOCAL_FRONTEND_PORT"
-    else
-        echo "Local frontend: stopped"
-    fi
+    print_local_service_status "Local backend" "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend
+    print_local_service_status "Local frontend" "$LOCAL_FRONTEND_PID_FILE" "$LOCAL_FRONTEND_PORT" frontend
     if daemon_is_running; then
         echo "Screen daemon: running (PID $(cat "$DAEMON_PID_FILE"))"
     else
@@ -678,6 +747,10 @@ function local_run() {
     fi
     local_logs all
 }
+
+if [ "${SERAPH_MANAGE_SOURCE_ONLY:-false}" = "true" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # --- Main Script Logic ---
 

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsPanel } from "../SettingsPanel";
@@ -121,6 +121,76 @@ describe("cockpit overlays", () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalled();
     });
+  });
+
+  it("opens settings on Screenshot/VLM without eager-loading heavy sections", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStoragePayload));
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({ screen: { analysis_enabled: true } }));
+      }
+      if (url.includes("/api/settings/")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    useChatStore.setState({ settingsPanelOpen: true });
+    render(<SettingsPanel />);
+
+    expect(await screen.findByText("Settings")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/settings/artifact-storage"),
+        expect.any(Object),
+      );
+    });
+
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requestedUrls.some((url) => url.includes("/api/settings/artifact-storage"))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/api/settings/screen-analysis"))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/api/skills"))).toBe(false);
+    expect(requestedUrls.some((url) => url.includes("/api/mcp/servers"))).toBe(false);
+    expect(requestedUrls.some((url) => url.includes("/api/catalog"))).toBe(false);
+    expect(requestedUrls.some((url) => url.includes("/api/audit"))).toBe(false);
+    expect(requestedUrls.some((url) => url.includes("/api/workflows"))).toBe(false);
+  });
+
+  it("reopens settings on Screenshot/VLM after a heavy section was active", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStoragePayload));
+      if (url.includes("/api/settings/screen-analysis")) {
+        return Promise.resolve(mockResponse({ screen: { analysis_enabled: true } }));
+      }
+      if (url.includes("/api/mcp/servers")) return Promise.resolve(mockResponse({ servers: [] }));
+      if (url.includes("/api/settings/")) return Promise.resolve(mockResponse({ mode: "balanced" }));
+      return Promise.resolve(mockResponse({}));
+    });
+
+    useChatStore.setState({ settingsPanelOpen: true });
+    render(<SettingsPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "MCP" }));
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/mcp/servers"))).toBe(true);
+    });
+
+    await act(async () => {
+      useChatStore.setState({ settingsPanelOpen: false });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("MCP Servers")).not.toBeInTheDocument();
+    });
+    fetchMock.mockClear();
+    await act(async () => {
+      useChatStore.setState({ settingsPanelOpen: true });
+    });
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/settings/artifact-storage"))).toBe(true);
+    });
+    expect(screen.getByText("Screenshot Folder")).toBeInTheDocument();
+    const reopenUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(reopenUrls.filter((url) => url.includes("/api/mcp/servers"))).toEqual([]);
   });
 
   it("updates the theme preference from settings", async () => {

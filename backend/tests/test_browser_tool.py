@@ -7,6 +7,7 @@ import pytest
 
 from config.settings import settings
 from src.audit.repository import audit_repository
+from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.tools.browser_tool import browse_webpage
 from src.tools.browser_tool import _route_guarded_browser_request
 
@@ -36,9 +37,11 @@ def reset_browser_site_policy():
     original_blocklist = settings.browser_site_blocklist
     settings.browser_site_allowlist = ""
     settings.browser_site_blocklist = ""
+    reset_integration_timeout_rate_limit_state()
     yield
     settings.browser_site_allowlist = original_allowlist
     settings.browser_site_blocklist = original_blocklist
+    reset_integration_timeout_rate_limit_state()
 
 
 def test_browse_webpage_logs_blocked_runtime_audit(async_db):
@@ -152,3 +155,25 @@ def test_browse_webpage_logs_timeout_runtime_audit(async_db):
     assert events[0]["tool_name"] == "browser:playwright"
     assert events[0]["details"]["hostname"] == "example.com"
     assert events[0]["details"]["timeout_seconds"] == 30
+    assert events[0]["details"]["timeout_rate_limited"] is True
+
+
+def test_browse_webpage_rate_limits_repeated_timeout_runtime_audit(async_db):
+    with (
+        patch("src.tools.browser_tool._browse", new=AsyncMock(side_effect=TimeoutError("Timed out"))),
+        patch("concurrent.futures.ThreadPoolExecutor", return_value=_ImmediateExecutor()),
+    ):
+        first = browse_webpage("https://example.com/slow")
+        second = browse_webpage("https://example.com/slow")
+
+    assert "timed out after" in first.lower()
+    assert "timed out after" in second.lower()
+
+    async def _fetch():
+        events = await audit_repository.list_events(limit=10)
+        return [e for e in events if e["event_type"] == "integration_timed_out"]
+
+    events = asyncio.run(_fetch())
+    assert len(events) == 1
+    assert events[0]["tool_name"] == "browser:playwright"
+    assert events[0]["details"]["timeout_rate_limit_group"] == "browser:playwright:example.com:extract"

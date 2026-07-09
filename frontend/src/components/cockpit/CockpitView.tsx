@@ -61,6 +61,24 @@ interface RuntimeStatus {
   model: string;
   model_label: string;
   api_base?: string;
+  effective_runtime?: {
+    runtime_path?: string;
+    active_profile?: string;
+    provider?: string;
+    provider_label?: string;
+    model?: string;
+    model_label?: string;
+    mode?: string;
+    route_label?: string;
+    summary_label?: string;
+    api_base?: string;
+    vlm_base_url?: string;
+    vlm_backend_url?: string;
+    vlm_configured?: boolean;
+    queue_status_endpoint?: string;
+    health_endpoint?: string;
+    backend_health_endpoint?: string;
+  };
   timezone?: string;
   llm_logging_enabled?: boolean;
 }
@@ -6636,6 +6654,7 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
   const provider = typeof record.provider === "string" ? record.provider.trim() : "";
   const model = typeof record.model === "string" ? record.model.trim() : "";
   const modelLabel = typeof record.model_label === "string" ? record.model_label.trim() : "";
+  const effectiveRuntime = normalizeEffectiveRuntime(record.effective_runtime);
   if (!provider || (!model && !modelLabel)) return null;
   return {
     version: typeof record.version === "string" ? record.version : "",
@@ -6644,8 +6663,32 @@ function normalizeRuntimeStatus(value: unknown): RuntimeStatus | null {
     model: model || modelLabel,
     model_label: modelLabel || model,
     api_base: typeof record.api_base === "string" ? record.api_base : undefined,
+    effective_runtime: effectiveRuntime ?? undefined,
     timezone: typeof record.timezone === "string" ? record.timezone : undefined,
     llm_logging_enabled: typeof record.llm_logging_enabled === "boolean" ? record.llm_logging_enabled : undefined,
+  };
+}
+
+function normalizeEffectiveRuntime(value: unknown): RuntimeStatus["effective_runtime"] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    runtime_path: typeof record.runtime_path === "string" ? record.runtime_path : undefined,
+    active_profile: typeof record.active_profile === "string" ? record.active_profile : undefined,
+    provider: typeof record.provider === "string" ? record.provider : undefined,
+    provider_label: typeof record.provider_label === "string" ? record.provider_label : undefined,
+    model: typeof record.model === "string" ? record.model : undefined,
+    model_label: typeof record.model_label === "string" ? record.model_label : undefined,
+    mode: typeof record.mode === "string" ? record.mode : undefined,
+    route_label: typeof record.route_label === "string" ? record.route_label : undefined,
+    summary_label: typeof record.summary_label === "string" ? record.summary_label : undefined,
+    api_base: typeof record.api_base === "string" ? record.api_base : undefined,
+    vlm_base_url: typeof record.vlm_base_url === "string" ? record.vlm_base_url : undefined,
+    vlm_backend_url: typeof record.vlm_backend_url === "string" ? record.vlm_backend_url : undefined,
+    vlm_configured: typeof record.vlm_configured === "boolean" ? record.vlm_configured : undefined,
+    queue_status_endpoint: typeof record.queue_status_endpoint === "string" ? record.queue_status_endpoint : undefined,
+    health_endpoint: typeof record.health_endpoint === "string" ? record.health_endpoint : undefined,
+    backend_health_endpoint: typeof record.backend_health_endpoint === "string" ? record.backend_health_endpoint : undefined,
   };
 }
 
@@ -8359,11 +8402,21 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const connectionLabel = effectiveConnectionStatus === "connected"
     ? "live"
     : effectiveConnectionStatus;
-  const runtimeProviderBaseLabel = (runtimeStatus?.provider ?? "unknown").replace(/[_.-]+/g, " ").toUpperCase();
+  const runtimeRouteLabel = runtimeStatus?.effective_runtime?.route_label
+    || runtimeStatus?.effective_runtime?.provider_label
+    || runtimeStatus?.provider
+    || "unknown";
+  const runtimeProviderBaseLabel = runtimeRouteLabel.replace(/[_.-]+/g, " ").toUpperCase();
   const runtimeProviderLabel = runtimeReceipt?.source === "retained"
     ? `${runtimeProviderBaseLabel} STALE`
     : runtimeProviderBaseLabel;
-  const runtimeModelLabel = (runtimeStatus?.model_label ?? runtimeStatus?.model ?? "unknown")
+  const runtimeModelLabel = (
+    runtimeStatus?.effective_runtime?.model_label
+    ?? runtimeStatus?.effective_runtime?.model
+    ?? runtimeStatus?.model_label
+    ?? runtimeStatus?.model
+    ?? "unknown"
+  )
     .replace(/^openrouter\//, "")
     .replace(/^anthropic\//, "")
     .replace(/[_/-]+/g, " ")

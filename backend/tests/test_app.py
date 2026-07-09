@@ -108,6 +108,24 @@ async def test_runtime_status_exposes_gpu_vlm_runtime_and_chat_profile(client):
     assert payload["provider"] == "local-gemma"
     assert payload["api_base"] == "http://192.168.1.26:8001/v1"
     assert payload["active_profile"] == "local-gemma-chat-thinking"
+    assert payload["effective_runtime"] == {
+        "runtime_path": "chat_agent",
+        "active_profile": "local-gemma-chat-thinking",
+        "provider": "local-gemma",
+        "provider_label": "local-gemma/gpu-vlm",
+        "model": "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+        "model_label": "gemma-4-26B-A4B-it-qat-GGUF",
+        "mode": "gpu-server",
+        "route_label": "GPU VLM",
+        "summary_label": "GPU VLM · gemma-4-26B-A4B-it-qat-GGUF",
+        "api_base": "http://192.168.1.26:8001/v1",
+        "vlm_base_url": "http://192.168.1.26:8001",
+        "vlm_backend_url": "http://192.168.1.26:8000/v1",
+        "vlm_configured": True,
+        "queue_status_endpoint": "http://192.168.1.26:8001/queue/status",
+        "health_endpoint": "http://192.168.1.26:8001/health",
+        "backend_health_endpoint": "http://192.168.1.26:8001/health/backend",
+    }
     assert payload["vlm_runtime"] == {
         "mode": "gpu-server",
         "configured": True,

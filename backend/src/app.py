@@ -88,6 +88,60 @@ def _active_chat_runtime_status() -> dict[str, str]:
         "active_profile": active_profile,
     }
 
+
+def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[str, object]) -> dict[str, object]:
+    provider = runtime.get("provider", "")
+    model = runtime.get("model", "")
+    model_label = runtime.get("model_label", "")
+    profile = runtime.get("active_profile", "")
+    if provider == "local-gemma":
+        mode = str(vlm_status.get("mode") or "not_configured")
+        if mode == "gpu-server":
+            route_label = "GPU VLM"
+            provider_label = "local-gemma/gpu-vlm"
+        elif mode == "mac-wrapper":
+            route_label = "Mac VLM"
+            provider_label = "local-gemma/mac-vlm"
+        elif bool(vlm_status.get("configured")):
+            route_label = "VLM wrapper"
+            provider_label = "local-gemma/vlm"
+        else:
+            route_label = "local Gemma"
+            provider_label = "local-gemma"
+        return {
+            "runtime_path": "chat_agent",
+            "active_profile": profile,
+            "provider": provider,
+            "provider_label": provider_label,
+            "model": model,
+            "model_label": model_label,
+            "mode": mode,
+            "route_label": route_label,
+            "summary_label": f"{route_label} · {model_label or model or 'unknown'}",
+            "api_base": runtime.get("api_base", ""),
+            "vlm_base_url": str(vlm_status.get("base_url") or ""),
+            "vlm_backend_url": str(vlm_status.get("backend_url") or ""),
+            "vlm_configured": bool(vlm_status.get("configured")),
+            "queue_status_endpoint": str(vlm_status.get("queue_status_endpoint") or ""),
+            "health_endpoint": str(vlm_status.get("health_endpoint") or ""),
+            "backend_health_endpoint": str(vlm_status.get("backend_health_endpoint") or ""),
+        }
+
+    provider_label = provider or "unknown"
+    return {
+        "runtime_path": "chat_agent",
+        "active_profile": profile,
+        "provider": provider,
+        "provider_label": provider_label,
+        "model": model,
+        "model_label": model_label,
+        "mode": "remote_provider" if provider not in {"codex-local", "local"} else provider,
+        "route_label": provider_label,
+        "summary_label": f"{provider_label} · {model_label or model or 'unknown'}",
+        "api_base": runtime.get("api_base", ""),
+        "vlm_configured": bool(vlm_status.get("configured")),
+    }
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -192,18 +246,20 @@ def create_app() -> FastAPI:
     @app.get("/api/runtime/status")
     async def runtime_status():
         runtime = _active_chat_runtime_status()
+        vlm_status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
         default_model = settings.default_model.strip()
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
             **runtime,
+            "effective_runtime": _effective_runtime_route_status(runtime, vlm_status),
             "default_provider": _runtime_provider_label(default_model),
             "default_model": default_model,
             "default_model_label": _runtime_model_label(default_model),
             "default_api_base": settings.llm_api_base.strip(),
             "provider_profiles": provider_profile_statuses(),
             "local_operators": local_operator_statuses(probe=False),
-            "vlm_runtime": effective_vlm_status(live_probe=deferred_vlm_live_probe()),
+            "vlm_runtime": vlm_status,
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
         }

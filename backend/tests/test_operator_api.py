@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import text
 
 from src.cockpit.production_operator_control import (
     PRODUCTION_OPERATOR_CONTROL_BLOCKED_CLAIMS,
@@ -559,6 +560,38 @@ async def test_operator_m6_memory_superiority_surface_delegates_to_memory_payloa
     assert resp.json()["summary"]["behavior_receipt_count"] == 1
     assert resp.json()["behavior_receipts"][0]["changed_dimensions"] == ["recall_context", "action_posture"]
     build_payload.assert_awaited_once_with(session_id="session-1", query="Atlas")
+
+
+@pytest.mark.asyncio
+async def test_operator_database_doctor_degrades_missing_guardian_table(client, async_db):
+    async with async_db() as db:
+        await db.execute(text("DROP TABLE guardian_interventions"))
+
+    doctor_resp = await client.get("/api/operator/database-doctor")
+    assert doctor_resp.status_code == 200
+    doctor_payload = doctor_resp.json()
+    assert doctor_payload["summary"]["database_status"] == "degraded"
+    assert doctor_payload["summary"]["operator_status"] == "operator_database_degraded_missing_tables"
+    assert doctor_payload["summary"]["repair_command"] == "./manage.sh -e dev local run"
+    assert doctor_payload["missing_tables"] == ["guardian_interventions"]
+
+    guardian_resp = await client.get("/api/operator/guardian-state", params={"session_id": "session-1"})
+    assert guardian_resp.status_code == 200
+    guardian_payload = guardian_resp.json()
+    assert guardian_payload["summary"]["database_status"] == "degraded"
+    assert guardian_payload["surface"] == "/api/operator/guardian-state"
+    assert guardian_payload["missing_tables"] == ["guardian_interventions"]
+
+    timeline_resp = await client.get("/api/operator/timeline", params={"session_id": "session-1", "limit": 8})
+    assert timeline_resp.status_code == 200
+    timeline_payload = timeline_resp.json()
+    assert timeline_payload["items"] == []
+    assert timeline_payload["summary"]["database_status"] == "degraded"
+    assert timeline_payload["missing_tables"] == ["guardian_interventions"]
+
+    m8_resp = await client.get("/api/operator/m8-guardian-brain", params={"session_id": "session-1"})
+    assert m8_resp.status_code == 200
+    assert m8_resp.json()["missing_tables"] == ["guardian_interventions"]
 
 
 @pytest.mark.asyncio

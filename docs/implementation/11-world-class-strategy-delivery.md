@@ -4,18 +4,25 @@ title: 11. World-Class Strategy Delivery
 
 # 11. World-Class Strategy Delivery
 
+**Document class:** Active implementation evidence mirror
+
+This document records bounded delivery principles and evidence from the
+historical M0-M9/#475 program. It is not the accepted target, current milestone
+order, or execution queue. The [Project Constitution](/) and ADRs solely own
+product decisions; Epic #736 and the GitHub Project own current execution.
+
 ## Status On `develop`
 
 - [ ] The world-class strategy is only partially translated into shipped implementation on `develop`.
 
 ## Paired Research
 
-- design source of truth: [11. Superiority Program](/research/superiority-program)
+- historical design evidence: [11. Superiority Program](/research/superiority-program)
 - benchmark input: [10. Competitive Benchmark](/research/competitive-benchmark)
-- canonical strategy source of truth: [17. Seraph World-Class Strategy](/research/seraph-world-class-strategy)
+- historical strategy research: [17. Seraph World-Class Strategy](/research/seraph-world-class-strategy)
 - M0 competitor truth: [18. Agent Competition Truth Table](/research/agent-competition-truth-table)
 - M0 claim and wording gate: [19. Strategy Claim Ledger](/research/strategy-claim-ledger)
-- agent parity goal overlay: [20. Seraph Agent Parity And Exceedance Goals](/research/seraph-agent-parity-and-exceedance-goals)
+- archived parity program: [20. Historical Agent-Parity Research Program](/research/seraph-agent-parity-and-exceedance-goals)
 - synthesis context: [00. Research Synthesis](/research)
 
 ## Purpose
@@ -37,7 +44,7 @@ The GitHub Project owns active execution.
 - Issues own scoped problem statements, acceptance criteria, milestone labels, and proof requirements.
 - PRs own integration truth until merged.
 - Implementation docs own durable delivery rules and shipped/missing strategic status, not live task queues.
-- Research docs own product strategy, milestone order, competitive frame, and acceptance standards.
+- Research docs supply evidence and dated competitive context; the constitution and ADRs own accepted product direction.
 
 If docs and Project state disagree, the Project is the execution source of truth and the docs should be corrected only through an explicit strategy or status update.
 
@@ -66,7 +73,7 @@ The corrected priority is capability-first. Guardian intelligence remains a moat
 
 This is the delivery stack. It is intentionally not time-bounded.
 
-- `M0. Competition truth and execution governance`: GitHub Project owns live execution state; docs own strategy, milestone definitions, acceptance rules, and primary-source competitive truth.
+- `M0. Competition truth and execution governance`: historical program language; current decisions belong to the constitution/ADRs and execution state belongs to GitHub.
 - `M1. Capability kernel and manifest contract`: one coherent map and contract for core tools, workflows, skills, MCP, connectors, automations, browser/computer-use surfaces, memory providers, runbooks, and extension-owned contributions.
 - `M2. Execution supremacy`: terminal, process, browser/computer use, files, patching, artifacts, sandboxes, background sessions, and repair flows are excellent enough to compete with serious task agents.
 - `M3. Trusted execution boundaries`: tool, workflow, browser, connector, secret, filesystem, process, delegation, and provider paths have explicit least-privilege boundaries and proof.
@@ -105,7 +112,8 @@ The first execution wave underneath that spine is:
 
 ## Current Next-Batch Order
 
-The next implementation program should stay milestone-sized, proof-led, and branch-scoped. The Project remains the execution source of truth; this section records the strategy ordering and acceptance frame so future issues and PRs do not drift back into time-boxed or surface-area-first planning.
+The following implementation ordering is a historical #475 record. It does not
+order Epic #736 work. The Project remains the execution source of truth.
 
 | Order | Batch | Primary milestone | Existing issue | Acceptance frame |
 |---:|---|---|---|---|
@@ -160,7 +168,7 @@ M1 source-of-truth contract:
 
 Acceptance for #425/#434:
 
-- the durable docs name M1 as the capability-kernel source of truth for M2, M3, and M9
+- historical M1 docs described a shared capability contract consumed by M2, M3, and M9; current contracts are governed by the constitution and tracked implementation work
 - the accepted contract covers identity, manifest shape, permissions, provenance, mutation rights, health, compatibility, lifecycle state, and trust level
 - acceptance/proof wording is evidence-grounded and does not imply M1 is complete from documentation alone
 - future M2/M3/M9 work has a clear rule for when it must update M1 docs or reject a capability class as underdeclared

@@ -1,5 +1,11 @@
 # Seraph Backend
 
+> **Partial/transitional implementation:** The canonical product and provider
+> boundary is defined by the
+> [Project Constitution](../docs/implementation/00-project-constitution.md).
+> Existing provider-specific and command-backed profiles documented below are
+> shipped history pending issue #739; they are not target architecture.
+
 AI assistant backend powered by FastAPI, smolagents, and LiteLLM-compatible provider routing.
 
 ## Setup
@@ -24,14 +30,7 @@ AI assistant backend powered by FastAPI, smolagents, and LiteLLM-compatible prov
    ./manage.sh -e dev local up
    ```
 
-4. Or run only the backend manually:
-   ```bash
-   cd backend
-   source ../.env.dev
-   uv run uvicorn src.app:create_app --factory --host 0.0.0.0 --port 8004 --reload
-   ```
-
-5. Run via Docker:
+4. Run via Docker:
    ```bash
    ./manage.sh -e dev up -d
    ```

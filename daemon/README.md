@@ -1,5 +1,11 @@
 # Seraph Native macOS Daemon
 
+> **Partial/transitional implementation:** This daemon currently posts to the
+> Mac-hosted Seraph backend. The accepted target is a paired, revocable Mac edge
+> connected to the authenticated GPU-hosted core; see
+> [ADR-004](../docs/implementation/decisions/004-gpu-core-mac-edge-topology.md).
+> This README describes current behavior, not proof that the target edge ships.
+
 Lightweight polling daemon that captures the active window (app name + window title) and posts it to the Seraph backend. Runs natively on macOS — outside Docker.
 
 ## Running the Full Project
